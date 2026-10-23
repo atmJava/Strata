@@ -136,7 +136,7 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | W0.2 | done | §7.6, §7.7 and §7.8 of the server plan record the 2026-10-23 config change, the bitwise check and the PLE measurement |
 | W0.3 | done | one section appended per round: §7.6 (T2), §7.7 (PLE field), §7.8 (PLE measured) |
 | W1.1 | done | 2026-10-23: in the upstream configuration (`STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, `--adapt-every 1000000`, `--no-prefill-borrow`, one slot) both arms are stable and gave the same 512 greedy tokens (`aac0a04d…`), 4 warm runs + 3 after a second restart. One first run after a restart differed once (`00281f84…`), not reproduced |
-| W1.2 | open | prior run was on an older build |
+| W1.2 | done | 2026-10-23 on the final build (126,050-token cold prompt): concurrent read on 58.2/58.5 s with the stream at 19.7–20.3 tok/s and a 0.9 s longest stall; off 49.0/49.6 s with the stream at 0.3–0.4 tok/s and a 48.7 s stall |
 | W1.3 | open | — |
 | W1.4 | open | `/tmp/soak.py` produced 0 bytes on the old build |
 | W2.1 | done | [SERVER_PLE.md](SERVER_PLE.md): the `PLE` field is a running total (nothing in the serving path calls `Prefill::reset()`), reads are one 4 KiB page per 90-byte row (8 KiB on a straddle), the gather is one batched request per chunk on an aux-CPU thread |

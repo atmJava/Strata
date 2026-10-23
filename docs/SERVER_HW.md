@@ -120,6 +120,8 @@ All on this machine, engine 0.1.47 unless noted. Single-stream numbers move 76.7
 | NVLink, peer copy and SM-side read | 47.05 and 45.74 GB/s | 2026-10-13 |
 | 84K cold read, concurrent read on | 42.2 s, 21–22 tok/s decoding beside it, longest stall 0.8 s | 2026-10-22 |
 | 84K cold read, concurrent read off | 35.7 s, 0.3 tok/s beside it, longest stall 35.5 s | 2026-10-22 |
+| 127K cold read, concurrent read on | 58.2 / 58.5 s, 19.7–20.3 tok/s beside it, longest stall 0.9 s, no gap over 2 s | 2026-10-23 |
+| 127K cold read, concurrent read off | 49.0 / 49.6 s, 0.3–0.4 tok/s beside it, longest stall 48.7 s, 5–6% of gaps over 2 s | 2026-10-23 |
 | Prefill, cold 13.2K prompt | 1470 → 1552 tok/s with `--prefill-pipe 1` | 2026-10-22 |
 | Rebuild of the serving source | same build-id, same 79,076,000 bytes; 323 bytes of nvcc temp names differ in `.strtab` | 2026-10-23 |
 | Turing kernel series on (`STRATA_SM75_PERF=1`), 84K cold prefill | 2375.6 / 2381.3 → 2552.0 / 2566.5 / 2556.9 tok/s (+7.2 to +7.6%) | 2026-10-23 |
@@ -138,12 +140,11 @@ interleaved, not as one run each.
 
 ## Not tested
 
-1. A 127K cold read on the final 0.2.2 build (it was run on an older build only).
-2. A one-hour soak.
-3. Multi-stream cold-start stalls: 5–10 s were seen on an older build with 3–4 joins, and did not come back on a
+1. A one-hour soak.
+2. Multi-stream cold-start stalls: 5–10 s were seen on an older build with 3–4 joins, and did not come back on a
    warm machine. Cause unknown, not reproduced on the final build.
-4. Eight slots, long-context (≥128K) concurrency, vision under load, tool calls under load.
-5. The engine's own test suite (it was switched off for the release build).
+3. Eight slots, long-context (≥128K) concurrency, vision under load, tool calls under load.
+4. The engine's own test suite (it was switched off for the release build).
 
 ## What comes next
 
