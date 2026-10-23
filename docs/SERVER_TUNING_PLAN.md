@@ -144,6 +144,32 @@ already issued a chunk ahead. The next performance candidate is W3, the `sm_75` 
 shape the numbers do show is the one every agent request has: the same text reads at 1,179–1,255 tok/s at 6K and at
 1,935–1,967 tok/s at 24K, so a small prompt pays a fixed cost per token.
 
+### The tensor-parallel patch: closed, not ported
+
+The parked patch lives in `/opt/ai/src/strata-0.2.0-tp-20261020` (base `strata-0.2.0-beta`). Its footprint, from a
+file-level diff: new `include/strata/core/tp_dense.hpp`, `src/core/tp_dense.cpp`, `src/kernels/cuda/native_mmvq_split.cu`;
+changed `CMakeLists.txt`, `include/strata/core/verify.hpp`, `src/core/verify.cpp`, `include/strata/core/weights.hpp`,
+`src/core/weights.cpp`, `include/strata/kernels/native_mmvq.hpp`, `include/strata/kernels/verify_kernels.hpp`,
+`serve/server.py`, `serve/replicas.py`, and two server tests. The switch is `STRATA_TP_GDN=1`.
+
+It is not ported, for three reasons that are about this box rather than the patch:
+
+1. **It needs the mode this box does not use.** Per `strata-optimized-default-20261018.md` its gate is `--batch 0`,
+   no `--pipeline-windows`, no `--spec-split`, no `--batch-mtp` — one stream. This server was moved to
+   `parallel 4` + `--batch-groups 2` on measurement (4 sessions +63% over the serial group), and a port would trade
+   that for a single-stream gain.
+2. **The measured gain is single-stream.** +3.8% on a projection benchmark and +7.5% weighted on real single-session
+   use. There is no measurement of it under the pipelined 4-slot mode, and the patch's own document says it does not
+   combine with it.
+3. **VRAM margin.** The record measured about 293 MiB free on CUDA1 after the TP split, against a box that already
+   starts at 689 / 1039 MiB free with vision loaded.
+
+Porting it would mean rebasing the seven changed files onto 0.2.2's `verify.cpp` and weight code, redoing the
+`serve/` side, and then a bit-by-bit check on top of the 300 MiB margin — for a mode the serving config does not use.
+
+**Closed.** The tree is left in place and the decision is recorded, not forgotten. It re-opens if the load becomes
+single-session dominant, or if a solo-mode endpoint (no slots) is wanted for a batch client.
+
 ### Not tried, and why
 
 - The C track (lookup-chain, suffix-draft, spec window): pipelined slots run no per-slot drafts by design, and this
