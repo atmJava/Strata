@@ -87,8 +87,46 @@ nor unbuffered. If the answer is "the predicate should change", we will open a P
 
 ---
 
-## 草稿 B —— 贴到 #2197（把 `STRATA_SM75_PERF` 变默认，open，32 评论）——待写
+## 草稿 B —— 贴到 #2197（把 `STRATA_SM75_PERF` 变默认，open，32 评论）
 
-卡点是"维护者手上没有 sm_75 卡确认"，而我们有：84K 冷 prefill +7.2~7.6%、43–50K +6.0~7.8%、
-4 路并发 +4.1~7.5%，以及 §7.6 的逐位门（在上游式单槽配置下跑的，生产配置本身不可复现，所以逐位只能另开配置）。
-等 A 的裁决形式一起发。
+> 2026-10-24 改写：**这条线程已经被同行证据推到收尾**（rafatxf 2026-10-22："on 0.1.47 … IQ3_XXS is now
+> 12/12 byte-identical"、"that closes the last open line"，另有 6 台 sm_75 机器交过数据）。
+> 所以我们那 +7% 与逐位门**大半是重复**，回帖改短，只交两样新东西：那条偶发例外，和跑 T2 配置的实操坑。
+
+### A seventh sm_75 box confirms it, with one exception worth writing down before the body is final
+
+**Setup.** 2× RTX 2080 Ti 22 GB (modded, `sm_75`), NVLink NV2, Xeon E5-2680 v4 (AVX2, no AVX-512, 14c/28t),
+62 GiB, driver 595.71.05, CUDA 13.0. Engine `0.1.47` built from source for `sm_75`, Qwen3.8-Flash-Next
+GSQ-RCO IQ3_XXS. We run `STRATA_SM75_PERF=1` in production today. We have **not** measured
+`STRATA_EXP_MODE` — we are on the shipped mode-4 default for Turing.
+
+**The gate, run the way `docs/BATCHING.md:403-408` asks.** `STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`,
+`--adapt-every 1000000`, `--no-prefill-borrow`, `parallel 1`. One trap for anyone reproducing it: `--spec`
+cannot be turned off on a native pack (it wants `--spec T`, T ≥ 2), so what you are gating is a spec window,
+not a plain decode — worth saying in the body so the next person does not hunt for a switch that does not exist.
+
+`STRATA_SM75_PERF=0` and `=1` produced the same 512-token answer (`aac0a04d109391fe`). On the `=1` arm: four
+runs identical after warm-up, and after a further restart three more identical including the cold start —
+9 of 10.
+
+**The exception, which is the reason for this comment.** After one restart the **first** request on the `=1`
+arm gave a different answer (`00281f843ecd3543`); restarting again did not reproduce it, and we did not
+attribute it. Since rafatxf's summary (12/12 byte-identical on 0.1.47) is what the body will carry, it seems
+worth recording that on one box the only divergence was the first request after a start — if that is expected
+(the first window warms caches and picks expert placement), a line in the body would save someone chasing it.
+
+**Speed on this box** (production shape: 4 slots, `--pcie-frac 0.31`, adaptive): 84K cold prefill
+2,375.6 / 2,381.3 → 2,552.0 / 2,566.5 / 2,556.9 tok/s (+7.2 to +7.6%); 43–50K cold prefill 2,108 / 2,094 →
+2,236 / 2,258 (+6.0 to +7.8%); 4 concurrent streams 111.3 / 112.5 → 119.7 / 117.1 (+4.1 to +7.5%).
+Single-stream decode 67.9–78.0 against 67.8–71.2 — pointing up but inside the run-to-run band, so we do not
+claim it. In the production shape the output is not reproducible arm to arm (three runs of one prompt give
+three different `text_sha256` values and different draft counts), which is why the bitwise claim above is
+made only in the gate config.
+
+**What we did not test.** `STRATA_EXP_MODE` at all, so we add nothing to the mode 4 / 0 / 8 comparison
+yusheng227507 and Adamyno have run; the Q2_0 pack; three-card splits; engine 0.1.48.
+
+---
+
+## 草稿 C —— 若 mode 8 在本机成立，再贴 #2197 一条（**等 L-006 测完再写**）
+
