@@ -32,3 +32,10 @@ tok=$(echo "$tail40" | grep -oE '[0-9.]+ tok/s\) \(stop' | tail -1 | grep -oE '^
 hit=$(echo "$tail40" | grep -oE 'expert cache [0-9.]+% hit' | tail -1 | grep -oE '[0-9.]+')
 
 echo "$ts,${f0:-NA},${f1:-NA},${warn},${tok:-NA},${hit:-NA}" >> "$OUT"
+
+# Early warning, ahead of the engine's own 512 MiB line (#2065): a request that starts that close to
+# full can page GPU memory to RAM and never finish. 700 MiB leaves room for one more verify window.
+# The flag file is what a later round reads; it is not deleted here on purpose, so a dip is not missed.
+if [ -n "$f0" ] && [ "$f0" -lt "${VRAM_PERF_WARN_MIB:-700}" ]; then
+    echo "$ts gpu0_free=$f0 gpu1_free=${f1:-NA} below ${VRAM_PERF_WARN_MIB:-700} MiB" >> "$OUT.warn"
+fi
