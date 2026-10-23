@@ -23,6 +23,7 @@ Facts below were checked on the machine, most on 2026-10-13 (NVLink and driver) 
 | Operating system and driver | kernel `7.0.0-38-generic`, driver `595.71.05` (pinned; see below) |
 | CUDA | 13.0, `/usr/local/cuda-13.0` |
 | Service | `strata.service` → `run-022.sh` → `serve/server.py`, port 8080, `Restart=on-failure`, starts at boot |
+| Run config | `strata-022.json`: `parallel 4`, `--batch-groups 2`, and since 2026-10-23 `STRATA_SM75_PERF=1` in its `env` block |
 | Source | `/opt/ai/src/strata-0.2.2`, ggml from the pinned `3cf03257` |
 
 Two things about this machine decide most of what follows:
@@ -39,10 +40,19 @@ Two things about this machine decide most of what follows:
 |---|---|
 | `main` | Upstream, untouched, at `011c9e60`. Fast-forward only |
 | `hw/server-adapt` | This document, and the build settings that apply to this box |
-| `hw/s1-concurrent-read` | One commit: a concurrent read no longer turns itself off beside decoding slots when the source is the io-prefetch/mapped-experts shape this machine uses |
+| `hw/s1-concurrent-read` | One commit: a concurrent read no longer turns itself off beside decoding slots when the source is the io-prefetch/mapped-experts shape this machine uses. **This is the source the binary that serves now was built from** |
 | `hw/tp-solo` *(not created)* | The solo-window tensor-parallel patch (about +3% decode, +150 MiB per card). Parked: written against 0.2.0-beta, it needs a port to 0.2.2's `verify.cpp` / `generate.cpp` and a bit-by-bit equivalence check first |
 
 Each branch is one change, based on `main`, so it can be rebased on its own when a new release lands.
+
+## The source on the server
+
+`/opt/ai/src/strata-0.2.2` is an unpacked tree, not a git checkout. On 2026-10-23 it was compared with
+`hw/server-adapt`, line by line and ignoring line endings. The only differences: the two files of the S1 change
+(`include/strata/program/batch_read.hpp`, `src/program/generate.cpp`), whose md5s equal the `hw/s1-concurrent-read`
+commit's, and one paragraph in `docs/BATCHING.md` that no branch has. That paragraph names
+`STRATA_PIPED_CONCURRENT_ASSUME_COPY_ONLY`, an env switch the final S1 code does not have: it is left over from the
+first, gated version of the change. The rest is listed in *Building on it*.
 
 ## Why `sm_75` is most of the work
 
@@ -76,6 +86,28 @@ cmake --build build -j20
 
 A change to a file that also compiles as HIP or SYCL cannot be validated here: this box has one backend.
 
+### A rebuild is reproducible, with one caveat
+
+Rebuilt on 2026-10-23 from the source on the box (see *The source on the server*), with the same command, into the
+same `build/` path. The new and old `CMakeCache.txt` had the same md5, so the flags, the compiler and the paths were
+the same; toolchain was cmake 3.28.3, nvcc 13.0, gcc 13.3, `BUILD_EXIT=0`.
+
+| Check | Result |
+|---|---|
+| Size, `--version` | 79,076,000 bytes, `strata 0.1.47` — both the same |
+| `.text`, `.rodata`, `.data`, `.data.rel.ro` | identical, byte for byte |
+| `.nv_fatbin` (62 MB of CUDA) | identical, byte for byte |
+| GNU build-id | identical (`09c8ffd3…`) |
+| sha256 of the stripped binary | identical (`fb3da34e…`) |
+| sha256 of the whole file | **differs**: 323 bytes |
+
+All 323 differing bytes are inside `.strtab`, and every one of them sits in an nvcc temporary file name of the form
+`tmpxft_<hex>_00000000-6_<file>.cudafe1.cpp` (130 names). That number is picked per compile, so it changes on every
+build. Read the result as: the build is reproducible; compare two builds by build-id or by the stripped hash, not by
+the file's sha256.
+
+Build in the same directory to compare at all: ten strings in the binary carry `/opt/ai/src/strata-0.2.2/build`.
+
 ## What has been measured on it
 
 All on this machine, engine 0.1.47 unless noted. Single-stream numbers move 76.7–81.6 tok/s between restarts
@@ -89,6 +121,12 @@ All on this machine, engine 0.1.47 unless noted. Single-stream numbers move 76.7
 | 84K cold read, concurrent read on | 42.2 s, 21–22 tok/s decoding beside it, longest stall 0.8 s | 2026-10-22 |
 | 84K cold read, concurrent read off | 35.7 s, 0.3 tok/s beside it, longest stall 35.5 s | 2026-10-22 |
 | Prefill, cold 13.2K prompt | 1470 → 1552 tok/s with `--prefill-pipe 1` | 2026-10-22 |
+| Rebuild of the serving source | same build-id, same 79,076,000 bytes; 323 bytes of nvcc temp names differ in `.strtab` | 2026-10-23 |
+| Turing kernel series on (`STRATA_SM75_PERF=1`), 84K cold prefill | 2375.6 / 2381.3 → 2552.0 / 2566.5 / 2556.9 tok/s (+7.2 to +7.6%) | 2026-10-23 |
+| Turing series on, cold prefill 43–50K | 2108 / 2094 → 2236 / 2258 tok/s (+6.0 to +7.8%) | 2026-10-23 |
+| Turing series on, four sessions | 111.3 / 112.5 → 119.7 / 117.1 tok/s (+4.1 to +7.5%) | 2026-10-23 |
+| Turing series on, decode after 84K | 67.8–78.0 tok/s against 67.8–71.2: up, but inside the spread, not claimed | 2026-10-23 |
+| `STRATA_KV_PREFETCH=1` on top of the above | +0.6% prefill, +1.0% cold read, −2.2% four sessions: no gain, removed | 2026-10-23 |
 
 ## Not a lever (ruled out, with a measurement)
 
@@ -110,10 +148,20 @@ interleaved, not as one run each.
 
 ## What comes next
 
-1. Rebuild from `hw/server-adapt` and confirm it matches the binary that is serving now.
-2. Close the unmeasured items above that need no new code: the 127K read, the bitwise check, the soak.
-3. Only then touch placement, if the numbers ask for it: the split planner and the RAM tier on 22 GB cards.
-4. Port the tensor-parallel patch to 0.2.2 on its own branch, or drop it and record why.
+The tuning work — bottlenecks, goals, rules, acceptance and the test ladder — is in
+[SERVER_TUNING_PLAN.md](SERVER_TUNING_PLAN.md). The order the work is done in, and the running status, is
+[SERVER_MASTER_PLAN.md](SERVER_MASTER_PLAN.md). This list is the short version.
+
+1. ~~Rebuild from `hw/server-adapt` and confirm it matches the binary that is serving now.~~ Done on 2026-10-23. The
+   binary that serves was **not** built from `hw/server-adapt` but from `hw/s1-concurrent-read`, and rebuilding that
+   source reproduced it (see *A rebuild is reproducible, with one caveat*). The next rebuild should start from
+   `hw/s1-concurrent-read`.
+2. The Turing kernel series is on (`STRATA_SM75_PERF=1`, +7% prefill). Next is the PLE read: 6 of the 7 s of a new
+   prompt, and the largest thing left for a server (see the plan).
+3. Close the unmeasured items above that need no new code: the 127K read, the bitwise check under the configuration
+   upstream requires, the soak.
+4. Only then touch placement, if the numbers ask for it: the split planner and the RAM tier on 22 GB cards.
+5. Port the tensor-parallel patch to 0.2.2 on its own branch, or drop it and record why.
 
 ## Rules
 
