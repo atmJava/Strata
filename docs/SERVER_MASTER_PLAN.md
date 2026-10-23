@@ -143,8 +143,8 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | W2.2 | done | measured on 2026-10-23: PLE costs 0–62 ms per request at 6–24K tokens of real text, plus ~1 s on the first request after an engine start. No candidate is worth implementing — see [SERVER_PLE.md](SERVER_PLE.md#measured-2026-10-23-ple-is-not-the-bottleneck-any-more) |
 | W2.3 | closed | the premise did not survive W2.2: there is no per-request PLE cost to remove |
 | W2.4 | closed | same; re-opens only if a real load shows a cost that matters |
-| W3.1 | open | — |
-| W3.2 | open | — |
+| W3.1 | closed | not applicable to this model: on Turing the fused prompt experts are set up for `T_Q2_0` only (`src/prefill/moe_fused_iq.cu:1302-1304`), and `native_supported()` refuses any other pair on such a card (`:1425`). This box serves a native IQ3_XXS pack, so `STRATA_PF_FUSED_SM75=1` cannot reach it |
+| W3.2 | closed | same. The measured prefill gain would need a Q2_0 pack, which is a different model and out of scope |
 | W4.1 | open | — |
 | W4.2 | open | TP parked since 0.2.0 |
 | W5.1 | done | `/opt/ai/bin/run-arm.sh`, `apply-arm.sh`, `cold-prefill.py` |

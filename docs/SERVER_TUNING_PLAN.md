@@ -148,8 +148,11 @@ shape the numbers do show is the one every agent request has: the same text read
 
 - The C track (lookup-chain, suffix-draft, spec window): pipelined slots run no per-slot drafts by design, and this
   box serves four slots. It only moves a single stream.
-- `STRATA_PF_FUSED_SM75=1` (fused int8 prompt experts): it changes the bits and needs a quality gate, not just a
-  reading. It is the next candidate after P3 if prefill is still the target, with the KL gate as the price.
+- `STRATA_PF_FUSED_SM75=1` (fused int8 prompt experts): **closed as not applicable to this model.** On Turing the
+  native path sets up the `T_Q2_0` kernels only (`src/prefill/moe_fused_iq.cu:1302-1304`, the codebook formats do not
+  fit 64 KiB of shared memory at four warps a row), and `native_supported()` refuses every other format on such a
+  card (`:1425`). This box serves a native IQ3_XXS pack, so the switch cannot reach it; a Q2_0 pack would be a
+  different model.
 - A `sm_75` default for the Turing series: it would change upstream's default for every 7.5 card. Fine as a proposal
   to upstream once this fork has a bitwise check behind it; not as a local patch.
 
@@ -157,7 +160,7 @@ shape the numbers do show is the one every agent request has: the same text read
 
 | Rank | Item | Evidence | Status |
 |---|---|---|---|
-| 1 | Prefill expert GEMM on `sm_75` | `gemm gate/up` 18–26% of the prefill timeline; the same text reads at 1,179–1,255 tok/s at 6K and 1,935–1,967 at 24K, so a small prompt pays a fixed cost per token | next (W3) |
+| 1 | Prefill expert GEMM on `sm_75` | `gemm gate/up` 18–26% of the prefill timeline; the same text reads at 1,179–1,255 tok/s at 6K and 1,935–1,967 at 24K, so a small prompt pays a fixed cost per token. The fused alternative covers `T_Q2_0` only on Turing and this pack is IQ3_XXS | no lever for this pack |
 | 2 | PLE read on new content | 0–62 ms per request at 6–24K tokens, ~1 s on the first request after a start ([SERVER_PLE.md](SERVER_PLE.md)) | measured, closed |
 | 3 | Long-context KV from RAM | 40+ GiB per 184K request; the overlap switch gave nothing here | measured, closed |
 | 4 | Decode single stream | ~79 tok/s; the ceiling is the serial layer split, not a kernel | closed by the record |
@@ -268,8 +271,9 @@ backup. Results land in `/opt/ai/logs/arm-<label>.log` and the two jsonl files b
 request after an engine start ([SERVER_PLE.md](SERVER_PLE.md)); no change is worth making. The shape that is left —
 a small prompt reading at two-thirds the rate of a large one — moves to W3, the `sm_75` prompt-expert path.
 
-**P4 — code.** Only what P3 leaves. Candidates: the PLE row read, `STRATA_PF_FUSED_SM75` with a KL gate, and a
-`sm_75` default proposal upstream once T2 passes.
+**P4 — code.** No performance change is queued: W2 showed nothing worth removing and W3's lever does not reach this
+pack. What is left is W4 (the upstream report and the tensor-parallel decision) and W5.2 (memory stability after the
+config change).
 
 **P5 — the record.** Close the three unmeasured items in [SERVER_HW.md](SERVER_HW.md) (127K read, bitwise check,
 soak) and fold the server's own documents' open items into one place.
