@@ -145,7 +145,7 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | W2.4 | closed | same; re-opens only if a real load shows a cost that matters |
 | W3.1 | closed | not applicable to this model: on Turing the fused prompt experts are set up for `T_Q2_0` only (`src/prefill/moe_fused_iq.cu:1302-1304`), and `native_supported()` refuses any other pair on such a card (`:1425`). This box serves a native IQ3_XXS pack, so `STRATA_PF_FUSED_SM75=1` cannot reach it |
 | W3.2 | closed | same. The measured prefill gain would need a Q2_0 pack, which is a different model and out of scope |
-| W4.1 | open | — |
+| W4.1 | done | [UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md): ready-to-post issue with the A-B-A table, the T2 exactness result and what was not tested. Not posted: no network route to GitHub from this machine |
 | W4.2 | open | TP parked since 0.2.0 |
 | W5.1 | done | `/opt/ai/bin/run-arm.sh`, `apply-arm.sh`, `cold-prefill.py` |
 | W5.2 | open | — |
