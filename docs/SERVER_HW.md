@@ -148,6 +148,15 @@ interleaved, not as one run each.
    warm machine. Cause unknown, not reproduced on the final build.
 3. Eight slots, long-context (≥128K) concurrency, vision under load, tool calls under load.
 4. The engine's own test suite (it was switched off for the release build).
+5. Whether llama.cpp's MMQ has a tile for this pack's IQ3_XXS experts on `sm_75`. The check runs against the pinned
+   llama.cpp tree, so only the engine's own start-up log answers it — the engine prints one line per type when a type
+   has no tile — and no log on this box has been read for that line. Until it is read, which path serves the prompt
+   experts here is inferred from the build, not observed.
+6. What these cards report for `MaxSharedMemoryPerBlockOptin` and `ReservedSharedMemoryPerBlock`. Several kernels
+   choose their tile size against those two numbers, and the values are not recorded here.
+7. The fused int8 prompt experts on this pack (`STRATA_PF_FUSED=1` with `STRATA_PF_FUSED_SM75=1`, after three lines
+   in `src/prefill/moe_fused_iq.cu`): never built for this card and never run. Why it is worth a round, and what
+   would settle it, is in [SERVER_TUNING_PLAN.md](SERVER_TUNING_PLAN.md#not-tried-and-why).
 
 ## What comes next
 

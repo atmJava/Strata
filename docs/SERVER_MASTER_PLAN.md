@@ -26,21 +26,31 @@ The programme is finished when all of these are true:
 
 ## Definition of done: the check
 
-Written on 2026-10-23, when every task had reached a state.
+Written on 2026-10-23, when every task had reached a state. Row 1 was true that morning; W3 was reopened the same
+afternoon, so it is not any more.
 
 | # | Item | State |
 |---|---|---|
-| 1 | Every workstream done or closed with a reason | **yes**: 17 tasks, 12 done, 5 closed, 0 open |
+| 1 | Every workstream done or closed with a reason | **no, as of 2026-10-23**: 17 tasks, 12 done, 3 closed, 2 open. W3.1 and W3.2 were closed that morning and reopened that afternoon; the reason recorded for them was a comment, not a measurement |
 | 2 | The three items this plan took on are run: the 127K read, the bitwise check, the soak | **yes, with one caveat**: 127K measured on and off (W1.2), bitwise in the upstream configuration (W1.1), soak 47 of 60 minutes (W1.4, cut by an external restart that is now fixed). The rest of `SERVER_HW.md`'s list is out of scope by item 2 and stays open there |
 | 3 | The run config and the documents agree | **yes**: 14 `env` keys, each explained in §7 of the server record; `--prefill auto`; no diagnostic switch left in |
 | 4 | Every number names the box and the boot | **yes**: every row of the measured tables carries 2026-10-22 or 2026-10-23, and the A-B-A rows name the arm |
 | 5 | Upstream text for anything that helps other `sm_75` machines | **yes**: [UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md), unposted for lack of a network route |
 
-What the plan did not produce, and why: no performance code change. PLE was measured out (0–62 ms a request), the fused
-`sm_75` prompt experts do not cover an IQ3_XXS pack, the tensor-parallel patch needs a mode this box does not serve,
-and the one configuration lever found (a 4096-token chunk) wins 8% on small prompts and loses 6% on large ones with no
-traffic data to choose. The one change that shipped is a configuration line (`STRATA_SM75_PERF=1`, +7% prefill), and
-the one operational defect found (`needrestart` restarting the service nightly) is fixed.
+What the plan did not produce, and why: no performance code change. PLE was measured out (0–62 ms a request), the
+tensor-parallel patch needs a mode this box does not serve, and the one configuration lever found (a 4096-token chunk)
+wins 8% on small prompts and loses 6% on large ones with no traffic data to choose. The one change that shipped is a
+configuration line (`STRATA_SM75_PERF=1`, +7% prefill), and the one operational defect found (`needrestart`
+restarting the service nightly) is fixed.
+
+W3 is the exception, and it is open: it was closed on 2026-10-23 morning on a comment in
+`src/prefill/moe_fused_iq.cu:1302-1304` — that the codebook formats do not fit 64 KiB at four warps a row — helped
+along by the header comment at `include/strata/prefill/moe_fused.hpp:2,31`, which says the fused prompt experts are
+for `sm_80` and newer. Neither is a measurement. The file's own formula puts this box's format at 60,672 bytes,
+inside the limit, and the branch that carries the comment returns five lines before the code that would have asked
+the driver. The numbers and what would settle it are in
+[SERVER_TUNING_PLAN.md](SERVER_TUNING_PLAN.md#not-tried-and-why). The rule this leaves behind: **a closure reason has
+to name the run that produced it**, and where a comment is the only evidence, the check is usually a few lines away.
 
 ## Workstreams
 
@@ -162,12 +172,16 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | W2.2 | done | measured on 2026-10-23: PLE costs 0–62 ms per request at 6–24K tokens of real text, plus ~1 s on the first request after an engine start. No candidate is worth implementing — see [SERVER_PLE.md](SERVER_PLE.md#measured-2026-10-23-ple-is-not-the-bottleneck-any-more) |
 | W2.3 | closed | the premise did not survive W2.2: there is no per-request PLE cost to remove |
 | W2.4 | closed | same; re-opens only if a real load shows a cost that matters |
-| W3.1 | closed | not applicable to this model: on Turing the fused prompt experts are set up for `T_Q2_0` only (`src/prefill/moe_fused_iq.cu:1302-1304`), and `native_supported()` refuses any other pair on such a card (`:1425`). This box serves a native IQ3_XXS pack, so `STRATA_PF_FUSED_SM75=1` cannot reach it |
-| W3.2 | closed | same. The measured prefill gain would need a Q2_0 pack, which is a different model and out of scope |
+| W3.1 | **open — reopened 2026-10-23** | Closed as "not applicable to this model" on `src/prefill/moe_fused_iq.cu:1302-1304` and on `native_supported()`'s Turing refusal (`:1425`). The refusal is real; its stated reason was never probed — the Turing branch returns at `:1307`, five lines above the `setup_one` calls at `:1309-1311` that ask the driver — and the kernel's own formula puts IQ3_XXS gate/up at 60,672 B of shared memory against a 64 KiB limit, 1,024 B more than the `Q2_0` format that *is* set up. The pack is IQ3_XXS gate/up with IQ4_NL down, a pair `gu_covered` and `d_covered` (`:1333,1344`) already accept. **Unconfirmed static analysis: arithmetic on constants read from the file, nothing run on this box.** What would settle it is in [SERVER_TUNING_PLAN.md](SERVER_TUNING_PLAN.md#not-tried-and-why) |
+| W3.2 | **open — reopened with W3.1** | It assumed the measured gain needs a Q2_0 pack. The gains on record are gfx12 (IQ3_XXS +15.7%, +19-20% with the attention work) and sm_120; for a native pack the only engine numbers are IQ2_XS on an RTX 5070, +8% at 4K and 0% at 32K (`src/prefill/prefill.cpp:256`). For this pack the one quality measurement went the other way — first-token KL 0.00340 with MMQ against 0.00388 fused over 24 prompts on an R9700, which is why that flag stayed opt-in ([AMD_HIP.md](AMD_HIP.md)). So the gain here is unknown, not known-and-unavailable |
 | W4.1 | done | [UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md): ready-to-post issue with the A-B-A table, the T2 exactness result and what was not tested. Not posted: no network route to GitHub from this machine |
 | W4.2 | closed | not ported: `STRATA_TP_GDN` needs `--batch 0` (single stream), while this box was moved to `parallel 4` on measurement; the gain measured in the record is single-stream (+3.8% projection, +7.5% weighted), and the patch leaves ~293 MiB free on CUDA1. Footprint and re-open condition in [SERVER_TUNING_PLAN.md](SERVER_TUNING_PLAN.md#the-tensor-parallel-patch-closed-not-ported) |
 | W5.1 | done | `/opt/ai/bin/run-arm.sh`, `apply-arm.sh`, `cold-prefill.py` |
 | W5.2 | done | across the soak and the cache counters: `evictions 0` over 1,120 parks / 1,119 restores, conversation-cache bytes flat at 589.8 MB, MemAvailable low water 23.3 GiB (historically 4.1 GiB), RSS +148 MB over 39 minutes. A day of real traffic is not available; this is the best sample there is |
+
+W3.1 and W3.2 are open on a reading, not on a run. What is established is that the reason they were closed was not a
+measurement. Whether the switch pays on this box is still unknown, and every byte count and percentage in those two
+rows is unconfirmed static analysis until the machine is used.
 
 Already settled before this plan existed, so it is not a task: the Turing series is on (`STRATA_SM75_PERF=1`,
 +7.2–7.6% prefill, A-B-A), and `STRATA_KV_PREFETCH` is off (+0.6%, inside the noise).

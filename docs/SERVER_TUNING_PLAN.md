@@ -176,11 +176,66 @@ single-session dominant, or if a solo-mode endpoint (no slots) is wanted for a b
 
 - The C track (lookup-chain, suffix-draft, spec window): pipelined slots run no per-slot drafts by design, and this
   box serves four slots. It only moves a single stream.
-- `STRATA_PF_FUSED_SM75=1` (fused int8 prompt experts): **closed as not applicable to this model.** On Turing the
-  native path sets up the `T_Q2_0` kernels only (`src/prefill/moe_fused_iq.cu:1302-1304`, the codebook formats do not
-  fit 64 KiB of shared memory at four warps a row), and `native_supported()` refuses every other format on such a
-  card (`:1425`). This box serves a native IQ3_XXS pack, so the switch cannot reach it; a Q2_0 pack would be a
-  different model.
+- `STRATA_PF_FUSED_SM75=1` (fused int8 prompt experts): **reopened 2026-10-23 — the reason it was closed was a
+  comment, not a measurement.** It was closed because the Turing branch of `fused::dev_info()` sets up the `T_Q2_0`
+  kernels only (`src/prefill/moe_fused_iq.cu:1302-1304`) and the comment there says the codebook formats "do not fit
+  64 KB at 4 warps a row". That branch returns at `:1307`, five lines above the `setup_one` calls at `:1309-1311`
+  which ask the driver for exactly this (`cudaFuncSetAttribute` plus an occupancy query, `:1213-1219`), so no card
+  ever answered it. The kernel's own shared-memory formula (`:110-113`, with the constants at `:58-67` and the
+  codebook sizes at `:106-109`) says the comment is wrong for this format. Arithmetic on constants read from the
+  file, **unconfirmed static analysis — nothing here was run on hardware**:
+
+  | gate/up format | codebook | shared memory, 4 warps and 2 stages | against 64 KiB |
+  |---|---:|---:|---|
+  | `Q2_0`, `IQ4_NL`, `IQ4_XS` | 0 | 59,648 B | fits — the only formats Turing sets up |
+  | **`IQ3_XXS`** | 1,024 | **60,672 B** | **fits, 4,864 B spare** |
+  | `IQ2_XXS`, `IQ3_S` | 2,048 | 61,696 B | fits |
+  | `IQ2_XS` | 4,096 | 63,744 B | fits 64 KiB; not if 1 KiB a block is reserved |
+  | `IQ2_S` | 8,192 | 67,840 B | does not fit |
+
+  The distance between the format that is set up and this box's pack is 1,024 bytes: the `iq3xxs_grid`. The same
+  formula says the author's *other* shared-memory claim is right — four stages at four warps is 70,888 B, which
+  does not fit, and that is why Turing runs two stages (`:69-71`) — so the configuration is not what blocks this
+  format. The pack is also a pair the kernels already cover: its 48 expert layers are IQ3_XXS gate/up with IQ4_NL
+  down ([ORCA.md](ORCA.md), and [INTEL.md](INTEL.md) says the same), and `gu_covered` (`:1333`) and `d_covered`
+  (`:1344`) accept that pair with no Turing condition on either. What stands in the way is three lines: the Turing
+  branch sets up `Q2_0` only (`:1304`), `native_supported()` refuses every other pair on such a card (`:1425`), and
+  `requested()` wants `STRATA_PF_FUSED=1` beside `STRATA_PF_FUSED_SM75=1` (`:1426-1427`, and
+  `src/prefill/moe_fused.cu:652,675,690-696`). No new kernel and no new dispatch: the body is compiled for
+  `__CUDA_ARCH__ >= 750` (`:482`) and the launch switch already routes `T_IQ3_XXS` gate/up and `Q2_0` / `IQ4_NL`
+  down (`:1534,1539-1540`).
+
+  Three things are open, and only this box settles them. **(a) Does the driver grant 60,672 bytes?** Read
+  `cudaDevAttrMaxSharedMemoryPerBlockOptin` and `cudaDevAttrReservedSharedMemoryPerBlock`, the way
+  `src/prefill/gdn_rec_parity.cu:1127-1129` does, and compare them with the number above. 60,672 fits 65,536 with
+  room and fits 64 KiB less a 1 KiB reservation with 2,816 B to spare, but this checkout does not record the card's
+  values. **(b) Does the kernel stay under 128 registers a thread** at 512 threads and one block a multiprocessor
+  (`__launch_bounds__(512, 1)`, `:479`)? The same `setup_one` answers it, because it requires one resident block.
+  **(c) Is it faster here than the MMQ int8 path that serves this pack today** (`src/prefill/moe_mmq.cu:273-274`,
+  dispatched at `:455`)? MMQ's tile check (`:294-320`) runs against the pinned llama.cpp tree, so only the start-up
+  log answers it: when a type has no tile the engine prints the line at `src/prefill/moe_mmq.cu:312-314` once per
+  type, and its absence means MMQ is what runs. `STRATA_PREFILL_MMQ=0` asks the cheaper question — whether MMQ beats
+  the FP16 path on this card at all — with no rebuild.
+
+  It changes answers: int8 activations and int8 H, another sum order. So the gate is KL and top-1, not bitwise. The
+  only quality numbers for this pack are from another card, and they are not in the win's favour: on an R9700 the
+  IQ3_XXS pack measured first-token KL 0.00340 with MMQ against 0.00388 fused over 24 prompts, and
+  [AMD_HIP.md](AMD_HIP.md) records that the flag stays opt-in **because that pool is not at or below MMQ's**;
+  against the FP16 prompt path fused is at MMQ's level (0.00613 against 0.00683, [DETAILS.md](DETAILS.md)). The
+  speed wins are on gfx12 (IQ3_XXS +15.7%, +19-20% with the attention work) and on sm_120. The only fused-against-MMQ
+  engine numbers for a *native* pack are in `src/prefill/prefill.cpp:256` — IQ2_XS on an RTX 5070, +8% at 4K and 0%
+  at 32K. Nothing has ever been measured for this pack on `sm_75`.
+
+  Two cautions for the round that tries it. Turning it on is not swapping a kernel: `fused_ring()` demands that
+  **every** layer be covered (`src/prefill/prefill.cpp:263-272`), the MoE buffers shrink to the fused path's sizes,
+  the ring's byte budget goes from 384 blobs' worth to 1024 (`:280-283`) while a native pack's slot cap stays 512
+  (`:276`), and with them the auto chunk and the borrowed cache slots move — so it is measured as a whole engine
+  (T5 and T4), not as a kernel bench. `--peer-device` keeps the MMQ path and its buffer sizes (`:258`). And the
+  fused path and `STRATA_PREFILL_HELP` are alternatives, not two arms: the help path needs the MMQ buffers
+  ([MULTI_GPU.md](MULTI_GPU.md)), so both cannot be left on while the other is tested. The instrument for (b) and
+  for the parity gate already exists: `tests/cuda/prefill_fused_iq_test.cpp:693-699` skips a pair only while
+  `native_supported()` refuses it, so the moment those three lines are relaxed the same test runs the IQ3_XXS pair
+  on this card — parity and timing, with no change to the test.
 - `--prefill 4096` (smaller chunks): measured, parked. A 6.5K prompt reads 5.24/5.35 s against 5.61/5.86 s at 8192
   (+8%, the two stages overlap once the prompt is more than one chunk), while a 22.7K prompt reads 1,830 against
   ~1,950 tok/s (−6%). The chunk is tied to the ring sizing, so it is a restart option, not a per-request one. Parked
@@ -193,7 +248,7 @@ single-session dominant, or if a solo-mode endpoint (no slots) is wanted for a b
 
 | Rank | Item | Evidence | Status |
 |---|---|---|---|
-| 1 | Prefill expert GEMM on `sm_75` | `gemm gate/up` 18–26% of the prefill timeline; the same text reads at 1,179–1,255 tok/s at 6K and 1,935–1,967 at 24K, so a small prompt pays a fixed cost per token. The fused alternative covers `T_Q2_0` only on Turing and this pack is IQ3_XXS | no lever for this pack |
+| 1 | Prefill expert GEMM on `sm_75` | `gemm gate/up` 18–26% of the prefill timeline; the same text reads at 1,179–1,255 tok/s at 6K and 1,935–1,967 at 24K, so a small prompt pays a fixed cost per token. The one candidate lever is the fused int8 path, whose closure was reopened 2026-10-23 | the only open lever, unmeasured |
 | 2 | PLE read on new content | 0–62 ms per request at 6–24K tokens, ~1 s on the first request after a start ([SERVER_PLE.md](SERVER_PLE.md)) | measured, closed |
 | 3 | Long-context KV from RAM | 40+ GiB per 184K request; the overlap switch gave nothing here | measured, closed |
 | 4 | Decode single stream | ~79 tok/s; the ceiling is the serial layer split, not a kernel | closed by the record |
@@ -210,7 +265,7 @@ Ruled out with a measurement, again: NVLink (47.05 GB/s, 0.46% of the window), c
 | G2 | Take the bitwise Turing kernels if they hold up | **done**: +7% prefill, adopted, and the same 512 tokens as `=0` in the upstream configuration (W1.1) |
 | G3 | Overlap the long-context KV upload | **closed as failed**: +0.6%, dropped |
 | G4 | Make the PLE read a measured choice | **done**: it is a measured choice and the answer is "leave it" (W2.2) |
-| G5 | Change code only where the numbers ask | **closed with nothing changed**: the two candidates were the PLE row read (measured out, W2.2) and the `sm_75` prompt experts (they do not reach an IQ3_XXS pack, W3) |
+| G5 | Change code only where the numbers ask | **open again on one leg**: the PLE row read was measured out (W2.2) and the tensor-parallel patch is closed on its own terms, but the `sm_75` prompt experts were closed on a comment the arithmetic refutes (W3.1, reopened 2026-10-23). Nothing has been changed since |
 
 ## Non-goals
 
@@ -302,11 +357,14 @@ backup. Results land in `/opt/ai/logs/arm-<label>.log` and the two jsonl files b
 
 **P3 — PLE.** Measured, closed. The per-request cost is 0–62 ms at 6–24K tokens and about a second on the first
 request after an engine start ([SERVER_PLE.md](SERVER_PLE.md)); no change is worth making. The shape that is left —
-a small prompt reading at two-thirds the rate of a large one — is not W3's to take: the fused prompt experts do not
-reach this pack. Its one lever is the parked `--prefill 4096`, waiting on the traffic mix.
+a small prompt reading at two-thirds the rate of a large one — is not PLE's to take. Whether W3's lever reaches it is
+open again as of 2026-10-23 (see *Not tried, and why*); the one lever measured for it is the parked `--prefill 4096`,
+waiting on the traffic mix.
 
-**P4 — code.** No performance change is queued, and none was made: W2 showed nothing worth removing and W3's lever
-does not reach this pack. W4 is closed — the upstream report is written
+**P4 — code.** Nothing has been changed, and one candidate is queued. W2 showed nothing worth removing. W3's lever
+was believed not to reach this pack; on 2026-10-23 that belief was shown to rest on a comment, and the queued work is
+the three-line opt-in described under *Not tried, and why* — unmeasured, and the test that would measure it is already
+in the tree. W4 is closed — the upstream report is written
 ([UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md)) and not posted, for lack of a network route, and the
 tensor-parallel patch is closed rather than ported — and W5.2 is done on the soak sample.
 

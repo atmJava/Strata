@@ -62,6 +62,23 @@ with every per-kernel variable still able to override it and `STRATA_SM75_PERF=0
 Alternatively, take these numbers into `docs/DETAILS.md` and leave the switch opt-in; either way the card stops
 being unmeasured.
 
+## A comment that says more than the code does
+
+Reading these files for a different reason, we found two comments a reader would take as "an `sm_75` card cannot have
+the fused prompt experts": `include/strata/prefill/moe_fused.hpp:2` ("NVIDIA sm_80 and newer; sm_75 and HIP: MMQ")
+and `:31`, which describes `available()` as "the current device is sm_80 or newer". The code is not that.
+`src/prefill/moe_fused.cu:652` accepts a 7.5 card when `STRATA_PF_FUSED_SM75=1`, and `:675` is
+`dev_info().cc >= 75`. `src/prefill/moe_fused_iq.cu:1298-1307` goes further: it has a Turing branch that sets the
+kernels up for `T_Q2_0`, and its comment — "the codebook formats do not fit 64 KB at 4 warps a row" — is the reason
+this fork closed its own attempt at the IQ3_XXS pack without running anything.
+
+The arithmetic in that same file says the comment is wrong for `IQ3_XXS`: its shared memory at four warps and two
+stages is 60,672 B (`:110-113` with `:106-109`), 1,024 B more than the `Q2_0` format the branch does set up, against
+a 64 KiB limit. Only `IQ2_S` is over at that shape (67,840 B). The branch returns at `:1307`, five lines above the
+`setup_one` calls at `:1309-1311` that ask the driver whether it fits, so the claim has never been tested on any
+card. **This paragraph is reading, not measurement — we have not run it.** We thought it worth reporting either way:
+a comment that decides what a maintainer tries costs more than a comment that is merely wrong.
+
 ## What I did not test
 
 - Only one card model: RTX 2080 Ti (22 GB and stock 11 GB share the TU102 die). No 2060/2070/2080, no Super variants,
@@ -71,6 +88,8 @@ being unmeasured.
 - The engine's own test suite was off in the release build, so the parity binaries were not run.
 - The `--batch-groups 2` pipelined path, vision, and tool calls were exercised only through the serving config, not as
   separate correctness runs.
+- The fused int8 prompt experts (`STRATA_PF_FUSED_SM75=1`) were not measured on this card at all. The paragraph above
+  says only why they are worth measuring here.
 
 ## Reproduction status
 
