@@ -85,6 +85,26 @@ def contains(*needles):
     return check
 
 
+def num(expected):
+    """True when the answer contains exactly one run of digits and it is `expected`.
+
+    Used by the reasoning tasks: "297" and "答案是 297。" pass, "2970"、"298" 和 "不是 297 是 298" 不过.
+    A plain substring check would take the last two."""
+    def check(ans):
+        groups = re.findall(r"\d+", ans)
+        return len(groups) == 1 and groups[0] == str(expected)
+    return check
+
+
+def one_of(expected):
+    """True when, after stripping whitespace and the usual Chinese/ASCII answer punctuation, the answer
+    begins or ends with `expected`.  For single-character answers where prose around them is fine."""
+    def check(ans):
+        t = re.sub(r"[\s。．.！!，,：:；;是得为的答案第名]", "", ans)
+        return t.startswith(expected) or t.endswith(expected)
+    return check
+
+
 def equals(want):
     def check(ans):
         return ans.strip().strip("`'\" ") == want
@@ -113,8 +133,8 @@ CTX_TEXT, CTX_FACTS = build_context()
 E1, E2 = 173, 288
 
 
-def task_list(long_mode):
-    base = list(TASKS)
+def task_list(long_mode, reason=False):
+    base = list(TASKS) + (list(REASON_TASKS) if reason else [])
     if not long_mode:
         return base
     n1, t1 = CTX_FACTS[E1]
@@ -140,6 +160,22 @@ TASKS = [
     ("t_sluglook", "用 lookup 查 quant，对查到的值调用 slug，只回答 slug 的结果。", equals("iq3_xxs")),
     ("t_zhfinal", "用 lookup 查 driver，然后用中文一句话说明这台机器的驱动版本，句子里必须带上版本号数字。",
      contains("595.71.05")),
+]
+
+# Reasoning tasks: no tool can answer these, and each has one exact answer.  The lookup/chain tasks
+# above ask the model to fetch and echo; these ask it to work something out, which is where a thinking
+# budget or an effort hint is supposed to bite.  Every expected value below was computed by hand and
+# is written here so the grader never has to agree with the model.
+REASON_TASKS = [
+    ("r_chain", "先把 231 乘以 3，再减去 99，最后除以 2。只回答最终数字。", num(297)),
+    ("r_arith", "计算 (37*29 + 41) / 6，只回答它的整数部分。", num(185)),
+    ("r_count", "1 到 200（含两端）之间，能被 3 整除但不能被 5 整除的整数有多少个？只回答数字。", num(53)),
+    ("r_mod", "123456 除以 97 的余数是多少？只回答数字。", num(72)),
+    ("r_bits", "1234 写成二进制之后里面有多少个 1？只回答数字。", num(5)),
+    ("r_algebra", "解方程 3x + 11 = 47，只回答 x 的值。", num(12)),
+    ("r_speed", "一列火车 45 分钟行驶了 63 公里，它的时速是多少公里？只回答数字。", num(84)),
+    ("r_logic", "甲、乙、丙三人分别得了第 1、2、3 名，没有并列。已知：甲不是第 1，乙不是第 2，"
+                 "丙不是第 3，而且甲不是第 2。谁是第 1？只回答一个字：甲、乙或丙。", one_of("乙")),
 ]
 
 
@@ -251,7 +287,8 @@ def run_task(tid, instruction, check, budget, key, context=None, effort=EFFORT):
 def main():
     argv = sys.argv[1:]
     long_mode = "long" in argv
-    argv = [a for a in argv if a != "long"]
+    reason_mode = "reason" in argv
+    argv = [a for a in argv if a not in ("long", "reason")]
     reps = int(argv[0]) if argv else 3
     # An arm is "<budget>[@<effort>]": "none", "512", "0@low", "256@off".  Both fields are per-request,
     # so an arm needs no restart and leaves no state behind; the budget turned out to be a small lever
@@ -262,17 +299,18 @@ def main():
     for spec in specs:
         b, _, eff = spec.partition("@")
         arms.append((spec, 0 if b in ("", "none") else int(b), eff or EFFORT))
-    tasks = task_list(long_mode)
+    tasks = task_list(long_mode, reason_mode)
     context = CTX_TEXT if long_mode else None
     key = api_key()
     if not key:
         print("no api_key from", CFG)
         return 1
+    shape = ("-long" if long_mode else "") + ("-reason" if reason_mode else "")
     tag = os.environ.get("AB_TAG", "")
-    out = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.json" % ("-long" if long_mode else "", tag))
-    log = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.log" % ("-long" if long_mode else "", tag))
+    out = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.json" % (shape, tag))
+    log = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.log" % (shape, tag))
     print("mode %s  %d tasks  context %d chars  arms %s  reps %d"
-          % ("long" if long_mode else "short", len(tasks), len(CTX_TEXT) if long_mode else 0,
+          % (shape or "short", len(tasks), len(CTX_TEXT) if long_mode else 0,
              specs, reps), flush=True)
     results = {s: [] for s, _b, _e in arms}
     for rep in range(1, reps + 1):

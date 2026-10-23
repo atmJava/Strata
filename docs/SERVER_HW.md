@@ -101,6 +101,7 @@ All on this machine, engine 0.1.47 unless noted. Single-stream numbers move 76.7
 | `STRATA_SM75_PERF` on vs off | cold 84K prefill +7.2 to +7.6%, cold 43–50K +6.0 to +7.8%, four streams +4.1 to +7.5%; single-stream decode inside the run-to-run band, so not claimed | 2026-10-23, plan §7.5 |
 | `STRATA_SM75_PERF` bitwise gate | same 512-token answer (`aac0a04d109391fe`) on 9 of 10 runs in the config upstream asks for; the one exception was the first request after one restart and did not come back on the next restart | 2026-10-23, plan §7.6 |
 | `--vram-reserve-mib 960 → 1280` | GPU0 free at load 504 → 804–810 MiB (the engine's own warning line sits at 512), expert cache 7,334 → 7,190 slots (−1.96%), and the expert-cache hit rate did not move: median 98.90% before the restart, 99.00% after (p10 97.80 → 97.50) over 88 and 470 completed requests | 2026-10-23/24, ledger L-001 |
+| Thinking knobs, agent-shaped tasks | `reasoning_effort` is a prompt sentence, not an engine cap. `medium` costs nothing and saves 7% of completion tokens on reasoning tasks (28% on lookup-shaped ones). `none`/`off` saves 41% of tokens and 25% of wall clock but fails 3 to 4 of 14 reasoning tasks every rep - wrong arithmetic and one empty answer. A thinking budget saves ≤10%. | 2026-10-24, ledger L-009 / L-010 |
 | Prefill, cold 13.2K prompt | 1470 → 1552 tok/s with `--prefill-pipe 1` | 2026-10-22 |
 
 One thing every number above sits inside: **in this box's production shape (4 slots, `--pcie-frac 0.31`,
