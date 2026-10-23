@@ -133,8 +133,8 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | Task | State | Evidence |
 |---|---|---|
 | W0.1 | done | the documents are committed on `hw/server-adapt` in the same change that added this file |
-| W0.2 | open | §7 of the server plan already records the 2026-10-23 change |
-| W0.3 | open | — |
+| W0.2 | done | §7.6, §7.7 and §7.8 of the server plan record the 2026-10-23 config change, the bitwise check and the PLE measurement |
+| W0.3 | done | one section appended per round: §7.6 (T2), §7.7 (PLE field), §7.8 (PLE measured) |
 | W1.1 | done | 2026-10-23: in the upstream configuration (`STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, `--adapt-every 1000000`, `--no-prefill-borrow`, one slot) both arms are stable and gave the same 512 greedy tokens (`aac0a04d…`), 4 warm runs + 3 after a second restart. One first run after a restart differed once (`00281f84…`), not reproduced |
 | W1.2 | open | prior run was on an older build |
 | W1.3 | open | — |
