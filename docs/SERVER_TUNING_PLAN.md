@@ -179,8 +179,13 @@ single-session dominant, or if a solo-mode endpoint (no slots) is wanted for a b
   fit 64 KiB of shared memory at four warps a row), and `native_supported()` refuses every other format on such a
   card (`:1425`). This box serves a native IQ3_XXS pack, so the switch cannot reach it; a Q2_0 pack would be a
   different model.
+- `--prefill 4096` (smaller chunks): measured, parked. A 6.5K prompt reads 5.24/5.35 s against 5.61/5.86 s at 8192
+  (+8%, the two stages overlap once the prompt is more than one chunk), while a 22.7K prompt reads 1,830 against
+  ~1,950 tok/s (−6%). The chunk is tied to the ring sizing, so it is a restart option, not a per-request one. Parked
+  until the traffic mix is known; flipping it is one line in the run config.
 - A `sm_75` default for the Turing series: it would change upstream's default for every 7.5 card. Fine as a proposal
-  to upstream once this fork has a bitwise check behind it; not as a local patch.
+  to upstream once this fork has a bitwise check behind it; not as a local patch. The proposal text is in
+  [UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md).
 
 ## Bottlenecks, after the measurements
 

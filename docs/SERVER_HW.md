@@ -130,6 +130,8 @@ All on this machine, engine 0.1.47 unless noted. Single-stream numbers move 76.7
 | Turing series on, decode after 84K | 67.8–78.0 tok/s against 67.8–71.2: up, but inside the spread, not claimed | 2026-10-23 |
 | `STRATA_KV_PREFETCH=1` on top of the above | +0.6% prefill, +1.0% cold read, −2.2% four sessions: no gain, removed | 2026-10-23 |
 | Bitwise check, Turing series on against off, in the configuration upstream requires | the same 512 tokens in 9 of 10 runs; one first-run after a restart differed and did not come back | 2026-10-23 |
+| Soak (47 minutes, cut by an external service restart) | 3,995 requests, 0 errors; RSS +148 MB; MemAvailable 23.3–23.6 GiB; 0 cache evictions; GPU0 61 → 82 °C, GPU1 53 → 65 °C | 2026-10-23 |
+| `--prefill 4096` against `auto` (8192) | 6.5K-token read 5.24/5.35 s against 5.61/5.86 s (+8%); 22.7K read 1,830 against ~1,950 tok/s (−6%): kept `auto` | 2026-10-23 |
 
 ## Not a lever (ruled out, with a measurement)
 
@@ -140,7 +142,8 @@ interleaved, not as one run each.
 
 ## Not tested
 
-1. A one-hour soak.
+1. A full one-hour soak: 47 minutes were clean on 2026-10-23 before `apt-daily-upgrade` restarted the service
+   (`needrestart`; now exempted in `/etc/needrestart/conf.d/50-strata.conf`). The next run can go the full hour.
 2. Multi-stream cold-start stalls: 5–10 s were seen on an older build with 3–4 joins, and did not come back on a
    warm machine. Cause unknown, not reproduced on the final build.
 3. Eight slots, long-context (≥128K) concurrency, vision under load, tool calls under load.
