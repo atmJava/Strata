@@ -308,3 +308,32 @@ rep3 那三次我正好在睡觉）。**按 rep 内部配对读**：污染最小
 `env.STRATA_EXP_MODE`（args 与 sampling 逐字段相同，脚本里断言 args 完全相等），
 不加 `--go` 不动任何东西；跑起来是 3 次安装（A→B→A）≈ **约 495 s 不可用**（不是原先估的两次，
 因为 A 臂也要重装一次以便同 boot 对照——这条更正要记着）。**等 atmJava 批停机窗口。**
+
+---
+
+## L-008 · #3724 同 pin 复核（事实 + 静态阅读，**没有测**）
+
+上游 [#3724](https://github.com/Niko1221/Strata/issues/3724)（open，0 评论）报：把 llama.cpp
+[#30553](https://github.com/ggml-org/llama.cpp/pull/30553) backport 到**与我们相同的 ggml pin** 上，
+IQ3_S 在 4K +2.88%、16K +2.62%、短对话 decode +12.66%（他的机器是 2080 Ti + 4070 SUPER）。
+
+**已核实的事实**（不是读代码猜的）：
+
+| 检查 | 读数 | 怎么核的 |
+|---|---|---|
+| #30553 合并时间 | **2026-10-19T07:41Z**，merge commit `4c1004c49221`，只改 1 个文件 `ggml/src/ggml-cuda/mmq.cuh` | GitHub API + `.diff` |
+| 我们的 pin 日期 | `3cf03257f219afbe7334045ff7c6a06ac68c627d`，**Sun Sep 20 2026** | `/opt/ai/src/llama.cpp-3cf03257/…/VERSION.txt` |
+| 我们引擎实际用哪份 ggml | `STRATA_GGML_DIR:PATH=/opt/ai/src/llama.cpp-3cf03257` | `strata-0.2.2/build/CMakeCache.txt` |
+| 补丁在不在我们树里 | **不在**：`grep -n nwork mmq.cuh` 无命中，第 1444 行正是 diff 里的旧行 | 直接 grep 那份源码 |
+
+**静态阅读（未测）**：在这个 pin 里 MMQ 本身就是 stream-K 发射器（`launch_mul_mat_q` 1396 行 →
+`block_nums_stream_k` 1444 行），而 `ggml_cuda_should_use_mmq()` 把 `IQ3_XXS`/`IQ3_S` 都列为支持；
+改动只影响 `tiles_efficiency_percent < 90` 那一支（小工作量 = decode 形态），把 block 数封顶在
+`min(nsm, nwork)`。所以他报的"decode 涨得多"在机制上是通的。
+
+**没established 的关键一环**：这台机器 `--resident-experts` 走的是 Strata 自己的
+`src/kernels/cuda/iq_kernels.cu`，**专家矩阵很可能根本不经过 ggml 的 MMQ**；dense 层大概还是要过。
+所以"backport 在我们机器上值多少"只能实测，而且**要重编译引擎**（比 mode 8 重得多：mode 8 只是 env）。
+
+**决定**：排在 mode 8 之后。不在 mode 8 出数之前为重编译付时间。回帖可选（内容只是"同 pin 确认不含、
+适用性存疑"，没有新数字），也一并等 atmJava 批。

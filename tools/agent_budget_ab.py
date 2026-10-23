@@ -150,9 +150,9 @@ def api_key():
         return os.environ.get("QE_KEY", "")
 
 
-def one_turn(messages, budget, key):
+def one_turn(messages, budget, key, effort=EFFORT):
     payload = {"model": MODEL, "messages": messages, "tools": TOOLS, "tool_choice": "auto",
-               "max_tokens": 1600, "reasoning_effort": EFFORT, "stream": True, "temperature": 0}
+               "max_tokens": 1600, "reasoning_effort": effort, "stream": True, "temperature": 0}
     if budget:
         payload["reasoning_budget_tokens"] = budget
     req = urllib.request.Request(BASE + "/v1/chat/completions",
@@ -199,7 +199,7 @@ def one_turn(messages, budget, key):
             [calls[k] for k in sorted(calls)])
 
 
-def run_task(tid, instruction, check, budget, key, context=None):
+def run_task(tid, instruction, check, budget, key, context=None, effort=EFFORT):
     text = (context + "\n\n" + instruction) if context else instruction
     messages = [{"role": "user", "content": text}]
     t0 = time.time()
@@ -208,7 +208,7 @@ def run_task(tid, instruction, check, budget, key, context=None):
     while steps < MAX_STEPS and not error:
         steps += 1
         try:
-            head, calls = one_turn(messages, budget, key)
+            head, calls = one_turn(messages, budget, key, effort)
         except Exception as exc:
             error = "%s: %s" % (type(exc).__name__, exc)
             break
@@ -253,31 +253,40 @@ def main():
     long_mode = "long" in argv
     argv = [a for a in argv if a != "long"]
     reps = int(argv[0]) if argv else 3
-    arms = argv[1:] or ["none", "512", "256"]
+    # An arm is "<budget>[@<effort>]": "none", "512", "0@low", "256@off".  Both fields are per-request,
+    # so an arm needs no restart and leaves no state behind; the budget turned out to be a small lever
+    # (<=10%) and effort a much bigger one (16 completion tokens at off vs ~200 at high on the same
+    # prompt with a byte-identical answer), so effort is what the arms vary here.
+    specs = argv[1:] or ["none", "512", "256"]
+    arms = []
+    for spec in specs:
+        b, _, eff = spec.partition("@")
+        arms.append((spec, 0 if b in ("", "none") else int(b), eff or EFFORT))
     tasks = task_list(long_mode)
     context = CTX_TEXT if long_mode else None
     key = api_key()
     if not key:
         print("no api_key from", CFG)
         return 1
-    out = pathlib.Path("/opt/ai/runs/agent-budget-ab%s.json" % ("-long" if long_mode else ""))
-    log = pathlib.Path("/opt/ai/runs/agent-budget-ab%s.log" % ("-long" if long_mode else ""))
-    print("mode %s  %d tasks  context %d chars (~%d tokens by the server)  arms %s  reps %d"
+    tag = os.environ.get("AB_TAG", "")
+    out = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.json" % ("-long" if long_mode else "", tag))
+    log = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.log" % ("-long" if long_mode else "", tag))
+    print("mode %s  %d tasks  context %d chars  arms %s  reps %d"
           % ("long" if long_mode else "short", len(tasks), len(CTX_TEXT) if long_mode else 0,
-             0, arms, reps), flush=True)
-    results = {a: [] for a in arms}
+             specs, reps), flush=True)
+    results = {s: [] for s, _b, _e in arms}
     for rep in range(1, reps + 1):
-        for arm in arms:
-            budget = 0 if arm == "none" else int(arm)
-            rows = [run_task(tid, ins, chk, budget, key, context) for tid, ins, chk in tasks]
-            results[arm].append({"rep": rep, "rows": rows})
+        for spec, budget, effort in arms:
+            rows = [run_task(tid, ins, chk, budget, key, context, effort)
+                    for tid, ins, chk in tasks]
+            results[spec].append({"rep": rep, "rows": rows})
             ok = sum(1 for r in rows if r["ok"])
             tk = sum(r["completion_tokens"] for r in rows)
             pt = sum(r["prompt_tokens"] for r in rows)
             sec = sum(r["secs"] for r in rows)
             bad = sum(r["malformed"] for r in rows)
-            print("rep %d arm %-5s  ok %d/%d  toolcalls %2d  malformed %d  compl %5d  prompt %6d  %6.1fs"
-                  % (rep, arm, ok, len(tasks), sum(r["tool_calls"] for r in rows), bad, tk, pt, sec),
+            print("rep %d arm %-12s  ok %d/%d  toolcalls %2d  malformed %d  compl %5d  prompt %6d  %6.1fs"
+                  % (rep, spec, ok, len(tasks), sum(r["tool_calls"] for r in rows), bad, tk, pt, sec),
                   flush=True)
             for r in rows:
                 if not r["ok"] or r["error"] or r["malformed"]:
@@ -286,15 +295,15 @@ def main():
     print("\n=== summary (median over reps) ===")
     print("%-6s %14s %10s %10s %10s %10s %10s" % ("arm", "ok/N (median)", "compl", "prompt",
                                                   "malformed", "task s med", "sha set"))
-    for arm in arms:
-        oks = [sum(1 for r in run["rows"] if r["ok"]) for run in results[arm]]
-        tks = [sum(r["completion_tokens"] for r in run["rows"]) for run in results[arm]]
-        pts = [sum(r["prompt_tokens"] for r in run["rows"]) for run in results[arm]]
-        bads = [sum(r["malformed"] for r in run["rows"]) for run in results[arm]]
-        per_task_secs = [sorted(r["secs"] for r in run["rows"])[len(tasks) // 2] for run in results[arm]]
-        shas = {r["sha"] for run in results[arm] for r in run["rows"] if r["ok"]}
-        print("%-6s %8s / %-2d    %10d %10d %10d %10.1f %10d"
-              % (arm, statistics.median(oks), len(tasks), statistics.median(tks), statistics.median(pts),
+    for spec, _b, _eff in arms:
+        oks = [sum(1 for r in run["rows"] if r["ok"]) for run in results[spec]]
+        tks = [sum(r["completion_tokens"] for r in run["rows"]) for run in results[spec]]
+        pts = [sum(r["prompt_tokens"] for r in run["rows"]) for run in results[spec]]
+        bads = [sum(r["malformed"] for r in run["rows"]) for run in results[spec]]
+        per_task_secs = [sorted(r["secs"] for r in run["rows"])[len(tasks) // 2] for run in results[spec]]
+        shas = {r["sha"] for run in results[spec] for r in run["rows"] if r["ok"]}
+        print("%-12s %8s / %-2d    %10d %10d %10d %10.1f %10d"
+              % (spec, statistics.median(oks), len(tasks), statistics.median(tks), statistics.median(pts),
                  statistics.median(bads), statistics.median(per_task_secs), len(shas)))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(results, ensure_ascii=False, indent=1))
