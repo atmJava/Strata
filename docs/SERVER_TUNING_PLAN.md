@@ -127,13 +127,16 @@ off the decode's path. Recorded as measured, not explained.
 The engine says `--ple-io direct` measures slow on this SSD and warns that a prompt can spend minutes in layer 1.
 The record already quantified it: a brand-new 8.2K prompt takes 6.9–7.2 s, of which the host PLE bucket is
 5.98–6.58 s; the same content a second time takes 0; `--ple-inflight 1024` did nothing; `--ple-io ram` is rejected
-for RAM; the read path fetches 90-byte rows as 8 KiB. The prefill timing lines in the current log still show
-`PLE 33xxx ms` on long contexts, and those numbers sit beside `wall 421 ms`, so what the field measures remains
-unread.
+for RAM; the read path fetches 90-byte rows one page at a time. The prefill timing lines in the current log still
+show `PLE 33xxx ms` on long contexts beside `wall 421 ms`: the source answers that (see
+[SERVER_PLE.md](SERVER_PLE.md)), `PLE` is a running total since the engine started, not a per-request figure, so a
+per-request cost has to be taken as a difference.
 
-This is the largest remaining item for a *server*: a new agent session pays it on its first prompt. The three
-candidates the record lists are: the table in memory (no RAM), a 512-byte row read, and issuing the read earlier in
-the engine. The third is a code change; the second is a code change; the first is decided.
+This is the largest remaining item for a *server*: a new agent session pays it on its first prompt. The read path is
+now mapped in [SERVER_PLE.md](SERVER_PLE.md): 16 rows of 90 bytes per token, read one 4 KiB page at a time (8 KiB when
+a row straddles), deduped and sorted across the chunk, on one worker thread with up to 256 reads in flight, with the
+next chunk read ahead. The record's 7,018–8,580 rows/s against a disk probed at 111,804 IOPS says the queue is not
+saturating, and that is the first thing to settle in W2.2.
 
 ### Not tried, and why
 
@@ -148,7 +151,7 @@ the engine. The third is a code change; the second is a code change; the first i
 
 | Rank | Item | Evidence | Status |
 |---|---|---|---|
-| 1 | PLE read on new content | 6 of 7 s of a new 8K prompt; `direct` at 7–8.6K rows/s; the log's `PLE 33 s` | open, largest |
+| 1 | PLE read on new content | 6 of 7 s of a new 8K prompt; `direct` at 7–8.6K rows/s; 4 KiB read per 90-byte row ([SERVER_PLE.md](SERVER_PLE.md)) | open, largest |
 | 2 | Prefill expert GEMM on `sm_75` | `gemm gate/up` 18–26% of the prefill timeline; int8 fused prompt experts are opt-in and change bits | candidate |
 | 3 | Long-context KV from RAM | 40+ GiB per 184K request; the overlap switch gave nothing here | measured, closed |
 | 4 | Decode single stream | ~79 tok/s; the ceiling is the serial layer split, not a kernel | closed by the record |
@@ -255,8 +258,9 @@ backup. Results land in `/opt/ai/logs/arm-<label>.log` and the two jsonl files b
 
 **P2 — KV prefetch.** Done, dropped. The switch is out of the config.
 
-**P3 — PLE.** Next. Read the `PLE` field in the source first, then decide between the row-size change and doing the
-read earlier. The gate is T5 at 4K / 32K / 128K plus T6, because PLE sits in the prefill path this box already
+**P3 — PLE.** Read, not yet measured. [SERVER_PLE.md](SERVER_PLE.md) maps the path and corrects the field's meaning:
+`PLE` is a running total, so the first step is the per-request delta on a cold 8K and a cold 32K prompt with the
+concurrent read off. The gate is T5 at 4K / 32K / 128K plus T6, because PLE sits in the prefill path this box already
 saturates.
 
 **P4 — code.** Only what P3 leaves. Candidates: the PLE row read, `STRATA_PF_FUSED_SM75` with a KL gate, and a
@@ -267,8 +271,8 @@ soak) and fold the server's own documents' open items into one place.
 
 ## Open questions
 
-1. What does the `PLE` field in `strata prefill timing` measure? `wall 421 ms` beside `PLE 33 674 ms` cannot be one
-   span. Read `src/prefill/prefill.cpp` before drawing anything from it.
+1. ~~What does the `PLE` field in `strata prefill timing` measure?~~ Answered in [SERVER_PLE.md](SERVER_PLE.md): a
+   running total since the engine started, not a per-request figure.
 2. Is 22 GB reported as 22 GB? `nvidia-smi` says 22528 MiB; the engine prints 21.49 GiB free and sizes the cache
    from it.
 3. Why did the KV overlap gain nothing here when it gained 5% on two 3080s? Layer split, resident cells, or S1.

@@ -139,7 +139,7 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | W1.2 | open | prior run was on an older build |
 | W1.3 | open | — |
 | W1.4 | open | `/tmp/soak.py` produced 0 bytes on the old build |
-| W2.1 | open | — |
+| W2.1 | done | [SERVER_PLE.md](SERVER_PLE.md): the `PLE` field is a running total (nothing in the serving path calls `Prefill::reset()`), reads are one 4 KiB page per 90-byte row (8 KiB on a straddle), the gather is one batched request per chunk on an aux-CPU thread |
 | W2.2 | open | — |
 | W2.3 | open | — |
 | W2.4 | open | — |
