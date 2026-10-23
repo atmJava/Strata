@@ -24,7 +24,10 @@ ssh atm@192.168.3.14 'systemctl is-active strata; \
 
 ## 2. 恢复顺序（从轻到重，一步不行再下一步）
 
-1. `ssh atm@192.168.3.14 'systemctl restart strata'`，等 30–60 s（实测本 boot：unit 起 15:41:09 → 引擎起 15:41:29，约 20 s）。
+1. 重启：`ssh atm@192.168.3.14 'echo <sudo 密码> | sudo -S systemctl restart strata'`。
+   普通用户直接 `systemctl restart` 会被 polkit 挡下（`Failed to restart strata.service: Interactive authentication required`）。
+   **实测到可用要 165 s**（unit 起 17:02:39 → `/health` 返回 200 约 17:05:24）。journal 里那个"起 15:41:09 → 引擎起 15:41:29"
+   只是 unit 起 → 引擎进程起，**不代表能服务**。所以：**重启 ≈ 3 分钟没有推理**，别在自己正需要 token 的时候随手重启。
 2. 起不来 → 回退配置：`ls -t /opt/ai/backups/*/strata-022.json.* | head -3`，取最近一份
    `cp` 回 `/opt/ai/src/strata-0.2.2/strata-022.json`，再 restart。
 3. 还起不来 → 看 `/opt/ai/logs/strata-service.log` 尾部与 `journalctl -u strata -n 30`；
@@ -39,7 +42,11 @@ ssh atm@192.168.3.14 'systemctl is-active strata; \
 - **只用** `/opt/ai/bin/set-config-key.py <点号路径> <JSON值> --config /opt/ai/src/strata-0.2.2/strata-022.json`。
   它自动备份到 `/opt/ai/backups/<日期>/`。**必须显式给 `--config`**——它的默认值是 IQ2 那份配置，
   在这台机器上是个陷阱（脚本自己写了这句警告）。
-- 引擎参数在 `args` 里是一个 list：`--vram-reserve-mib` 在索引 42，它的值在索引 43。改索引 43，别改 42。
+- 引擎参数在 `args` 里是一个 **54 元素的字符串 list**：`--vram-reserve-mib` 在索引 42，它的值在索引 43。
+  **不要用 `set-config-key.py args.43 1280`**——实测它把整个 list 换成了 `{"43": 1280}`，54 个引擎参数全丢，
+  下次启动就是坏的（当时服务还在跑，只因为它启动时读过旧配置）。
+  正确做法：**就地替换 JSON 文本里那一个值**，然后 `json.load` 断言 `args` 仍是 54 个字符串、目标值已生效，
+  **检查通过才重启**。值必须是字符串（`"1280"`），写成数字会让 argv 构造出错。
 - 改 env 用 `env.STRATA_XXX`。改 args 里的值用 `args.<索引>`。
 - **改完必须重启才生效**（"The server reads the config when it starts"）。重启前先想清楚 §1 的判读和 §2 的回退。
 

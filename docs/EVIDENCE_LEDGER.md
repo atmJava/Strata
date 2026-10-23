@@ -28,7 +28,9 @@
 1. **#2065 的挂起风险正在现场触发**。引擎日志：
    `strata serve: WARNING: only 505 MiB of VRAM free at the start of this request (below 512 MiB): ... decode falls to
    a few tok/s and a window may never finish (#2065). Add --vram-reserve-mib 1024 ...`。
-   该形态在日志里累计 **734 次**（跨多次 boot），本次 boot 至少 1 次。**这就是能卡死我自己会话的东西。**
+   该形态在日志里累计 **12 次**（`grep -c "WARNING: only"`）。**别数错**：`grep -c "MiB of VRAM free"` 是 734 次，
+   但其中绝大多数是 `strata verify: capturing the N-token window (X MiB of VRAM free)` 这种 graph 捕获进度行，不是警告。
+   本次 boot 至少 1 次。**这就是能卡死我自己会话的东西。**
 2. **本 boot 的下降轨迹**：加载时 GPU0 预留 960 MiB → 现在 505 MiB，**−455 MiB**。
    其中 verify 窗口的 graph 捕获可解释约 −45 MiB（捕获 1/2/3/5/7/8 token 窗口时 GPU0 从 551 一路到 515，
    每个新宽度约 −10 MiB 且不归还）；**其余约 410 MiB 去向未查明**（*静态阅读，未测*）。
@@ -60,4 +62,37 @@
 3. 单流 decode 落在噪声内（±2%，跨 boot 只作趋势参考，见 §判据规则）；
 4. 回退：`set-config-key.py args.43 960 --config /opt/ai/src/strata-0.2.2/strata-022.json` + restart。
 
-**执行**：见下方记录（执行后回写）。
+**执行**（2026-10-24 01:02–01:11 CST / 2026-10-23 17:02–17:11 UTC）：
+
+| 步骤 | 结果 |
+|---|---|
+| 改配置 | 就地替换 JSON 文本，`args` 仍是 54 个字符串，`--vram-reserve-mib 1280`、`--vram-reserve-later-mib 1435` 未动。备份：`/opt/ai/backups/20261023/strata-022.json.pre-reserve1280-170233` |
+| 中途事故 | 先用 `set-config-key.py args.43 1280` 试过，它把整个 list 换成 `{"43": 1280}`；**检查门拦下了重启**，从 `pre-key-args_43` 备份恢复后改用文本替换。坏配置副本留在 `/opt/ai/tmp/args-mangled-*.json` |
+| 重启 | `sudo -S systemctl restart strata`（普通用户会被 polkit 拦），**到 `/health`=200 用了 165 s** |
+| 缓存 sizing | `expert cache auto: 16.85 GiB free, 1280 MiB reserved -> **7190 slots**`（原 7334，**−144 slot = −1.96%**；我预估 −135，方向对） |
+| 判据 1（不再告警） | 加载后 GPU0 free **1010 MiB**（原 504），一次探针请求后 **890**，5 分钟后被动采样 **864**；告警线 512 → **余量 350+ MiB**。`grep -c "WARNING: only"` 重启前后都是 **12**，**没有新增** ✅ |
+| 判据 2（hit 不掉） | 采样到 **97.6%**（改动前本会话流量 97.9–99.2%，中位 ~98.8%）。单点读数，**未过 A/B，不作结论**；持续观察 `vram-perf.csv` |
+| 判据 3（速度在噪声内） | 采样到 **86.3 tok/s** 单流（改动前本会话 72.5–79.3；台账基线 79.1）。跨 boot、不同 prompt 混合，**只算趋势** |
+| 判据 4（回退） | 文本替换回 `"960"` + `sudo -S systemctl restart strata`，代价约 3 分钟不可用 |
+
+**为什么这次没法按标准判胜负**：`--vram-reserve-mib` 是**加载时**的输入，改它必须重启 → 必然跨 boot；
+而本机任何并发都会把单流腰斩（记录：2 路各 43–45 tok/s），我一边生成一边跑基准只会两头都脏。
+所以 L-001 的**速度代价**用两条腿看：(a) 被动采样 `vram-perf.csv` 的真实流量分布（已装，每 5 分钟）；
+(b) 等一个批准的停机窗口做同 boot A-B-A。**这是稳定性改动，判据 1 已经满足；速度代价待观察。**
+
+---
+
+## L-002 · 思考 token 预算（下一个候选，未开始）
+
+**观察**（同一批探针，只读）：`max_tokens 400` 时思考吃掉 218 token、答案 0 个 ——
+日志原话 `the reply reached max tokens while still thinking, so it has no answer`；
+`max_tokens 500` 时思考 268、答案 350。配置里 `reasoning_budget_tokens = 12288`，
+等于**思考基本不设上限**，只在撞到 `max_tokens` 时才收。
+
+**为什么值得做**：这是 L1（任务墙钟）上唯一不需要重编译、不需要重启引擎就能试的杠杆——
+调优记录 §21.2 自己估过"思考 −64% ≈ 墙钟 −25%"，比任何 kernel 改动都大。
+
+**风险**：思考变短可能让工具调用正确率下降（`tool_call_recovery`、`reasoning_loop_recovery=recover` 是兜底，不是质量保证）。
+**所以判据必须是任务级**：同一批 agent 任务，报完成率、工具调用通过率、空答案率、墙钟中位，不能只看 tok/s。
+
+**待查**：`reasoning_budget_tokens` 是不是那 15 个可热改键之一（若是，A/B 成本大幅下降，不必重启）。
