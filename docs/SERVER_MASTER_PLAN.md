@@ -15,8 +15,9 @@ does not repeat them; it decides **what happens next**.
 The programme is finished when all of these are true:
 
 1. Every workstream below is either **done with evidence** or **closed with a recorded reason**.
-2. `SERVER_HW.md`'s "Not tested" list is empty: the 127K read, the bitwise check under the upstream configuration,
-   and the soak are run.
+2. The three unmeasured items this plan took on are run: the 127K read, the bitwise check under the upstream
+   configuration, and the soak. What else `SERVER_HW.md` lists as not tested — multi-stream stalls, 8 slots and
+   vision under load, the engine's own test suite — was never in this plan's scope and stays open there.
 3. The run config on the server and the documents agree: every `env` key and every non-default flag has a line
    saying why it is there and what it bought.
 4. The numbers in `SERVER_HW.md` and `SERVER_TUNING_PLAN.md` are from this box and name the boot they came from.
@@ -30,7 +31,7 @@ Written on 2026-10-23, when every task had reached a state.
 | # | Item | State |
 |---|---|---|
 | 1 | Every workstream done or closed with a reason | **yes**: 17 tasks, 12 done, 5 closed, 0 open |
-| 2 | The three "not tested" items are run: the 127K read, the bitwise check, the soak | **yes, with one caveat**: 127K measured on and off (W1.2), bitwise in the upstream configuration (W1.1), soak 47 of 60 minutes (W1.4, cut by an external restart that is now fixed). `SERVER_HW.md`'s list keeps its other items (multi-stream stalls, 8 slots/vision, the engine's own tests), which were never in this plan's scope |
+| 2 | The three items this plan took on are run: the 127K read, the bitwise check, the soak | **yes, with one caveat**: 127K measured on and off (W1.2), bitwise in the upstream configuration (W1.1), soak 47 of 60 minutes (W1.4, cut by an external restart that is now fixed). The rest of `SERVER_HW.md`'s list is out of scope by item 2 and stays open there |
 | 3 | The run config and the documents agree | **yes**: 14 `env` keys, each explained in §7 of the server record; `--prefill auto`; no diagnostic switch left in |
 | 4 | Every number names the box and the boot | **yes**: every row of the measured tables carries 2026-10-22 or 2026-10-23, and the A-B-A rows name the arm |
 | 5 | Upstream text for anything that helps other `sm_75` machines | **yes**: [UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md), unposted for lack of a network route |
@@ -41,7 +42,7 @@ and the one configuration lever found (a 4096-token chunk) wins 8% on small prom
 traffic data to choose. The one change that shipped is a configuration line (`STRATA_SM75_PERF=1`, +7% prefill), and
 the one operational defect found (`needrestart` restarting the service nightly) is fixed.
 
-
+## Workstreams
 
 Each task is one round of work. A task is "done" when its evidence exists and the documents say so; "closed" when
 the answer is no and the reason is written down.

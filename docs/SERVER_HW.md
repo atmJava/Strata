@@ -159,12 +159,19 @@ The tuning work — bottlenecks, goals, rules, acceptance and the test ladder �
    binary that serves was **not** built from `hw/server-adapt` but from `hw/s1-concurrent-read`, and rebuilding that
    source reproduced it (see *A rebuild is reproducible, with one caveat*). The next rebuild should start from
    `hw/s1-concurrent-read`.
-2. The Turing kernel series is on (`STRATA_SM75_PERF=1`, +7% prefill). Next is the PLE read: 6 of the 7 s of a new
-   prompt, and the largest thing left for a server (see the plan).
-3. Close the unmeasured items above that need no new code: the 127K read, the bitwise check under the configuration
-   upstream requires, the soak.
-4. Only then touch placement, if the numbers ask for it: the split planner and the RAM tier on 22 GB cards.
-5. Port the tensor-parallel patch to 0.2.2 on its own branch, or drop it and record why.
+2. ~~The Turing kernel series is on (`STRATA_SM75_PERF=1`, +7% prefill). Next is the PLE read: 6 of the 7 s of a new
+   prompt, and the largest thing left for a server (see the plan).~~ Done, and the premise did not hold. Measured on
+   2026-10-23 on real text: PLE costs 0–62 ms a request at 6–24K tokens, plus about 1 s on the first request after an
+   engine start ([SERVER_PLE.md](SERVER_PLE.md)). There is nothing left there to take.
+3. ~~Close the unmeasured items above that need no new code: the 127K read, the bitwise check under the configuration
+   upstream requires, the soak.~~ Done on 2026-10-23, except the last: 127K measured on and off, bitwise in the
+   upstream configuration, soak 47 of 60 minutes. The full hour is still to re-run.
+4. Only then touch placement, if the numbers ask for it: the split planner and the RAM tier on 22 GB cards. Not
+   reached — the plan closed with no code change, and no measurement asked for it.
+5. ~~Port the tensor-parallel patch to 0.2.2 on its own branch, or drop it and record why.~~ Dropped, with the reason
+   recorded: `STRATA_TP_GDN` needs `--batch 0` (one stream) and this box serves `parallel 4`, which measured +63% on
+   four sessions over the serial group. Footprint and re-open condition in
+   [SERVER_TUNING_PLAN.md](SERVER_TUNING_PLAN.md#the-tensor-parallel-patch-closed-not-ported).
 
 ## Rules
 

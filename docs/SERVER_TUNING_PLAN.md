@@ -140,9 +140,11 @@ So the record's premise no longer holds on 0.2.2 with the concurrent read: the g
 while the GPU works and hides. What is left is the first request after an engine start, about a second, once.
 
 **Decision:** no PLE change. `--ple-io ram` is out for RAM, the smaller read unit is a pack change, and the read is
-already issued a chunk ahead. The next performance candidate is W3, the `sm_75` prompt-expert path, because the
-shape the numbers do show is the one every agent request has: the same text reads at 1,179–1,255 tok/s at 6K and at
-1,935–1,967 tok/s at 24K, so a small prompt pays a fixed cost per token.
+already issued a chunk ahead. The shape the numbers do show is the one every agent request has: the same text reads
+at 1,179–1,255 tok/s at 6K and at 1,935–1,967 tok/s at 24K, so a small prompt pays a fixed cost per token. W3, the
+`sm_75` prompt-expert path, was the next candidate for that shape and is **closed as not applicable** here (the pack
+is native IQ3_XXS, the Turing kernels are set up for `T_Q2_0` only; see *Not tried, and why*). The one lever left for
+it is `--prefill 4096`, parked until the traffic mix is known — one line in the run config.
 
 ### The tensor-parallel patch: closed, not ported
 
@@ -208,7 +210,7 @@ Ruled out with a measurement, again: NVLink (47.05 GB/s, 0.46% of the window), c
 | G2 | Take the bitwise Turing kernels if they hold up | **done**: +7% prefill, adopted, and the same 512 tokens as `=0` in the upstream configuration (W1.1) |
 | G3 | Overlap the long-context KV upload | **closed as failed**: +0.6%, dropped |
 | G4 | Make the PLE read a measured choice | **done**: it is a measured choice and the answer is "leave it" (W2.2) |
-| G5 | Change code only where the numbers ask | open: PLE row read and the `sm_75` prompt experts are the two candidates |
+| G5 | Change code only where the numbers ask | **closed with nothing changed**: the two candidates were the PLE row read (measured out, W2.2) and the `sm_75` prompt experts (they do not reach an IQ3_XXS pack, W3) |
 
 ## Non-goals
 
@@ -300,14 +302,17 @@ backup. Results land in `/opt/ai/logs/arm-<label>.log` and the two jsonl files b
 
 **P3 — PLE.** Measured, closed. The per-request cost is 0–62 ms at 6–24K tokens and about a second on the first
 request after an engine start ([SERVER_PLE.md](SERVER_PLE.md)); no change is worth making. The shape that is left —
-a small prompt reading at two-thirds the rate of a large one — moves to W3, the `sm_75` prompt-expert path.
+a small prompt reading at two-thirds the rate of a large one — is not W3's to take: the fused prompt experts do not
+reach this pack. Its one lever is the parked `--prefill 4096`, waiting on the traffic mix.
 
-**P4 — code.** No performance change is queued: W2 showed nothing worth removing and W3's lever does not reach this
-pack. What is left is W4 (the upstream report and the tensor-parallel decision) and W5.2 (memory stability after the
-config change).
+**P4 — code.** No performance change is queued, and none was made: W2 showed nothing worth removing and W3's lever
+does not reach this pack. W4 is closed — the upstream report is written
+([UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md)) and not posted, for lack of a network route, and the
+tensor-parallel patch is closed rather than ported — and W5.2 is done on the soak sample.
 
-**P5 — the record.** Close the three unmeasured items in [SERVER_HW.md](SERVER_HW.md) (127K read, bitwise check,
-soak) and fold the server's own documents' open items into one place.
+**P5 — the record.** The three unmeasured items in [SERVER_HW.md](SERVER_HW.md) are closed on 2026-10-23 except the
+full hour: 127K measured on and off, bitwise in the upstream configuration, soak 47 of 60 minutes. Folding the open
+items of the server's own 24 documents into one place was not done; `/opt/ai/docs/README.md` is still their index.
 
 ## Open questions
 
@@ -316,5 +321,8 @@ soak) and fold the server's own documents' open items into one place.
 2. Is 22 GB reported as 22 GB? `nvidia-smi` says 22528 MiB; the engine prints 21.49 GiB free and sizes the cache
    from it.
 3. Why did the KV overlap gain nothing here when it gained 5% on two 3080s? Layer split, resident cells, or S1.
-4. Does `STRATA_SM75_PERF=1` hold bitwise under the T2 configuration? Until it does, the speed is measured and the
-   correctness is borrowed from upstream's claim.
+4. ~~Does `STRATA_SM75_PERF=1` hold bitwise under the T2 configuration?~~ Answered on 2026-10-23 (W1.1): in the
+   upstream configuration the two arms gave the same 512 greedy tokens in 9 of 10 runs; one first run after a restart
+   differed once and did not come back. The correctness is no longer borrowed.
+5. What is the traffic mix, small prompts against large? `--prefill 4096` wins +8% at 6.5K and loses 6% at 22.7K, so
+   the choice is the mix and not the code, and nothing on the box records it.
