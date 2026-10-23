@@ -13404,7 +13404,22 @@ int main(int argc, char** argv) {
                     // (--remote-expert-opt works only through a helper cache, so without one it does not count)
                     s.helper_caches = prefill_src != srcp;
                     for (int r = 0; r < 3; ++r) s.helper_caches |= o.expert_cache_remote[(size_t) r] > 0;
-                    s.staged_source = srcp == &src && src.stages_blobs();
+                    // An unbuffered source reads through copy_blobs/read_direct into the caller own buffer,
+                    // with one AIO context and aligned buffer per thread (FileExpertSource::read_direct), and the
+                    // prompt reader copies every transient expert (Prefill takes blob_stable only when
+                    // !transient, i.e. a resident or override pointer): such a source cannot recycle a buffer
+                    // the reader holds, so it is not "staged" for this gate.  Phase 0 on 2x RTX 2080 Ti: a
+                    // 84K-token read beside decoding slots made zero staged_blob / claim_grow / begin_layer
+                    // calls on the reader thread.
+                    // The prompt reader never enters the stage pool: Prefill copies every transient expert
+                    // with copy_blobs and takes blob_stable only when !transient, where the source answers
+                    // with a resident or a mapped pointer.  This box has the io-prefetch/mapped-experts source
+                    // (io_prefetch=1, no role pointers, no unbuffered handles); Phase 0 measured 0 staged_blob,
+                    // 0 claim_grow and 0 begin_layer calls on the reader thread over an 84K-token read.  That
+                    // shape is not "staged" for this gate; the GGUF in place and an unbuffered source, not
+                    // measured here, stay off.
+                    const bool mapped_io_source = src.io_prefetch() && !src.unbuffered() && !src.gguf_mode();
+                    s.staged_source = srcp == &src && src.stages_blobs() && !mapped_io_source;
                     s.other_source = srcp != &src && srcp != &arena_src;
                     if (const char* why = strata::program::concurrent_read_off(s)) {
                         std::fprintf(stderr, "strata batch: STRATA_PIPED_CONCURRENT is off beside %s\n", why);

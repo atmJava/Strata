@@ -35,8 +35,10 @@ struct ConcurrentReadSetup {
     bool pcie_dma = false;          ///< --pcie-mode dma: the same (its copies)
     bool helper_caches = false;     ///< --expert-cache-device1..3 (and --remote-expert-opt on them), a prompt source of
                                     ///< its own; --remote-expert-opt alone is inert on a plain layer split
-    bool staged_source = false;     ///< the GGUF source stages its blobs (in place, unbuffered, STRATA_IO_PREFETCH):
-                                    ///< it recycles the buffers it hands out, one thread at a time
+    bool staged_source = false;     ///< the source stages its blobs from a pool it recycles (the GGUF in
+                                    ///< place, an unbuffered source): one thread at a time.  The io-prefetch/
+                                    ///< mapped-experts source is not set here: its reader gets resident or
+                                    ///< mapped pointers only (see generate.cpp gate)
     bool other_source = false;      ///< an expert source that is neither the GGUF source nor the arena
 };
 
