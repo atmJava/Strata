@@ -137,7 +137,7 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | W0.3 | done | one section appended per round: §7.6 (T2), §7.7 (PLE field), §7.8 (PLE measured) |
 | W1.1 | done | 2026-10-23: in the upstream configuration (`STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, `--adapt-every 1000000`, `--no-prefill-borrow`, one slot) both arms are stable and gave the same 512 greedy tokens (`aac0a04d…`), 4 warm runs + 3 after a second restart. One first run after a restart differed once (`00281f84…`), not reproduced |
 | W1.2 | done | 2026-10-23 on the final build (126,050-token cold prompt): concurrent read on 58.2/58.5 s with the stream at 19.7–20.3 tok/s and a 0.9 s longest stall; off 49.0/49.6 s with the stream at 0.3–0.4 tok/s and a 48.7 s stall |
-| W1.3 | open | — |
+| W1.3 | done | 2026-10-23, three reps: a client leaves 10.2–10.3 s into a 55,035-token read; the engine stops at 39,680 tokens (16.5–16.7 s), logs `(cancelled)`, keeps serving (the next request completes, health 200). The next request waits 6.6–6.7 s behind the chunk in flight. No `keeps its conversation` line per cancel |
 | W1.4 | open | `/tmp/soak.py` produced 0 bytes on the old build |
 | W2.1 | done | [SERVER_PLE.md](SERVER_PLE.md): the `PLE` field is a running total (nothing in the serving path calls `Prefill::reset()`), reads are one 4 KiB page per 90-byte row (8 KiB on a straddle), the gather is one batched request per chunk on an aux-CPU thread |
 | W2.2 | done | measured on 2026-10-23: PLE costs 0–62 ms per request at 6–24K tokens of real text, plus ~1 s on the first request after an engine start. No candidate is worth implementing — see [SERVER_PLE.md](SERVER_PLE.md#measured-2026-10-23-ple-is-not-the-bottleneck-any-more) |
