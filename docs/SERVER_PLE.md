@@ -76,3 +76,34 @@ The box reports 7,018–8,580 rows/s while the disk was probed at 111,804 IOPS e
 256 reads in flight, 7K rows/s is about 36 ms per read, which looks like a queue that is not saturating rather than a
 slow drive. Reading the submit/reap loop against that number is the next step; it is unconfirmed static analysis
 until it is measured.
+
+## Measured 2026-10-23: PLE is not the bottleneck any more
+
+Method: `PLE` is a running total, so the per-request cost is the difference between the value before a cold prompt
+and the value after it, over the lines of the current engine start only (a layer split prints one line per stage and
+the last line in the file is not always the stage that does the PLE work). Real prose from `/opt/ai/docs` is used as
+the prompt, a different slice each time: synthetic filler has repeating n-grams, and the reader's million-row cache
+answers those, which measured about 1 ms per request and would have hidden the effect.
+
+| Prompt | read | PLE, first request after a start | PLE, later requests |
+|---|---|---|---|
+| 6,248–6,663 tokens of real text | 4.9–6.6 s (1,179–1,255 tok/s) | **1,015 ms** | 0–1 ms |
+| 24,060–24,101 tokens of real text | 12.2–12.4 s (1,935–1,967 tok/s) | 203 ms | 0–62 ms |
+
+Read as: with the concurrent read (S1) in place, the gather runs on the prompt's own thread while the GPU works, so
+it hides; what remains is the first request after an engine start, when the row cache and the page cache are cold.
+That is a one-off per restart, not a per-session cost.
+
+Two limits of this measurement: two to three samples per size in one boot, and the first-request figure was seen
+twice at two sizes, not repeated per size.
+
+**Decision (W2.2):** none of the three PLE candidates is implemented now. `--ple-io ram` is out for RAM; the smaller
+read unit is a pack change; issuing the read earlier is already done for chunks 2..N, and the measurement shows the
+first chunk no longer dominates. W2.3/W2.4 are closed on this evidence and re-open only if a real load shows a cost
+that matters.
+
+What the numbers do point at is the shape every agent request has: the same real text reads at 1,179–1,255 tok/s at
+6K and 1,935–1,967 tok/s at 24K. The small prompt pays a fixed cost per token, which is the effect the server's
+record already described; the next performance candidate is W3 (the `sm_75` prompt-expert path), which targets that
+read directly.
+

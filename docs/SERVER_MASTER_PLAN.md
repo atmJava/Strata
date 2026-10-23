@@ -140,9 +140,9 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | W1.3 | open | — |
 | W1.4 | open | `/tmp/soak.py` produced 0 bytes on the old build |
 | W2.1 | done | [SERVER_PLE.md](SERVER_PLE.md): the `PLE` field is a running total (nothing in the serving path calls `Prefill::reset()`), reads are one 4 KiB page per 90-byte row (8 KiB on a straddle), the gather is one batched request per chunk on an aux-CPU thread |
-| W2.2 | open | — |
-| W2.3 | open | — |
-| W2.4 | open | — |
+| W2.2 | done | measured on 2026-10-23: PLE costs 0–62 ms per request at 6–24K tokens of real text, plus ~1 s on the first request after an engine start. No candidate is worth implementing — see [SERVER_PLE.md](SERVER_PLE.md#measured-2026-10-23-ple-is-not-the-bottleneck-any-more) |
+| W2.3 | closed | the premise did not survive W2.2: there is no per-request PLE cost to remove |
+| W2.4 | closed | same; re-opens only if a real load shows a cost that matters |
 | W3.1 | open | — |
 | W3.2 | open | — |
 | W4.1 | open | — |

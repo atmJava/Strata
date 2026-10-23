@@ -122,21 +122,27 @@ established; candidates are the layer split (each card owns half the layers, so 
 32,768 resident cells already covering the first 32K, and the concurrent-read change (S1) already moving the read
 off the decode's path. Recorded as measured, not explained.
 
-### P3 — `--ple-io`: open, and the record has the numbers
+### P3 — `--ple-io`: measured, not a bottleneck any more
 
-The engine says `--ple-io direct` measures slow on this SSD and warns that a prompt can spend minutes in layer 1.
-The record already quantified it: a brand-new 8.2K prompt takes 6.9–7.2 s, of which the host PLE bucket is
-5.98–6.58 s; the same content a second time takes 0; `--ple-inflight 1024` did nothing; `--ple-io ram` is rejected
-for RAM; the read path fetches 90-byte rows one page at a time. The prefill timing lines in the current log still
-show `PLE 33xxx ms` on long contexts beside `wall 421 ms`: the source answers that (see
-[SERVER_PLE.md](SERVER_PLE.md)), `PLE` is a running total since the engine started, not a per-request figure, so a
-per-request cost has to be taken as a difference.
+The record had the numbers: a brand-new 8.2K prompt taking 6.9–7.2 s, of which the host PLE bucket was 5.98–6.58 s,
+and `--ple-inflight 1024` doing nothing. The read path is mapped in [SERVER_PLE.md](SERVER_PLE.md), including the
+finding that the `PLE` field is a running total, not a per-request figure.
 
-This is the largest remaining item for a *server*: a new agent session pays it on its first prompt. The read path is
-now mapped in [SERVER_PLE.md](SERVER_PLE.md): 16 rows of 90 bytes per token, read one 4 KiB page at a time (8 KiB when
-a row straddles), deduped and sorted across the chunk, on one worker thread with up to 256 reads in flight, with the
-next chunk read ahead. The record's 7,018–8,580 rows/s against a disk probed at 111,804 IOPS says the queue is not
-saturating, and that is the first thing to settle in W2.2.
+Measured on 2026-10-23 with the delta of that counter, on real prose (a different slice each time, because the
+reader's row cache answers repeated text):
+
+| Prompt | read | PLE, first after a start | PLE, later |
+|---|---|---|---|
+| 6.2–6.7K tokens | 4.9–6.6 s (1,179–1,255 tok/s) | 1,015 ms | 0–1 ms |
+| 24.1K tokens | 12.2–12.4 s (1,935–1,967 tok/s) | 203 ms | 0–62 ms |
+
+So the record's premise no longer holds on 0.2.2 with the concurrent read: the gather runs on the prompt's own thread
+while the GPU works and hides. What is left is the first request after an engine start, about a second, once.
+
+**Decision:** no PLE change. `--ple-io ram` is out for RAM, the smaller read unit is a pack change, and the read is
+already issued a chunk ahead. The next performance candidate is W3, the `sm_75` prompt-expert path, because the
+shape the numbers do show is the one every agent request has: the same text reads at 1,179–1,255 tok/s at 6K and at
+1,935–1,967 tok/s at 24K, so a small prompt pays a fixed cost per token.
 
 ### Not tried, and why
 
@@ -151,8 +157,8 @@ saturating, and that is the first thing to settle in W2.2.
 
 | Rank | Item | Evidence | Status |
 |---|---|---|---|
-| 1 | PLE read on new content | 6 of 7 s of a new 8K prompt; `direct` at 7–8.6K rows/s; 4 KiB read per 90-byte row ([SERVER_PLE.md](SERVER_PLE.md)) | open, largest |
-| 2 | Prefill expert GEMM on `sm_75` | `gemm gate/up` 18–26% of the prefill timeline; int8 fused prompt experts are opt-in and change bits | candidate |
+| 1 | Prefill expert GEMM on `sm_75` | `gemm gate/up` 18–26% of the prefill timeline; the same text reads at 1,179–1,255 tok/s at 6K and 1,935–1,967 at 24K, so a small prompt pays a fixed cost per token | next (W3) |
+| 2 | PLE read on new content | 0–62 ms per request at 6–24K tokens, ~1 s on the first request after a start ([SERVER_PLE.md](SERVER_PLE.md)) | measured, closed |
 | 3 | Long-context KV from RAM | 40+ GiB per 184K request; the overlap switch gave nothing here | measured, closed |
 | 4 | Decode single stream | ~79 tok/s; the ceiling is the serial layer split, not a kernel | closed by the record |
 | 5 | CPU share (AVX-2) | the engine's own policy; prefill is 93.6% in `libcuda.so`, so the CPU is not the limit | closed by the record |
@@ -165,9 +171,9 @@ Ruled out with a measurement, again: NVLink (47.05 GB/s, 0.46% of the window), c
 | # | Goal | Status |
 |---|---|---|
 | G1 | Know what the default path does, repeatably | done: the A-B-A harness and the baseline above |
-| G2 | Take the bitwise Turing kernels if they hold up | **done for speed: +7% prefill, adopted.** Correctness (bitwise) still open |
+| G2 | Take the bitwise Turing kernels if they hold up | **done**: +7% prefill, adopted, and the same 512 tokens as `=0` in the upstream configuration (W1.1) |
 | G3 | Overlap the long-context KV upload | **closed as failed**: +0.6%, dropped |
-| G4 | Make the PLE read a measured choice | open; the record narrows it to row size or timing, not the table in RAM |
+| G4 | Make the PLE read a measured choice | **done**: it is a measured choice and the answer is "leave it" (W2.2) |
 | G5 | Change code only where the numbers ask | open: PLE row read and the `sm_75` prompt experts are the two candidates |
 
 ## Non-goals
@@ -258,10 +264,9 @@ backup. Results land in `/opt/ai/logs/arm-<label>.log` and the two jsonl files b
 
 **P2 — KV prefetch.** Done, dropped. The switch is out of the config.
 
-**P3 — PLE.** Read, not yet measured. [SERVER_PLE.md](SERVER_PLE.md) maps the path and corrects the field's meaning:
-`PLE` is a running total, so the first step is the per-request delta on a cold 8K and a cold 32K prompt with the
-concurrent read off. The gate is T5 at 4K / 32K / 128K plus T6, because PLE sits in the prefill path this box already
-saturates.
+**P3 — PLE.** Measured, closed. The per-request cost is 0–62 ms at 6–24K tokens and about a second on the first
+request after an engine start ([SERVER_PLE.md](SERVER_PLE.md)); no change is worth making. The shape that is left —
+a small prompt reading at two-thirds the rate of a large one — moves to W3, the `sm_75` prompt-expert path.
 
 **P4 — code.** Only what P3 leaves. Candidates: the PLE row read, `STRATA_PF_FUSED_SM75` with a KL gate, and a
 `sm_75` default proposal upstream once T2 passes.
