@@ -95,4 +95,47 @@
 **风险**：思考变短可能让工具调用正确率下降（`tool_call_recovery`、`reasoning_loop_recovery=recover` 是兜底，不是质量保证）。
 **所以判据必须是任务级**：同一批 agent 任务，报完成率、工具调用通过率、空答案率、墙钟中位，不能只看 tok/s。
 
-**待查**：`reasoning_budget_tokens` 是不是那 15 个可热改键之一（若是，A/B 成本大幅下降，不必重启）。
+**已查清（2026-10-24，读源码 + 实测）**：
+
+- `reasoning_budget_tokens` 是**请求级**参数：`serve/server.py:4100-4109` 的 `reasoning_budget()` 先取请求自己的值，
+  没有才退到配置的默认。所以 A/B **不用重启、不用改服务端状态**——评测脚本每次请求带上预算即可，
+  所有臂同一个 boot（这正是判据要的东西）。`POST /settings`（`SHARED_KEYS`，`serve/server.py:7656`）也能热改，
+  但它会写 `shared_path` 并影响**包括我自己在内**的所有客户端，所以不用它。
+- `POST /config` 改的键是"used from the next start"（`serve/server.py:6949-6951`），**不是**热改。
+- `_own_page` 只要求 `Content-Type: application/json` 且没有 foreign Origin（`serve/server.py:6904-6914`、
+  `6953-6960`：没有 Origin 头就不是浏览器）——curl 能过这道门。
+
+**判据脚本的两个坑（都是实测撞出来的，不是读出来的）**：
+
+1. **`/opt/ai/bin` 里的老脚本与线上鉴权不同步**。`quality_eval.py` 不发 API key，而 `strata-022.json` 里
+   `api_key = "111"`，于是每个任务 `HTTPError 401`、总分打成 `SCORED: 0/11`——**看起来像模型退步，其实是鉴权失败**。
+   这台机器上 164 个脚本，凡是当年按"无鉴权"写的都有这个风险。改造版 `tools/quality_eval_budget.py` 从配置里读 key。
+2. 本机 python 3.12.3 的 `sys.environ` **不存在**（`os.environ` 在）。我第一版改造用了 `sys.environ`，
+   每个任务 `AttributeError`，又是一次"0/11 假象"。
+
+**A 臂基线**（`/opt/ai/runs/L002-A1`，无预算 → 配置的 12288 生效，贪心）：
+
+| 指标 | 值 |
+|---|---|
+| 判分 | **11/11 全对**（另两个中文长文无标准答案，只看中文占比与循环覆盖） |
+| 每任务 completion token | 短任务 30–159（`zh-fact-1` 30、`calc-3` 112、`code-1` 159）；长文 `zh-prose-1` **1213**、`zh-prose-2` **1817** |
+| 全轮合计 | 3,969 completion token；思考字符合计 7,007 |
+| 循环覆盖 | 全部 0.000（没有思考打转） |
+
+**这条基线直接改变了实验设计**：11 个可判分的任务思考只有 30–159 token，预算设 1024 只会咬到两个长文，
+短任务根本不受影响——那 A/B 就只是"长文变短了"，证明不了质量。所以臂改成 **256（会咬到全部短任务与长文）
++ 1024（只咬长文）+ 基线复测**，顺序 256 → 1024 → 基线，全在一个 boot 里（`tools/thinking-budget-ab.sh`）。
+
+**墙钟在这台机器上是被污染的**：只要第二条流在解码，单流就腰斩，所以这个实验的**主判据是 token 数与判分**，
+秒数只当趋势看。
+
+---
+
+## L-003 · 待办队列（本轮整理出来，未开始）
+
+1. `--vram-reserve-mib 1280` 的被动观察：读 `/opt/ai/logs/vram-perf.csv` 的分布，判 −144 slot 有没有伤命中。
+2. 上游回帖：草稿 A（#2275）已写好待 atmJava 点头；草稿 B（#2197）待写。
+3. `SERVER_HW.md` 里那五条与线上矛盾的说法还没改（`SERVER_ADAPT_REQUIREMENTS.md` §8 列了清单）。
+4. 上游 #3497 那条线（Turing 上宿主 `cudaGraphLaunch` ~1.47 ms）本机**从未测过**；先要用 nsys 复现，
+   而 nsys 会不会干扰生产服务未知——开工前先确认。
+5. 服务器上 `/opt/ai/bin` 的 164 个脚本仍未进 git。
