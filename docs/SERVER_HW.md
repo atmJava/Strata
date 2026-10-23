@@ -127,6 +127,7 @@ All on this machine, engine 0.1.47 unless noted. Single-stream numbers move 76.7
 | Turing series on, four sessions | 111.3 / 112.5 → 119.7 / 117.1 tok/s (+4.1 to +7.5%) | 2026-10-23 |
 | Turing series on, decode after 84K | 67.8–78.0 tok/s against 67.8–71.2: up, but inside the spread, not claimed | 2026-10-23 |
 | `STRATA_KV_PREFETCH=1` on top of the above | +0.6% prefill, +1.0% cold read, −2.2% four sessions: no gain, removed | 2026-10-23 |
+| Bitwise check, Turing series on against off, in the configuration upstream requires | the same 512 tokens in 9 of 10 runs; one first-run after a restart differed and did not come back | 2026-10-23 |
 
 ## Not a lever (ruled out, with a measurement)
 
@@ -138,13 +139,11 @@ interleaved, not as one run each.
 ## Not tested
 
 1. A 127K cold read on the final 0.2.2 build (it was run on an older build only).
-2. The 512-token bitwise check under the configuration upstream requires for it (`STRATA_IQ_MT_MIN=1`,
-   `--pcie-frac 0`, a fixed adaptive, `--no-prefill-borrow`). Without that, on and off differ by design.
-3. A one-hour soak.
-4. Multi-stream cold-start stalls: 5–10 s were seen on an older build with 3–4 joins, and did not come back on a
+2. A one-hour soak.
+3. Multi-stream cold-start stalls: 5–10 s were seen on an older build with 3–4 joins, and did not come back on a
    warm machine. Cause unknown, not reproduced on the final build.
-5. Eight slots, long-context (≥128K) concurrency, vision under load, tool calls under load.
-6. The engine's own test suite (it was switched off for the release build).
+4. Eight slots, long-context (≥128K) concurrency, vision under load, tool calls under load.
+5. The engine's own test suite (it was switched off for the release build).
 
 ## What comes next
 

@@ -93,11 +93,13 @@ parameters table lists the 724 `STRATA_*` variables and none of its tuning docum
   is wider than the effect, so it is **not claimed** as a decode win; the draft acceptance rate carries it
   (275/347 and 255/325 accepted, against 259/328 and 280/359 before).
 
-**Bitwise was not verified, and the harness cannot verify it here.** The documented claim is that these kernels are
-bitwise; the end-to-end text is not. The same prompt run twice inside one arm gave three different `text_sha256`
-values and different draft counts, so this configuration's output is not reproducible run to run — the server's own
-plan says the same: "default parameters, on/off `text_sha256` differ by design", and a bitwise check needs
-`STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, a fixed adaptive and `--no-prefill-borrow`. That check is still open (T2).
+**Bitwise: checked on 2026-10-23, and it holds after warm-up.** The production configuration is not reproducible run
+to run — the same prompt twice gave different `text_sha256` values and different draft counts — so the check has to
+use the configuration upstream asks for: `STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, `--adapt-every 1000000`,
+`--no-prefill-borrow`, one slot. In that configuration both arms are stable, and `STRATA_SM75_PERF=1` produced the
+**same 512 greedy tokens** as `=0` (`aac0a04d…`), four runs warm plus three after a second restart. One first run
+right after a restart differed once (`00281f84…`) and did not come back on the repeat restart; recorded as a cold-run
+difference, not explained.
 
 Risk taken: the series changes nothing outside a 7.5 card, `=0` restores the old kernels, and a revert plus restart
 is 150–180 s. The change is one line in the run config's `env` block.
