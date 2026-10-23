@@ -436,3 +436,50 @@ L-009 那 8 个任务是查表/短链式，不构成质量门。这轮给工装�
 **`none` 不能用，`medium` 只是个小甜头，预算是小杠杆**。
 所以剩下的大头**只在引擎侧**：mode 8（env，等批停机）、#3724 那条 backport（要重编译，L-008）。
 这也把我一直被卡住的那件事变得更值钱：**需要 atmJava 批 330 s 停机**。
+
+---
+
+## L-011 · `STRATA_EXP_MODE=8` 本机 A-B-A：**+8% 单流 decode，质量门过，已采纳进生产**
+
+**动机**：上游给 Turing 的默认是 mode 4（`src/kernels/cuda/iq_kernels.cu:4999-5004`），而 #2197 里
+**同卡类、同 IQ3_XXS pack** 的同行报 mode 8 decode **+14% 且文本中性**（yusheng227507），IQ3_S 上
+mode 8 比 mode 4 +4.9%（Adamyno）。我们生产 env 之前**没设 `STRATA_EXP_MODE`**，也就是在跑默认。
+
+**执行时间线**（原始日志 `/opt/ai/logs/arm-exp{A-mode4,B-mode8,A2-mode4}.log`，工装 `tools/server/exp-mode-ab.sh`）：
+18:36 第一次尝试**被我自己的工具误判**：`use-config.sh` 的就绪循环实际只给 120 s（注释写 240 s），
+把一次"只是慢、不是失败"的启动判成失败并自动装回 A。journalctl 是证据：`18:38:39 Started` →
+`18:40:42 Stopping`（是我主动停的）。修好后重跑：A（线上已是 mode 4，**跳过重启**）→ B（重启，153 s 就绪）
+→ A（重启，141 s），**总 816 s**。
+
+**速度**（`bench-strata.py` 每臂 3 次取中位）：
+
+| 臂 | 单流 decode | 4 路聚合 | 冷 prefill 13.2K |
+|---|---:|---:|---:|
+| A（mode 4） | 67.2 tok/s | 118.9 tok/s | 2,260 tok/s |
+| B（mode 8） | **73.5 tok/s** | 120.4 tok/s | 2,256 tok/s |
+| A2（mode 4，括号） | 67.7 tok/s | 111.9 tok/s | 2,249 tok/s |
+
+括号 A/A2 单流只差 **0.7%**，B 相对 A **+8.5%**、相对 A2 +7.9% —— **过 3% 线，是同 boot 括号内的真结论**。
+4 路聚合的括号摆幅本身就有 5.9%，所以那列 **不结论**。冷 prefill 不变（−0.2%）。
+
+**质量与逐位**：
+- `parity_window.py` 共跑 **24 次**（速度轮每臂 6 次 + 质量轮每臂 3 次），**答案哈希 24/24 全是
+  `b17bc92de6ba8a97`，无一例外**。**限制要说清**：那是 7.6K prompt + 512 token 窗口上一个 **25 字符**
+  的答案，样本很窄；同行做的是 4,995 个 teacher-forced 位置逐值相同，我们没跑那么重的门。
+- **agent 推理形态**（14 个可判分任务，其中 8 个只能靠算不能靠查，`high` effort，交错 3 轮，
+  `tools/server/exp-mode8-quality.sh`）：mode 8 = 14/14、13/14、14/14（中位 **14/14**），token 中位 2,230；
+  mode 4 = 三轮全 14/14，token 中位 2,178（**差 +2.4%，在 3% 线内**）；14 任务总秒中位 **42.3 s 对 44.5 s
+  （−4.9%）**，方向与 +8% 一致。
+- mode 8 那唯一一次失败是 rep2 的 `t_zhfinal` 答成"这台机器的驱动版本是 "（**截断/空答案**那一类）。
+  42 个任务实例里 1 次对 0 次，**不构成信号**；但记下来，因为空答案率正是首要指标的一部分。
+- 显存：mode 8 稳态空闲**不差于** mode 4（重启后 846–856 / 946–948），`#2065` 警告数仍是 12 条没新增；
+  启动就绪 mode 8 144–153 s 对 mode 4 141–147 s，无实质差别。
+
+**决定：采纳。** 生产 env 现在是 `STRATA_EXP_MODE=8` + `STRATA_SM75_PERF=1`（在活进程
+`/proc/<pid>/environ` 里核实，不是只看配置文件）；`strata-022.prod.json` 已刷新成 mode 8，
+旧的留成 `strata-022.prod.json.pre-mode8-1911`。**回退只要一条命令**：
+`/opt/ai/bin/use-config.sh /opt/ai/src/strata-0.2.2/exp-mode-A-default4.json`。
+
+**没测的**：127K 长上下文下的 mode 8 对照；8 槽并发；`--spec` 接受率有没有被改变（bench 那次
+`draft_n` 没报出来，要补）。**下一轮的观察点**：生产换成 mode 8 之后，被动采样里的 4 路聚合与
+服务日志里的空答案/截断是否变多。本会话自己的 token 现在就是 mode 8 生成的。

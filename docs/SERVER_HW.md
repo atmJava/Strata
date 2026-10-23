@@ -102,6 +102,7 @@ All on this machine, engine 0.1.47 unless noted. Single-stream numbers move 76.7
 | `STRATA_SM75_PERF` bitwise gate | same 512-token answer (`aac0a04d109391fe`) on 9 of 10 runs in the config upstream asks for; the one exception was the first request after one restart and did not come back on the next restart | 2026-10-23, plan §7.6 |
 | `--vram-reserve-mib 960 → 1280` | GPU0 free at load 504 → 804–810 MiB (the engine's own warning line sits at 512), expert cache 7,334 → 7,190 slots (−1.96%), and the expert-cache hit rate did not move: median 98.90% before the restart, 99.00% after (p10 97.80 → 97.50) over 88 and 470 completed requests | 2026-10-23/24, ledger L-001 |
 | Thinking knobs, agent-shaped tasks | `reasoning_effort` is a prompt sentence, not an engine cap. `medium` costs nothing and saves 7% of completion tokens on reasoning tasks (28% on lookup-shaped ones). `none`/`off` saves 41% of tokens and 25% of wall clock but fails 3 to 4 of 14 reasoning tasks every rep - wrong arithmetic and one empty answer. A thinking budget saves ≤10%. | 2026-10-24, ledger L-009 / L-010 |
+| `STRATA_EXP_MODE` 4 → 8 (now the production setting) | single-stream decode 67.2 / 67.7 (mode 4, same-boot bracket) against **73.5** (mode 8): **+8.5%**, with the bracket itself only 0.7% apart. Four-stream aggregate is not a result (its own bracket is 5.9% wide); cold prefill did not move. 24 of 24 bitwise runs returned the identical answer; the agent reasoning harness passed 14/14 in the median in both arms with tokens 2,230 against 2,178 (+2.4%, inside the noise line) and 14 tasks in 42.3 s against 44.5 s (−4.9%). | 2026-10-24, ledger L-011 |
 | Prefill, cold 13.2K prompt | 1470 → 1552 tok/s with `--prefill-pipe 1` | 2026-10-22 |
 
 One thing every number above sits inside: **in this box's production shape (4 slots, `--pcie-frac 0.31`,
@@ -134,18 +135,19 @@ interleaved, not as one run each.
    warm machine. Cause unknown, not reproduced on the final build.
 2. Eight slots, long-context (≥128K) concurrency, vision under load.
 3. The engine's own test suite (it was switched off for the release build).
-4. `STRATA_EXP_MODE` at all. Upstream gives Turing mode 4 by default (`src/kernels/cuda/iq_kernels.cu:4999-5004`)
-   and peers on this card class report mode 8 at +14% decode, text-neutral ([#2197](https://github.com/Niko1221/Strata/issues/2197)).
-   Our service env sets no `STRATA_EXP_MODE`, so we are on the default. `tools/server/exp-mode-ab.sh` is written
-   and dry-run-verified; it costs two restarts (~330 s unavailable) and has not been approved to run yet.
+4. Long-context behaviour of `STRATA_EXP_MODE`. The mode-8 test itself is done (ledger L-011: +8.5%
+   single-stream decode inside a same-boot bracket, 24 of 24 identical answer hashes, agent reasoning
+   unchanged in the median - it is the production setting now). Not measured: mode 8 at 127K context, at eight
+   slots, and against anything as heavy as the peers' 4,995-position teacher-forced comparison.
 5. Tool calls under load have been measured for correctness only: a client-side tool loop comes back 6/6 and 8/8
    in every thinking-budget arm (ledger L-005), which says the budget is not a lever there, not that the tool path
    is fast.
 
 ## What comes next
 
-1. Decide `STRATA_EXP_MODE`: run `tools/server/exp-mode-ab.sh` (two restarts, ~330 s of this box being down) and
-   find out whether the peers' +14% holds here. This is the largest single unmeasured number on the list.
+1. Watch the change that is now live. Mode 8 is the production setting (ledger L-011), so the next reading is
+   passive: the four-stream aggregate and any rise in empty or truncated answers in the service log, before
+   spending another restart window on anything.
 2. Rebuild from `hw/server-adapt` and confirm it matches the binary that is serving now.
 3. Post the two upstream comment drafts in `docs/UPSTREAM_DRAFTS.md` (the #2275 one carries the 84K and 127K
    concurrent-read numbers and the instrumented answer to the recycled-buffer objection). They are written and

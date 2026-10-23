@@ -9,8 +9,8 @@
 #     already running - so the script reported READY while nothing had changed.
 #   - readiness was judged only by /health, which the old engine answers until it is gone.
 # So: remember the engine pid, restart without hiding errors and stop on a non-zero rc, require the pid
-# to change, and only then wait for the new engine to report "loaded": true.  Measured readiness on
-# this box is about 165 s; the loop here allows 240 s and says so if it times out.
+# to change, and only then wait for the new engine to report "loaded": true.  Readiness is allowed 420 s
+# below, because a cold load here is ~165 s and a slow one is not a failed one.
 #
 # It also refuses a config whose args is not a list of strings, because a dotted-path setter once
 # replaced this box's 54-element args list with {"43": 1280} and the service would have started wrong.
@@ -60,13 +60,24 @@ if [ -z "$newpid" ] || [ "$newpid" = "$oldpid" ]; then
 fi
 echo "new engine pid $newpid"
 
+# Readiness, and what I got wrong the first time.  A cold load here takes ~165 s (the ~30 GB model is
+# read from disk); a restart right after a restart is much faster (~75 s) because the model is still in
+# the page cache.  The first version of this loop allowed 40x3 = 120 s for readiness while its comment
+# claimed 240 s, and it aborted a mode-8 start that was merely slow, not failed.  So: allow 420 s, and
+# tell "still loading" apart from "the process is gone" - if the unit is no longer active, stop waiting.
 ready=""
-for i in $(seq 1 40); do
+for i in $(seq 1 140); do
   H=$(curl -s -m 5 http://127.0.0.1:8080/health 2>/dev/null)
-  case "$H" in *'"loaded": true'*) ready=1; echo "READY after ~$((i*3))s (measured ~165s)"; break;; esac
+  case "$H" in *'"loaded": true'*) ready=1; echo "READY after ~$((i*3))s (cold load measures ~165s)"; break;; esac
+  if ! systemctl is-active --quiet strata.service; then
+    echo "NOT STARTING: the unit is no longer active after $((i*3))s - this is a real failure, not a slow load"
+    journalctl -u strata -n 25 --no-pager | cut -c1-120
+    exit 1
+  fi
+  [ $((i % 10)) -eq 0 ] && echo "  still loading ... $((i*3))s"
   sleep 3
 done
-[ -n "$ready" ] || { echo "NOT READY after 240s - check: journalctl -u strata -n 50"; exit 1; }
+[ -n "$ready" ] || { echo "NOT READY after 420s - check: journalctl -u strata -n 50"; exit 1; }
 
 echo "--- what is actually running ---"
 tr '\0' '\n' < "/proc/$newpid/environ" | grep -E '^STRATA_' | sort
