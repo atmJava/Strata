@@ -64,5 +64,23 @@ ssh atm@192.168.3.14 'systemctl is-active strata; \
 - 显存只被一个进程占：Strata 引擎本体（GPU0 21.4 GiB / GPU1 21.0 GiB）。**余量问题是我们自己造成的**，
   不是外部进程抢的。
 - 定时器 `nvlink-crc-sample.timer` 每小时在跑，最新读数两卡两 link 的 `crc/replay/recovery` 全 0。
-- 无残留实验进程，无用户 crontab，磁盘剩 162 G。
-- GPU0 温度 75 ℃ / GPU1 58 ℃（负载 156 W / 132 W）——比调优记录里写的 45–52 ℃ 高，**待复核**。
+- 无残留实验进程，磁盘剩 162 G。**用户 crontab 现在有一条**（2026-10-24 加的）：
+  `*/5 * * * * /opt/ai/bin/vram-perf-sample.sh` → `/opt/ai/logs/vram-perf.csv`，零负载被动采样，
+  低于 700 MiB 另写 `vram-perf.csv.warn`。恢复时别把它当垃圾删了。
+- GPU0 温度那条已复核完毕：**是负载驱动的，不是热故障**。同一台机器上的读数是
+  78 ℃（我自己的 eval 在跑）→ 75 ℃ → 62 ℃（负载停下），GPU1 48–60 ℃。
+  调优记录里 45–52 ℃ 是轻载读数。真正的判据应该是"负载停下后能不能回到 60 ℃ 以下"。
+
+## 6. 工装自己会骗人的三个地方（2026-10-24 实测撞出来的）
+
+- **`/health` 答 200 不代表重启过**。老引擎在被换掉之前一直在答。判断重启要看**引擎 PID 变了**；
+  `use-config.sh` 现在就是这么判的，并且 `sudo` 失败就直接退出，不再把 stderr 丢掉后照样报 READY。
+- **`strata-022.prod.json` 只是某一刻的快照，不是"生产配置"这个概念**。它曾停在 05:09 那份
+  （`--vram-reserve-mib` 还是 960），谁拿它当基准做 A/B，谁就把 L-001 静默回滚了。
+  现在它是 17:02 那份（1280），旧的留成 `strata-022.prod.json.pre-L001-0509`。
+  **动手前先 diff 一下快照与线上**，一行就够。
+- **别把脚本放在 `/tmp`**。逐位门原来就是 `/tmp/parity.py`，`/tmp` 一清就没了，而 `run-arm.sh`
+  照样跑完一臂、留下一份看起来完整的日志。现在门是 `/opt/ai/bin/parity_window.py`
+  （repo 里 `tools/server/`），arm 脚本找不到它就拒绝开跑。
+- **`args` 是 54 个字符串的列表**，不是字典。`set-config-key.py args.43 …` 会把整个列表换成
+  `{"43": …}`；`use-config.sh` 现在会先断言形状再装。
