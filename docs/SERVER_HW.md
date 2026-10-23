@@ -176,7 +176,8 @@ The tuning work — bottlenecks, goals, rules, acceptance and the test ladder �
    upstream requires, the soak.~~ Done on 2026-10-23, except the last: 127K measured on and off, bitwise in the
    upstream configuration, soak 47 of 60 minutes. The full hour is still to re-run.
 4. Only then touch placement, if the numbers ask for it: the split planner and the RAM tier on 22 GB cards. Not
-   reached — the plan closed with no code change, and no measurement asked for it.
+   reached — no measurement has asked for it. The plan reopened the same day on one candidate (W3, the fused prompt
+   experts) and added W6, the readings that cost nothing; nothing there has been run, so this item stays where it was.
 5. ~~Port the tensor-parallel patch to 0.2.2 on its own branch, or drop it and record why.~~ Dropped, with the reason
    recorded: `STRATA_TP_GDN` needs `--batch 0` (one stream) and this box serves `parallel 4`, which measured +63% on
    four sessions over the serial group. Footprint and re-open condition in

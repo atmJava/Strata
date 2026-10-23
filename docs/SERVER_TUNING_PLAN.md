@@ -244,6 +244,109 @@ single-session dominant, or if a solo-mode endpoint (no slots) is wanted for a b
   to upstream once this fork has a bitwise check behind it; not as a local patch. The proposal text is in
   [UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md).
 
+## Which switches reach this box
+
+Written 2026-10-23 by reading the guard around every environment variable that can select CUDA code, one file at a
+time. **Nothing in this section was run on this box; it is unconfirmed static analysis.** Every line reference was
+read in that pass. "Reaches" means the guard admits compute capability 7.5 and this pack's formats — `IQ3_XXS`
+gate/up with `IQ4_NL` down — and nothing more. "Recorded elsewhere" quotes another card's number and names the
+document; it is not a prediction about this one.
+
+### Already on here, so not candidates
+
+`STRATA_SM75_PERF=1`, `STRATA_BF16_TC=1` (+18.2% prefill) and `STRATA_SELECT_SIMT=1` (+4-14.5%, answers change) are
+in the adopted table at the top of this document. Three more ride the Turing default without being asked for:
+`GR_UP75` and `GR_DOWN_TG` (`src/kernels/cuda/fused_gr.cu:1207,1232`) and `PA_V1_PREFETCH`
+(`src/kernels/cuda/qsa_prompt_attn.cu:2418`). `STRATA_TOPK_STREAM` is on by default and is Turing-specific: above
+about 90K cells a prompt's top-k takes the wide coalesced kernel instead of the register kernel (PR #743: 131K,
+1.03 → 0.75 ms, the same ids, `src/kernels/cuda/qsa_select.cu:2561-2569`). So the Turing series is not the only place
+this card's choices were made, and the arms below that undo them are escape hatches, not wins.
+
+### The nine the `sm_86` table turns on
+
+`src/core/nv_defaults.cpp:21-35` has tables for `sm_86` and `sm_60` only, and `src/program/generate.cpp:2801-2813`
+applies a table only when every visible card reports the same compute capability — which two 2080 Ti cards do. An
+`sm_75` table is therefore a one-entry change, and the proposal for it is in
+[UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md). None of the nine has an architecture gate below its own
+environment read, so all nine are settable on this box today and none has been measured on it.
+
+| Switch | What it changes | Answers | Recorded elsewhere |
+|---|---|---|---|
+| `STRATA_ATTN_DAILY=1` | the Daily's decode attention, on every CUDA card (`src/kernels/cuda/qsa_decode_attn.cu:842-847`); `STRATA_ATTN_MERGE_V2` follows it unless set (`:927-933`) | bit-exact, and the merge is bitwise too (`:935`) | +3.2% (5 of 5) on an RTX 3060, +0.7% on an A4000 ([DETAILS.md](DETAILS.md)) |
+| `STRATA_SIDE_MIXER=1/2` | the mixer's input-only work on graph branches (`src/core/verify.cpp:186`) | bit-exact | +0.5% / -0.6% short context |
+| `STRATA_QSA_ROWS=1` | a verify window's block scores with the queries in registers, up to 4 queries (`src/kernels/cuda/qsa_select.cu:1718-1720`) | bit-exact | the kernel 47.2 → 36.2 µs at T=1 and 101.2 → 54.6 µs at T=4 on a 2080 Ti, the engine +3.2% and +0.1% ([QSAROWS.md](QSAROWS.md)); -0.3% / +0.3% on `sm_86` |
+| `STRATA_GU_SWIGLU=1` | SwiGLU folded into the gate/up kernel (`src/kernels/cuda/iq_kernels.cu:4106-4112`); default on `sm_120` only | the same `hq` bits | no NVIDIA number in these docs |
+| `STRATA_B6_MMVQ_ROWS=1` | exact multi-column MMVQ rows (`src/kernels/cuda/native_mmvq.cu:1158-1161`, read at first use so an arch table can set it) | bit-exact | +0.2-1% / +0.5-2% on `sm_86`, for K-quants and IQ4_XS — **check it does anything to this pack's types before spending a round** |
+| `STRATA_ADAPT_NOWAIT=1`, `STRATA_ADAPT_LAG=n` | the tier-adapt round (`src/program/generate.cpp:1507,1516`), no arch gate | n/a | the batch paths are not lagged and `STRATA_ADAPT_OVERLAP` never runs on a layer split ([DETAILS.md](DETAILS.md)) — check on the box first |
+| `STRATA_CPU_IQ_ALL_EXACT1=1` | the CPU experts' path (`src/kernels/cpu/native_expert.cpp:202-209`), needs AVX2 without AVX-512, which this box has | bit-exact | CPU-side code, not a CUDA kernel |
+
+### Reaches this box, never measured here
+
+Ordered by how hot the code it selects is. All of them are environment variables only: no rebuild.
+
+| Switch | What it selects | Where | What another card said |
+|---|---|---|---|
+| `STRATA_IQ_STAGE_TABLES=1` | `IQ3_XXS` / `IQ3_S` codebooks and sign masks staged in shared memory by the grouped expert kernels (the single-matrix mmvq does not stage) | `src/kernels/cuda/iq_kernels.cu:3292-3303` | bitwise either way; a P100 read 0.97-1.03x, noise; on an RTX 3090 Ti, forced on, the `IQ3_S` layers took **3-13% longer** |
+| `STRATA_ATTN_LANECELL=1` | the decode attention's score phase, one cell per thread | `src/kernels/cuda/qsa_decode_attn.cu:914-918` | bit-identical scores, no shuffle reductions; no card named |
+| `STRATA_ARGMAX_ROWS_SM70=1` | the greedy pick in `sample_tokens` on **any `major == 7` card**: the multi-block row kernel | `src/kernels/cuda/verify_kernels.cu:962-973` | measured on `sm_70` only. Narrow: the sampler's argmax, not a decode kernel |
+| `STRATA_PF_WMMA=1` | the FP16 tensor-core expert tiles. The per-layer gate is on the **down** type, which here is `IQ4_NL` (`src/prefill/prefill.cpp:4017-4019`), and the down tiles are 52,224 B — those fit. The `IQ3_XXS` gate/up tiles need 84,992 B (`src/kernels/cuda/iq_kernels.cu:5654`), which is over 64 KiB, and a failed tile is an error, not a fallback (`src/prefill/prefill.cpp:4568`) | as left | a V100 read +10% prompt and it takes `IQ4_NL` down at K=640 ([NVIDIA_V100.md](NVIDIA_V100.md)). **Try it on a throwaway start**, because the failure mode is a failed prompt chunk |
+| `STRATA_PF_WMMA2=1` | the second WMMA variant, for `IQ2_S` gate/up and `IQ4_NL` down | `src/kernels/cuda/iq_kernels.cu:5617-5620,5632-5643` | no card named anywhere in these docs |
+| `STRATA_EXPDEC=1` | gate/up of the window's resident experts with the q8_1 rows in shared memory | [EXPERTDEC.md](EXPERTDEC.md) | bit-exact; +0.5% and +1-5% at short context on `sm_86`. It is on the list of what the `sm_86` table left out, which is why nobody has tried it here |
+| `STRATA_QUANT_GATHER=1` | the per-row gather instead of the scatter for the activation quantize feeding the prompt MMQ | `src/prefill/moe_mmq.cu:397-404` | "no difference measured" on `sm_86` ([DETAILS.md](DETAILS.md)) |
+| `STRATA_LFUSE=1` | the shared expert's gate row riding in the router GEMV launch (`src/core/verify.cpp:96,1873`); `STRATA_LFUSE_PAIR` is on with it (`:160`) | as left | from the AMD fork's measurements |
+| `STRATA_QFUSE=1` | producers writing their consumer's q8_1 activation image — "the same bytes" | `src/core/verify.cpp:162,204` | the AMD fork; no NVIDIA number here |
+| `STRATA_VERIFY_QDEDUP=1` | one q8_1 image of the verify query instead of two (`src/core/verify.cpp:161,1961`) | as left | no number in these docs; it does not combine with the forked shared-expert stream (`:1961`) |
+| `STRATA_DEC_BATCH=0` | turns the shared-expert batching off (it is on by default) | `src/kernels/cuda/shared_expert.cu:247` | no number here |
+| `STRATA_GR_V3=1` | the two-kernel hyper-connection read, another summation order | `src/kernels/cuda/fused_gr.cu:608,2237-2238` | opt-in upstream; needs the two-half split on some cards (`:2266`) |
+| `STRATA_GR_FAST=1/0` | the latency-hidden norm and up kernels. They **are** compiled into a CUDA build (`:34-35`); the value is read at `:2186-2188` over a per-card default | as left | gfx906's kernels; no NVIDIA number here |
+| `STRATA_GR_NORM_FAST=1`, `STRATA_GR_DOWN_MAX4=1` | the split norm (`:1180-1181`), four tokens' sums per thread on short launches (`:1154-1159`) | `src/kernels/cuda/fused_gr.cu` | norm fast: "measured on `sm_70` only"; max4: no win on a 5070 |
+| `STRATA_GDN_PIPELINE=0`, `STRATA_GDN_REC_HEADS=1`, `STRATA_GDN_CONV_SERIAL=1` | the GDN prefill kernels' A/B arms; the same bits except `CONVL2` | `src/prefill/kernels.cu:2707,2613,2590` | no numbers here |
+| `STRATA_SH_STREAM=1`, `STRATA_SH_FORK_LATE=0`, `STRATA_COMMIT_BATCH=0`, `STRATA_VERIFY_ASYNC_LAUNCH=1` | the decode window's stream fork and commit scheduling | `src/core/verify.cpp:257-262,1858-1860,2464-2470,2783` | `SH_STREAM`'s numbers are an RX 6800 and a gfx1151 table (`:257-259`) |
+| `STRATA_DF_BRANCH=1` | the mixer's side branches inside the window graph | `src/core/verify.cpp:950-954` | **the reason it is off names this card**: on Linux with open modules and GSP a stage's window stopped inside its graph when an NVML query (`nvidia-smi`) came between requests, on 2× RTX 3090 **and 2× RTX 2080 Ti** (#905). Never seen on Windows. Do not enable it on a box that runs a monitor |
+| `STRATA_TOPK_STREAM=0`, `STRATA_TOPK_CAPACITY_GUARD=1`, `STRATA_TOPK_OLD=1` | **undo** the Turing choices above: setting `CAPACITY_GUARD` at all restores the capacity rule and switches the Turing prefill bound off (`src/kernels/cuda/qsa_select.cu:2530-2535`) | as left | escape hatches. Worth one run each only if a long prompt behaves oddly |
+| `STRATA_PA_V2T=1` | the v2 prompt attention written for Turing with register staging, still marked "until measured" | `src/kernels/cuda/qsa_prompt_attn.cu:2411-2413` | the one prompt-attention arm this box has never run |
+| `STRATA_OLD_SAMPLER=1`, `STRATA_SAMPLER_ONE_BLOCK=1`, `STRATA_SPEC_GUMBEL=1` | the sampled path only, so they cannot show up in a greedy run | `src/kernels/cuda/sampler.cu:1112,1117-1118` | no numbers here |
+
+### Says it reaches us and does not
+
+| Switch | Why not, from the guard |
+|---|---|
+| `STRATA_MMQ_DIRECT` | `is ignored: this build has no pointer-table MMQ (CUDA with STRATA_MMQ_TAB only)` (`src/prefill/moe_mmq.cu:565-566`); the flag is off in `CMakeLists.txt:108` |
+| `STRATA_MMQ_KQ`, `STRATA_Q6K_EXPERTS`, `STRATA_MMQ_TQ_OVERLAY` | the build command in [SERVER_HW.md](SERVER_HW.md) turns all three on, but they only add kernel instances for K-quant, Q6_K and trellis types (`src/prefill/moe_mmq.cu:44-48,280-284`, `src/kernels/cuda/iq_kernels.cu:766-776`). This pack has none of them |
+| `STRATA_TQ_STAGE` / `_SUB8` / `_ROWCH`, `STRATA_Q6P_GRID`, `STRATA_Q6_PACKED`, `STRATA_EXPERT_V2` / `_V2K`, `STRATA_KQ_SPLIT`, `STRATA_TSUM`, `STRATA_Q8_PACKED`, `STRATA_MMVQ_WAVE` | type and arch gates read at the line: `gu_type == 21` (`iq_kernels.cu:5064`), `12 || 13` (`:5096`), `TY == 12 || 13 || 8` (`:829`), Q8_0 and Pascal, gfx906 |
+| `STRATA_GDN_KEYHEAD`, `STRATA_GDN_CHUNKED` | `cc_major >= 8` (`src/prefill/kernels.cu:857`), and the chunked scan wants 93.7 KB of shared memory against this card's 64 KiB (`:1191`) |
+| `STRATA_QSA_CLUSTER` | needs `cc_major >= 9` **and** `ptxVersion >= 90` **and** `binaryVersion >= 90` (`src/kernels/cuda/qsa_select.cu:1983-1986`); this build targets 75 |
+| `STRATA_DF_PDL` | `cc_major >= 9` (`src/kernels/cuda/verify_kernels.cu:1598`) |
+| `STRATA_SM70_TABLE`, `STRATA_SM60_TABLE`, `STRATA_SM61_TABLE` | 7.0, 6.0 and 6.1 only — 7.5 is deliberately not in them (`src/kernels/cuda/iq_kernels.cu:4968-4977`) |
+| `STRATA_WMMA_GEMM`, `STRATA_WMMA_BF16`, `STRATA_PF_GEMM`, `STRATA_PF_PAD`, `STRATA_PF_BK64`, `STRATA_DENSE_MMQ`, `STRATA_PA_FAST` | inside `#ifdef STRATA_USE_HIP` (`src/kernels/cuda/gemm.cu:949,1076,1256`, `src/kernels/cuda/wmma_gemm.cu:691`) |
+| `STRATA_DENSE_F32` | `cc >= 60 && cc < 70` (`src/kernels/cuda/gemm.cu:794`) |
+| `STRATA_PROMPT_ATTN_IMMA` | refused on Turing on purpose: `g_pa_imma == 1 && !turing` (`src/kernels/cuda/qsa_prompt_attn.cu:2426`), although it gained +2.5% on the prompt read on `sm_86` |
+| `STRATA_Q36_*` | a different binary (`src/program/q36_engine.cu:1`) |
+
+### Newer-card code with nothing Turing-side at all
+
+`PDL` (`include/strata/kernels/pdl.hpp:63`), the fused hyper-connection up-projection `gr_upmix` (an empty body below
+`__CUDA_ARCH__ 800`, `src/prefill/kernels.cu:2320,2345`, with a `cc_major >= 8` runtime gate at `:2544`), the GDN
+chunked scan (`:1191`), and NVFP4 W4A4 (`src/kernels/cuda/mmq_nvfp4_w4a4.cu:3`). Where the repo did want a newer
+feature on this card it wrote the fallback and it is in use: `cp.async` → plain copies
+(`src/prefill/kernels.cu:719`, `src/prefill/moe_fused.cu:198`), the TF32 scorer → the SIMT tiled one
+(`src/kernels/cuda/qsa_select.cu:173-176`), clusters → split kernels (`:1356,2031,2511`), tf32 scores → FP32 FMA
+(`src/kernels/cuda/native_qsa_score.cu:67-70`). Those four are the shape any new Turing path should take.
+
+### The cheapest probes, in the order to run them
+
+1. Read the start-up log for the line `src/prefill/moe_mmq.cu:312-314` prints. Costs a boot, and it decides what
+   every prompt-expert idea below means.
+2. Read `MaxSharedMemoryPerBlockOptin` and `ReservedSharedMemoryPerBlock` for both cards, the way
+   `src/prefill/gdn_rec_parity.cu:1127-1129` does. Costs nothing and several tile sizes are chosen against them.
+3. `STRATA_PREFILL_MMQ=0`, A-B-A at 32K and 128K: does MMQ beat the FP16 expert path on this card at all? No
+   rebuild, and it frames the fused path and the WMMA arms.
+4. The nine, plus `EXPDEC`, `ATTN_LANECELL` and `ARGMAX_ROWS_SM70`, as a drop-one sweep: T2 for exactness, T3 and T4
+   for speed, medians of three, A-B-A across restarts. Anything under 3% is out.
+5. The three-line fused opt-in under *Not tried, and why* — `prefill_fused_iq_test` first, a whole engine second.
+
+None of this is queued as work. It is the list, with what each item still needs.
+
 ## Bottlenecks, after the measurements
 
 | Rank | Item | Evidence | Status |
