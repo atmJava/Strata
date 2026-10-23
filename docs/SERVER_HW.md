@@ -1,8 +1,12 @@
 # Server hardware: this fork
 
-This is `atmJava/Strata`, a fork of [Niko1221/Strata](https://github.com/Niko1221/Strata) taken at `011c9e60`
-(0.2.2, engine 0.1.47). It exists for one machine: a two-card server that runs Strata as a service, where upstream's
-desktop release is built for cards much newer than the ones in it.
+This is `atmJava/Strata`, a fork of [Niko1221/Strata](https://github.com/Niko1221/Strata). `main` is a
+fast-forward of upstream and currently sits at `7ddc17a3` (0.2.3.1); the fork was taken at `011c9e60` (0.2.2,
+engine 0.1.47) and has been moved since. It exists for one machine: a two-card server that runs Strata as a
+service. The reason for forking has narrowed with upstream: the 0.1.48 `linux-x86_64/cuda/cuda13` package lists
+`sm_75` among its archs ([packaging/UPDATES.md](../packaging/UPDATES.md)), so "upstream builds only for newer
+cards" is no longer the whole story. What the fork carries now is the machine-specific patches, and the record of
+what has been measured on this box.
 
 The reason for a fork rather than a tarball and a patch file: the changes made on that machine used to live as
 hand-applied patches in `/opt/ai/src/*`, so every release meant re-applying them by hand and hoping the context
@@ -15,14 +19,14 @@ Facts below were checked on the machine, most on 2026-10-13 (NVLink and driver) 
 
 | | |
 |---|---|
-| Host | `ubuntu-server`, `atm@192.168.2.223`, reached over SSH, no display, Wi-Fi only (no wired port) |
+| Host | `ubuntu-server`, `atm@192.168.3.14`, reached over SSH, no display, Wi-Fi only (no wired port). The box moved LAN address: older notes here and on the machine say `192.168.2.223`, which no longer answers |
 | Cards | 2 × RTX 2080 Ti **22 GB** (TU102, `sm_75`); 11 GB is the stock size of this card. Both take a layer split |
 | Link between the cards | NVLink `NV2`: two links per card, 25.781 GB/s each. P2P supported and passing, no replay. Measured 47.05 GB/s against a 51.56 GB/s ceiling (91%) |
 | CPU | Xeon E5-2680 v4, 14 cores / 28 threads, one NUMA node |
 | Memory | 62 GiB |
 | Operating system and driver | kernel `7.0.0-38-generic`, driver `595.71.05` (pinned; see below) |
 | CUDA | 13.0, `/usr/local/cuda-13.0` |
-| Service | `strata.service` → `run-022.sh` → `serve/server.py`, port 8080, `Restart=on-failure`, starts at boot |
+| Service | `strata.service` → `run-022.sh` → `serve/server.py`, port 8080, `Restart=on-failure`, starts at boot. Its `env` sets `STRATA_SM75_PERF=1`, `STRATA_PIPED_CONCURRENT=1` and eleven more switches (`/proc/<pid>/environ` is the truth, not the config file). A restart takes **~165 s** before `/health` answers `loaded: true`, and restarting it from an SSH session needs `sudo -S` |
 | Source | `/opt/ai/src/strata-0.2.2`, ggml from the pinned `3cf03257` |
 
 Two things about this machine decide most of what follows:
@@ -37,8 +41,9 @@ Two things about this machine decide most of what follows:
 
 | Branch | What it holds |
 |---|---|
-| `main` | Upstream, untouched, at `011c9e60`. Fast-forward only |
+| `main` | Upstream, untouched, at `7ddc17a3` (0.2.3.1). Fast-forward only |
 | `hw/server-adapt` | This document, and the build settings that apply to this box |
+| `hw/server-adapt-0.2.3` | The same work rebased onto 0.2.3.1, plus the requirements page, the recovery runbook, the evidence ledger, the upstream comment drafts and the measurement harness (`tools/`). Pushed as the fork's working branch; `main` is untouched |
 | `hw/s1-concurrent-read` | One commit: a concurrent read no longer turns itself off beside decoding slots when the source is the io-prefetch/mapped-experts shape this machine uses |
 | `hw/tp-solo` *(not created)* | The solo-window tensor-parallel patch (about +3% decode, +150 MiB per card). Parked: written against 0.2.0-beta, it needs a port to 0.2.2's `verify.cpp` / `generate.cpp` and a bit-by-bit equivalence check first |
 
@@ -51,8 +56,12 @@ Read in the engine, not measured (unconfirmed static analysis):
 - `CMakeLists.txt` defaults `CMAKE_CUDA_ARCHITECTURES` to `120`. A build for these cards has to pass `75` by hand.
 - Features gated at `sm_90+` (thread-block clusters, PDL) are compiled out here. That is expected, and it means
   upstream's numbers for those features say nothing about this box.
-- Upstream's 0.2.2 speed work (Gyro, GPU roles, NUMA pool) mostly does not reach `sm_75`. This machine has one NUMA
-  node, so the NUMA pool is off by design, and 0.2.2 was taken for the correctness and batch-path fixes, not speed.
+- Upstream's 0.2.2 speed work (Gyro, GPU roles, NUMA pool) mostly does not reach `sm_75`, and this machine has one
+  NUMA node so the NUMA pool is off by design. But **the `sm_75` kernel series is the counterexample to "upstream's
+  speed work cannot reach this card"**: `STRATA_SM75_PERF=1` measures +7.2 to +7.6% on a cold 84K prefill here
+  (2,375.6 / 2,381.3 → 2,552.0 / 2,566.5 / 2,556.9 tok/s, plan §7.5) and +4.1 to +7.5% on four concurrent streams,
+  and it is set in the service's `env` today. Upstream is being asked to make it the default on Turing in
+  [#2197](https://github.com/Niko1221/Strata/issues/2197), where six other `sm_75` boxes have posted their numbers.
 - 22 GB is not a stock size for this card. Whatever the engine decides from the reported memory is deciding it from
   a number the card was not sold with.
 - This box is **not** on upstream's wanted-hardware list ([TEST_REQUESTS.md](TEST_REQUESTS.md)): that list asks for
@@ -88,7 +97,17 @@ All on this machine, engine 0.1.47 unless noted. Single-stream numbers move 76.7
 | NVLink, peer copy and SM-side read | 47.05 and 45.74 GB/s | 2026-10-13 |
 | 84K cold read, concurrent read on | 42.2 s, 21–22 tok/s decoding beside it, longest stall 0.8 s | 2026-10-22 |
 | 84K cold read, concurrent read off | 35.7 s, 0.3 tok/s beside it, longest stall 35.5 s | 2026-10-22 |
+| 127K cold read, concurrent read on / off | 58.2 / 58.5 s with the neighbour at 19.7 / 20.3 tok/s and a 0.9 s longest gap, against 49.0 / 49.6 s at 0.3 / 0.4 tok/s and a 48.7 / 49.3 s gap: the read costs 19% more, the neighbour keeps working | 2026-10-23, plan §7.9 |
+| `STRATA_SM75_PERF` on vs off | cold 84K prefill +7.2 to +7.6%, cold 43–50K +6.0 to +7.8%, four streams +4.1 to +7.5%; single-stream decode inside the run-to-run band, so not claimed | 2026-10-23, plan §7.5 |
+| `STRATA_SM75_PERF` bitwise gate | same 512-token answer (`aac0a04d109391fe`) on 9 of 10 runs in the config upstream asks for; the one exception was the first request after one restart and did not come back on the next restart | 2026-10-23, plan §7.6 |
+| `--vram-reserve-mib 960 → 1280` | GPU0 free at load 504 → 804–810 MiB (the engine's own warning line sits at 512), expert cache 7,334 → 7,190 slots (−1.96%), and the expert-cache hit rate did not move: median 98.90% before the restart, 99.00% after (p10 97.80 → 97.50) over 88 and 470 completed requests | 2026-10-23/24, ledger L-001 |
 | Prefill, cold 13.2K prompt | 1470 → 1552 tok/s with `--prefill-pipe 1` | 2026-10-22 |
+
+One thing every number above sits inside: **in this box's production shape (4 slots, `--pcie-frac 0.31`,
+adaptive) the output is not reproducible.** Two runs of the same self-scoring suite in the same boot, same config,
+differ by 24.5% in per-task completion tokens and by 28% in total; pinning `temperature: 0` does not fix it (six
+runs, six different answer hashes — ledger L-004). So a difference under ~3% is never a result here, and bitwise
+claims can only be made in the single-slot gate config.
 
 ## Not a lever (ruled out, with a measurement)
 
@@ -97,23 +116,41 @@ Clock locking (`-lgc`) is monotonically slower below 1890 MHz (−4.8% at 1700, 
 Cross-card staging is 0.46% of the window, so the link is not the limit. All three were tested as A-B-A or
 interleaved, not as one run each.
 
+## Closed since this page was written
+
+1. **A 127K cold read on the final build** — done, both arms, in plan §7.9 (the row is in the table above).
+2. **The 512-token bitwise check in the configuration upstream requires** — done, plan §7.6: `STRATA_IQ_MT_MIN=1`,
+   `--pcie-frac 0`, `--adapt-every 1000000`, `--no-prefill-borrow`, `parallel 1`. One practical trap: `--spec`
+   cannot be turned off on a native pack (it wants `--spec T`, T ≥ 2), so what is gated is a spec window.
+   The tool is now `tools/server/parity_window.py`; the box's copy used to live at `/tmp/parity.py`, `/tmp` was
+   cleared, and the arm script kept reporting a completed run with the correctness gate missing.
+3. **A soak** — 47 minutes on the production build with the concurrent-read gate open, no corruption seen; it was
+   cut short by a restart from outside this work, so it is not a one-hour soak.
+
 ## Not tested
 
-1. A 127K cold read on the final 0.2.2 build (it was run on an older build only).
-2. The 512-token bitwise check under the configuration upstream requires for it (`STRATA_IQ_MT_MIN=1`,
-   `--pcie-frac 0`, a fixed adaptive, `--no-prefill-borrow`). Without that, on and off differ by design.
-3. A one-hour soak.
-4. Multi-stream cold-start stalls: 5–10 s were seen on an older build with 3–4 joins, and did not come back on a
+1. Multi-stream cold-start stalls: 5–10 s were seen on an older build with 3–4 joins, and did not come back on a
    warm machine. Cause unknown, not reproduced on the final build.
-5. Eight slots, long-context (≥128K) concurrency, vision under load, tool calls under load.
-6. The engine's own test suite (it was switched off for the release build).
+2. Eight slots, long-context (≥128K) concurrency, vision under load.
+3. The engine's own test suite (it was switched off for the release build).
+4. `STRATA_EXP_MODE` at all. Upstream gives Turing mode 4 by default (`src/kernels/cuda/iq_kernels.cu:4999-5004`)
+   and peers on this card class report mode 8 at +14% decode, text-neutral ([#2197](https://github.com/Niko1221/Strata/issues/2197)).
+   Our service env sets no `STRATA_EXP_MODE`, so we are on the default. `tools/server/exp-mode-ab.sh` is written
+   and dry-run-verified; it costs two restarts (~330 s unavailable) and has not been approved to run yet.
+5. Tool calls under load have been measured for correctness only: a client-side tool loop comes back 6/6 and 8/8
+   in every thinking-budget arm (ledger L-005), which says the budget is not a lever there, not that the tool path
+   is fast.
 
 ## What comes next
 
-1. Rebuild from `hw/server-adapt` and confirm it matches the binary that is serving now.
-2. Close the unmeasured items above that need no new code: the 127K read, the bitwise check, the soak.
-3. Only then touch placement, if the numbers ask for it: the split planner and the RAM tier on 22 GB cards.
-4. Port the tensor-parallel patch to 0.2.2 on its own branch, or drop it and record why.
+1. Decide `STRATA_EXP_MODE`: run `tools/server/exp-mode-ab.sh` (two restarts, ~330 s of this box being down) and
+   find out whether the peers' +14% holds here. This is the largest single unmeasured number on the list.
+2. Rebuild from `hw/server-adapt` and confirm it matches the binary that is serving now.
+3. Post the two upstream comment drafts in `docs/UPSTREAM_DRAFTS.md` (the #2275 one carries the 84K and 127K
+   concurrent-read numbers and the instrumented answer to the recycled-buffer objection). They are written and
+   unposted; posting is the owner's call.
+4. Only then touch placement, if the numbers ask for it: the split planner and the RAM tier on 22 GB cards.
+5. Port the tensor-parallel patch to current main on its own branch, or drop it and record why.
 
 ## Rules
 
