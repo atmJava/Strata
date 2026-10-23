@@ -23,7 +23,25 @@ The programme is finished when all of these are true:
 5. Anything that would help another `sm_75` machine is written up so it can be offered upstream, and anything that
    only helps this box is marked as such.
 
-## Workstreams
+## Definition of done: the check
+
+Written on 2026-10-23, when every task had reached a state.
+
+| # | Item | State |
+|---|---|---|
+| 1 | Every workstream done or closed with a reason | **yes**: 17 tasks, 12 done, 5 closed, 0 open |
+| 2 | The three "not tested" items are run: the 127K read, the bitwise check, the soak | **yes, with one caveat**: 127K measured on and off (W1.2), bitwise in the upstream configuration (W1.1), soak 47 of 60 minutes (W1.4, cut by an external restart that is now fixed). `SERVER_HW.md`'s list keeps its other items (multi-stream stalls, 8 slots/vision, the engine's own tests), which were never in this plan's scope |
+| 3 | The run config and the documents agree | **yes**: 14 `env` keys, each explained in §7 of the server record; `--prefill auto`; no diagnostic switch left in |
+| 4 | Every number names the box and the boot | **yes**: every row of the measured tables carries 2026-10-22 or 2026-10-23, and the A-B-A rows name the arm |
+| 5 | Upstream text for anything that helps other `sm_75` machines | **yes**: [UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md), unposted for lack of a network route |
+
+What the plan did not produce, and why: no performance code change. PLE was measured out (0–62 ms a request), the fused
+`sm_75` prompt experts do not cover an IQ3_XXS pack, the tensor-parallel patch needs a mode this box does not serve,
+and the one configuration lever found (a 4096-token chunk) wins 8% on small prompts and loses 6% on large ones with no
+traffic data to choose. The one change that shipped is a configuration line (`STRATA_SM75_PERF=1`, +7% prefill), and
+the one operational defect found (`needrestart` restarting the service nightly) is fixed.
+
+
 
 Each task is one round of work. A task is "done" when its evidence exists and the documents say so; "closed" when
 the answer is no and the reason is written down.
