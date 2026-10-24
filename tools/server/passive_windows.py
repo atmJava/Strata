@@ -209,17 +209,22 @@ def main():
         i += 1
     windows = []
     for path in logs:
-        with path.open(errors="replace") as handle:
-            for line in handle:
-                if marker:
-                    if marker in line:
-                        windows.append(Window(""))
-                else:
-                    m = START.search(line)
-                    if m:
-                        windows.append(Window(m.group(1)))
-                if windows:
-                    windows[-1].add(line)
+        lines = path.open(errors="replace").read().splitlines()
+        if lines and not any(marker in line if marker else START.search(line) for line in lines):
+            # logrotate cuts the engine log at 00:00, so a session that started before the cut has no
+            # start line in the current file.  Without this fallback the tool prints nothing for the
+            # window you actually came for (it did, on 2026-10-24).
+            windows.append(Window("unknown (rotated tail: %s)" % path.name))
+        for line in lines:
+            if marker:
+                if marker in line:
+                    windows.append(Window(""))
+            else:
+                m = START.search(line)
+                if m:
+                    windows.append(Window(m.group(1)))
+            if windows:
+                windows[-1].add(line)
     if starts:
         # right-align: the starts are the newest boundaries, which is what you know from the engine
         # log when the log you are reading has no timestamps on its own restart lines
@@ -235,7 +240,9 @@ def main():
             if not w.start:
                 w.start = "(undated start)"
     if since:
-        windows = [w for w in windows if w.start >= since]
+        # a window whose start is unknown cannot be date-filtered; a rotated tail file is recent by
+        # construction, which is the case that matters here
+        windows = [w for w in windows if w.start.startswith("unknown (") or w.start >= since]
     shown = windows if full else windows[-12:]
     if len(shown) != len(windows):
         print("(showing the last %d of %d windows; --full for all)\n" % (len(shown), len(windows)))

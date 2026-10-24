@@ -72,17 +72,24 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 - 重启期间我自己在续行 → 请求会失败；所以**重启要放在后台任务里**，脚本最后一步自己装回生产配置
   （万一会话断了，机器停在正确状态）。
 
-## 5. 生产现状（2026-10-24 02:3x UTC 核实）
+## 5. 生产现状（2026-10-24 03:4x UTC 重新核实）
 
-`active`，`NRestarts=0`，服务端进程自 **19:10:55 UTC** 起（就是装 mode 8 那次），MainPID 56424 是 python
-服务端，**引擎是它的子进程 56437**（见 §7 第 13 条）。在**引擎子进程**的 `/proc/<pid>/environ` 里核实了
-**15 个 `STRATA_*` 变量**，其中两条关键：**`STRATA_SM75_PERF=1`**、**`STRATA_EXP_MODE=8`**。
+**今天为 gate 的 A-B-A 重启了四次**（引擎会话 03:11:00、03:15:25、03:29:11、03:34:17 UTC），所以现在：`active`、
+`NRestarts=0`、MainPID **99239**（服务 03:34:15Z 起）、引擎子进程 **99251**、vision 子进程 **99246**（见 §7 第 13 条）。
+**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **03:34:17Z 这个新会话**重新攒（§11 第 5 条）。
+在**引擎子进程**的 `/proc/<pid>/environ` 里核实了 **15 个 `STRATA_*` 变量**，其中三条关键：
+**`STRATA_SM75_PERF=1`**、**`STRATA_EXP_MODE=8`**、**`STRATA_PIPED_CONCURRENT=1`**（开/关今天实测过，**L-019**）。
+空闲显存 814/906（03:45Z 的 CSV 行）、`.warn` 未触发。
 配置 `/opt/ai/src/strata-0.2.2/strata-022.json`：`args` 是 **54 个字符串**的列表（含
 `--resident-experts --expert-cache auto --spec 8 --mtp-max-t 4 --max-context 256000 --kv int8
 --kv-resident 32768 --conversation-cache-mib 12288 --vram-reserve-mib 1280 --vram-reserve-later-mib 1435
 --pcie-frac 0.31 --gpu 0,1 --batch-groups 2 --layer-split 24 --batch 4`）；
 顶层 `reasoning_budget_tokens 12288`、`parallel 4`、`api_key "111"`、**没有 `reasoning_effort` 这个键**
 （= 服务端不给默认，每个客户端自己定，所以**改配置对我自己的会话无效**）。
+
+引擎 cmdline 今天完整读了一遍，两条值得记：`--prefill auto --prefill-pipe 1`（chunk 是自动算的，53/53 次启动
+都是 8192 tokens / 96-slot ring，见 L-017），以及 **`--expert-profile` 指的是
+`/opt/ai/src/strata-0.1.40.1/data/expert-profile.bin`**——**"退役"的 0.1.40.1 那棵树仍被生产依赖，别删它**。
 
 **线上只有两处是我改的，都在参数层**（相对上游默认）：
 
@@ -101,7 +108,8 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 |---|---|---|
 | 单流基线 / 4 路聚合 | 79.1 tok/s / 103–108 聚合 | L-000 区 |
 | `STRATA_SM75_PERF=1` | 冷 prefill **+7.2~7.6%**、43–43K **+6.0~7.8%**、4 路 **+4.1~7.5%**；T2 形态逐位 `aac0a04d109391fe`（9/10，一次"重启后首请求"分歧未复现） | L-002 区 |
-| S1 并发读补丁（**代码，已在生产二进制里**，见 L-013） | 127K 冷读 49.0/49.6 s → **58.2/58.5 s（读慢 19%）**，但邻居流 **0.3 → 19.7/20.3 tok/s**、最长卡顿 **49 s → 0.9 s**。**这条是 T2 门控配置里的数**（`parallel 1 --batch-groups 1 --pcie-frac 0 --spec 0`），**不是生产形态**；开关靠 env 不靠换二进制 | L-004/plan §7.9 + **L-013** |
+| S1 并发读补丁（**代码，已在生产二进制里**，见 L-013） | 127K 冷读 49.0/49.6 s → **58.2/58.5 s（读慢 19%）**，但邻居流 **0.3 → 19.7/20.3 tok/s**、最长卡顿 **49 s → 0.9 s**。**这条是 T2 门控配置里的数**（`parallel 1 --batch-groups 1 --pcie-frac 0 --spec 0`），**不是生产形态**；开关靠 env 不靠换二进制。**生产形态的开/关已于 2026-10-24 实测，见下一行与 L-019** | L-004/plan §7.9 + **L-013** |
+| **生产形态 gate 开/关（同一二进制，只换 `env.STRATA_PIPED_CONCURRENT`）** | 冷读（一条全新 ~22,700 token prompt）墙钟 ON **14.35 s** 对 OFF **11.8 s** → **读的人多等 21.6%**；旁边那条解码流在冷读窗口内 **47.0 对 2.0 字符/s**、最长 chunk 间隔 **0.70 s 对 11.64 s**；单流 73.0/74.4/74.2、4 路聚合 125.0/124.4/121.2、接受率 78.13/82.33/80.95% **三项都落在噪声里（无结论）** | **L-019** |
 | L-001 显存预留 | GPU0 空闲 504 → 804–810（现 ~850）；专家缓存 7,334 → **7,190 slot（−1.96%）**；命中中位 98.90 → 99.00%（p10 97.80→97.50），88/470 请求 | L-001 |
 | 噪声地板 | 同一基线两次跑，**每任务 token 方差均值 24.5%**；生产形态 `temperature: 0` **钉不住**长输出的哈希 | L-007 |
 | 思考侧 | `effort` 只是 prompt 里一句话（`serve/server.py` 的 `EFFORT_TURN`/`render_prompt`）；`low`≡`high`（−0.5%，噪声内）；`medium` 查表形态 −28%、**推理形态只 −7%**；`none/off` −41% token、−25% 墙钟但 **14 个推理任务丢 3–4 个**（真算错 + 空答案）；预算 ≤10% | L-005 / L-009 / L-010 |
@@ -140,8 +148,8 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
    `/opt/ai/bin/single-session-tune.py` 指向一份已删的配置。
 10. **不要在服务占卡时跑吃显存的离线 kernel bench**（只剩 ~790 MiB → 直接踩 #2065 分页）。
 11. `nvidia_smi.link_version.power_draw` 是**无效字段**；数警告用 `grep -c "WARNING: only"`。
-12. **停机 >2 分钟要先问用户**（我自己写的 runbook 规则）。上一轮我**没等批准**就跑完 mode 8 实验并采纳，
-    理由是收益最大且一条命令可回退——用户在 2026-10-24 上午**追认了**（"留在生产"）。
+12. **停机 >2 分钟：决定权已在 2026-10-24 交给我**（用户原话"你可以自己做决策，不要问我"）。纪律照旧：低峰跑、
+    先 `cp -p` 快照配置、测完逐字节恢复、台账写清停了多久。上一轮 mode 8 那次是没等批准跑完的，用户追认了。
 13. **`MainPID` 不是引擎**：`MainPID` 是 python 服务端（它的 `/proc/<pid>/environ` 只有 397 字节基础环境，
     **一个 `STRATA_*` 都没有**，照它读会误判"env 没生效"）。引擎是**子进程**：`pgrep -P <MainPID>` →
     `strata-host` / `strata-vision`，要看这两个的 `environ` 与 `/proc/<pid>/exe`。
@@ -161,6 +169,14 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
     引擎打 `is a native (IQ) pack: it needs --native SHARD1, --spec T (T >= 2) and --prefill CHUNK` 就退出，
     连撞 11 次（2026-10-23 05:17:56–05:20:54）看起来完全像崩溃循环。**判据：看有没有那句 "it needs ..."**
     （有=配置被拒；没有=真出事）。同一条也说明 `--spec`/`--prefill` 在 native pack 上是硬要求，不是可调项。
+19. **A-B-A 里 `--since` 不能传"开始测量的时刻"**：窗口是按 **engine 启动**切的，引擎在你开始测之前 2~3 分钟就起来了，
+    于是那个臂的窗口被 `--since` 滤掉、工具**输出为空**，看着像"这一臂什么都没发生"（第一轮就这么丢了两臂的引擎侧数字）。
+    要传**重启之前**的时刻。轮转尾文件那种 "start unknown" 窗口不受 `--since` 过滤，别指望它帮你滤。
+20. **流式正文在 `choices[0]["delta"]["content"]`**，不在 `choices[0]["content"]`（照后者读会读到 `None`，
+    整条流看着像 0 token）。而且 `len()` 数的是**字符**不是 token：这条中文提示词约 2 字符/token，400 token 报成 ~800。
+    要真 token 数就看流里有没有带 `usage.completion_tokens`（带了就用它），别把字符/s 当 tok/s 写进结论。
+21. **gate 关掉时引擎一行都不打**：OFF 那一整窗是 `reads 0 / refusals 0`——**"没有拒绝行"不能当"gate 开着"的证据**，
+    那条路径整个没走也是这个形状。判开关只读 `/proc/<引擎pid>/environ`。
 
 ## 8. 工装（都在 `/opt/ai/bin`，源码版本在 `tools/server/`，改完要 scp 上去）
 
@@ -175,9 +191,10 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 | `agent_budget_ab.py [long] [reason] <reps> <arms…>` | agent harness：臂写作 `<budget>[@<effort>]`（如 `0@medium`）；`AB_TAG` 后缀输出文件；`reason` 加 8 个**只能靠算**的可判分任务 |
 | `vram-perf-sample.sh` | cron `*/5 * * * *` 在跑（**别删**）；写 `/opt/ai/logs/vram-perf.csv`，低于 700 写 `.warn` |
 | `nvlink-crc-sample.timer` | systemd timer，active；`/opt/ai/logs/nvlink-crc.log` 至今 `crc/replay/recovery` 全 0 |
-| `passive_windows.py` | **免停机判据**：按引擎会话切窗口，报 `--spec` 接受率（引擎每请求写的 `drafts accepted A of B`）、suffix draft 接受率、专家命中中位/p10/min、`length` 截断数、"想到没答案"数、prompt 规模；`--band MIN:MAX` 只在同一 prompt 长度带内比较（固定 prompt 的 bench ≈293、parity ≈7.7K、cold-prefill ≈13.3K）；服务日志侧用 `--marker` + `--starts` 对齐时间戳。源码 `tools/server/passive_windows.py` |
+| `passive_windows.py` | **免停机判据**：按引擎会话切窗口，报 `--spec` 接受率（引擎每请求写的 `drafts accepted A of B`）、suffix draft 接受率、专家命中中位/p10/min、`length` 截断数、"想到没答案"数、prompt 规模；`--band MIN:MAX` 只在同一 prompt 长度带内比较（固定 prompt 的 bench ≈293、parity ≈7.7K、cold-prefill ≈13.3K）；服务日志侧用 `--marker` + `--starts` 对齐时间戳。轮转后的尾文件没有 `engine started` 行时会合成一个 `unknown (rotated tail: <file>)` 窗口而不是什么都不打（2026-10-24 补的，以前直接为空，坑过一轮），这种窗口不受 `--since` 滤。源码 `tools/server/passive_windows.py` |
 | `concurrent_reads.py` | 同样按会话切窗口，读 `read N tokens on a thread of its own in N ms (concurrent, …); the slots decoded N rows meanwhile`：报并发读次数、读总时长、期间槽解码行数、"0 行的读"占比，并用 `stages its blobs` 那条拒绝行判**gate 到底开没开**（不用猜二进制）。轮转后的尾文件没有 `engine started` 行，它会合成一个"session start unknown (rotated)"窗口而不是输出为空（以前为空，坑过一轮）。源码 `tools/server/concurrent_reads.py` |
-| `piped_scenario.py` | **造两条流的场景脚本**：A 流式解码 400 tokens，B 同时读 ~127K 冷提示词；报 B 的冷读（客户端墙钟 + 引擎自己那行 `prompt N = R reused + K read in M ms`）、A 在 B 窗口内的 tok/s、A 最长 chunk 间隔、以及引擎自报的"期间槽解码 N 行"。用来做 gate 的生产形态 A-B-A。**已部署、尚未跑过**（跑之前要有第二条流在场）。它替代 `/tmp/piped_scenario_127k.py`（L-004 的来源，文件已没了） |
+| `piped_scenario.py [reps] [chars] [solo\|coexist]` | **造两条流的场景脚本**：A 流式解码 400 tokens，B 同时读一条**全新**冷提示词（从 `/opt/ai/docs/strata-parameters-0.2.2-20261022.md` 切 `chars` 字符，默认 60000 ≈ 22.7K token）；报 B 的客户端墙钟 + 引擎那行 `prompt N = R reused + K read in M ms`、A 在 B 窗口内的**字符**/s、A 最长 chunk 间隔、引擎自报"期间槽解码 N 行"、这一轮 gate 有没有拒绝。**`solo` 是对照**：同一条流、旁边没人读。2026-10-24 跑过两轮（L-019）：第一版读错 JSON 字段（§7 第 20 条），修好后才有数。它替代 `/tmp/piped_scenario_127k.py`（L-004 的来源，文件已没了） |
+| `gate_prod_ab.sh [chars] [scenario-reps] [bench-reps]` | **生产形态 gate 开/关 A-B-A（不重编译）**：A1 = 当时已在跑的那个 boot（不重启）→ 生成 `env.STRATA_PIPED_CONCURRENT="0"` 的变体重启过去 = B → 用脚本开头 `cp -p` 的快照重启回来 = A2；每臂 solo + coexist + bench，全追加到 `/opt/ai/logs/L018-gate-ab-<ts>.log`，结尾 `cmp -s` 确认逐字节恢复原配置。**跑它的时候别生成、别派子代理**（§7 第 16 条）。已跑，结果 **L-019** |
 
 ## 9. 上游与分支状态
 
@@ -241,42 +258,45 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
   **mode 8 没有可测变化**（带内 +1.2% / +0.8%，3% 线内，L-012）。
 - ~~S1 要不要上生产~~：那两行**已经在生产二进制里**（L-013）。
 
+- ~~S1 要不要上生产~~：那两行**已经在生产二进制里**（L-013）。
+- ~~生产形态 gate 开/关值不值~~：**已测（L-019，2026-10-24，同一二进制只换 env）**。代价落在**读的人**
+  （22.7K 冷读墙钟 14.35 对 11.8 s = **+21.6%**），收益落在**旁边每一条正在解码的流**（最长停顿
+  **11.64 s → 0.70 s**，2.0 → 47.0 字符/s）；单流、4 路聚合、draft 接受率**三项都测不出差别**（臂间抖动盖过臂间差）。
+  **gate 保持开着**——这也正是用户定的"并发共存优先"。
+
 **还欠着的（按价值排序）**
 
-1. **生产形态的 gate 开/关 A-B-A**（`STRATA_PIPED_CONCURRENT=1` 对 `=0`，同一二进制，2 次重启 ≈ 330 s，
-   **要停机批准**）。判据用首要指标那一套：agent 任务墙钟、空答案率、工具调用通过率、4 路聚合、
-   冷读时长与邻居流；**不要只看单流 tok/s**。**而且必须先造出第二条流**（L-015：空机时 97% 的并发读
-   谁也没帮上，有并发时只剩 46%，中间槽每次中位推进 57 行）——只在空机上开关一次，测到的是空机结论。
-   工装已进 git：`bench-strata.py`（现在带接受率）、`warm-measure.py`、`read-gap.py`、`passive_windows.py`、
-   `concurrent_reads.py`。**缺一个脚本**：那条"一条流在解码、另一条读 127K 冷提示词"的场景，原来在
-   `/tmp/piped_scenario_127k.py`，**2026-10-24 去看不在了**（L-004 预言的坑真发生了），要重写进 git。
-2. ~~**#3724 到底适用不适用**~~ **已判掉（L-016，整条是"静态阅读，未测"）**：那两行在本机**只被
+1. **#3724 到底适用不适用** **已判掉（L-016，整条是"静态阅读，未测"）**：那两行在本机**只被
    prompt 专家（gather 路径）和 drafter 的 Q8_0 投影走到**；**decode 专家不进 MMQ**（走
    `iq_kernels.cu` 的 `native_expert_grouped`）、**dense 层也不进**——我原先在 §11 旧版里猜"dense 要过 MMQ"
    **是错的**，dense 的 MMQ 入口是 **HIP-only**（`gemm.cu` 里 `#if ... && defined(__HIPCC__)`）。
    形状推算 `nwork ≥ 100 > nsm(68)` → 与今天完全一致，只有 down 的"1 专家尾组 + `ntx=1`"会少开 8 个 block。
-   **结论：改动会被走到，但收益预计噪声级 → 决定不为它花重编译 + 停机（等用户追认）。**
+   **结论：改动会被走到，但收益预计噪声级 → 不为它花重编译 + 停机**（停机的决定权用户已交给我，§10 已表态 6）。
    真要花一次重启，值的是 `STRATA_PREFILL_MMQ=0` 对默认（证明 prompt 到底走不走 MMQ、多大），不是 backport。
    另记一条 build 坑：Strata 把这个调度器**镜像**在 `moe_mmq_tab.cuh:427`，CMake 对 `mmq.cuh:875..1571`
    做指纹，backport 会让 `STRATA_MMQ_TAB` 自动关掉（今天它 OFF，所以暂无影响）。
-   **Draft D 已写好、未发**（见 §9 与 `docs/UPSTREAM_DRAFTS.md`）。
-3. **`/opt/ai/bin` 剩余脚本继续搬进 git**：本轮搬了 `passive_windows.py`、`concurrent_reads.py`，外加 9 个
+   **Draft D 写好了，按"上游只读"的新规矩不再发**（`docs/UPSTREAM_DRAFTS.md`）。
+2. **`/opt/ai/bin` 剩余脚本继续搬进 git**：本轮搬了 `passive_windows.py`、`concurrent_reads.py`，外加 9 个
    判据脚本（`nvlink-crc-sample.sh`、`t2check.py`、`thinking-budget-ab.sh`、`soak-analyze.py`、`warm-measure.py`、
    `read-gap.py`、`metrics-peek.py`、`verify-running-config.sh`、`check-session-warnings.sh`）。
-   **两个坑还留着**：(a) `verify-running-config.sh` 与 `check-session-warnings.sh` 在服务器上是 **root 所有**
-   （2026-10-15/16 用 sudo 建的），git 里是**修好的版本**（原来硬编 `/opt/ai/src/strata-0.1.40.1`，验的是退役
-   部署），服务器上那份**要 sudo 才能换**——用 root 先问用户。(b) `restart-strata.sh`、`swap-engine.sh` 里
-   各有一句明文 sudo 密码，**在密码那条定下来之前别搬进公开仓库**。
-4. **`verify-running-config.sh` 现在是"线上到底跑的是哪份配置"的标准答案**：它比 cmdline/env/进程时间三样。
+   **(a) 已结**：服务器上那两个 root 所有的 `verify-running-config.sh`、`check-session-warnings.sh` 已于 03:02Z
+   用 sudo 换成 git 里修好的版本（用户批准），旧的留成 `*.pre-20261024`，换完两边 **md5 一致**且两份都能跑。
+   **(b) 还留着**：`restart-strata.sh`、`swap-engine.sh` 里各有一句明文 sudo 密码，
+   **在密码那条定下来之前别搬进公开仓库**（§10 未决 1）。
+3. **`verify-running-config.sh` 现在是"线上到底跑的是哪份配置"的标准答案**：它比 cmdline/env/进程时间三样。
    本轮跑出来的事实是——引擎 cmdline **59 个 arg**、配置里 **54 个**，多的三个是服务端注入的
    `--serve`、自动算的 `--layer-split 24`、以及从 `parallel: 4` 推出来的 `--batch 4`；ENV 一致、进程比配置新
    → **线上跑的就是磁盘上这份**。以前那份脚本只认前两个注入项，会把正确状态报成 DIFFERENT。
-5. **被动窗口继续长样本**：mode 8 生产窗口现在 105 个请求 / 82,847 draft，等它到几百请求再回看同一张表
-   （尤其截断率与 suffix draft 接受率那两列）。
+4. **被动窗口继续长样本**：mode 8 那个 19:10:55Z 的会话**已被今天四次重启切断**；新会话从 **03:34:17Z** 起，
+   目前里面基本是 gate 实验自己的流量（A2 窗：45 个请求、接受率 78.25% of 901——小样本，别当结论）。
+   等它攒够几百条**真实**请求再回看同一张表（截断率、suffix draft 接受率、命中率那三列）。
+5. **gate 开着时"更多条流"的形状**：L-019 只测了**两条**流。生产是 `parallel 4`，三条以上并发时读的人会不会被
+   拖得更多、邻居会不会反而更慢？**没测**。工装现成：`piped_scenario.py` 多开几条 A 流就行（不用重编译）。
 6. **medium 思考预算**：L-010 说它在推理形态只省 7%，还没做"设成默认"的 A-B-A（免重启，随时能做）。
-7. **上游要的第二项检查 (b)**：钉 `--prefill N`（N 大于被测提示词）再重复几次重启——**要重启**，
-   和 gate 的 A-B-A 并到同一个停机窗口最省。第一项 (a) 已做完（L-017：chunk 53/53 都是 8192/96-slot）。
-   顺带留了个没查清的小尾巴：71 次启动里有 **7 次既没打 chunk-auto 也没打配置拒绝那句**
+7. **上游要的第二项检查 (b)**：钉 `--prefill N`（N 大于被测提示词）再重复几次重启。今天确实重启了四次，
+   但**没有钉 `--prefill`**（还是 `auto`），所以 **(b) 仍未做**；下次要重编译或调参数时并到同一个停机窗口最省。
+   第一项 (a) 已做完（L-017：chunk 53/53 都是 8192/96-slot；今天这四次重启也照样都打 auto）。
+   顺带那个小尾巴仍未查：71 次启动里有 **7 次既没打 chunk-auto 也没打配置拒绝那句**
    （`10-22 04:48:13`、`06:55:29`、`10-23 05:21:12`、`05:24:24`、`05:27:44`、`06:57:28`、`18:38:40`），
    **为什么这 7 次没打，不知道**。
 
@@ -287,6 +307,11 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 判据规矩、上游兼容规矩、"停机 >2 分钟先问"、"每轮末尾更新本页"。**旧 goal
 `goal-96ec4721-4579-431f-bf5c-81dfa8e36a2b`（paused，rev 3，4/256 轮）作废，别再 resume 它。**
 会话被 fork/恢复后目标会自动 disarm：用户说继续时用 `update_goal` 的 `action: resume`（**需要用户的直接轮次**）。
+
+**目标正文里有两条已经被用户后来的话改掉了，但正文我改不了**（`update_goal action edit` 在自动续行轮里被拒，
+要人类轮次）：(1) 上游从"兼容地回帖"变成**只读、不回帖、不开 PR**；(2) **"停机 >2 分钟先问"变成用户交给我自己决定**。
+下一个用户轮次顺手把这两条写进正文（顺带可以决定要不要把"思考预算降级 / mode 8 与 medium 提前 / #3724 已判不重编译"
+这些也写进去）。在那之前按本页 §1 与 §10 的写法执行，它们是最新的。
 
 ## 13. 一句话给接手者
 
