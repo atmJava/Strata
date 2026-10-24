@@ -68,11 +68,11 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 - 重启期间我自己在续行 → 请求会失败；所以**重启要放在后台任务里**，脚本最后一步自己装回生产配置
   （万一会话断了，机器停在正确状态）。
 
-## 5. 生产现状（2026-10-24 01:30 UTC 核实）
+## 5. 生产现状（2026-10-24 02:3x UTC 核实）
 
-`active`，`NRestarts=0`，进程自 **19:10:55 UTC** 起（就是装 mode 8 那次）。
-`/proc/<pid>/environ` 里核实了 **15 个 `STRATA_*` 变量**，其中两条关键：
-**`STRATA_SM75_PERF=1`**、**`STRATA_EXP_MODE=8`**。
+`active`，`NRestarts=0`，服务端进程自 **19:10:55 UTC** 起（就是装 mode 8 那次），MainPID 56424 是 python
+服务端，**引擎是它的子进程 56437**（见 §7 第 13 条）。在**引擎子进程**的 `/proc/<pid>/environ` 里核实了
+**15 个 `STRATA_*` 变量**，其中两条关键：**`STRATA_SM75_PERF=1`**、**`STRATA_EXP_MODE=8`**。
 配置 `/opt/ai/src/strata-0.2.2/strata-022.json`：`args` 是 **54 个字符串**的列表（含
 `--resident-experts --expert-cache auto --spec 8 --mtp-max-t 4 --max-context 256000 --kv int8
 --kv-resident 32768 --conversation-cache-mib 12288 --vram-reserve-mib 1280 --vram-reserve-later-mib 1435
