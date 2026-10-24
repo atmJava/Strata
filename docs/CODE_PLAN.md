@@ -317,3 +317,30 @@ TP 在这台机器上只值 +3%（L-033）说明它不是"算力协作"的钥匙
 （A 臂出现 `declined … share is 0`、B 臂没有），A2 的工装可用 —— 以后所有 env 型开关都能同 boot 交替。
 
 **教训（写进 RULES §9 的第 5 条）**：给开关加"文件优先于 env"的覆盖时，必须同时接受"文件会覆盖我自己的 env"。
+
+
+---
+
+## 15. S3 结果：窗口时间去哪了（2026-10-24 夜，`STRATA_SPLIT_TIMING=1`，生产二进制 + 该 env）
+
+不要新写探针：`STRATA_SPLIT_TIMING` **已经在打印**每个 stage 每窗口的四段（`generate.cpp:15484`）。
+4,524 新增 token、生成 200 token、114 与 202 个窗口两次采样：
+
+| stage | 窗口数 | 等 GPU | pool + plan | **host staging** | commit | 合计 |
+|---|---|---|---|---|---|---|
+| 0 | 114 | **9.251 ms** | 2.836 ms | **1.969 ms** | 0.206 ms | 14.26 ms |
+| 1 | 114 | **8.607 ms** | 2.736 ms | 0.001 ms | 0.210 ms | 11.55 ms |
+| 0 | 202 | **9.482 ms** | 1.922 ms | **1.159 ms** | 0.229 ms | 12.79 ms |
+| 1 | 202 | **8.927 ms** | 2.106 ms | 0.001 ms | 0.235 ms | 11.27 ms |
+
+**读数**（与 decode 78–89 tok/s ≈ 11–13 ms/token 自洽）：
+1. **最大项是"等 GPU"（65–73%）**，不是主机字节。stage 0 比 stage 1 多 ~0.6 ms，正是拿不到数据的那一半。
+2. **host staging 占 stage 0 的 8–14%**（1.16–1.97 ms/窗口）—— 这就是 A1 那 3.9 GB/轮 的**暴露部分**。
+   若完全遮住，上限约 **8–14%**，**过 5% 判据**。
+3. stage 1 的 staging ≈ 0：它的专家来自本卡驻留/对卡，不经主机 —— 与"NVLink 只在跨卡那一段有意义"一致。
+4. 所以 S4 的靶子从"按 stage 拆 H2D"改成更直接的：**把 stage 0 的 host staging 藏到计算背后**（预取提前一层）。
+
+**已有的旋钮**（先测现成的，不写新的）：`STRATA_IO_PREFETCH`、`STRATA_IO_PREFETCH_DEPTH`、`STRATA_IO_PF_AHEAD`、
+`STRATA_IO_PF_STAGE`、`STRATA_FILL_AHEAD`、`STRATA_IQ_PREFETCH`、`STRATA_HANDOFF_PIPE`。
+**下一轮**：把这 7 个中与 decode 驻留路径相关的几个接进 `runtime_flag`（1 次构建 + 1 次安装），
+然后**同 boot 交替**逐个 A/B（0 重启/个），判据：decode tok/s 配对中位 **+5%** 且 staging 值下降；否则不采纳。
