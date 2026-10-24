@@ -375,18 +375,16 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 
 ## 13. 未决 / 待观察
 
-> **下一轮先做**：**P0d 诊断**（单次启动，不做 A/B）—— 打上 `patches/local-strata/help-debug-0.2.2.patch`
-> 在 `build-imma` 里编，开 `STRATA_PREFILL_HELP=1 STRATA_PREFILL_HELP_DEBUG=1`，看 `bind_stage_helper` 到底被哪道门拒。
-> 为什么不是先测：今天两次 TTFT 运行都作废（helper 从没绑定；第二次是我重叠了安装器），**没触发 ≠ 不成立**。
-> 拿到门之后再决定改哪一行（候选：`pp->p2p` 可配 / 放行某道门），然后才是 A/B（判据第一条是日志里出现 `peer GPU` 行）。
-> 之后是 **P0**：三点剖析 + 字节账（先证明病因，再决定写不写内核）。
-> 上一轮我在 NVLink 上判错过一次：只看"两卡各剩 0.8–1.0 GB 空闲"就说它不是杠杆，漏了 helper 用的是**空闲那张卡
-> 在 prefill 期间的档期**（不是空闲显存）。更正写在 [`CODE_PLAN.md`](CODE_PLAN.md) §8。
-> 为什么不是 IMMA：v1 计划（`6e6d7017`）的"算力受限"被复核否掉了 —— 满带宽只要 4.9 T MAC/s，`dp4a` 可供 27 T
-> （余量 5.5×）；而且 512 专家 top-10 在 4 并发下每组只有 1 行，`m16n8k32` 的 16 行里 15 行是空的。
-> 详见 [`CODE_PLAN.md`](CODE_PLAN.md) §1 的六条复核（F1–F6）。
-> P0 的两个实验都不需要新内核、不需要重启：`read-only / no-unpack / def` 三点剖析，加一次 trace 出字节数与组大小直方图。
-> `--pipeline-windows 2` 已否决（L-045：两对方向不一致，单流 +10% 未复现）。
+**（2026-10-24 夜更新）helper 这条线已经判完并关闭**：`--prefill-pipe 1` 时真实请求不进 `bind_stage_helper`
+（`planned_C < n` → `single_chunk=false`），`--prefill-pipe 0` 时才进；而启动时 `split_help_env()` 让 **flag 文件优先于
+env**，我自己的 `prefill_help=0` 把它关了 —— 两个条件同时满足后 helper 真的把行分给了对端。
+同 boot 配对结果：**1.5k −3.0/−3.9%（4/4 胜，但 <5% 不算结论）**、**4.5k +4.8/+18.9/+8.1%（0/6 胜）** → 我们的负载
+（4.5k+ 新增）没有收益，**helper 关闭**，`prefill_help=0` 保持。
+
+> **下一轮先做（S3）**：给 `prefill.cpp` 的窗口路径加**每窗口 host 字节 + 等待时间**打印（默认关，
+> `STRATA_PREFILL_HELP_DEBUG=1` 之外的独立开关），把 A1 量到的 **3.9 GB/轮**分成"被计算遮住的"与"真等待的"。
+> 判据：等待占比 >30% → 写 S4（预取提前一层 / 按 stage 拆 H2D 流）；<10% → 结论"字节不是瓶颈"，转 S5（nsys 看 36% 缺口）。
+> 测量一律用新工装：`flag-ab.sh`（同 boot 交替）+ `paired_ttft.py`（逐条配对），别再用跨 boot 中位数。
 
 **代码计划见 [`CODE_PLAN.md`](CODE_PLAN.md)**（v2：P0 定位病因 → P1-A/B/C 三选一 → P2 head 分卡 → P3 结构级；含测量协议与不做清单）。
 
