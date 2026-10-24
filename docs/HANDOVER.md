@@ -366,7 +366,22 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 > 理由：首字这条路已经走到底（L-030 / L-031），真实请求墙钟中位 13.2 s 里约 12 s 是解码，**现在缺的是能判解码改动的尺子**，
 > 不是再猜一个旋钮。
 
-**新岔路（2026-10-24 合并上游时发现）**：`v0.2.4.1` 把 **CPU 专家/kernel 路径**改了 13 个文件（+920/−86：
+**新岔路（2026-10-24 合并上游时发现，当日已测）**：`v0.2.4.1` 把 **CPU 专家/kernel 路径**改了 13 个文件
+（+920/−86：AVX2/AVX512 的 IQ/TQ kernel、`expert_layout`、`native_expert`）。**测过了（L-034）：没有可测收益**——
+单请求 −1.4%、4 并发 +4.0%，而同配置两臂本身漂移 +2.2%、单臂内 4 并发摆动 ±15% → 不采纳；且它改了一个自由文本答案
+（质量门 2/3 逐字相同）。0.2.4.1 的树（含 S1）留在 `/opt/ai/src/strata-0.2.4.1`（385M）备用。
+
+**代码层面的路线（2026-10-24 定的，替代上面那条）**：先拿**解码相图**，再写内核。
+1. `STRATA_DECODE_TIMING`（默认关、不改数值）：照 `STRATA_PREFILL_TIMING` 的 `PfTimer` 给 verify/batch 窗口按相记账
+   （qsa attn / select / router / **gate/up** / **dequant** / **gemm down** / combine / gdn / kv stage / **wait copy** /
+   draft+verify，外加 host 侧 CPU pool drain、launch gap、adaptive 换专家），每 N token 一行。约 150–250 行。
+2. 按相图选靶：**A. sm_75 的 INT8 IMMA 专家 GEMM**（2080 Ti 的 `m16n8k32` ≈ 107 TOPS vs SIMT FP32 13.4 TFLOPS；
+   解码走 `native_expert_grouped`，静态阅读）——若 gate/up+down ≥40%，预期该段 1.3–2×；**B. Broadwell 的 AVX2
+   IQ3_XXS 点积**（E5-2680 v4 无 AVX-512、无 VNNI；CPU 池若 ≥20%，预期 1.2–1.5×）。两条都要 env 门控 + 质量门 +
+   同 boot A-B-A ≥3 臂。
+3. **不要碰**（都已被我们自己的实测否掉）：PCIe/预取（VRAM 命中 99.6%）、MMQ 指针表（L-031）、read-ahead（真流量很少撞满槽）、
+   TP（L-033）、parking（L-032）、换 0.2.4.1（L-034）。
+`v0.2.4.1` 把 **CPU 专家/kernel 路径**改了 13 个文件（+920/−86：
 AVX2/AVX512 的 IQ/TQ kernel、`expert_layout`、`native_expert`），而我们的解码正是 `--native` + CPU 专家池。
 Qwen 的 GPU 引擎文件没动、`serve/server.py` 只动了 DeepSeek 分支，所以**升级的收益若存在，只可能在 CPU 专家这一段**。
 代价：重建（~5 min）、一次 156 s 重启、S1 补丁要按新基线重新打（`generate.cpp` 没变，理论上仍然能 `git apply`）、
