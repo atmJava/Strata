@@ -74,10 +74,10 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 
 ## 5. 生产现状（2026-10-24 03:4x UTC 重新核实）
 
-**今天为 gate 的开/关实验和打开请求监视器一共重启 7 次**（引擎会话 03:11:00、03:15:25、03:29:11、03:34:17、
-03:53:15、03:57:17、04:12:08 UTC，合计 ~1,101 s 冷加载），所以现在：`active`、`NRestarts=0`、MainPID **109993**
-（服务 04:12:07Z 起）、引擎子进程 **110005**、vision 子进程 **110000**（见 §7 第 13 条）。
-**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **04:12:08Z 这个会话**重新攒（§11 第 4 条）。
+**今天为 gate 的开/关实验、打开请求监视器、效果 A-B-A 和 trace 实验一共重启 11 次**（引擎会话 03:11:00、03:15:25、
+03:29:11、03:34:17、03:53:15、03:57:17、04:12:08、04:59:41、05:02:30、05:07:13、05:10:53 UTC，合计 ~1,570 s 冷加载），
+所以现在：`active`、`NRestarts=0`、MainPID **129107**（05:10:53Z 起）、引擎子进程 **129116**、vision 子进程 **129121**（见 §7 第 13 条）。
+**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **05:10:53Z 这个会话**重新攒（§11 第 4 条）。
 在**引擎子进程**的 `/proc/<pid>/environ` 里核实了 **15 个 `STRATA_*` 变量**，其中三条关键：
 **`STRATA_SM75_PERF=1`**、**`STRATA_EXP_MODE=8`**、**`STRATA_PIPED_CONCURRENT=1`**（开/关今天实测过，**L-019**）。
 空闲显存 814/906（03:45Z 的 CSV 行）、`.warn` 未触发。
@@ -116,6 +116,9 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 | **请求监视器打开（`api_monitor`）+ 满槽时排队的机制钉死** | 开销**测不出**（bench 单流 73.8 / 聚合 120.2 / 接受率 79.81%，都在 L-019 三臂带内；`json.dumps` 800K 字符只 2.9 ms）。**满 4 槽时读的人先等空槽**：引擎三行日志的先后（46.3 s 的批次 → 读 14.8 s → `slot 0 takes 22702 tokens`）证明读是在批次收尾后才开始。**真实流量第一批**：墙钟中位 13.2 s、TTFT 中位 0.80 s / p90 2.46 s / 最长 83.82 s（n=34，本会话的 agent 请求） | **L-021** |
 | **effort `medium` 不设成默认** | agent 形态 A-B-A 3 轮（14 任务、temp 0、只有这一条流）：墙钟中位 **+0.4%**、completion token **+2.2%**、做对题数两臂中位都 14/14、畸形工具调用 0/9 → **全在 <3% 线内，测不出**；而且**我们自己的客户端显式发 `reasoning_effort: high`**（监视器存了我这条会话的请求体），服务端默认**轮不到**，改了只影响不写 effort 的第三方 | **L-023** |
 | **read-ahead 的改动点（静态阅读，未测）** | 引擎中途收新活（只排在飞的毫秒级窗口），读本身跑在自己线程上、最后才 42.6 ms 复制进槽；**唯一障碍是 `BGEN` 下命令那一刻就要有空槽**。改动 = 加一条不要槽的读命令（opt-in）。值：满槽时那条冷读的 **36–43 s**；代价：读改在 4 条流旁边跑（邻居今天已掉 35–60%，多一路掉多少**未测**） | **L-024** |
+| **read-ahead 是中等工程，不是一条命令（静态阅读，未测）** | 读本身跟槽无关（两个调用点 13482 / 13710），**卡在 K/V 落地**：准入要先 `kvg_ensure(…, quiesce)`，而 quiesce 要求设备安静（12542 / 15079 / 10514）；会话状态最后才复制（42.6 ms），checkpoint 在槽间搬的机制已经有一半（15436-15448）；parked conversation 是**按槽记账**的（起点不是现成件）。→ **要不要花重编译先过一个判据**：真实流量里有多少请求真撞上"冷读 + 满槽" | **L-025** |
+| **DSH 形状每轮首字 1–4 s，其中约 0.7 s 是每次读的固定成本** | `turn-ttft.py` 单流干净跑：冷读 45,017 token = **19.7–19.8 s**（2,275 tok/s）；重读 ≈460 → **1.01–1.09 s**、≈1,835 → **2.2 s**、≈4,535 → **4.0 s**。拟合 `读 ms ≈ 711 + 0.728×token`（**固定 0.7 s + 1,370 tok/s**；45K 大读是 2,275 tok/s，另一个区制）。**客户端首字只比引擎读多 0.05–0.10 s** → 那 0.7 s 在引擎里，不在服务端。热起来后 draft 接受率 ~99%、生成 108–134 tok/s（冷读后第一次只有 66–67 tok/s） | **L-026** |
+| **`STRATA_TRACE=1` 拆不到那 0.7 s（单流）** | 两臂（trace 开 / 关）的读时间逐档对得上（1,474/1,466、1,012/1,010、1,081/1,091、2,200/2,205、3,997/3,984 ms）→ **开 trace 的代价测不出**；但 `strata trace: admission` **一行都没打**，因为那条打印在**批量准入**里，而单流走的是 solo `GEN` 路径。要拆得让请求走 BGEN（有并发） | **L-027** |
 | L-001 显存预留 | GPU0 空闲 504 → 804–810（现 ~850）；专家缓存 7,334 → **7,190 slot（−1.96%）**；命中中位 98.90 → 99.00%（p10 97.80→97.50），88/470 请求 | L-001 |
 | 噪声地板 | 同一基线两次跑，**每任务 token 方差均值 24.5%**；生产形态 `temperature: 0` **钉不住**长输出的哈希 | L-007 |
 | 思考侧 | `effort` 只是 prompt 里一句话（`serve/server.py` 的 `EFFORT_TURN`/`render_prompt`）；`low`≡`high`（−0.5%，噪声内）；`medium` 查表形态 −28%、**推理形态只 −7%**；`none/off` −41% token、−25% 墙钟但 **14 个推理任务丢 3–4 个**（真算错 + 空答案）；预算 ≤10% | L-005 / L-009 / L-010 |
@@ -193,6 +196,10 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
     判排队看引擎日志行的先后（`strata batch (…): … rows in …` → `read … tokens …` → `slot N takes …`）或 `first_token_s`。
 24. **`first_token_s` 从请求到达起算**（`server.py:5203-5205`），**含排队 + 读 + 首 token**：它是用户感知的 TTFT，
     不是引擎 prefill。监视器只在内存里留 100 条、不落盘 → **跑完立刻 dump**（`enable_api_monitor.sh` 就是这么做的）。
+25. **`STRATA_TRACE=1` 只在批量准入那段打印**（`generate.cpp:15465` 的 `strata trace: admission …`，紧挨 `slot N takes`
+    和 `BADM`）：**单流顺序请求走的是 solo `GEN` 路径，一行 trace 都不会有**（L-027 就是这么空手而归的）。
+    想拆单流的开销，要么让请求走 BGEN（并发），要么去读 solo 路径自己的分段。判断"这次跑的是不是批量路径"：
+    看日志里有没有 `slot N takes … tokens`。
 
 ## 8. 工装（都在 `/opt/ai/bin`，源码版本在 `tools/server/`，改完要 scp 上去）
 
@@ -214,6 +221,17 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 | `gate_prod_ab.sh [chars] [scenario-reps] [bench-reps]` | **生产形态 gate 开/关 A-B-A（不重编译）**：A1 = 当时已在跑的那个 boot（不重启）→ 生成 `env.STRATA_PIPED_CONCURRENT="0"` 的变体重启过去 = B → 用脚本开头 `cp -p` 的快照重启回来 = A2；每臂 solo + coexist + bench，全追加到 `/opt/ai/logs/L018-gate-ab-<ts>.log`，结尾 `cmp -s` 确认逐字节恢复原配置。**跑它的时候别生成、别派子代理**（§7 第 16 条）。已跑，结果 **L-019** |
 | `gate_prod_streams.sh [peers] [reps] [chars]` | **多流版**：`peers` 条解码流 + 1 条冷读，开着（当时的 boot）对 关着（重启后）两臂 + 恢复后 1 轮确认；两臂各跑 solo 与 coexist。**只有 3 条流那轮做了开/关**，4 条流只测了开着的形状（`gate_prod_streams.sh 4 …` 要自己加对照）。已跑（3 流），结果 **L-020** |
 | `enable_api_monitor.sh [peers] [peer-max-tokens] [reps]` | 打开服务端请求监视器（配置顶层键 `"api_monitor": true`，重启）并**当场 dump** `GET /api/requests`：每条请求的 `wallclock_s` / `first_token_s`（=用户感知 TTFT）/ `queue_s` / `load_s`。监视器只留 100 条、不落盘，**跑完必须马上读**（脚本会 dump 到 `/opt/ai/logs/L021-*.log` 和 `/opt/ai/tmp/L021-requests-111.json`）。**回退**：`use-config.sh /opt/ai/tmp/monitor-off-20261024T041201Z.json`。已跑，结果 **L-021** |
+| `turn-ttft.py <tag> [新增,逗号] [每档轮数] [上下文token] [生成token]` | **DSH 形状的多轮探针**（首要指标那条路径）：`messages` 累积 + 每轮塞一段唯一内容当工具输出，量"这一轮实际要重读多少"、首字、生成速率；`temperature: 0` + `reasoning_effort: none`；结果追加 `/opt/ai/logs/turn-ttft.jsonl`。**本轮修了三个坑**：引擎日志路径写死在 0.1.40.1 那套安装（现在 `TTFT_LOG`/`TTFT_CFG` 可指）、**不发 api key**（0.2.2 之后 401）、`block()` 的 token 估算差 4 倍（原来 `/3`，"45000"实际造出 180,018 token → 撞上下限吃 400，现在 `/12`），并且**撞到 400 也会把已量的行写进 jsonl**（以前直接崩、什么都留不下）。已跑，结果 **L-026** |
+| `trace_admission_phases.sh [ctx] [tag后缀]` | 快照配置 → 加 `env.STRATA_TRACE="1"` 重启（B 臂）→ 跑 `turn-ttft` → 恢复配置重启（A2 臂）→ 再跑一轮；把两次的 `strata serve: prompt …` 和 `strata trace: admission …` 并排打出来。**只对走 BGEN 的请求有用**（§7 第 25 条）。已跑，结果 **L-027**（trace 一行没打，但两臂对上了） |
+
+**本轮又搬进 `tools/server/` 的 7 份判据脚本**（原来只在 `/opt/ai/bin`）：`turn-ttft.py`（**DSH 形状的多轮会话**：每轮实际重读多少 + 首字延迟——就是首要指标那条路径）、
+`conv_cache_ab.py`（会话缓存 A/B：每条请求引擎实际重读多少）、`probe_determinism.py`（跑动差异是采样还是引擎——`agent_budget_ab.py` 的 docstring 直接引用它）、
+`quality_eval.py`（`quality_eval_budget.py` 的母本）、`effort-cost.py` / `effort_lang_ab.py` / `replay_effort_ab.py`（effort 那三条支线，L-023 的背景）。
+搬的时候修了两处**换了安装就失效**的写死：`turn-ttft.py` 的引擎日志路径（原来写死 0.1.40.1 那套，现在 `TTFT_LOG` / `TTFT_CFG` 可指）
+和它**不发 api key**（0.2.2 之后不发就 401，第一次跑就是这么死的）。
+`/opt/ai/bin` 里还有 ~140 份历史一次性脚本（vLLM 时代、iq3xxs 装机、各种 sweep），**故意不搬**——不是判据、路径多半也旧了，
+搬进来只会淹掉真在用的这批。`restart-strata.sh` / `swap-engine.sh` 也**故意留在服务器上**：里面写死了 sudo 口令，
+等用户决定怎么处理"口令在公开的 fork 里"这件事再说（§10）。
 
 ## 9. 上游与分支状态
 
@@ -310,22 +328,27 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
    用 sudo 换成 git 里修好的版本（用户批准），旧的留成 `*.pre-20261024`，换完两边 **md5 一致**且两份都能跑。
    **(b) 还留着**：`restart-strata.sh`、`swap-engine.sh` 里各有一句明文 sudo 密码，
    **在密码那条定下来之前别搬进公开仓库**（§10 未决 1）。
+   **(c) 本轮又搬了 7 份**：`turn-ttft.py`、`conv_cache_ab.py`、`probe_determinism.py`、`quality_eval.py`、
+   `effort-cost.py`、`effort_lang_ab.py`、`replay_effort_ab.py`（为什么选这 7 份、哪些历史脚本故意不搬，见 §8 末尾）。
 3. **`verify-running-config.sh` 现在是"线上到底跑的是哪份配置"的标准答案**：它比 cmdline/env/进程时间三样。
    本轮跑出来的事实是——引擎 cmdline **59 个 arg**、配置里 **54 个**，多的三个是服务端注入的
    `--serve`、自动算的 `--layer-split 24`、以及从 `parallel: 4` 推出来的 `--batch 4`；ENV 一致、进程比配置新
    → **线上跑的就是磁盘上这份**。以前那份脚本只认前两个注入项，会把正确状态报成 DIFFERENT。
-4. **被动窗口继续长样本**：mode 8 那个 19:10:55Z 的会话**已被今天六次重启切断**；当前会话从 **03:57:17Z** 起，
-   里面目前基本是 gate 实验自己的流量（上一个窗 03:34:17Z：45 个请求、接受率 78.25% of 901——小样本，别当结论）。
+4. **被动窗口继续长样本**：mode 8 那个 19:10:55Z 的会话**已被今天十一次重启切断**；当前会话从 **05:10:53Z** 起，
+   里面目前基本是实验自己的流量（上一个窗 03:34:17Z：45 个请求、接受率 78.25% of 901——小样本，别当结论）。
    等它攒够几百条**真实**请求再回看同一张表（截断率、suffix draft 接受率、命中率那三列）。
-5. **满槽时读的人在等空槽——位置钉死了（L-021 现象 + L-022 代码）**：排队在**服务端的槽预留**
-   （`serve/server.py:2124` `pick_slot`：全忙就返回 None，服务端**拿到空槽才把提示词发给引擎**），
-   引擎也不接没有槽的活（`generate.cpp:12007` `ERR BGEN: no such free slot`）。
-   **"把并发压在槽数以下"没有现成旋钮**（`self.batch` 就是引擎自报的 `batch_slots`，槽数=准入上限），
-   而且 `pick_slot` 在 pipelined 组里**优先填 busy 槽下面的洞**，"总留一个空槽"这套排布下本来不成立。
-   → **下一步是把 read-ahead 做出来**（L-024 把改动点读清了）：引擎加一条**不要槽的读命令**
-   （先把提示词读进暂存，槽空了再走那 42.6 ms 的复制 + 正常 BGEN），默认路径一字节不动、opt-in；
-   服务端 `pick_slot` 那边相应地不必等空槽才发。**要重编译 + ≥2 次重启**，还没做。
-   想先量 drain 那一段：开 `STRATA_TRACE=1` 会打 `strata trace: drain for BGEN: N groups in flight, X ms`。
+   注：L-026 已经把 DSH 形状的首字/重读/接受率单独量过一遍（热起来后接受率 ~99%），被动窗口值在**跨天趋势**。
+5. **引擎侧读路径：先拆那 0.7 s 的固定成本（现在的第一优先），read-ahead 降级。**
+   - **固定成本（L-026）**：普通 agent 回合的首字 = **0.7 s 固定 + 读**（小读 ~1,370 tok/s、45K 大读 2,275 tok/s），
+     460 token 那档里固定成本占 ~60%；**客户端首字只比引擎自报的读多 0.05–0.10 s** → 它**在引擎里，不在服务端**。
+     下一步：**让请求走 BGEN**（并发跑 `turn-ttft.py`，或配一个并发探针），`STRATA_TRACE=1` 才会打出
+     `strata trace: admission …` 的分段（drain / prompt(read, windows, checkpoints = sync+save+evict, rest) /
+     first window / slot copy / slot freed / checkpoint copy）。单流拆不到（L-027，§7 第 25 条）。
+     免停机能做的一半：静态读 solo `GEN` 路径有没有自己的分段计时。
+   - **read-ahead（降级，L-024 / L-025）**：排队在服务端 `pick_slot`（全忙返回 None），引擎也不接无槽的 BGEN（12007）；
+     **没有"少准入"的旋钮**；改动是**中等工程**（K/V 落地要 quiesce、parked conversation 按槽记账），不是加条命令。
+     而且 L-026 显示普通回合只要 0.7 s + 读，排队只在"满槽 + 冷读"时咬人，真实流量 TTFT 中位 0.80 s（L-021）
+     → **先不花这次重编译**；等 (a) 拆完固定成本再看它值不值。
    免停机的支线：静态读 `pick_slot` / 控制行 / `STRATA_ADMIT_SHORT_FIRST`（`server.py:319` 读的是**服务端进程**的环境，
    配置 `env` 键在 import 之后才应用 → 要生效得进 systemd 单元的环境，那是 root 的活）。
 6. **4 条流的"关着"对照**：L-020 只有 3 条流做了开/关；4 条流（生产满配）只测了开着。`gate_prod_streams.sh 4 3 60000`
