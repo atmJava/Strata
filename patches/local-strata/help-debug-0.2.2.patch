@@ -1,6 +1,58 @@
---- /tmp/prefill-022.orig.cpp	2026-10-24 18:21:56.816720506 +0800
-+++ /tmp/prefill-022.cpp	2026-10-24 18:21:56.074243722 +0800
-@@ -1957,13 +1957,34 @@
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -62,6 +62,7 @@
+ #include <thread>
+ #include <utility>
+ #include <vector>
++#include "strata/core/runtime_flag.hpp"
+ 
+ #ifndef STRATA_PREFILL_MMQ
+ // A build without the llama.cpp sources (no STRATA_NATIVE_EXPERTS): no MMQ, the FP16 expert path everywhere.
+@@ -1877,6 +1878,10 @@
+ // grouping and round differently from the default, like STRATA_SPLIT_OWN). Unset or 0: every stage's prompt experts on
+ // its own GPU, as before.
+ bool split_help_env() {
++    // The flag file first, so an A/B can alternate inside one boot instead of paying two cold loads and measuring
++    // across them (see `include/strata/core/runtime_flag.hpp`).  Absent file or key: the environment, as before.
++    long long f = 0;
++    if (strata::core::runtime_flag_int("prefill_help", f)) return f != 0;
+     static const bool v = [] { const char* e = std::getenv("STRATA_PREFILL_HELP"); return e != nullptr && std::atoi(e) != 0; }();
+     return v;
+ }
+@@ -1888,6 +1893,8 @@
+ // none pays, which this rule follows (0.41 at 1.5K, 0.32 at 3K, off from ~3.3K).
+ // STRATA_PREFILL_HELP_FRAC sets the share for every T.
+ double split_help_frac(int64_t T) {
++    double rf = 0.0;   // the flag file: the share becomes a runtime knob, the environment stays the default
++    if (strata::core::runtime_flag_double("prefill_help_frac", rf)) return std::clamp(rf, 0.0, 1.0);
+     static const double fixed = [] {
+         const char* e = std::getenv("STRATA_PREFILL_HELP_FRAC");
+         return e ? std::clamp(std::atof(e), 0.0, 1.0) : -1.0;
+@@ -1915,9 +1922,21 @@
+ bool Prefill::set_stage_helper(Prefill* helper, std::string& err) {
+     Impl& m = *impl_;
+     m.help_pp.reset();
+-    if (helper == nullptr || helper == this || !split_help_env()) return true;
++    static const bool help_dbg_setup = [] {
++        const char* e = std::getenv("STRATA_PREFILL_HELP_DEBUG");
++        return e != nullptr && std::atoi(e) != 0;
++    }();
++    auto no_helper = [&](const char* why) {
++        if (help_dbg_setup) std::fprintf(stderr, "strata prefill help: no helper: %s\n", why);
++        return true;
++    };
++    if (helper == nullptr || helper == this || !split_help_env())
++        return no_helper(helper == nullptr ? "no next stage" : helper == this ? "the stage is its own helper"
++                                                         : "STRATA_PREFILL_HELP is off (env or flag file)");
+     const Impl& h = *helper->impl_;
+-    if (m.device < 0 || h.device < 0 || h.device == m.device || !mmq_plan().any) return true;
++    if (m.device < 0 || h.device < 0 || h.device == m.device)
++        return no_helper("the two prompt paths are on one device (or none)");
++    if (!mmq_plan().any) return no_helper("mmq_plan().any is false for this pack");
+     auto pp = std::make_unique<PeerPrefill>();
+     pp->peer = nullptr;   // stream-only: it holds no experts, it streams a share of this stage's
+     pp->compact = true;
+@@ -1957,13 +1976,34 @@
  // (that stage idles until this one hands its rows over).  False when it cannot help this prompt.
  bool Prefill::bind_stage_helper(int64_t T) {
      Impl& m = *impl_;
