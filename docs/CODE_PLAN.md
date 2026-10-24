@@ -511,3 +511,32 @@ MMQ/dp4a 只是在**读它们**；读的效率取决于每次取多少个矩阵�
   （`include/strata/kernels/s2_expert_grouped.hpp:72`，0.2.2 树就有）：造 40 个专家 × 4 token 的 slot 表，
   循环计时，量出这条命中内核的 **GB/s 与占比**。它把"44% 峰值"从一个算术推断变成实测，
   也是将来搬 0.2.4.x 成对内核时的**同机基线**。注意：与生产同卡跑，只申请 ~80 MiB；若显存不够就直接报错退出，不影响服务。
+
+
+---
+
+## 23. **实测推翻了第 20/21 节的成本模型**：专家命中内核已经在满带宽，杠子其实在 CPU 池（2026-10-24 夜）
+
+`STRATA_DECODE_TIMING=1` 一次请求的实测（T≈2.05、1.90 token/窗口，30.09 ms/窗口）：
+
+```
+verify 25.09 = GPU-reach wait 9.29 + per-layer host 2.22 [plan 0.17 actq 0.10 jobs 0.02 CPU 2.62] + stage 1.47
+per layer-window: CPU experts 0.52 (0.61 entries), VRAM hits 19.83, PCIe 0.03
+strata decode GPU stages (ms/window, stage 0):
+  GDN q8+qkv 0.75 conv 0.07 ab 0.12 z 0.56 rec 0.24 out-proj 0.76 router 0.34 shared+quant 0.57
+  waitA 0.53 | VRAM hits 1.52 | waitB 0.14 | PCIe grp 0.12 | waitCPU 1.56 | copy 0.16 (gap 0.02)
+  hc0 norm 0.29 down 0.36 up 0.38
+```
+
+**两条硬读数**：
+
+1. **`VRAM hits` 只占 1.52 ms/窗口 → 0.063 ms/层**。每层每窗口 19.83 个命中、每专家 ≈1.96 MB（Q4）→
+   39 MB / 0.063 ms ≈ **620 GB/s ≈ HBM 峰值**。**专家命中内核已经跑到满带宽了** ——
+   第 20/21 节按"40 个不同专家、0.29 ms/层"算出的 44% 是**错的**（真实是 ~20 个不同专家、0.063 ms/层）。
+   **所以"改内核拿 +50%"这条路不存在**，我把结论改正。
+2. **`waitCPU` 1.56 ms/窗口（stage 0）+ waitA 0.53 + waitB 0.14** —— GPU 有空等，等的是 **CPU 池**。
+   这就是"等 GPU 9.29 ms"之外唯一一块可动的空闲：CPU 池的每窗口延迟。
+
+**修正后的下一阶段**：靶子从"专家内核"改成 **CPU 池延迟**（`--pcie-frac` 决定多少专家交给 CPU；
+当前 0.31）。可能的动作：池的线程/亲和性、每层 CPU 专家数、池与 GPU 的重叠。判据：`waitCPU` 从 1.56 降到 <0.5 ms/窗口，
+且 decode 配对 ≥5%。**这条需要新的同 boot A/B**，下一轮做。
