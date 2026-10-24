@@ -5,6 +5,7 @@
 # each arm is a restart.  This driver keeps the snapshot/restore/`cmp -s`/gate boilerplate in one place and takes the
 # env keys on the command line, so a switch is one line to test and the log names it.
 #
+# MEASURE=ttft switches the arm from bench-strata (decode) to turn-ttft (time to first token).
 # Usage: exp-env-ab.sh <label> [reps] KEY=VAL|cg:KEY=VAL [KEY=VAL ...]   ("cfg:key=value" for a top-level key)
 #   e.g. exp-env-ab.sh hc-fuse 3 STRATA_QFUSE=1 STRATA_HC_UPMIX=1
 #        exp-env-ab.sh split25 3 cfg:layer_split=25
@@ -28,8 +29,13 @@ say() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$OUT"; }
 
 arm() {
   local tag=$1
-  say "--- bench-strata $tag ($REPS reps) ---"
-  python3 "$BIN/bench-strata.py" "$tag" "$REPS" >>"$OUT" 2>&1
+  if [ "${MEASURE:-bench}" = "ttft" ]; then
+    say "--- turn-ttft $tag (sizes 300,3000 x2 @45k, DSH shape) ---"
+    python3 "$BIN/turn-ttft.py" "$tag" 300,3000 2 45000 300 >>"$OUT" 2>&1
+  else
+    say "--- bench-strata $tag ($REPS reps) ---"
+    python3 "$BIN/bench-strata.py" "$tag" "$REPS" >>"$OUT" 2>&1
+  fi
   say "--- quality gate $tag ---"
   python3 - "$GATE" "$tag" <<'PY' | tee -a "$OUT"
 import hashlib, json, sys, urllib.request
