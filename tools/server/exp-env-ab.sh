@@ -7,6 +7,7 @@
 #
 # MEASURE=ttft switches the arm from bench-strata (decode) to turn-ttft (time to first token).
 # Usage: exp-env-ab.sh <label> [reps] KEY=VAL|cg:KEY=VAL [KEY=VAL ...]   ("cfg:key=value" for a top-level key)
+#   MEASURE=ttft with SIZES=300,4500 TTFT_REPS=3 picks the prompt sizes (default 300,3000 x2).
 #   e.g. exp-env-ab.sh hc-fuse 3 STRATA_QFUSE=1 STRATA_HC_UPMIX=1
 #        exp-env-ab.sh pipewin 3 "arg:--pipeline-windows=2"
 #        exp-env-ab.sh split25 3 cfg:layer_split=25
@@ -31,8 +32,10 @@ say() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$OUT"; }
 arm() {
   local tag=$1
   if [ "${MEASURE:-bench}" = "ttft" ]; then
-    say "--- turn-ttft $tag (sizes 300,3000 x2 @45k, DSH shape) ---"
-    python3 "$BIN/turn-ttft.py" "$tag" 300,3000 2 45000 300 >>"$OUT" 2>&1
+    say "--- turn-ttft $tag (sizes ${SIZES:-300,3000} x${TTFT_REPS:-2} @45k, DSH shape) ---"
+    # the tag must name the experiment: turn-ttft appends to ONE jsonl, so a bare "A"/"B" makes every run's
+    # rows indistinguishable afterwards (found 2026-10-24: seven runs, all tagged A/B)
+    python3 "$BIN/turn-ttft.py" "$LABEL-$tag" "${SIZES:-300,3000}" "${TTFT_REPS:-2}" 45000 300 >>"$OUT" 2>&1
   else
     say "--- bench-strata $tag ($REPS reps) ---"
     python3 "$BIN/bench-strata.py" "$tag" "$REPS" >>"$OUT" 2>&1
