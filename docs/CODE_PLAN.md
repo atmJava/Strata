@@ -263,21 +263,24 @@ TP 在这台机器上只值 +3%（L-033）说明它不是"算力协作"的钥匙
 - **仍未知**：`--prefill-pipe 0` 时为什么有时进、有时不进（2.3k/4.5k/6.8k 后来都没进）。**下一步只需一个探针**
   （在 `single_chunk` 计算处打印 `n/cap/single_chunk`），不是猜。
 
-## 12. 通宵计划（执行只看这一节）
+## 12. 通宵计划 v3.1（执行只看这一节；已按 2026-10-24 夜评审改过）
 
-原则：**每项先写判据与止损，再动手；一次只跑一个安装器；每轮 ≤2 次重启；改动默认关、逐位不变、可回滚。**
+**评审改掉了三件事**（都接受）：R1 的探针基本是重复劳动（pipe=1 时 `planned_C = pipeline_chunk(n) < n` → `single_chunk=false`
+已经解释了“不进 helper”；pipe=0 时 6.8k 的 10 条 `declined` 已经证明“进得去”）；R4 的“去重”前提错（gate/up 与 down 是两组不同
+字节，不是重复）；R3“0 改动按窗口统计”做不到（现有计数器是每请求累计，必须加打印）。**顺序按评审改成：先判 helper 生死，
+再把预算给“字节的暴露度”。**
 
-| # | 任务 | 类型 | 重启 | 判据 / 止损 | 回滚 |
-|---|---|---|---|---|---|
-| **R1** | `single_chunk` 探针：在 `prefill.cpp` 计算 `single_chunk` 处打印 `n, cap, single_chunk, stages, pipe`（默认关，`STRATA_PREFILL_HELP_DEBUG=1` 才打） | 代码（只加日志） | 1 | 能解释“为什么 6.8k 进来过一次”，并给出**稳定**复现条件的结论；≥2 组不同 n 有记录 | 恢复 `prefill.cpp.bak-help` |
-| **R2** | 用 R1 的结论决定 helper 是否值得继续：若只有 ≤cap 的请求能帮，且 cap 随 VRAM 缩，则**关线**，把预算给 R3 | 决策 | 0 | 若“能帮到的提示词占比 <20% 的时间” → 关线（写进 §6 不做清单） | — |
-| **R3** | **每轮 3.9 GB 主机字节的来路**：用 `--stage-timing`/`STRATA_*_TIMING` 把“专家流 / KV 流 / 权重驻留”分开，按窗口统计；目标是找出**可去重**的部分（同一专家的 gate/up 与 down 是否各搬一次） | 测量（0 改动） | 0 | 若去重能省 ≥30% 字节 → 写 R4；否则转 R5 | — |
-| **R4** | **字节去重/预取**：只对“同一请求内已被读过的专家 blob”做一次去重（或按路由频次排序的预取），默认关 | 代码（内核/缓存） | 2（A/B） | 同 boot flag 交替，每臂 ≥3 提示词配对，TTFT 中位 −5% 才采纳；逐位门 `parity_window.py` 必过 | 去掉 flag＝回到今天的行为 |
-| **R5** | **结构性线索**：相图 36% 不在表里、`waitA` 1.54 ms/窗口。用一次 `nsys` 或 `STRATA_*_TIMING` 判是不是“48 层×4 路小内核串行”；若是，评估 graph/层内合并的原型 | 测量 → 可能代码 | 0→2 | 先出“时间去哪了”的表；没有 ≥5% 的候选就不写代码 | — |
-| **R6** | **收尾**：恢复生产（`restore-prod.sh`），验 `md5` 一致的配置、`NRestarts=0`、`/health`、16 env；把今晚的数字写进 `HANDOVER.md` 与 `EVIDENCE_LEDGER.md` | 运维 | 1 | 生产与 `strata-022.prod.json` byte-identical；`verify-running-config.sh` 的 VERDICT 行 | 已提交的文档就是回滚点 |
+| # | 任务 | 重启 | 判据 / 止损 | 回滚 |
+|---|---|---|---|---|
+| **S1** | **helper 生死判决**：配置 = 生产 + `--prefill-pipe 0` + `STRATA_PREFILL_HELP=1`、`STRATA_PREFILL_HELP_FRAC=0.4`（**用 env 绕开 flag 文件的疑问**）、`STRATA_PREFILL_HELP_DEBUG=1`；发一条 6.8k 提示词 | 1 | 日志出现 `peer GPU … computes its experts' rows` **且** `peer-streamed experts > 0` → 活；只有 `declined …` → 记下那道门，**关线**（进 §6 不做清单） | 已有 `prefill.cpp.bak-help`；配置用 `restore-prod.sh` |
+| **S2** | 若 S1 活：同 boot 用 **flag 文件**交替（`prefill_help_frac` 0 / 0.4），3 轮、每臂 2 条提示词，**配对差**判定 | 0 | 配对中位差 ≥5% 且符号检验 p<0.1 → 采纳；否则"不可分辨"，关线 | flag 置 0 |
+| **S3** | **字节的暴露度**（比去重更可能有效）：给 `prefill.cpp` 加**每窗口**的 host 字节与等待打印（默认关），把 3.9 GB/轮 分成"被计算遮住的"与"真等待的" | 1 | 若 `host staging` 与 `waitA` 显示等待占比 >30% → 写 S4；<10% → 结论"字节不是瓶颈"，转 S5 | 去掉打印 |
+| **S4** | **预取深度 / 两卡各自的 H2D**：把专家预取提前一层（或按 stage 拆一条 prefetch 流），默认关、逐位不变 | 2（A/B） | 同 boot 配对 TTFT −5% 才采纳；`parity_window.py` 必过 | flag 关＝回到今天 |
+| **S5** | **结构性线索**：相图 36% 不在表里、`waitA` 1.54 ms/窗口 → 判是不是"48 层 × 4 路小内核串行"。`nsys` 要停服务、自己拉起（评审指出：不是 0 重启，是 2 次） | 2（或跳过） | 先出"时间去哪了"的表；没有 ≥5% 的候选就不写代码 | — |
+| **S6** | **收尾**：`restore-prod.sh`，验 `md5sum strata-022.json` 与 `strata-022.prod.json` 相同、`NRestarts=0`、`/health`、16 env；数字进 `HANDOVER.md` / `EVIDENCE_LEDGER.md` | 1 | `verify-running-config.sh` 的 VERDICT 行 + md5 相同 | 文档已提交 |
 
-**今晚不做的**：IMMA decode（F1/F2 已否）；对卡专家缓存（容量受限，判据是每窗口 miss <30 MB 即关线）；
-改 `--prefill-pipe`/`layer_split`/`--pipeline-windows` 这类已被实测否决的开关。
+**今晚不做的**：IMMA decode（F1/F2 已否）；对卡专家缓存（容量受限）；`--prefill-pipe`/`layer_split`/`--pipeline-windows`
+这类已被实测否决的开关；KV 流（命中 79.6%，读 RAM 仅 0.5 MiB，已到底）。
 
 ## 13. 无人值守规则（今晚额外加的四条）
 
@@ -285,3 +288,7 @@ TP 在这台机器上只值 +3%（L-033）说明它不是"算力协作"的钥匙
 2. **部署后验文件**：`md5sum` + `strings | grep <新字符串>` 对**部署路径**做，不对构建产物做。
 3. **一个安装器**：动手前 `pgrep -af "[u]se-config|[r]estore-prod|[f]lag-ab|[e]xp-env-ab"` 必须为空。
 4. **每轮结束必须留证据**：日志路径、脚本名、命令、以及“没测什么”。没有证据的轮次按未发生处理。
+5. **每轮开头与结尾各跑一次** `verify-running-config.sh` 并记 `md5sum strata-022.json`；两次不一致，该轮**作废**。
+6. **不碰生产三件套**：`build/strata`、`strata-022.json`、`strata.service`。实验二进制只进 `/opt/ai/engines/<名字>/build/`，
+   收尾必须 `restore-prod.sh` + md5 相同 + `NRestarts=0`。
+7. **每轮记协变量**：`nvidia-smi --query-gpu=index,temperature.gpu,clocks_throttle_reasons.active`（长跑降频会被误读成代码效应）。
