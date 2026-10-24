@@ -292,3 +292,28 @@ TP 在这台机器上只值 +3%（L-033）说明它不是"算力协作"的钥匙
 6. **不碰生产三件套**：`build/strata`、`strata-022.json`、`strata.service`。实验二进制只进 `/opt/ai/engines/<名字>/build/`，
    收尾必须 `restore-prod.sh` + md5 相同 + `NRestarts=0`。
 7. **每轮记协变量**：`nvidia-smi --query-gpu=index,temperature.gpu,clocks_throttle_reasons.active`（长跑降频会被误读成代码效应）。
+
+
+---
+
+## 14. S1/S2 结果（2026-10-24 夜，实测，同 boot 配对）
+
+**S1：helper 活了。** 之前两次失败的真正原因是我自己的 flag 文件：`split_help_env()` 让**文件优先于 env**，
+而文件里写着 `prefill_help=0` → 启动时被自己的开关关掉；`--prefill-pipe 1` 时真实请求又不进 `bind_stage_helper`
+（`planned_C = pipeline_chunk(n) < n` → `single_chunk=false`）。两个条件缺一不可：
+**`--prefill-pipe 0` + `prefill_help=1`**。这一版启动后 `set_stage_helper` 两个 stage 都成功，
+6.8k 提示词的 `chunk decision` 显示 `single_chunk=1`、没有任何 `declined` 行 → 真的把行分给了对端。
+
+**S2：同 boot 配对 A/B（flag 文件交替 `prefill_help_frac` 0 ↔ 0.4，每臂 2 条、共 3 轮）**
+
+| 每轮新增 | 配对差中位 | B（helper）胜 | 判定 |
+|---|---|---|---|
+| 1,500（2 轮合并 4/4） | **−3.0% / −3.9%** | 4/4 | 方向一致，但 **<5% → 不可分辨** |
+| 4,500（3 轮） | **+4.8% / +18.9% / +8.1%**（中位 ≈ +8%） | **0/6** | helper **更慢** |
+
+**结论**：helper 在 1.5k 上略快（与上游 3090 表一致），在 4.5k 上稳定更慢（也与表的"~4K 以上 none 更好"一致）。
+我们的实际负载是 4.5k+ 新增 token → **这条线关闭**，`prefill_help` 保持关。
+**但它顺带证明了两件可复用的事**：① `--prefill-pipe 0` 是 helper 能被问到的前提；② **运行时 flag 文件真的生效**
+（A 臂出现 `declined … share is 0`、B 臂没有），A2 的工装可用 —— 以后所有 env 型开关都能同 boot 交替。
+
+**教训（写进 RULES §9 的第 5 条）**：给开关加"文件优先于 env"的覆盖时，必须同时接受"文件会覆盖我自己的 env"。
