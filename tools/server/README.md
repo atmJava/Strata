@@ -7,6 +7,9 @@ the two are compared with `ops-check-tool-sync.sh`.
 
 ## Conventions
 
+Before changing a script or writing a new one, read [`../../docs/RULES.md`](../../docs/RULES.md) §3–§4
+(source check first, resources and error paths, probes off by default, upstream style).
+
 1. **One home, one deploy step.** Edit here, then `scp` to `/opt/ai/bin/` and `chmod 755`. After any change run
    `ops-check-tool-sync.sh` from the repository: it lists every file whose git and deployed copies differ.
 2. **New files carry a role prefix.** `ops-` changes the box (deploy, restart, restore, verify), `exp-` is an

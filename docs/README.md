@@ -1,12 +1,13 @@
 # 文档地图（先看这张表，再决定读哪一份）
 
-**唯一的接手入口是 [`HANDOVER.md`](HANDOVER.md)**；数字与证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)
-（顶部有 34 条判决索引）。其余文档按下面的状态读——**标"历史/存档"的不要当现状**。
+**先读 [`RULES.md`](RULES.md)（怎么干活），接手入口是 [`HANDOVER.md`](HANDOVER.md)**；数字与证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)
+（顶部有 35 条判决索引）。其余文档按下面的状态读——**标"历史/存档"的不要当现状**。
 
 | 文档 | 状态 | 用途 | 什么时候读 |
 |---|---|---|---|
+| [`RULES.md`](RULES.md) | **工作章程**（怎么干活，先读） | 决策权、每轮五步、写代码/证据/记录/停机规则 | 接手第一件事 |
 | [`HANDOVER.md`](HANDOVER.md) | **现行入口**（每轮更新） | 决策表、生产现状、坑、未决与下一轮 | 每次接手的第一份 |
-| [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) | **现行台账**（L-000…L-032） | 每条结论 + 原始日志路径 + 判决（采纳/否决/结论/参考） | 要数字、要判据、要"这条试过没有" |
+| [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) | **现行台账**（L-000…L-034） | 每条结论 + 原始日志路径 + 判决（采纳/否决/结论/参考） | 要数字、要判据、要"这条试过没有" |
 | [`../tools/server/README.md`](../tools/server/README.md) | **现行工装手册** | 每个脚本干什么、怎么部署、实验脚本的固定形状、构建 | 跑任何测量之前 |
 | [`SERVER_ADAPT_REQUIREMENTS.md`](SERVER_ADAPT_REQUIREMENTS.md) | 草案（2026-10-24） | 适配需求清单，§10 有 8 项待裁决 | 想知道"用户当初要什么" |
 | [`SERVER_HW.md`](SERVER_HW.md) | 背景，**部分过期** | 这台机器与这个 fork 的由来 | 只作背景；现状以 HANDOVER §4/§6 为准 |
