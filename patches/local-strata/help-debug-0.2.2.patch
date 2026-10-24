@@ -1,0 +1,41 @@
+--- /tmp/prefill-022.orig.cpp	2026-10-24 18:21:56.816720506 +0800
++++ /tmp/prefill-022.cpp	2026-10-24 18:21:56.074243722 +0800
+@@ -1957,13 +1957,34 @@
+ // (that stage idles until this one hands its rows over).  False when it cannot help this prompt.
+ bool Prefill::bind_stage_helper(int64_t T) {
+     Impl& m = *impl_;
+-    if (!m.help_pp || helper_ == nullptr || m.pp) return false;
++    // STRATA_PREFILL_HELP_DEBUG=1: name the gate that declined, once per token count.  A helper that never binds
++    // looks exactly like a helper that helps nothing from the outside - the 2026-10-24 10:07Z run wrote "no peer
++    // line" and cost four restarts guessing why.  Off by default: the default path is byte-identical.
++    static const bool help_dbg = [] {
++        const char* e = std::getenv("STRATA_PREFILL_HELP_DEBUG");
++        return e != nullptr && std::atoi(e) != 0;
++    }();
++    auto declined = [&](const char* why) {
++        if (help_dbg)
++            std::fprintf(stderr, "strata prefill help: declined for T=%lld: %s\n", (long long) T, why);
++        return false;
++    };
++    if (!m.help_pp || helper_ == nullptr || m.pp) return declined("not armed (help_pp, helper_, or m.pp)");
+     const double frac = split_help_frac(T);
+-    if (frac <= 0.0 || T < stream_all_min() || m.src == nullptr || m.ring <= STAGE || fused_ring()) return false;
++    if (frac <= 0.0) return declined("split_help_frac(T) is 0 - the share rule, set STRATA_PREFILL_HELP_FRAC");
++    if (T < stream_all_min()) return declined("T below STRATA_PREFILL_STREAM_MIN (the staged walk's floor)");
++    if (m.src == nullptr) return declined("m.src is null - no streamed expert source on this stage");
++    if (m.ring <= STAGE) return declined("the staging ring has no spare slots (m.ring <= STAGE)");
++    if (fused_ring()) return declined("fused_ring() - the fused prompt path owns the ring");
+     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
++    if (help_dbg && !mmq_plan().any)
++        std::fprintf(stderr, "strata prefill help: mmq_plan().any is false for this pack\n");
+     for (int64_t l = stage_lb_; l < stage_le_; ++l) {
+-        if (!(mmq_plan().any && mmq_plan().layer[(size_t) l])) return false;   // the peer computes on MMQ only
+-        if (lay.native && fused::native_supported(lay.fmt[(size_t) l].gu_type, lay.fmt[(size_t) l].d_type)) return false;
++        // the peer computes on MMQ only
++        if (!(mmq_plan().any && mmq_plan().layer[(size_t) l]))
++            return declined((std::string("layer ") + std::to_string((long long) l) + " is not on MMQ").c_str());
++        if (lay.native && fused::native_supported(lay.fmt[(size_t) l].gu_type, lay.fmt[(size_t) l].d_type))
++            return declined((std::string("layer ") + std::to_string((long long) l) + " is natively fused").c_str());
+     }
+     Impl& h = *helper_->impl_;
+     // the helper's buffers must be laid out for this chunk (the serve path lends every stage's at once)
