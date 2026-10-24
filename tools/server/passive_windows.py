@@ -14,7 +14,7 @@ real traffic - including the two numbers the L-011 bench did not report:
     the thinking ate the whole window).
 
 It also reports the expert-cache hit rate and the per-request decode rate, so a window can be
-judged on the same columns as hitrate_before_after.py, plus how big the traffic was (prompt tokens
+judged on the same columns as hitrate_before_after.py (its legacy predecessor, in this folder), plus how big the traffic was (prompt tokens
 read per request), because a window of 300-token prompts and a window of 100K prompts are not the
 same workload and the difference is not controlled here.
 

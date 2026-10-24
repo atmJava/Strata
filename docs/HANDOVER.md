@@ -1,20 +1,24 @@
-# 交接 · Strata 服务器适配（2026-10-24 10:1x CST / 02:1x UTC 第二次交接）
+# 交接 · Strata 服务器适配（持续更新的唯一入口）
 
-写给一个**完全没有上下文的新会话**。目标是让你读完这一份就能接手，不用重问用户、不用重新试探机器。
-细节不在这里展开，本文只给"现在是什么、为什么、下一步做什么、什么不能碰"。
-**上一份（09:30 CST）的正文仍然有效，凡是与本页冲突的地方以本页为准**；被推翻的条目都写在 §10 与 §14。
+> 这份文件是接手入口：**先读它**，需要数字时按 `docs/EVIDENCE_LEDGER.md` 顶部的判决索引跳条目。
+> 文档地图：[`docs/README.md`](README.md)（哪些现行、哪些是历史存档）。工装手册：[`tools/server/README.md`](../tools/server/README.md)。
+> 最后更新：2026-10-24 06:45 UTC（文档与工装规范化那一轮）。
 
-## 0. 先读哪几份（都在本仓库 `docs/`）
 
-| 文件 | 干什么用 |
-|---|---|
-| `docs/SERVER_HW.md` | 这台机器的**事实页**：硬件、生产配置、所有测过的数字与出处 |
-| `docs/SERVER_RECOVERY.md` | **出事怎么办**：重启、回退、判据工装自己会骗人的地方 |
-| `docs/EVIDENCE_LEDGER.md` | **台账 L-000…L-011**：每条结论的原始日志路径、判据、没测的部分 |
-| `docs/UPSTREAM_DRAFTS.md` | 待发上游的评论草稿（**A/B 已写好未发，等用户批**） |
-| `docs/SERVER_ADAPT_REQUIREMENTS.md` | 当初把用户想法整理成需求的那份（方向变了，看 §10 决定区） |
+## 0. 十分钟接手
+
+1. **读这一页**：§3 的决策表（现在生产是什么、为什么、怎么回滚）、§6 的生产现状（PID、配置、最近重启）。
+2. **看下一轮做什么**：§13 顶部的"下一轮先做"。
+3. **扫一遍 §9 的坑**：每一条都真踩过并付过代价，重踩等于白烧重启。
+4. **要动任何数值**：先看 §2 的规矩；工装清单和"怎么加一个实验脚本"在 `tools/server/README.md`。
+5. **动生产只有一条路**：`use-config.sh <config.json>`（快照 → 校验 → 安装 → 等 PID 变化 → 等 `/health "loaded": true`，
+   每次约 156 s）。它成对存在于 git 和 `/opt/ai/bin`；改完用 `tools/server/ops-check-tool-sync.sh` 对齐两边。
+6. 当前生产的一切都在 §3 表里，**不在表里的东西不要假设它在生产里跑**。
+
+---
 
 ## 1. 任务与硬规则（用户原话立下的，不可省略）
+
 
 **目标**：在 `192.168.3.14` 上把 Strata 推理服务做出**可验证**的性能提升。
 **首要指标**：真实 agent 任务的完成墙钟（含思考 token 数、**空答案率**、工具调用通过率）；
@@ -23,21 +27,68 @@
 1. **兼容上游 `Niko1221/Strata`**：`main` 只 fast-forward；一分支一改动；默认路径字节一致、新行为 opt-in；
    动手前先查上游 issue/PR，撞车就跟、不重复做。
    **2026-10-24 用户加了硬规矩：上游只读——不回帖、不开 PR、不提交任何东西。** 此前发过的三条评论
-   **已按此令删除**（§9）；写好的英文正文只作为台账留档放在 `docs/UPSTREAM_DRAFTS.md`，不再发布。
+   **已按此令删除**（§11）；写好的英文正文只作为台账留档放在 `docs/UPSTREAM_DRAFTS.md`，不再发布。
 2. **判据**：同 boot A-B-A 或交错、**每臂 ≥3 次**、中位+sd、**<3% 不算结论**；改数值要过逐位门或质量门；
    每个实验落一条能追到原始日志的台账。**读代码得到的结论必须标"静态阅读，未测"**。
 3. **不许提交自己没做过的测量**（CONTRIBUTING.md 明写）。外部网站只读不压测；GitHub API 节制。
 4. **每轮结束复盘**：cron/timer 是否在跑、有无残留进程、读 `/opt/ai/logs/vram-perf.csv` 看漂移、更新方向。
-5. 用户要"每一轮都做复盘、自我调整、不要把自己玩死了"——**这条是方法论，不是口号**，见 §4。
+5. 用户要"每一轮都做复盘、自我调整、不要把自己玩死了"——**这条是方法论，不是口号**，见 §2。
 6. **停机 >2 分钟**：原来要先问用户，**2026-10-24 用户把决定权交给我**（原话"你可以自己做决策，不要问我"）。
    仍然要守：低峰时段做、先备份配置（`use-config.sh` 自带备份）、测完恢复原状态、台账写清停了多久。
 
-## 2. 访问方式与密钥（都已在用，别重新试）
+
+## 2. 判据与实验规则（不遵守的结论不要写进台账）
+
+- **判据优先级**（用户定的）：① 真实 agent 任务的完成墙钟（`GET /api/requests` 的 `wallclock_s` / `first_token_s`，
+  含思考 token 数、空答案率、工具调用通过率）> ② 4 路聚合 decode 与 TTFT p50/p90 > ③ 单流 tok/s（最低，别拿它当理由）。
+- **实验形态**：同 boot A-B-A 或交错；每臂 ≥3 次；报中位数与离散度。**<3% 不算结论**；跨 boot 比"小读/首字"这类
+  小量时按 **~7%** 看待（L-031 实测同形状三臂跨度 1,023–1,097 ms）。
+- **改数值**：过逐位门（`tools/server/parity_window.py`）或质量门（`quality_eval.py` / `agent_budget_ab.py`）。
+- **只读代码得到的结论**一律标 *静态阅读，未测*。
+- **绝不提交没做过的测量**；每条台账条目必须写原始日志路径与脚本名。
+- **停机**（>2 min）决定权在自己：低峰跑、先 `cp -p` 快照配置、测完逐字节恢复并用 `cmp -s` 验证、台账写清停了多久。
+- **本会话与子代理的 token 都由这台机器生成**（§7）：有别的流在跑就别测速度。
+- **外部站点只读不压测**；GitHub API 节制；上游只读（§11）。
+
+---
+
+
+## 3. 已定案：一页决策表
+
+生产 = `strata-022.json`（`exe=build/strata`，54 个 args，`parallel: 4`，`--max-context 256000`）。
+**回滚一律是"装回上一份快照"**：`use-config.sh /opt/ai/tmp/<snapshot>.json`（每次实验前 `cp -p` 存一份）。
+
+| 决定 | 证据 | 状态 |
+|---|---|---|
+| `STRATA_EXP_MODE=8` 进生产 | L-011（单流 decode +8%，质量门过；L-012 被动窗口确认） | **在生产**（env） |
+| `STRATA_PIPED_CONCURRENT=1` 保持开 | L-019（读的人 +21.6%，邻居停顿 11.6 → 0.70 s）、L-020（3 流时 +44.5%，邻居 22–23 倍） | **在生产**（env） |
+| `api_monitor: true` 保持开 | L-021（开销测不出；真实流量首个 TTFT 中位 0.80 s） | **在生产**（config） |
+| `--vram-reserve-mib 1280`（原 960） | L-001 判决（保留，不回退） | **在生产**（args） |
+| `--kv int8`、`--kv-resident 32768`、`--conversation-cache-*`、`--prompt-cache 3`、`--spec 8`、`--pcie-frac 0.31`、`--batch 4` / `--batch-groups 2` | 基线形态（L-000），后续实验都在这套形态上做 | **在生产**（args，别单独改） |
+| #3724（llama.cpp #30553）backport | L-016 静态判定：本机只有一部分路径走到，收益噪声级 | **否决**（不花重编译） |
+| 思考预算默认改 `medium` | L-023：agent 形态测不出差别，且我们的客户端自己发 `high` | **否决** |
+| MMQ tab 构建 + `STRATA_MMQ_DIRECT=1` | L-031：开关生效（48/48 层），端到端 −2.7%/−0.6%/−0.1%，对同二进制关着的那臂还慢 +4.3% | **否决**（`build-mmqtab/` 留盘备用） |
+| `--conversation-cache-park-gain` | L-032：parking 是每次会话切换 350 ms（1–2%），且该旋钮在此形状下没跳过它 | **否决** |
+| read-ahead / 服务端先发后挂 | L-022/L-024/L-025：位置在 `pick_slot`，无"少准入"旋钮，中等工程；真实流量很少撞满槽 | **未做**（降级，见 §13） |
+
+---
+
+## 4. 这台机器的形状
+
+
+E5-2680 v4（14c/28t，**只有 AVX2**）、62 GiB 内存、**2× RTX 2080 Ti 22528 MiB / sm_75**、
+NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0。
+服务：`strata.service` → `/opt/ai/src/strata-0.2.2/run-022.sh` → **自建引擎 0.1.47**（上游现在 0.1.48）。
+引擎日志 `/opt/ai/src/strata-0.2.2/strata-022.log`（**logrotate 每天 00:00 转成 `.log.1`**）；
+服务日志 `/opt/ai/logs/strata-service.log`。GPU0 稳态负载下 ~70–78 ℃、空载 ~62 ℃（**负载驱动，正常**）。
+
+## 5. 访问方式与密钥（都已在用，别重新试）
+
 
 - **服务器**：`atm@192.168.3.14`（主机名 `ubuntu-server`），**密码只在会话里，没有写进这份文档**；
   **sudo 密码与登录密码是同一个**。本 DSH 的 ed25519 公钥已装到该账号 →
   **`ssh -o BatchMode=yes atm@192.168.3.14` 免密可用**（不需要密码就能干活）。
-  需要 root 时：`echo <密码> | sudo -S <cmd>`（**不要把 stderr 丢到 /dev/null**，见 §7）。
+  需要 root 时：`echo <密码> | sudo -S <cmd>`（**不要把 stderr 丢到 /dev/null**，见 §9）。
 - **API**：`http://192.168.3.14:8080`，`Authorization: Bearer 111`（`api_key` 就是字符串 `111`）。
   没带 key 会 401；很多 `/opt/ai/bin` 下的老脚本**早于 API key**，会静默给 0 分。
 - **GitHub token**（账号 `atmJava`，fork 源）：2026-10-24 上午用户换发了新串（`ghp_…` 开头），
@@ -52,37 +103,17 @@
 - **本机仓库**：`/home/kali/IdeaProjects/strata`（kali，i7-8550U，**没有 NVIDIA 卡**）→
   **本机不能复现任何测量**，所有数字只能来自服务器。
 
-## 3. 这台机器的形状
+## 6. 生产现状与运维纪律
 
-E5-2680 v4（14c/28t，**只有 AVX2**）、62 GiB 内存、**2× RTX 2080 Ti 22528 MiB / sm_75**、
-NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0。
-服务：`strata.service` → `/opt/ai/src/strata-0.2.2/run-022.sh` → **自建引擎 0.1.47**（上游现在 0.1.48）。
-引擎日志 `/opt/ai/src/strata-0.2.2/strata-022.log`（**logrotate 每天 00:00 转成 `.log.1`**）；
-服务日志 `/opt/ai/logs/strata-service.log`。GPU0 稳态负载下 ~70–78 ℃、空载 ~62 ℃（**负载驱动，正常**）。
-
-## 4. 最特殊的一条：这个会话的 token 就是这台机器生成的
-
-**本 DSH 会话的 token 来自 `192.168.3.14:8080`**（服务日志里有本会话的 tool call 行）。推论，都是实测：
-
-- **重启 = 冷加载约 165 s 不可用**；紧接重启的第二次只要 **~75 s**（模型还在 page cache）。
-- **任何并发都把单流腰斩**：我一边生成一边跑基准，两边数据都脏（实测过：rep 间总时长 53→111 s 乱摆）。
-- **不自杀的跑法**（用过两次，有效）：`bash` 工具 `run_in_background: true` 发起 →
-  立刻 `job_output wait: true` 阻塞等 → **等待期间我不生成**，墙钟那一列就干净。
-  发起那一步是唯一污染。
-- 重启期间我自己在续行 → 请求会失败；所以**重启要放在后台任务里**，脚本最后一步自己装回生产配置
-  （万一会话断了，机器停在正确状态）。
-
-## 5. 生产现状（2026-10-24 03:4x UTC 重新核实）
-
-**今天为 gate 的开/关实验、打开请求监视器、效果 A-B-A、trace 实验、prefill 相图和 MMQ tab A-B-A 一共重启 20 次**
-（引擎会话 03:11:00、03:15:25、03:29:11、03:34:17、03:53:15、03:57:17、04:12:08、04:59:41、05:02:30、05:07:13、05:10:53、
-05:31:12、05:38:40、05:50:43（MMQ 臂，因检测坑白起一次）、05:52:47、05:58:35、06:02:54、06:07:07 UTC，合计 ~2,700 s 冷加载），
-所以现在：`active`、`NRestarts=0`、MainPID **147049**（06:23:21Z 起）、引擎子进程 **147064**、exe 是 `build/strata`、
-env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
-**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **06:23:21Z 这个会话**重新攒（§11 第 4 条）。
+**今天一共重启 20 次**（引擎会话 03:11:00、03:15:25、03:29:11、03:34:17、03:53:15、03:57:17、04:12:08、04:59:41、
+05:02:30、05:07:13、05:10:53、05:31:12、05:38:40、05:50:43（MMQ 臂，因路径坑白起一次）、05:52:47、05:58:42、06:03:01、
+06:07:15、06:16:09、06:20:16 UTC；合计约 3,100 s 冷加载）。所以现在：`active`、`NRestarts=0`、
+MainPID **147049**（服务进程 06:20:13Z 起）、引擎子进程 **147064**（06:20:15Z 起）、vision **147059**；
+`exe` 是 `build/strata`，env 里**没有** `STRATA_MMQ_DIRECT`、args 里**没有** `--conversation-cache-park-gain`
+（见 §9 第 13 条）。空闲显存 **856 / 954 MiB**（06:30Z 的 CSV 行，两张卡各 21.1 / 22.5 GiB used），`.warn` 未触发。
+**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **06:20:16Z 这个会话**重新攒（§13 第 4 条）。
 在**引擎子进程**的 `/proc/<pid>/environ` 里核实了 **15 个 `STRATA_*` 变量**，其中三条关键：
 **`STRATA_SM75_PERF=1`**、**`STRATA_EXP_MODE=8`**、**`STRATA_PIPED_CONCURRENT=1`**（开/关今天实测过，**L-019**）。
-空闲显存 814/906（03:45Z 的 CSV 行）、`.warn` 未触发。
 配置 `/opt/ai/src/strata-0.2.2/strata-022.json`：`args` 是 **54 个字符串**的列表（含
 `--resident-experts --expert-cache auto --spec 8 --mtp-max-t 4 --max-context 256000 --kv int8
 --kv-resident 32768 --conversation-cache-mib 12288 --vram-reserve-mib 1280 --vram-reserve-later-mib 1435
@@ -106,15 +137,29 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
 配置快照与历史：`strata-022.prod.json`（= 当前 mode 8）、`.pre-mode8-1911`、`.pre-L001-0509`；
 每次安装自动留 `strata-022.json.<时间戳>`，另有 `pre-reserve1280-170233`、`pre-key-args_43`。
 
-## 6. 已经确立的数字（细节与原始日志都在台账对应编号）
+## 7. 最特殊的一条：这个会话的 token 就是这台机器生成的
+
+
+**本 DSH 会话的 token 来自 `192.168.3.14:8080`**（服务日志里有本会话的 tool call 行）。推论，都是实测：
+
+- **重启 = 冷加载约 165 s 不可用**；紧接重启的第二次只要 **~75 s**（模型还在 page cache）。
+- **任何并发都把单流腰斩**：我一边生成一边跑基准，两边数据都脏（实测过：rep 间总时长 53→111 s 乱摆）。
+- **不自杀的跑法**（用过两次，有效）：`bash` 工具 `run_in_background: true` 发起 →
+  立刻 `job_output wait: true` 阻塞等 → **等待期间我不生成**，墙钟那一列就干净。
+  发起那一步是唯一污染。
+- 重启期间我自己在续行 → 请求会失败；所以**重启要放在后台任务里**，脚本最后一步自己装回生产配置
+  （万一会话断了，机器停在正确状态）。
+
+## 8. 已经确立的数字（细节与原始日志都在台账对应编号）
+
 
 | 结论 | 数字 | 编号 |
 |---|---|---|
 | 单流基线 / 4 路聚合 | 79.1 tok/s / 103–108 聚合 | L-000 区 |
 | `STRATA_SM75_PERF=1` | 冷 prefill **+7.2~7.6%**、43–43K **+6.0~7.8%**、4 路 **+4.1~7.5%**；T2 形态逐位 `aac0a04d109391fe`（9/10，一次"重启后首请求"分歧未复现） | L-002 区 |
-| S1 并发读补丁（**代码，已在生产二进制里**，见 L-013） | 127K 冷读 49.0/49.6 s → **58.2/58.5 s（读慢 19%）**，但邻居流 **0.3 → 19.7/20.3 tok/s**、最长卡顿 **49 s → 0.9 s**。**这条是 T2 门控配置里的数**（`parallel 1 --batch-groups 1 --pcie-frac 0 --spec 0`），**不是生产形态**；开关靠 env 不靠换二进制。**生产形态的开/关已于 2026-10-24 实测，见下一行与 L-019** | L-004/plan §7.9 + **L-013** |
+| S1 并发读补丁（**代码，已在生产二进制里**，见 L-013） | 127K 冷读 49.0/49.6 s → **58.2/58.5 s（读慢 19%）**，但邻居流 **0.3 → 19.7/20.3 tok/s**、最长卡顿 **49 s → 0.9 s**。**这条是 T2 门控配置里的数**（`parallel 1 --batch-groups 1 --pcie-frac 0 --spec 0`），**不是生产形态**；开关靠 env 不靠换二进制。**生产形态的开/关已于 2026-10-24 实测，见下一行与 L-019** | L-004/plan §9.9 + **L-013** |
 | **生产形态 gate 开/关（同一二进制，只换 `env.STRATA_PIPED_CONCURRENT`）** | 冷读（一条全新 ~22,700 token prompt）墙钟 ON **14.35 s** 对 OFF **11.8 s** → **读的人多等 21.6%**；旁边那条解码流在冷读窗口内 **47.0 对 2.0 字符/s**、最长 chunk 间隔 **0.70 s 对 11.64 s**；单流 73.0/74.4/74.2、4 路聚合 125.0/124.4/121.2、接受率 78.13/82.33/80.95% **三项都落在噪声里（无结论）** | **L-019** |
-| **流越多，gate 开着的账越划算（3 条流做了开/关，4 条只测了开着）** | 3 条流：读的人 17.2 对 11.9 s（**+44.5%**），每条邻居流 **28.3 对 1.3 字符/s**、停顿 **0.76 对 11.72 s**。4 条流（生产满配、只测开着）：读的人墙钟 21.4 s 而引擎只花 **11.3 s** → **大头是排队**；邻居每条 35.8–44.1 字符/s、间隔 ≤0.3 s。**引擎那行 "slots decoded N rows meanwhile" 不能当邻居进度用**（4 流时停在 4，见 §7 第 22 条） | **L-020** |
+| **流越多，gate 开着的账越划算（3 条流做了开/关，4 条只测了开着）** | 3 条流：读的人 17.2 对 11.9 s（**+44.5%**），每条邻居流 **28.3 对 1.3 字符/s**、停顿 **0.76 对 11.72 s**。4 条流（生产满配、只测开着）：读的人墙钟 21.4 s 而引擎只花 **11.3 s** → **大头是排队**；邻居每条 35.8–44.1 字符/s、间隔 ≤0.3 s。**引擎那行 "slots decoded N rows meanwhile" 不能当邻居进度用**（4 流时停在 4，见 §9 第 22 条） | **L-020** |
 | **请求监视器打开（`api_monitor`）+ 满槽时排队的机制钉死** | 开销**测不出**（bench 单流 73.8 / 聚合 120.2 / 接受率 79.81%，都在 L-019 三臂带内；`json.dumps` 800K 字符只 2.9 ms）。**满 4 槽时读的人先等空槽**：引擎三行日志的先后（46.3 s 的批次 → 读 14.8 s → `slot 0 takes 22702 tokens`）证明读是在批次收尾后才开始。**真实流量第一批**：墙钟中位 13.2 s、TTFT 中位 0.80 s / p90 2.46 s / 最长 83.82 s（n=34，本会话的 agent 请求） | **L-021** |
 | **effort `medium` 不设成默认** | agent 形态 A-B-A 3 轮（14 任务、temp 0、只有这一条流）：墙钟中位 **+0.4%**、completion token **+2.2%**、做对题数两臂中位都 14/14、畸形工具调用 0/9 → **全在 <3% 线内，测不出**；而且**我们自己的客户端显式发 `reasoning_effort: high`**（监视器存了我这条会话的请求体），服务端默认**轮不到**，改了只影响不写 effort 的第三方 | **L-023** |
 | **read-ahead 的改动点（静态阅读，未测）** | 引擎中途收新活（只排在飞的毫秒级窗口），读本身跑在自己线程上、最后才 42.6 ms 复制进槽；**唯一障碍是 `BGEN` 下命令那一刻就要有空槽**。改动 = 加一条不要槽的读命令（opt-in）。值：满槽时那条冷读的 **36–43 s**；代价：读改在 4 条流旁边跑（邻居今天已掉 35–60%，多一路掉多少**未测**） | **L-024** |
@@ -123,7 +168,7 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
 | **`STRATA_TRACE=1` 拆不到那 0.7 s（单流）** | 两臂（trace 开 / 关）的读时间逐档对得上（1,474/1,466、1,012/1,010、1,081/1,091、2,200/2,205、3,997/3,984 ms）→ **开 trace 的代价测不出**；但 `strata trace: admission` **一行都没打**，因为那条打印在**批量准入**里，而单流走的是 solo `GEN` 路径。**L-028 更正**：每步 trace 行单流也有（`read … (batched) in … ms` 等），只是没有 `admission` 那条——**别只 grep `admission`** | **L-027** |
 | **那 0.7–0.9 s 全在 `Prefill::run` 里面（实测拆段）** | 461 token 重读 = `read (batched)` **977 ms** + refill 74 + windows 42 + checkpoint 10 ≈ 引擎自报 1,012 ms；4,528 = 3,664 + 318 + 38；45,010 冷 = 19,213（6 个 7,680 chunk 流水）。**准入 drain 只有 0.2–0.3 ms、首 token windows 恒定 37–42 ms、refill 在读之后** → 都不是。**拟合 ≈788 + 0.409×token**（固定 0.79 s、线性段 2,443 tok/s；小段拟合 947 + 0.600×token → 越小越吃亏）。**与上下文长度无关** → "会话 K/V 要从 RAM 流回来"这条猜测**被实测否掉** | **L-028** |
 | **重发同一块 token 不变快 → 固定成本不是专家 staging** | `stage_repeat_probe.py`（45K 上下文，每对"唯一块 + 同样的块再来一次"，块实测 529 token）：唯一干净的一对 **1,226 → 1,246 ms（+1.6%，<3%）**；另两对一行被我自己会话的 200K 请求污染、一行 `read=1` 可疑，**已剔除**。限制：只有一对、两次读之间生成过 ~300 token（专家槽可能已换出）、探针靠 grep 共享日志取数 | **L-029** |
-| **那 1 s 的相图：成本在专家权重那几相，唯一能拿掉的是 stage 1 的 `wait copy`** | `STRATA_PREFILL_TIMING=1` 的 21 相记账（先量了工装自己的代价：**+2.5–8%**）。461 token：stage 0 GPU 370 ms（gate/up 111=30%、dequant 63=17%、down 52=14%、kv stage 26、gdn 23、attn 15）、stage 1 GPU 610 ms（**wait copy 185=30%**、down 119、dequant 107）。每 token 效率 461 vs 4,524：gate/up **2.75×**、dequant **6.8×**、down 2.8×、kv stage 9×，而 **qsa attn 不变** → **固定成本=小批次也要把专家权重读/反量化/乘一遍**。冷读 45,010：GPU 16,305 ms，**PLE 1,014 ms 是一次性的**（之后 0）。可拿掉项 = stage 1 的 `wait copy`（≈18% 上界），但它要 `STRATA_MMQ_TAB=ON` + `MMQ_DIRECT=1`，**本机二进制没有**（§7 第 27 条） | **L-030** |
+| **那 1 s 的相图：成本在专家权重那几相，唯一能拿掉的是 stage 1 的 `wait copy`** | `STRATA_PREFILL_TIMING=1` 的 21 相记账（先量了工装自己的代价：**+2.5–8%**）。461 token：stage 0 GPU 370 ms（gate/up 111=30%、dequant 63=17%、down 52=14%、kv stage 26、gdn 23、attn 15）、stage 1 GPU 610 ms（**wait copy 185=30%**、down 119、dequant 107）。每 token 效率 461 vs 4,524：gate/up **2.75×**、dequant **6.8×**、down 2.8×、kv stage 9×，而 **qsa attn 不变** → **固定成本=小批次也要把专家权重读/反量化/乘一遍**。冷读 45,010：GPU 16,305 ms，**PLE 1,014 ms 是一次性的**（之后 0）。可拿掉项 = stage 1 的 `wait copy`（≈18% 上界），但它要 `STRATA_MMQ_TAB=ON` + `MMQ_DIRECT=1`，**本机二进制没有**（§9 第 27 条） | **L-030** |
 | **`STRATA_MMQ_DIRECT=1`（MMQ tab 构建）买不到东西 → 不采纳** | A-B-A 三臂（现役 / tab+开关 / tab+关），引擎自报小读中位 **1,097 / 1,067 / 1,023 ms**、大读 **3,895 / 3,873 / 3,949**、冷读 19,7xx 三家一样 → **B 对 A −2.7%/−0.6%/−0.1%（<3%，不算结论），B 对同二进制关着的那臂还更慢 +4.3%**。开关确实生效（`48 of 48 layers`）。质量门：3 道贪心题里 2 道三臂逐字相同、1 道自由文本措辞不同。生产保持原二进制（已逐字节恢复） | **L-031** |
 | **会话 parking 是"每次切换一次 ~350 ms"，不是每轮 → 不是杠杆** | `park_gain_ab.sh` A-B-A：现役 / `--conversation-cache-park-gain 4096` / 恢复，各 1 次重启。一个 6 轮探针里 park **只有 1–2 次**、每次 **354 / 353 / 639 ms**（1.16 GB 快照），整轮 ~30 s → **1–2%**；gain 4096 在这个形状里**没跳过它**（会话一次就长过 45K）。⇒ 我原先"每轮付 0.35 s"的猜测被否，旋钮不采纳（已逐字节恢复） | **L-032** |
 | L-001 显存预留 | GPU0 空闲 504 → 804–810（现 ~850）；专家缓存 7,334 → **7,190 slot（−1.96%）**；命中中位 98.90 → 99.00%（p10 97.80→97.50），88/470 请求 | L-001 |
@@ -144,7 +189,8 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
 （旧的 12 条在 `.log.1`）、cron `*/5` 与 `nvlink-crc-sample.timer` 都在跑、`nvlink-crc.log` 里 crc/replay/recovery
 仍全 0。**mode 8 经用户批准留在生产**（2026-10-24 上午）。被动数字（接受率/命中率/截断）见 **L-012**。
 
-## 7. 陷阱清单（每一条都是真踩过的，新会话别再踩）
+## 9. 陷阱清单（每一条都是真踩过的，新会话别再踩）
+
 
 1. **`/health` 会在"要被换掉的那个引擎"上答 200** —— 只看 health 会把失败的重启演成成功。
    `use-config.sh` 现在**要求引擎 PID 变化**才开始等 ready。
@@ -223,42 +269,23 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
     把新二进制放在 `build-mmqtab/strata` 这种路径下，装完会等 120 s 后报 `RESTART NOT VISIBLE`（我这么白重启过一次）。
     现在的做法：`/opt/ai/engines/mmq-tab/build/strata`。
 
-## 8. 工装（都在 `/opt/ai/bin`，源码版本在 `tools/server/`，改完要 scp 上去）
 
-| 脚本 | 用法与要点 |
-|---|---|
-| `use-config.sh <config.json>` | **唯一**的安装/回退入口：备份→校验 args 是非空字符串列表→装→**等 PID 变**→等 `"loaded": true`（420 s）→打印引擎真实 env |
-| `run-arm.sh <label> [context]` | 跑一臂全套：bench 3 轮 + parity ×2 + 冷 prefill 13252×3 → `/opt/ai/logs/arm-<label>.log`；**缺工装或没 key 就拒绝跑** |
-| `parity_window.py [label] [lines] [max-tokens]` | 逐位门：自造 prompt（问 Event 0111）、`temperature: 0`、分别哈希 reasoning 与 content |
-| `bench-strata.py` / `cold-prefill.py` | 单流+4 并发 / 冷 prefill。`bench-strata.py` 现在**还报投机 draft 接受率**：测量段前后各读一次 `/metrics` 的累计计数取差，并写明窗口里有多少请求是别人的（`foreign_requests`），引擎中途重启过就说差值无意义 |
-| `exp-mode-ab.sh [--go]` | mode 4↔8 速度 A-B-A；**会识别线上已是 A 从而只要 2 次重启** |
-| `exp-mode8-quality.sh [--go]` | mode 8 的**质量** A-B-A（逐位 ×3 + 推理 harness ×3） |
-| `agent_budget_ab.py [long] [reason] <reps> <arms…>` | agent harness：臂写作 `<budget>[@<effort>]`（如 `none@medium`）；`AB_TAG` 后缀输出文件；`reason` 加 8 个**只能靠算**的可判分任务（共 14 个）；`temperature: 0` 钉死。**本轮起源码也在 `tools/server/`**（服务器上那份权限是 600，改完 scp 上去要留意权限）。已跑（L-023：`reason 3 none@high none@medium none@high`） |
-| `quality_eval_budget.py <outdir>` | 自评分质量评测（答案都能程序判分；`QE_BUDGET` 发预算、`QE_KEY` 传 key）。`thinking-budget-ab.sh` 就是它的多臂驱动器（免重启，一臂一臂跑）。**本轮起源码也在 `tools/server/`** |
-| `vram-perf-sample.sh` | cron `*/5 * * * *` 在跑（**别删**）；写 `/opt/ai/logs/vram-perf.csv`，低于 700 写 `.warn` |
-| `nvlink-crc-sample.timer` | systemd timer，active；`/opt/ai/logs/nvlink-crc.log` 至今 `crc/replay/recovery` 全 0 |
-| `passive_windows.py` | **免停机判据**：按引擎会话切窗口，报 `--spec` 接受率（引擎每请求写的 `drafts accepted A of B`）、suffix draft 接受率、专家命中中位/p10/min、`length` 截断数、"想到没答案"数、prompt 规模；`--band MIN:MAX` 只在同一 prompt 长度带内比较（固定 prompt 的 bench ≈293、parity ≈7.7K、cold-prefill ≈13.3K）；服务日志侧用 `--marker` + `--starts` 对齐时间戳。轮转后的尾文件没有 `engine started` 行时会合成一个 `unknown (rotated tail: <file>)` 窗口而不是什么都不打（2026-10-24 补的，以前直接为空，坑过一轮），这种窗口不受 `--since` 滤。源码 `tools/server/passive_windows.py` |
-| `concurrent_reads.py` | 同样按会话切窗口，读 `read N tokens on a thread of its own in N ms (concurrent, …); the slots decoded N rows meanwhile`：报并发读次数、读总时长、期间槽解码行数、"0 行的读"占比，并用 `stages its blobs` 那条拒绝行判**gate 到底开没开**（不用猜二进制）。轮转后的尾文件没有 `engine started` 行，它会合成一个"session start unknown (rotated)"窗口而不是输出为空（以前为空，坑过一轮）。源码 `tools/server/concurrent_reads.py` |
-| `piped_scenario.py [reps] [chars] [solo\|coexist] [peers]` | **造多条流的场景脚本**：`peers` 条流各解码 400 token（`PEER_MAX_TOKENS` 可拉长——4 条流时 400 太短，解码会跑在冷读前面），B 同时读一条**全新**冷提示词（从 `/opt/ai/docs/strata-parameters-0.2.2-20261022.md` 切 `chars` 字符，默认 60000 ≈ 22.7K token）；报 B 的客户端墙钟 + 引擎那行 `prompt N = R reused + K read in M ms`、A 在 B 窗口内的**字符**/s、A 最长 chunk 间隔、引擎自报"期间槽解码 N 行"、这一轮 gate 有没有拒绝。**`solo` 是对照**：同一条流、旁边没人读。2026-10-24 跑过两轮（L-019）：第一版读错 JSON 字段（§7 第 20 条），修好后才有数。它替代 `/tmp/piped_scenario_127k.py`（L-004 的来源，文件已没了） |
-| `gate_prod_ab.sh [chars] [scenario-reps] [bench-reps]` | **生产形态 gate 开/关 A-B-A（不重编译）**：A1 = 当时已在跑的那个 boot（不重启）→ 生成 `env.STRATA_PIPED_CONCURRENT="0"` 的变体重启过去 = B → 用脚本开头 `cp -p` 的快照重启回来 = A2；每臂 solo + coexist + bench，全追加到 `/opt/ai/logs/L018-gate-ab-<ts>.log`，结尾 `cmp -s` 确认逐字节恢复原配置。**跑它的时候别生成、别派子代理**（§7 第 16 条）。已跑，结果 **L-019** |
-| `gate_prod_streams.sh [peers] [reps] [chars]` | **多流版**：`peers` 条解码流 + 1 条冷读，开着（当时的 boot）对 关着（重启后）两臂 + 恢复后 1 轮确认；两臂各跑 solo 与 coexist。**只有 3 条流那轮做了开/关**，4 条流只测了开着的形状（`gate_prod_streams.sh 4 …` 要自己加对照）。已跑（3 流），结果 **L-020** |
-| `enable_api_monitor.sh [peers] [peer-max-tokens] [reps]` | 打开服务端请求监视器（配置顶层键 `"api_monitor": true`，重启）并**当场 dump** `GET /api/requests`：每条请求的 `wallclock_s` / `first_token_s`（=用户感知 TTFT）/ `queue_s` / `load_s`。监视器只留 100 条、不落盘，**跑完必须马上读**（脚本会 dump 到 `/opt/ai/logs/L021-*.log` 和 `/opt/ai/tmp/L021-requests-111.json`）。**回退**：`use-config.sh /opt/ai/tmp/monitor-off-20261024T041201Z.json`。已跑，结果 **L-021** |
-| `turn-ttft.py <tag> [新增,逗号] [每档轮数] [上下文token] [生成token]` | **DSH 形状的多轮探针**（首要指标那条路径）：`messages` 累积 + 每轮塞一段唯一内容当工具输出，量"这一轮实际要重读多少"、首字、生成速率；`temperature: 0` + `reasoning_effort: none`；结果追加 `/opt/ai/logs/turn-ttft.jsonl`。**本轮修了三个坑**：引擎日志路径写死在 0.1.40.1 那套安装（现在 `TTFT_LOG`/`TTFT_CFG` 可指）、**不发 api key**（0.2.2 之后 401）、`block()` 的 token 估算差 4 倍（原来 `/3`，"45000"实际造出 180,018 token → 撞上下限吃 400，现在 `/12`），并且**撞到 400 也会把已量的行写进 jsonl**（以前直接崩、什么都留不下）。已跑，结果 **L-026** |
-| `trace_admission_phases.sh [ctx] [tag后缀]` | 快照配置 → 加 `env.STRATA_TRACE="1"` 重启（B 臂）→ 跑 `turn-ttft` → 恢复配置重启（A2 臂）→ 再跑一轮；把两次的 `strata serve: prompt …` 和 `strata trace: admission …` 并排打出来。**只对走 BGEN 的请求有用**（§7 第 25 条）。已跑，结果 **L-027**（trace 一行没打，但两臂对上了） |
-| `stage_repeat_probe.py [ctx] [block] [pairs]` | 判别"固定成本是专家 staging 还是每轮固定动作"：同一块 token 连发两次，比较引擎自报的读时间。**两个坑**：这台机器的 `grep -E` **不认 `\d`**（第一版因此一行都没取到，已改 `[0-9]`）；共享日志里会抓到**别人的请求**，必须用 ctx 校验（本轮就抓出一行 ctx=200K 的）。已跑，结果 **L-029** |
-| `prefill_phase_timing.sh [ctx] [小,大块] [每档轮数]` | 用引擎自带的 `STRATA_PREFILL_TIMING=1` 把提示词读的 GPU 时间按 **21 个具名阶段**记账 + host 侧一行（chunk setup / 等 chunk / PLE）；A-B-A 两臂各一次重启，`turn-ttft` 出数。已跑，结果见 **L-030** |
-| `mmq_direct_ab.sh` | **`STRATA_MMQ_DIRECT=1`（MMQ tab 构建）对线上二进制**的 A-B-A：A（现役）→ B（MMQ 构建 + 开关）→ A2（MMQ 构建、开关关，用来把二进制本身的影响分开）→ 逐字节恢复；每臂跑 `turn-ttft 300,3000 3 @45K` + 3 道固定贪心题当质量门。**引擎二进制必须放在路径里含 `build/strata` 的地方**——`use-config.sh` 用 `pgrep -f 'build/strata --serve'` 找引擎，`build-mmqtab/strata` 匹配不上，装完会报 `RESTART NOT VISIBLE`（这轮就踩了，B 臂白重启一次）。已跑，结果见 **L-031** |
+## 10. 工装（源码在 `tools/server/`，部署在 `/opt/ai/bin`）
 
-**本轮又搬进 `tools/server/` 的 7 份判据脚本**（原来只在 `/opt/ai/bin`）：`turn-ttft.py`（**DSH 形状的多轮会话**：每轮实际重读多少 + 首字延迟——就是首要指标那条路径）、
-`conv_cache_ab.py`（会话缓存 A/B：每条请求引擎实际重读多少）、`probe_determinism.py`（跑动差异是采样还是引擎——`agent_budget_ab.py` 的 docstring 直接引用它）、
-`quality_eval.py`（`quality_eval_budget.py` 的母本）、`effort-cost.py` / `effort_lang_ab.py` / `replay_effort_ab.py`（effort 那三条支线，L-023 的背景）。
-搬的时候修了两处**换了安装就失效**的写死：`turn-ttft.py` 的引擎日志路径（原来写死 0.1.40.1 那套，现在 `TTFT_LOG` / `TTFT_CFG` 可指）
-和它**不发 api key**（0.2.2 之后不发就 401，第一次跑就是这么死的）。
-`/opt/ai/bin` 里还有 ~140 份历史一次性脚本（vLLM 时代、iq3xxs 装机、各种 sweep），**故意不搬**——不是判据、路径多半也旧了，
-搬进来只会淹掉真在用的这批。`restart-strata.sh` / `swap-engine.sh` 也**故意留在服务器上**：里面写死了 sudo 口令，
-等用户决定怎么处理"口令在公开的 fork 里"这件事再说（§10）。
+**手册在 [`tools/server/README.md`](../tools/server/README.md)**：每个脚本干什么、属于哪一类（`ops-` 改机器 /
+`exp-` 要重启 / `probe-` 只读）、写到哪里、对应哪条台账。改脚本的规矩也写在那份文件里。
 
-## 9. 上游与分支状态
+三条必须记住的：
+
+1. **git 是源码，`/opt/ai/bin` 是部署副本**，两边会静默漂移；动之前先跑 `tools/server/ops-check-tool-sync.sh`
+   （41 个文件逐个比 md5，漂移会明说）。
+2. **实验驱动脚本必须是"快照 → 安装 → 测量 → 逐字节恢复 → `cmp -s` 验证"**，并且在装失败时先恢复再退出。
+3. **换引擎二进制时路径里必须含 `build/strata`**（§9 第 28 条），否则 `use-config.sh` 找不到引擎。
+
+---
+
+## 11. 上游与分支状态
+
 
 - fork `atmJava/Strata`，`main` 已 fast-forward 到 **`7ddc17a3`（0.2.3.1）**。
 - 工作分支 **`hw/server-adapt-0.2.3`**（本地 `tmp/rebase-docs`；远端 tip 就是本地提交 `08507037`，
@@ -283,17 +310,18 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
   **(a) 已做完（L-017）：chunk 从来没变过（53/53 都是 8192 tokens / 96-slot ring）。**(b) 要重启。
   **他那条评论是他的，我们不动**；我们不再回（草稿 E 留在文档里不发）。
 
-## 10. 用户已表态 / 仍未决（别自己决定）
+## 12. 用户已表态 / 仍未决（别自己决定）
+
 
 **已表态（2026-10-24 上午，按时间顺序）**
 
-1. **mode 8 留在生产**（不认可才回退，见 §5）。
+1. **mode 8 留在生产**（不认可才回退，见 §6）。
 2. 草稿怎么处理：**先写 C、三份一起发** → 三份都发了。
-3. **随后改了规矩：上游只读**——不回帖、不开 PR、不提交任何东西；**已发的三条已删**（§9、台账 L-018）。
+3. **随后改了规矩：上游只读**——不回帖、不开 PR、不提交任何东西；**已发的三条已删**（§11、台账 L-018）。
    草稿 D/E 因此**不再发**，只留档。
 4. S1 的方向：**并发共存优先**。既然那两行已在生产二进制里（L-013），下一步是在**生产形态**测
    `STRATA_PIPED_CONCURRENT` 开/关，而不是"要不要上 S1"。
-5. **GitHub token 换发了新串**（§2）。
+5. **GitHub token 换发了新串**（§5）。
 6. **停机 >2 分钟的决定权交给我**（原话"你可以自己做决策，不要问我"）。仍按纪律做：低峰、先备份、
    测完恢复原状态、台账写清停了多久（§1 第 6 条）。
 7. **服务器上那两个 root 所有的旧脚本：批准用 sudo 换**。已于 03:02Z 换好（旧的备份成
@@ -309,7 +337,8 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
    mode 8 与 medium 提前、#3724 改成"已判、不花重编译"、S1 改写成"已在二进制里、待测生产形态开关"、
    以及**新加的"上游只读"**要不要写进目标正文。
 
-## 11. 未决 / 待观察
+## 13. 未决 / 待观察
+
 
 **已经结掉的（别再当未决做）**
 
@@ -327,7 +356,7 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
   **gate 保持开着**——这也正是用户定的"并发共存优先"。
 - ~~gate 开着在多条流下还划不划算~~：**3 条流做了开/关（L-020）**：读的人 +44.5%（17.2 对 11.9 s），
   每条邻居流 28.3 对 1.3 字符/s、停顿 0.76 对 11.72 s → **划得来，而且流越多越划得来**。4 条流只测了开着的形状
-  （邻居 35.8–44.1 字符/s、间隔 ≤0.3 s；读的人墙钟大头是**排队**不是读，见 §11 第 5 条）。
+  （邻居 35.8–44.1 字符/s、间隔 ≤0.3 s；读的人墙钟大头是**排队**不是读，见 §13 第 5 条）。
 - ~~medium 思考预算要不要设成默认~~：**不做（L-023）**。agent 形态 A-B-A 3 轮：墙钟 +0.4%、token +2.2%、
   做对题数两臂都 14/14、畸形调用 0/9 → 全在 <3% 线内；而且我们自己的客户端显式发 `high`，服务端默认轮不到。
 - ~~`pipe_rows` 为什么 4 条流时停在 4~~：**已答（L-021）**。引擎日志的先后是 `strata batch (pipelined, 2 groups of 2):
@@ -342,10 +371,10 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
 
 1. **#3724 到底适用不适用** **已判掉（L-016，整条是"静态阅读，未测"）**：那两行在本机**只被
    prompt 专家（gather 路径）和 drafter 的 Q8_0 投影走到**；**decode 专家不进 MMQ**（走
-   `iq_kernels.cu` 的 `native_expert_grouped`）、**dense 层也不进**——我原先在 §11 旧版里猜"dense 要过 MMQ"
+   `iq_kernels.cu` 的 `native_expert_grouped`）、**dense 层也不进**——我原先在 §13 旧版里猜"dense 要过 MMQ"
    **是错的**，dense 的 MMQ 入口是 **HIP-only**（`gemm.cu` 里 `#if ... && defined(__HIPCC__)`）。
    形状推算 `nwork ≥ 100 > nsm(68)` → 与今天完全一致，只有 down 的"1 专家尾组 + `ntx=1`"会少开 8 个 block。
-   **结论：改动会被走到，但收益预计噪声级 → 不为它花重编译 + 停机**（停机的决定权用户已交给我，§10 已表态 6）。
+   **结论：改动会被走到，但收益预计噪声级 → 不为它花重编译 + 停机**（停机的决定权用户已交给我，§12 已表态 6）。
    真要花一次重启，值的是 `STRATA_PREFILL_MMQ=0` 对默认（证明 prompt 到底走不走 MMQ、多大），不是 backport。
    另记一条 build 坑：Strata 把这个调度器**镜像**在 `moe_mmq_tab.cuh:427`，CMake 对 `mmq.cuh:875..1571`
    做指纹，backport 会让 `STRATA_MMQ_TAB` 自动关掉（今天它 OFF，所以暂无影响）。
@@ -356,9 +385,9 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
    **(a) 已结**：服务器上那两个 root 所有的 `verify-running-config.sh`、`check-session-warnings.sh` 已于 03:02Z
    用 sudo 换成 git 里修好的版本（用户批准），旧的留成 `*.pre-20261024`，换完两边 **md5 一致**且两份都能跑。
    **(b) 还留着**：`restart-strata.sh`、`swap-engine.sh` 里各有一句明文 sudo 密码，
-   **在密码那条定下来之前别搬进公开仓库**（§10 未决 1）。
+   **在密码那条定下来之前别搬进公开仓库**（§12 未决 1）。
    **(c) 本轮又搬了 7 份**：`turn-ttft.py`、`conv_cache_ab.py`、`probe_determinism.py`、`quality_eval.py`、
-   `effort-cost.py`、`effort_lang_ab.py`、`replay_effort_ab.py`（为什么选这 7 份、哪些历史脚本故意不搬，见 §8 末尾）。
+   `effort-cost.py`、`effort_lang_ab.py`、`replay_effort_ab.py`（为什么选这 7 份、哪些历史脚本故意不搬，见 `tools/server/README.md` 的 Deliberately not in git 一节）。
 3. **`verify-running-config.sh` 现在是"线上到底跑的是哪份配置"的标准答案**：它比 cmdline/env/进程时间三样。
    本轮跑出来的事实是——引擎 cmdline **59 个 arg**、配置里 **54 个**，多的三个是服务端注入的
    `--serve`、自动算的 `--layer-split 24`、以及从 `parallel: 4` 推出来的 `--batch 4`；ENV 一致、进程比配置新
@@ -380,7 +409,7 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
      改动是中等工程，而且排队只在"满槽 + 冷读"时咬人（真实流量 TTFT 中位 0.80 s）→ **不优先**。
 
 6. **4 条流的"关着"对照**：L-020 只有 3 条流做了开/关；4 条流（生产满配）只测了开着。`gate_prod_streams.sh 4 3 60000`
-   直接能跑（要 2 次重启 ≈ 300 s，决定权在我，§10 已表态 6）。**注意**：L-021 已经说明满槽时读基本不等重叠，
+   直接能跑（要 2 次重启 ≈ 300 s，决定权在我，§12 已表态 6）。**注意**：L-021 已经说明满槽时读基本不等重叠，
    所以这条对照的预期差别比 3 流那轮小——做之前先想清楚它还能回答什么。
 7. **`t_zhfinal` 那种"中文答到半句就停"**：L-023 里 high 臂 6 次运行栽 2 次（答到 `这台机器的驱动版本是 595.` 就收住，
    completion 只有 81–87 token，**不是 max_tokens 截的**）。n 太小，**别下结论**；以后跑 agent harness 时顺手看它出不出。
@@ -391,7 +420,8 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
    （`10-22 04:48:13`、`06:55:29`、`10-23 05:21:12`、`05:24:24`、`05:27:44`、`06:57:28`、`18:38:40`），
    **为什么这 7 次没打，不知道**。
 
-## 12. 目标状态
+## 14. 目标状态
+
 
 会话恢复后旧 goal 读不到了（`get_goal` 返回 null）。2026-10-24 上午用户说"列个全局目标执行"，于是
 **新建** `goal-c5cedf2a-32ed-478e-a639-b0c5a4127d53`（**active**，上限 60 轮）：正文里写死了首要指标、
@@ -402,9 +432,10 @@ env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
 **目标正文里有两条已经被用户后来的话改掉了，但正文我改不了**（`update_goal action edit` 在自动续行轮里被拒，
 要人类轮次）：(1) 上游从"兼容地回帖"变成**只读、不回帖、不开 PR**；(2) **"停机 >2 分钟先问"变成用户交给我自己决定**。
 下一个用户轮次顺手把这两条写进正文（顺带可以决定要不要把"思考预算降级 / mode 8 与 medium 提前 / #3724 已判不重编译"
-这些也写进去）。在那之前按本页 §1 与 §10 的写法执行，它们是最新的。
+这些也写进去）。在那之前按本页 §1 与 §12 的写法执行，它们是最新的。
 
-## 13. 一句话给接手者
+## 15. 一句话给接手者
+
 
 **先确认机器活着、cron 在跑、mode 8 还在生产，再动手；动手前想清楚要不要停机；
 所有数字都要能追到 `/opt/ai/logs` 或 `/opt/ai/runs` 里的原始文件；不要相信任何"看起来跑完了"的日志。**

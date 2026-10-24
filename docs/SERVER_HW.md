@@ -1,5 +1,8 @@
 # Server hardware: this fork
 
+> **状态：背景资料，部分条目已过期**（台账 L-003 记了五处与线上矛盾的说法）。机器与生产的现状以
+> [`HANDOVER.md`](HANDOVER.md) §4/§6 为准。
+
 This is `atmJava/Strata`, a fork of [Niko1221/Strata](https://github.com/Niko1221/Strata). `main` is a
 fast-forward of upstream and currently sits at `7ddc17a3` (0.2.3.1); the fork was taken at `011c9e60` (0.2.2,
 engine 0.1.47) and has been moved since. It exists for one machine: a two-card server that runs Strata as a

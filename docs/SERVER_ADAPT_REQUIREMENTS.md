@@ -1,5 +1,7 @@
 # 服务器适配与性能优化：需求说明书（草案 v1）
 
+> **状态：草案（2026-10-24）。** §10 的 8 项待裁决；**现状与结论以 [`HANDOVER.md`](HANDOVER.md) §3 的决策表为准**，本文件保留当初的需求原意。
+
 2026-10-24 · 待 `atm` 裁决 §10 的 8 项。
 
 本篇只定**目标、约束、判据、准入过滤器和缺口**。执行顺序在服务器的
@@ -174,7 +176,7 @@ PR #3800（JSON 约束解码下 MTP 草稿存活）。
 3. **回退**：改配置留带时间戳的备份（已有 `/opt/ai/backups/`）；改代码的分支必须能一键退回官方二进制。
 4. **监控与安全**：NVLink CRC / Replay 每小时采样 timer —— 调优记录 §7.4 建议，**已装并在跑**
    （`nvlink-crc-sample.timer`，日志 `/opt/ai/logs/nvlink-crc.log`，最新两卡两 link 的 crc/replay/recovery 全 0）。
-   2026-10-24 又加了一个零负载的被动采样器 `tools/vram-perf-sample.sh`（cron 每 5 分钟 → `/opt/ai/logs/vram-perf.csv`）：
+   2026-10-24 又加了一个零负载的被动采样器 `tools/server/vram-perf-sample.sh`（cron 每 5 分钟 → `/opt/ai/logs/vram-perf.csv`）：
    本机任何并发都会把单流腰斩，干净 A/B 只能等停机窗口，平时靠它盯显存余量与速度/命中的漂移。
    8080 对 LAN 开放且 key 为 `111`——需求要写明是接受，还是改 `--access local` 或换强 key。
 5. **预算门**：盘 162 G 空闲、RAM 余量、重启窗口——每个实验开工前先过预算门再开工。
