@@ -270,6 +270,10 @@ MainPID **147049**（服务进程 06:20:13Z 起）、引擎子进程 **147064**�
 28. **换引擎二进制时，路径里必须含 `build/strata`**：`use-config.sh` 靠 `pgrep -f 'build/strata --serve'` 找引擎，
     把新二进制放在 `build-mmqtab/strata` 这种路径下，装完会等 120 s 后报 `RESTART NOT VISIBLE`（我这么白重启过一次）。
     现在的做法：`/opt/ai/engines/mmq-tab/build/strata`。
+29. **`STRATA_HC_PERSIST=1` 和 `STRATA_HC_Q8=1` 互斥**（L-042）：`fused_gr_read_persist` 见到 `q8_down/q8_up`
+    非空就返回 false，而 `HC_Q8` 正是把它们填上的那个开关。我们采纳了 `HC_Q8`，所以**持久化 hc 内核对我们是死的**——
+    别再单独测它；要比只能换基线（`HC_Q8=0 + HC_PERSIST=1`）整体对比。
+
 
 
 ## 10. 工装（源码在 `tools/server/`，部署在 `/opt/ai/bin`）
