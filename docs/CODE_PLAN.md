@@ -413,3 +413,35 @@ flag 缓冲**）。生产日志里那句 `one hand-off per window` 说明我们�
 **所以本轮结束时的判断**：decode 的 65–73% 是"每层 0.37 ms 的交接成本 × 48 层"，均匀、无热点；
 下一步是**设计级**改动（chain 交接），不是调参或小改内核。这条已写进 HANDOVER 作为下一阶段的候选，
 而不是今晚硬上。
+
+
+---
+
+## 19. S6 结果：overlap 交接在这台机器上**更慢**（2026-10-24 夜，实测）
+
+`STRATA_SPLIT_OVERLAP=1` 在源码里已经存在（`generate.cpp:8908`，注释写明"measured on 2x RX 7900 XTX only"），
+开它就是让两 stage 用共享 ready flag 直接交接、主机不参与 —— 正是 S5 指出的那条结构性候选。
+启动日志确认它真的生效了：
+
+```
+strata serve: layer split: layers 0-23 (CUDA0), 24-47 (CUDA1),
+              one hand-off per window (overlapped: STRATA_SPLIT_OVERLAP=1)
+```
+
+**但实测更慢**（其余同生产，`STRATA_WAIT_LAYERS` + `STRATA_SPLIT_TIMING` 同开）：
+
+| 指标 | 基线（关） | overlap（开） |
+|---|---|---|
+| 每层等待合计 | **17.63 ms / 48 层** | **19.2–19.5 ms / 48 层**（+9%） |
+| 最慢层 | L1 0.50 ms | L1 0.60 ms |
+| stage 0 等 GPU | 9.25 / 9.48 ms | 8.92 / 9.98 ms（噪声内） |
+| stage 0 host staging | 1.97 / 1.16 ms | 1.74 / 1.32 ms |
+| decode | 69–89 tok/s | 87.7 tok/s（噪声内） |
+
+**结论**：这条 flag 交接在本机（CUDA + PCIe 3.0 + 2×2080Ti）**没有收益，每层等待反而 +9%**。
+不采纳，`STRATA_SPLIT_OVERLAP` 保持关。**S5 指向的那条结构性候选因此也被否掉** ——
+"每层 0.37 ms"不是主机同步造成的，把主机从交接里拿掉并不会变快；它更像是 GPU 侧每层启动/核间等待的固有成本。
+
+**今晚到此的完整判断**：decode 侧的四条候选（helper、显存换重叠、调层数、overlap 交接）**全部有实测且全部否决**；
+剩下的方向必须在**内核层**（每层 GPU 侧的计算/启动开销）或**层数结构**（更少的层×更大的核）上，
+而不是调度/交接方式。这条结论本身就值得写进台账：**不要再在 decode 的调度上花时间。**
