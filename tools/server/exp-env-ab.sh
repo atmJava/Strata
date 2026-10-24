@@ -127,7 +127,7 @@ say "--- restore the deployed config ---"
 cmp -s "$CFG" "$TMP/env-$LABEL-base-$TS.json" && say "config is byte-identical to the snapshot" || say "WARNING: config differs from the snapshot"
 
 say "=== quality gate: A vs B ==="
-python3 - "$TMP" "$LABEL" <<'PY' | tee -a "$OUT"
+python3 - "$TMP" "$LABEL" <<'PY' | tee -a "$OUT" || say "gate comparison failed (missing json?) - see the arm outputs above"
 import json, sys
 tmp, label = sys.argv[1], sys.argv[2]
 a = json.load(open("%s/env-gate-%s.json.A" % (tmp, label)))
@@ -136,4 +136,4 @@ for i in range(len(a)):
     print("  prompt %d: A=%s  B=%s  %s" % (i + 1, a[i]["sha"], b[i]["sha"],
                                            "identical" if a[i]["answer"] == b[i]["answer"] else "DIFFERS"))
 PY
-say "=== done ==="
+say "=== done (exit codes: last command $?) ==="
