@@ -377,6 +377,12 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 
 ## 13. 未决 / 待观察
 
+**（2026-10-24 夜，多路融合立项）** 计划见 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)（W1–W4），
+功能清单与验收见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md)，口径见 [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)，
+执行规则与每轮复盘见 [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) / [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)。
+目标 `goal-402218d9-57d7-4af1-aea0-391a1494acd9`（active，上限 60 轮）。
+**当前轮：R0 立项（无生产改动）；下一轮 R1 = 只读基线（W1）+ T1/T3 当前值。**
+
 **（2026-10-24 夜更新）helper 这条线已经判完并关闭**：`--prefill-pipe 1` 时真实请求不进 `bind_stage_helper`
 （`planned_C < n` → `single_chunk=false`），`--prefill-pipe 0` 时才进；而启动时 `split_help_env()` 让 **flag 文件优先于
 env**，我自己的 `prefill_help=0` 把它关了 —— 两个条件同时满足后 helper 真的把行分给了对端。

@@ -80,6 +80,16 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `mmq_direct_ab.sh` | MMQ pointer-table build, `STRATA_MMQ_DIRECT=1` on/off | L-031 |
 | `park_gain_ab.sh` | `--conversation-cache-park-gain`, is parking on the hot path | L-032 |
 
+### tests — black-box acceptance (pytest)
+| file | test | notes |
+|---|---|---|
+| `tests/test_mp_api.py` | T1 API contract (health, models, usage, 400/401) | stdlib only; runs against the live server |
+| `tests/test_mp_batch.py` | T2 greedy solo vs batch | exactness settings, else skip/xfail |
+| `tests/test_mp_admission.py` | T3 4 streams + cold reader (≤2 s / ≤1 s) | xfail until W3; the message carries the numbers |
+| `tests/test_mp_prefix.py` | T4 second read hits the prefix cache | `cached_tokens` from usage |
+
+See [`tests/README.md`](tests/README.md). The tests are real requests: do not run them beside a measurement.
+
 ## Deployed-copy rule
 
 `/opt/ai/bin` is what cron and the drivers actually execute, so a change that is only in git does nothing.

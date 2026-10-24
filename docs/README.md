@@ -1,16 +1,21 @@
 # 文档地图（先看这张表，再决定读哪一份）
 
 **先读 [`RULES.md`](RULES.md)（怎么干活），接手入口是 [`HANDOVER.md`](HANDOVER.md)**；数字与证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)
-（顶部有 35 条判决索引）。其余文档按下面的状态读——**标"历史/存档"的不要当现状**。
+（顶部有 46 条判决索引）。其余文档按下面的状态读——**标"历史/存档"的不要当现状**。
 
 | 文档 | 状态 | 用途 | 什么时候读 |
 |---|---|---|---|
 | [`RULES.md`](RULES.md) | **工作章程**（怎么干活，先读） | 决策权、每轮五步、写代码/证据/记录/停机规则 | 接手第一件事 |
 | [`HANDOVER.md`](HANDOVER.md) | **现行入口**（每轮更新） | 决策表、生产现状、坑、未决与下一轮 | 每次接手的第一份 |
 | [`CODE_PLAN.md`](CODE_PLAN.md) | **代码计划 v2**（写什么、怎么证明、怎么回滚） | P0 定位病因（三点剖析/字节账）→ P1-A/B/C 三选一 → P2 head 分卡 → P3 结构级 + 不做清单 + 测量协议 + 六条复核 | 要动代码之前 |
-| [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) | **现行台账**（L-000…L-034） | 每条结论 + 原始日志路径 + 判决（采纳/否决/结论/参考） | 要数字、要判据、要"这条试过没有" |
+| [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) | **现行台账**（L-000…L-045） | 每条结论 + 原始日志路径 + 判决（采纳/否决/结论/参考） | 要数字、要判据、要"这条试过没有" |
 | [`../tools/server/README.md`](../tools/server/README.md) | **现行工装手册** | 每个脚本干什么、怎么部署、实验脚本的固定形状、构建 | 跑任何测量之前 |
 | [`SERVER_ADAPT_REQUIREMENTS.md`](SERVER_ADAPT_REQUIREMENTS.md) | 草案（2026-10-24） | 适配需求清单，§10 有 8 项待裁决 | 想知道"用户当初要什么" |
+| [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md) | **草案**（2026-10-24） | 多路并发推理融合计划：W1–W4、验收门、风险回滚、轮次排期 | 推进"多路"这件事之前 |
+| [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md) | **草案**（2026-10-24） | 多路服务标准：术语、"多路就绪"四条、定容式、命名与台账模板 | 定容/验收/命名任何一条多路预设之前 |
+| [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) | **草案**（2026-10-24） | 多路执行规则：每轮六步、必做复盘、重启/构建预算、测量卫生、子代理规则 | 开始任何一轮多路实验之前 |
+| [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md) | **现行**（每轮追加） | 多路每轮复盘记录（最新在上，R0 起） | 每轮结束时写；接手时先看 |
+| [`FEATURE_PARITY.md`](FEATURE_PARITY.md) | **草案**（2026-10-24） | 功能清单 F1–F11、验收标准 G0–G4、测试用例 T1–T7、与 fork 测试的对照 | 决定"移植什么、怎么验收"之前 |
 | [`SERVER_HW.md`](SERVER_HW.md) | 背景，**部分过期** | 这台机器与这个 fork 的由来 | 只作背景；现状以 HANDOVER §4/§6 为准 |
 | [`SERVER_RECOVERY.md`](SERVER_RECOVERY.md) | 操作手册 | 服务不可用时的恢复步骤 | 服务挂了 |
 | [`TUNING_PLAN_0.2.2-20261022.md`](TUNING_PLAN_0.2.2-20261022.md) | **历史**（10-22） | 当时的调参假设与估算 | 台账里引用它的章节时 |
