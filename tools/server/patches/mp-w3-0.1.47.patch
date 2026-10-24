@@ -1,5 +1,5 @@
 --- strata-0.2.2/src/program/generate.cpp	2026-10-24 10:34:33.687089624 +0000
-+++ strata-mp/src/program/generate.cpp	2026-10-24 16:08:24.012467904 +0000
++++ strata-mp/src/program/generate.cpp	2026-10-24 16:11:14.050961330 +0000
 @@ -11224,6 +11224,22 @@
          };
          int admit_slot = -1;               ///< the slot the request being read will continue in (BGEN)
@@ -77,7 +77,7 @@
 +                }
 +                if (line.rfind("BCANCEL", 0) == 0) {
 +                    staged_admit.pending = false;
-+                    std::printf("BRDY 0 0 0\n");
++                    std::printf("BCANCELLED\n");
 +                    std::fflush(stdout);
 +                    continue;
 +                }

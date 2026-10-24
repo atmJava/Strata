@@ -107,6 +107,10 @@ staged 队首 + 客户端断开 → BCANCEL
 - 超时/断连：发 `BCANCEL`。
 - 默认关：`STRATA_MP_STAGED_READ=1`（服务端 env）才启用；否则走原 `pick_slot` 等待。
 
+**部署注意（R4 踩到的坑）**：`strata-022.json` 的 `env` 只进**引擎子进程**，服务端进程看不到
+（`/proc/<server>/environ` 里没有）。所以服务端开关要在 `run-022.sh` 里 `export STRATA_MP_STAGED_READ=1`
+（备份原脚本，测完恢复），而不是只加进配置 `env`。
+
 ## 5. v1 限制（写进 FEATURE_PARITY 判决）
 
 1. 暂存请求的对话检查点（`checks`）不搬进槽：这一路的会话缓存收益会少一点（不影响正确性、不影响 T4 的

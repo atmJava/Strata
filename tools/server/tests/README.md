@@ -30,7 +30,7 @@ test), `MP_MODEL` (default `qwen3.8-flash-next-iq3_xxs`).
 |---|---|---|
 | `test_mp_api.py` (T1) | **pass** | the server's API contract is in production |
 | `test_mp_batch.py` (T2) | pass or **skip/xfail** | exactness settings (`STRATA_IQ_MT_MIN=1` etc.) are not production; mismatch is reported |
-| `test_mp_admission.py` (T3) | **xfail** | W3 read-ahead not landed; reader queues 36–43 s at full slots (L-020/L-021) — the xfail message carries the numbers |
+| `test_mp_admission.py` (T3) | **xfail** | waits until /metrics reports 4 busy slots, then first AND second token ≤2 s; the xfail message carries the numbers (L-048) |
 | `test_mp_prefix.py` (T4) | **pass** | prompt cache is on in production; `cached_tokens` is reported |
 
 When W3 lands, T3's `pytest.xfail` turns into an assertion (delete the xfail branch); an xfail that stays after the
@@ -50,5 +50,5 @@ path in the round's `MULTIPATH_LOG` entry.
 | `conftest.py` | `server` fixture: skips with a clear reason when the server is unreachable |
 | `test_mp_api.py` | T1: health, models, non-stream/stream usage, 400, 401 |
 | `test_mp_batch.py` | T2: greedy solo vs batch |
-| `test_mp_admission.py` | T3: 4 streams + cold reader (acceptance ≤2 s, stall ≤1 s) |
+| `test_mp_admission.py` | T3: 4 streams + cold reader; 4-busy-slot gate, first + second token ≤2 s, neighbour stall ≤1 s |
 | `test_mp_prefix.py` | T4: second read hits the prefix cache |

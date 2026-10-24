@@ -82,6 +82,10 @@ F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
 **R1 基线（2026-10-24，L-046）**：T3 在 4×1200-token 流 + 452-token 冷读下，读者首 token **27.23 s**、邻居停顿
 0.68 s；bench 单流 72.7 / 4 路聚合 120.5 tok/s；piped 冷读墙钟 14.1 s。T3 在 W3 前保持 xfail，xfail 消息带当时数字。
 
+**R4 修正（L-048）**：T3 曾经在“有空槽”的瞬间假通过（读者 0.25 s，引擎日志却是正常的 `slot 0 takes 452 tokens`）。
+现在 T3 先等 `/metrics` 报 4 槽全忙，再要求读者**首 token 与第二 token 都在 2 s 内**（首 token 之后静默 27 s 不算准入）；
+前提不满足时 xfail 并写明“测的是空槽”。A 上真基线：46.2 s / 0.97 s。
+
 **xfail 纪律**：功能未落地时，测试可以 `@pytest.mark.xfail(strict=False, reason=...)`，但 reason 必须写清
 "等哪个 W 项 / 哪条台账"；功能落地后**改 strict 并删掉 xfail**，否则视为未验收。
 
