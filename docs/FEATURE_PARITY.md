@@ -33,8 +33,8 @@
 
 | ID | 功能 | fork 证据（文件:行 / 版本） | 对 Strata 有用？ | Strata 现状 | 移植形态 | 测试 | 判决（待） |
 |---|---|---|---|---|---|---|---|
-| **F1** | 多路 continuous batching 的**步契约**：每请求是 cursor（`computed` vs `target`）；每步先喂饱 running decodes，剩余预算给 waiting prefill；晚到 prefill 只推迟"还没吐 token"的请求（`num_output_tokens==0`） | `scheduler.py:606-615, 727, 1185-1235, 734-740`；CHANGELOG v0.2.2-post1 | **是（核心）** | 槽一起解码、`BGEN` 中途入批；**无统一 per-step 预算**；满槽时读根本发不出去 | W2（配置）→ W3（代码） | T2/T3 | W3 补丁已编译（R3，默认关 `STRATA_BATCH_STAGED_READ`）；运行时未验收（R4） |
-| **F2** | 单步 token 预算混批：所有 shipped profile 都是 `MAX_BATCHED_TOKENS=2048`；`request_token_budget = min(token_budget, input_budget - draft_slots)` | `scheduler.py:126-130, 624-627, 946`；`launcher.sh:6035` | **是** | `--prefill` 分块 + `STRATA_BATCH_DECODE_SHARE`，没有覆盖 decode+prefill 的统一预算 | W2 → W3 | T3 | 在办（W2 配置臂已否决：READ_PIECE 在 gate 下不触发，L-047；W3 补丁已编译，R4 验收） |
+| **F1** | 多路 continuous batching 的**步契约**：每请求是 cursor（`computed` vs `target`）；每步先喂饱 running decodes，剩余预算给 waiting prefill；晚到 prefill 只推迟"还没吐 token"的请求（`num_output_tokens==0`） | `scheduler.py:606-615, 727, 1185-1235, 734-740`；CHANGELOG v0.2.2-post1 | **是（核心）** | 槽一起解码、`BGEN` 中途入批；**无统一 per-step 预算**；满槽时读根本发不出去 | W2（配置）→ W3（代码） | T2/T3 | **部分采纳**（L-049：长读 TTFT 47.3→17.2 s；第二 token 仍等槽；opt-in，默认关） |
+| **F2** | 单步 token 预算混批：所有 shipped profile 都是 `MAX_BATCHED_TOKENS=2048`；`request_token_budget = min(token_budget, input_budget - draft_slots)` | `scheduler.py:126-130, 624-627, 946`；`launcher.sh:6035` | **是** | `--prefill` 分块 + `STRATA_BATCH_DECODE_SHARE`，没有覆盖 decode+prefill 的统一预算 | W2 → W3 | T3 | **部分采纳**（L-049；W2 配置臂否决见 L-047；并发部分搁置） |
 | **F3** | 前缀缓存语义：refcount 共享 + CoW、命中块只读、最后一个 prompt token 重算取 logits、`num_cached_tokens` 计数 | `single_type_kv_cache_manager.py:300-322, 448-468`；`kv_cache_manager.py:275-285`；`tests/v1/core/prefix_cache/*` | **是** | 有 prompt cache / conversation cache；缺"缓存计数"的对外口径与测试 | 暴露统计 + 测试 | T4 | 在办 |
 | **F4** | 投机解码（MTP/DFlash2）与**接受率验证实践**：混批里 MTP 在 chunk 边界留 lookahead；验证器 KV 精确；接受率有测试 | `tests/v1/spec_decode/*`；`scheduler.py:583-602`；CHANGELOG v0.2.2 | **是（验证方法）** | 已有 `--spec 8 --mtp-max-t 4`，热接受率 ~99%（L-026） | 验证实践（不开关，只补测试） | T5 | 在办 |
 | **F5** | SSD 前缀 KV 持久化 #243：`OffloadingConnector` + FS tier（`checkpoint-<sha256>`、每 block 一个 `.bin`、`PYTHONHASHSEED=0`），命中异步装入 `WAITING_FOR_REMOTE_KVS` | `launcher.sh:1748-1807`；`kv_offload/file_mapper.py:121-148`；`offloading/scheduler.py:1036-1209`；验证 1,568/1,929（重启）等 | **是（重启场景）** | 无；重启冷加载 ~165 s | 暂缓（P3，触发条件：重启频率或冷读占比升高） | T6 | 暂缓 |
@@ -84,7 +84,7 @@ F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
 
 **R4 修正（L-048）**：T3 曾经在“有空槽”的瞬间假通过（读者 0.25 s，引擎日志却是正常的 `slot 0 takes 452 tokens`）。
 现在 T3 先等 `/metrics` 报 4 槽全忙，再要求读者**首 token 与第二 token 都在 2 s 内**（首 token 之后静默 27 s 不算准入）；
-前提不满足时 xfail 并写明“测的是空槽”。A 上真基线：46.2 s / 0.97 s。
+前提不满足时 xfail 并写明“测的是空槽”。A 上真基线：46.2 s / 0.97 s。 **R5（L-049）**：B 上首 token 1.73 s / 第二 token 32.91 s、长读 17.2 s / 34.4 s → T3 仍 xfail（第二 token 判据），W3 部分采纳。
 
 **xfail 纪律**：功能未落地时，测试可以 `@pytest.mark.xfail(strict=False, reason=...)`，但 reason 必须写清
 "等哪个 W 项 / 哪条台账"；功能落地后**改 strict 并删掉 xfail**，否则视为未验收。

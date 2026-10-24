@@ -381,7 +381,7 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 功能清单与验收见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md)，口径见 [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)，
 执行规则与每轮复盘见 [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) / [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)。
 目标 `goal-402218d9-57d7-4af1-aea0-391a1494acd9`（active，上限 1000 轮）。
-**当前轮：R4 完成（W3-B 装上又复原；staged 未触发；T3 已加固为 4 槽门 + 第二 token 判据，A 上 46.2 s / 0.97 s；3 次重启超预算）；下一轮 R5 = 重装 B 并先证明 BRDY/BADOPT 出现，再测长读 TTFT。**
+**当前轮：R5 完成（W3 暂存读实测：长读 TTFT 47.3→17.2 s、短读首 token 46.2→1.7 s、第二 token 仍等槽 31–34 s → 部分采纳，L-049；已恢复 A）；下一轮 R6 = T5 接受率 + T1/T2/T4 复跑 + F4 判决。**
 
 **（2026-10-24 夜更新）helper 这条线已经判完并关闭**：`--prefill-pipe 1` 时真实请求不进 `bind_stage_helper`
 （`planned_C < n` → `single_chunk=false`），`--prefill-pipe 0` 时才进；而启动时 `split_help_env()` 让 **flag 文件优先于
