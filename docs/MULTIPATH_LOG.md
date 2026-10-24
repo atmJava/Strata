@@ -6,6 +6,29 @@
 
 ---
 
+## R3 · 2026-10-24/25 · W3 引擎补丁：暂存读编译通过（默认关，+145 行），生产未动
+
+- **改了什么**：① 新建 `/opt/ai/src/strata-mp`（生产 0.2.2 源码副本，947 MB，rsync 4 s）；
+  ② 全量构建基线：`build-mp/` 333 目标、`ninja -j6` 约 10 分钟，二进制 md5 `57dd3a24…`；
+  ③ 打 W3 补丁（`BREAD` / `BADOPT <slot>` / `BCANCEL`，默认关，`STRATA_BATCH_STAGED_READ` 才可达，
+  3 个 hunk / 145 行 diff）→ 增量编译链接通过，二进制 md5 `5904997f…`；
+  ④ 设计文档 [`MULTIPATH_W3.md`](MULTIPATH_W3.md)；⑤ 补丁入库 `tools/server/patches/mp-w3-0.1.47.patch`
+  （`git apply --check` 在本仓库 0.1.48 上**也通过**）。
+- **数字**：构建 10 分钟（6 并发）；补丁 145 行；**0 重启**；生产 `build/`、`build/strata` 与配置一字节未动。
+  基线/补丁二进制的 md5 都记在 `/opt/ai/logs/MP-R3-build.log` 末尾（见"原始日志"）。
+- **静态核对（本轮最重要的结论）**：`BGEN` 的读本来就写**主会话 `ss`**，槽只是 `copy_to_slot` 的目的地；
+  批量解码的提交走 `ver.commit_slots` → **槽会话**（`verify.hpp:365` 的 `slots_`），不写 `ss`。
+  所以"读进 ss、稍后收养"**不需要新增 KV 缓冲**，暂存期间 ss 安全——这是 W3 可行的根据。
+- **四问**：① cron/timer —— `vram-perf` 每 5 分钟、`nvlink-crc` 每小时，正常；② 残留进程 —— 无；
+  ③ `vram-perf.csv` —— 未读（本轮无生产动作，R4 动手前读）；④ 方向 —— 服务端 + 验收，R4。
+- **预算**：重启 0、构建 1（在 `strata-mp`）、生产改动 0。未超支。
+- **没测什么**：补丁的**运行时**行为（只编译过，**没有跑过一行**）；服务端 `BREAD/BADOPT` 未写；
+  G1–G4 全未测；MTP 首窗无 draft（v1 设计）。
+- **下一轮第一件事**：**R4 = 服务端暂存路径**（`serve/server.py`：`pick_slot` 满槽 → `BREAD`；`BRDY` → 等槽 →
+  `BADOPT`；断连 → `BCANCEL`）+ 协议冒烟（要停生产把 patched engine 跑起来，**记 1 次重启**），然后 A-B-A。
+
+---
+
 ## R2 · 2026-10-24 · W2 配置臂（读分片）：**不触发**，2 次重启，恢复逐字节一致
 
 - **改了什么**：装 B 臂（生产 + `STRATA_PIPED_READ_PIECE=32768`、`STRATA_PIPED_DECODE_MAX_MS=400`、
