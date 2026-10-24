@@ -114,6 +114,8 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 | **生产形态 gate 开/关（同一二进制，只换 `env.STRATA_PIPED_CONCURRENT`）** | 冷读（一条全新 ~22,700 token prompt）墙钟 ON **14.35 s** 对 OFF **11.8 s** → **读的人多等 21.6%**；旁边那条解码流在冷读窗口内 **47.0 对 2.0 字符/s**、最长 chunk 间隔 **0.70 s 对 11.64 s**；单流 73.0/74.4/74.2、4 路聚合 125.0/124.4/121.2、接受率 78.13/82.33/80.95% **三项都落在噪声里（无结论）** | **L-019** |
 | **流越多，gate 开着的账越划算（3 条流做了开/关，4 条只测了开着）** | 3 条流：读的人 17.2 对 11.9 s（**+44.5%**），每条邻居流 **28.3 对 1.3 字符/s**、停顿 **0.76 对 11.72 s**。4 条流（生产满配、只测开着）：读的人墙钟 21.4 s 而引擎只花 **11.3 s** → **大头是排队**；邻居每条 35.8–44.1 字符/s、间隔 ≤0.3 s。**引擎那行 "slots decoded N rows meanwhile" 不能当邻居进度用**（4 流时停在 4，见 §7 第 22 条） | **L-020** |
 | **请求监视器打开（`api_monitor`）+ 满槽时排队的机制钉死** | 开销**测不出**（bench 单流 73.8 / 聚合 120.2 / 接受率 79.81%，都在 L-019 三臂带内；`json.dumps` 800K 字符只 2.9 ms）。**满 4 槽时读的人先等空槽**：引擎三行日志的先后（46.3 s 的批次 → 读 14.8 s → `slot 0 takes 22702 tokens`）证明读是在批次收尾后才开始。**真实流量第一批**：墙钟中位 13.2 s、TTFT 中位 0.80 s / p90 2.46 s / 最长 83.82 s（n=34，本会话的 agent 请求） | **L-021** |
+| **effort `medium` 不设成默认** | agent 形态 A-B-A 3 轮（14 任务、temp 0、只有这一条流）：墙钟中位 **+0.4%**、completion token **+2.2%**、做对题数两臂中位都 14/14、畸形工具调用 0/9 → **全在 <3% 线内，测不出**；而且**我们自己的客户端显式发 `reasoning_effort: high`**（监视器存了我这条会话的请求体），服务端默认**轮不到**，改了只影响不写 effort 的第三方 | **L-023** |
+| **read-ahead 的改动点（静态阅读，未测）** | 引擎中途收新活（只排在飞的毫秒级窗口），读本身跑在自己线程上、最后才 42.6 ms 复制进槽；**唯一障碍是 `BGEN` 下命令那一刻就要有空槽**。改动 = 加一条不要槽的读命令（opt-in）。值：满槽时那条冷读的 **36–43 s**；代价：读改在 4 条流旁边跑（邻居今天已掉 35–60%，多一路掉多少**未测**） | **L-024** |
 | L-001 显存预留 | GPU0 空闲 504 → 804–810（现 ~850）；专家缓存 7,334 → **7,190 slot（−1.96%）**；命中中位 98.90 → 99.00%（p10 97.80→97.50），88/470 请求 | L-001 |
 | 噪声地板 | 同一基线两次跑，**每任务 token 方差均值 24.5%**；生产形态 `temperature: 0` **钉不住**长输出的哈希 | L-007 |
 | 思考侧 | `effort` 只是 prompt 里一句话（`serve/server.py` 的 `EFFORT_TURN`/`render_prompt`）；`low`≡`high`（−0.5%，噪声内）；`medium` 查表形态 −28%、**推理形态只 −7%**；`none/off` −41% token、−25% 墙钟但 **14 个推理任务丢 3–4 个**（真算错 + 空答案）；预算 ≤10% | L-005 / L-009 / L-010 |
@@ -202,7 +204,8 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 | `bench-strata.py` / `cold-prefill.py` | 单流+4 并发 / 冷 prefill。`bench-strata.py` 现在**还报投机 draft 接受率**：测量段前后各读一次 `/metrics` 的累计计数取差，并写明窗口里有多少请求是别人的（`foreign_requests`），引擎中途重启过就说差值无意义 |
 | `exp-mode-ab.sh [--go]` | mode 4↔8 速度 A-B-A；**会识别线上已是 A 从而只要 2 次重启** |
 | `exp-mode8-quality.sh [--go]` | mode 8 的**质量** A-B-A（逐位 ×3 + 推理 harness ×3） |
-| `agent_budget_ab.py [long] [reason] <reps> <arms…>` | agent harness：臂写作 `<budget>[@<effort>]`（如 `0@medium`）；`AB_TAG` 后缀输出文件；`reason` 加 8 个**只能靠算**的可判分任务 |
+| `agent_budget_ab.py [long] [reason] <reps> <arms…>` | agent harness：臂写作 `<budget>[@<effort>]`（如 `none@medium`）；`AB_TAG` 后缀输出文件；`reason` 加 8 个**只能靠算**的可判分任务（共 14 个）；`temperature: 0` 钉死。**本轮起源码也在 `tools/server/`**（服务器上那份权限是 600，改完 scp 上去要留意权限）。已跑（L-023：`reason 3 none@high none@medium none@high`） |
+| `quality_eval_budget.py <outdir>` | 自评分质量评测（答案都能程序判分；`QE_BUDGET` 发预算、`QE_KEY` 传 key）。`thinking-budget-ab.sh` 就是它的多臂驱动器（免重启，一臂一臂跑）。**本轮起源码也在 `tools/server/`** |
 | `vram-perf-sample.sh` | cron `*/5 * * * *` 在跑（**别删**）；写 `/opt/ai/logs/vram-perf.csv`，低于 700 写 `.warn` |
 | `nvlink-crc-sample.timer` | systemd timer，active；`/opt/ai/logs/nvlink-crc.log` 至今 `crc/replay/recovery` 全 0 |
 | `passive_windows.py` | **免停机判据**：按引擎会话切窗口，报 `--spec` 接受率（引擎每请求写的 `drafts accepted A of B`）、suffix draft 接受率、专家命中中位/p10/min、`length` 截断数、"想到没答案"数、prompt 规模；`--band MIN:MAX` 只在同一 prompt 长度带内比较（固定 prompt 的 bench ≈293、parity ≈7.7K、cold-prefill ≈13.3K）；服务日志侧用 `--marker` + `--starts` 对齐时间戳。轮转后的尾文件没有 `engine started` 行时会合成一个 `unknown (rotated tail: <file>)` 窗口而不是什么都不打（2026-10-24 补的，以前直接为空，坑过一轮），这种窗口不受 `--since` 滤。源码 `tools/server/passive_windows.py` |
@@ -282,6 +285,8 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 - ~~gate 开着在多条流下还划不划算~~：**3 条流做了开/关（L-020）**：读的人 +44.5%（17.2 对 11.9 s），
   每条邻居流 28.3 对 1.3 字符/s、停顿 0.76 对 11.72 s → **划得来，而且流越多越划得来**。4 条流只测了开着的形状
   （邻居 35.8–44.1 字符/s、间隔 ≤0.3 s；读的人墙钟大头是**排队**不是读，见 §11 第 5 条）。
+- ~~medium 思考预算要不要设成默认~~：**不做（L-023）**。agent 形态 A-B-A 3 轮：墙钟 +0.4%、token +2.2%、
+  做对题数两臂都 14/14、畸形调用 0/9 → 全在 <3% 线内；而且我们自己的客户端显式发 `high`，服务端默认轮不到。
 - ~~`pipe_rows` 为什么 4 条流时停在 4~~：**已答（L-021）**。引擎日志的先后是 `strata batch (pipelined, 2 groups of 2):
   4795 rows in 46303 ms` → `read 22695 tokens … in 14787 ms` → `slot 0 takes 22702 tokens`：**满槽时读要等空槽**，
   读是在批次窗口收尾后才开始的，所以"读期间槽还在解码"只剩尾巴 4 行。这列在有空槽时（≤3 条流）照样能用。
@@ -317,14 +322,17 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
    引擎也不接没有槽的活（`generate.cpp:12007` `ERR BGEN: no such free slot`）。
    **"把并发压在槽数以下"没有现成旋钮**（`self.batch` 就是引擎自报的 `batch_slots`，槽数=准入上限），
    而且 `pick_slot` 在 pipelined 组里**优先填 busy 槽下面的洞**，"总留一个空槽"这套排布下本来不成立。
-   → 想改要写代码（两条都算 opt-in，见 L-022）：引擎侧 read-ahead，或服务端"先发后挂"。**都要停机，引擎那条还要重编译。**
+   → **下一步是把 read-ahead 做出来**（L-024 把改动点读清了）：引擎加一条**不要槽的读命令**
+   （先把提示词读进暂存，槽空了再走那 42.6 ms 的复制 + 正常 BGEN），默认路径一字节不动、opt-in；
+   服务端 `pick_slot` 那边相应地不必等空槽才发。**要重编译 + ≥2 次重启**，还没做。
+   想先量 drain 那一段：开 `STRATA_TRACE=1` 会打 `strata trace: drain for BGEN: N groups in flight, X ms`。
    免停机的支线：静态读 `pick_slot` / 控制行 / `STRATA_ADMIT_SHORT_FIRST`（`server.py:319` 读的是**服务端进程**的环境，
    配置 `env` 键在 import 之后才应用 → 要生效得进 systemd 单元的环境，那是 root 的活）。
 6. **4 条流的"关着"对照**：L-020 只有 3 条流做了开/关；4 条流（生产满配）只测了开着。`gate_prod_streams.sh 4 3 60000`
    直接能跑（要 2 次重启 ≈ 300 s，决定权在我，§10 已表态 6）。**注意**：L-021 已经说明满槽时读基本不等重叠，
    所以这条对照的预期差别比 3 流那轮小——做之前先想清楚它还能回答什么。
-7. **medium 思考预算**：L-010 说它在推理形态只省 7%，还没做"设成默认"的 A-B-A（免重启，随时能做）。
-   现在有了监视器，**同一轮就能顺手量到真实流量的 TTFT 与墙钟分位**（`/api/requests`，跑完立刻 dump）。
+7. **`t_zhfinal` 那种"中文答到半句就停"**：L-023 里 high 臂 6 次运行栽 2 次（答到 `这台机器的驱动版本是 595.` 就收住，
+   completion 只有 81–87 token，**不是 max_tokens 截的**）。n 太小，**别下结论**；以后跑 agent harness 时顺手看它出不出。
 8. **上游要的第二项检查 (b)**：钉 `--prefill N`（N 大于被测提示词）再重复几次重启。今天确实重启了 7 次，
    但**没有钉 `--prefill`**（还是 `auto`），所以 **(b) 仍未做**；下次要重编译或调参数时并到同一个停机窗口最省。
    第一项 (a) 已做完（L-017：chunk 53/53 都是 8192/96-slot；今天这七次重启也照样都打 auto）。

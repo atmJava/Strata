@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""Agent-shaped A/B for the thinking budget: multi-step tool calls, not one-shot answers.
+
+Why this exists. The self-scoring eval answers 30-159 tokens of thinking per task, so a 1024-token
+thinking budget does not touch it at all (docs/EVIDENCE_LEDGER.md L-002: b1024 came back within 0.3%
+of baseline). But an agent step on this box thinks 746-989 tokens - that is what the budget would
+actually be trimming, and the eval cannot see it. So this harness drives the same endpoint through a
+tool-call loop: the model must call tools, we run them here, feed the results back, and only then take
+the answer. That is the shape a session like mine makes, and every task has a checkable answer.
+
+What counts as the result, in order:
+  1. tasks completed with a correct final answer (a wrong answer after any number of steps is a fail)
+  2. malformed tool calls (unknown name, or arguments that are not valid JSON, or a bad enum key)
+  3. completion tokens per task  - the budget's own effect, and the number least hurt by contamination
+  4. wall clock per task, as a median, treated as a trend only: on this box a second decoding stream
+     halves single-stream speed, and this harness runs while a session (mine) is generating.
+
+Arms run interleaved (rep 1: none, 512, 256; rep 2: none, 512, 256; ...) so drift hits every arm the
+same number of times. temperature 0 is pinned: the determinism probe (probe_determinism.py) showed
+whether the server applies its configured sampling when a request omits the keys, and if it does, an
+unpinned run-to-run spread of 24.5% would swallow a budget effect of similar size.
+
+Usage: agent_budget_ab.py [reps] [arm ...]     (default 3 reps, arms none 512 256)
+       arm "none" sends no reasoning_budget_tokens, so the config's 12288 applies.
+"""
+import hashlib
+import json
+import os
+import pathlib
+import re
+import statistics
+import sys
+import time
+import urllib.request
+
+BASE = "http://127.0.0.1:8080"
+CFG = "/opt/ai/src/strata-0.2.2/strata-022.json"
+MODEL = "qwen3.8-flash-next-iq3_xxs-abliterated"
+EFFORT = "high"
+MAX_STEPS = 6            # assistant turns per task; more than this and the task counts as not completed
+
+FACTS = {"driver": "595.71.05", "gpu0_free": "810", "slots": "7190", "quant": "IQ3_XXS"}
+
+TOOLS = [{
+    "type": "function", "function": {
+        "name": "add", "description": "Return the sum of two integers.",
+        "parameters": {"type": "object", "properties": {
+            "a": {"type": "integer"}, "b": {"type": "integer"}}, "required": ["a", "b"]}}},
+    {
+    "type": "function", "function": {
+        "name": "lookup", "description": "Return one stored fact about this server.",
+        "parameters": {"type": "object", "properties": {
+            "key": {"type": "string", "enum": sorted(FACTS)}}, "required": ["key"]}}},
+    {
+    "type": "function", "function": {
+        "name": "slug", "description": "Lowercase the text and replace every run of characters that is "
+                                       "not a letter or digit with a single underscore.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}}, "required": ["text"]}}}]
+
+
+def run_tool(name, args):
+    """Execute one tool call. Returns (result, malformed_reason)."""
+    if name == "add":
+        try:
+            return str(int(args["a"]) + int(args["b"])), None
+        except Exception as exc:
+            return None, "add: %r" % (exc,)
+    if name == "lookup":
+        key = args.get("key")
+        if key not in FACTS:
+            return None, "lookup: key %r not in the enum" % (key,)
+        return FACTS[key], None
+    if name == "slug":
+        text = args.get("text")
+        if not isinstance(text, str):
+            return None, "slug: text is %r" % (type(text).__name__,)
+        return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_"), None
+    return None, "no such tool: %r" % (name,)
+
+
+def contains(*needles):
+    def check(ans):
+        return all(n in ans for n in needles)
+    return check
+
+
+def num(expected):
+    """True when the answer contains exactly one run of digits and it is `expected`.
+
+    Used by the reasoning tasks: "297" and "答案是 297。" pass, "2970"、"298" 和 "不是 297 是 298" 不过.
+    A plain substring check would take the last two."""
+    def check(ans):
+        groups = re.findall(r"\d+", ans)
+        return len(groups) == 1 and groups[0] == str(expected)
+    return check
+
+
+def one_of(expected):
+    """True when, after stripping whitespace and the usual Chinese/ASCII answer punctuation, the answer
+    begins or ends with `expected`.  For single-character answers where prose around them is fine."""
+    def check(ans):
+        t = re.sub(r"[\s。．.！!，,：:；;是得为的答案第名]", "", ans)
+        return t.startswith(expected) or t.endswith(expected)
+    return check
+
+
+def equals(want):
+    def check(ans):
+        return ans.strip().strip("`'\" ") == want
+    return check
+
+
+# The long-context shape. A short instruction on an empty context makes the model think ~100-200
+# tokens per turn, so a 256-token budget cannot bite (measured: none 1,017 vs 256 1,004 tokens,
+# -1.3%, all arms 6/6).  A real session step carries a big context and thinks 746-989 tokens on this
+# box, so we give the harness one: a few hundred numbered log lines (~6K tokens) as prior history,
+# and tasks whose answer is a fact buried at a known line.  The lines are generated by a formula so
+# the expected answer is exact, and the same block is used in every arm and every rep.
+def build_context(nlines=300):
+    lines, facts = [], {}
+    for i in range(1, nlines + 1):
+        node = 200 + (i * 7) % 97
+        temp = 40 + (i * 13) % 40
+        duty = 30 + (i * 11) % 60
+        lines.append("Event %04d: the sensor at node %d reported %d.1 degrees and the fan duty rose "
+                     "to %d%%." % (i, node, temp, duty))
+        facts[i] = (node, temp)
+    return "\n".join(lines), facts
+
+
+CTX_TEXT, CTX_FACTS = build_context()
+E1, E2 = 173, 288
+
+
+def task_list(long_mode, reason=False):
+    base = list(TASKS) + (list(REASON_TASKS) if reason else [])
+    if not long_mode:
+        return base
+    n1, t1 = CTX_FACTS[E1]
+    n2, t2 = CTX_FACTS[E2]
+    base += [
+        ("t_retrieve", "下面给出的会话记录里有编号 Event %04d 的一条。先调用 lookup 查 gpu0_free，"
+                       "再回答该 Event 里的节点编号与温度，格式：node=<n> temp=<t> free=<值>" % E1,
+         contains("node=%d" % n1, "temp=%d.1" % t1, "free=810")),
+        ("t_retrieve2", "在同一份会话记录里找到 Event %04d，调用 slug 处理你从那条记录里读到的整句"
+                        "（从 \"the sensor\" 开头到 \"%%\" 结尾），然后只回答 slug 的结果。" % E2,
+         equals("the_sensor_at_node_%d_reported_%d_1_degrees_and_the_fan_duty_rose_to_%d" % (n2, t2, 30 + (E2 * 11) % 60))),
+    ]
+    return base
+
+
+TASKS = [
+    ("t2lookup", "先用 lookup 查 driver，再用 lookup 查 slots，然后回答：driver=<值> slots=<值>",
+     contains("driver=595.71.05", "slots=7190")),
+    ("t_chain", "用 lookup 查 gpu0_free，把它的数值用 add 加上 190，只回答那个数字。", equals("1000")),
+    ("t_slug3", "对 Disk、Space、Alert 这三个词分别调用 slug，把三个结果用英文逗号连接后回答。",
+     equals("disk,space,alert")),
+    ("t_seqadd", "先调用 add(7, 5)，再把得到的结果与 3 相加，只回答最终数字。", equals("15")),
+    ("t_sluglook", "用 lookup 查 quant，对查到的值调用 slug，只回答 slug 的结果。", equals("iq3_xxs")),
+    ("t_zhfinal", "用 lookup 查 driver，然后用中文一句话说明这台机器的驱动版本，句子里必须带上版本号数字。",
+     contains("595.71.05")),
+]
+
+# Reasoning tasks: no tool can answer these, and each has one exact answer.  The lookup/chain tasks
+# above ask the model to fetch and echo; these ask it to work something out, which is where a thinking
+# budget or an effort hint is supposed to bite.  Every expected value below was computed by hand and
+# is written here so the grader never has to agree with the model.
+REASON_TASKS = [
+    ("r_chain", "先把 231 乘以 3，再减去 99，最后除以 2。只回答最终数字。", num(297)),
+    ("r_arith", "计算 (37*29 + 41) / 6，只回答它的整数部分。", num(185)),
+    ("r_count", "1 到 200（含两端）之间，能被 3 整除但不能被 5 整除的整数有多少个？只回答数字。", num(53)),
+    ("r_mod", "123456 除以 97 的余数是多少？只回答数字。", num(72)),
+    ("r_bits", "1234 写成二进制之后里面有多少个 1？只回答数字。", num(5)),
+    ("r_algebra", "解方程 3x + 11 = 47，只回答 x 的值。", num(12)),
+    ("r_speed", "一列火车 45 分钟行驶了 63 公里，它的时速是多少公里？只回答数字。", num(84)),
+    ("r_logic", "甲、乙、丙三人分别得了第 1、2、3 名，没有并列。已知：甲不是第 1，乙不是第 2，"
+                 "丙不是第 3，而且甲不是第 2。谁是第 1？只回答一个字：甲、乙或丙。", one_of("乙")),
+]
+
+
+def api_key():
+    try:
+        return json.load(open(CFG)).get("api_key", "")
+    except Exception:
+        return os.environ.get("QE_KEY", "")
+
+
+def one_turn(messages, budget, key, effort=EFFORT):
+    payload = {"model": MODEL, "messages": messages, "tools": TOOLS, "tool_choice": "auto",
+               "max_tokens": 1600, "reasoning_effort": effort, "stream": True, "temperature": 0}
+    if budget:
+        payload["reasoning_budget_tokens"] = budget
+    req = urllib.request.Request(BASE + "/v1/chat/completions",
+                                 data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer " + key})
+    content, reasoning = [], []
+    calls = {}                     # index -> {id, name, args}
+    usage, finish = {}, None
+    with urllib.request.urlopen(req, timeout=900) as r:
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("usage"):
+                usage = obj["usage"]
+            for ch in obj.get("choices") or []:
+                d = ch.get("delta") or {}
+                if d.get("reasoning_content"):
+                    reasoning.append(d["reasoning_content"])
+                if d.get("content"):
+                    content.append(d["content"])
+                for tc in d.get("tool_calls") or []:
+                    slot = calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["args"] += fn["arguments"]
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+    return ({"content": "".join(content), "rsnCh": len("".join(reasoning)),
+             "completion_tokens": usage.get("completion_tokens") or 0,
+             "prompt_tokens": usage.get("prompt_tokens") or 0, "finish": finish},
+            [calls[k] for k in sorted(calls)])
+
+
+def run_task(tid, instruction, check, budget, key, context=None, effort=EFFORT):
+    text = (context + "\n\n" + instruction) if context else instruction
+    messages = [{"role": "user", "content": text}]
+    t0 = time.time()
+    steps = tokens = ptokens = bad = calls_made = 0
+    answer, error, done = "", None, False
+    while steps < MAX_STEPS and not error:
+        steps += 1
+        try:
+            head, calls = one_turn(messages, budget, key, effort)
+        except Exception as exc:
+            error = "%s: %s" % (type(exc).__name__, exc)
+            break
+        tokens += head["completion_tokens"]
+        ptokens += head["prompt_tokens"]
+        if head["finish"] == "length" and not calls:
+            error = "hit max_tokens while still thinking"
+            answer = head["content"]
+            break
+        if not calls:
+            answer = head["content"]
+            done = bool(answer.strip()) and check(answer)
+            break
+        messages.append({"role": "assistant", "content": head["content"] or None,
+                         "tool_calls": [{"id": c["id"] or ("call%d" % i), "type": "function",
+                                         "function": {"name": c["name"], "arguments": c["args"]}}
+                                        for i, c in enumerate(calls)]})
+        for i, c in enumerate(calls):
+            try:
+                args = json.loads(c["args"] or "{}")
+            except json.JSONDecodeError as exc:
+                args, bad = {}, bad + 1
+                result = "invalid arguments json: %s" % exc
+            else:
+                result, why = run_tool(c["name"], args)
+                if why:
+                    bad += 1
+                    result = "error: " + why
+                else:
+                    calls_made += 1
+            messages.append({"role": "tool", "tool_call_id": c["id"] or ("call%d" % i),
+                             "content": str(result)})
+    return {"id": tid, "task": tid, "ok": done, "steps": steps, "tool_calls": calls_made,
+            "malformed": bad, "completion_tokens": tokens, "prompt_tokens": ptokens,
+            "secs": round(time.time() - t0, 2),
+            "answer": answer[:160], "error": error,
+            "sha": hashlib.sha256(answer.encode()).hexdigest()[:12]}
+
+
+def main():
+    argv = sys.argv[1:]
+    long_mode = "long" in argv
+    reason_mode = "reason" in argv
+    argv = [a for a in argv if a not in ("long", "reason")]
+    reps = int(argv[0]) if argv else 3
+    # An arm is "<budget>[@<effort>]": "none", "512", "0@low", "256@off".  Both fields are per-request,
+    # so an arm needs no restart and leaves no state behind; the budget turned out to be a small lever
+    # (<=10%) and effort a much bigger one (16 completion tokens at off vs ~200 at high on the same
+    # prompt with a byte-identical answer), so effort is what the arms vary here.
+    specs = argv[1:] or ["none", "512", "256"]
+    arms = []
+    for spec in specs:
+        b, _, eff = spec.partition("@")
+        arms.append((spec, 0 if b in ("", "none") else int(b), eff or EFFORT))
+    tasks = task_list(long_mode, reason_mode)
+    context = CTX_TEXT if long_mode else None
+    key = api_key()
+    if not key:
+        print("no api_key from", CFG)
+        return 1
+    shape = ("-long" if long_mode else "") + ("-reason" if reason_mode else "")
+    tag = os.environ.get("AB_TAG", "")
+    out = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.json" % (shape, tag))
+    log = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.log" % (shape, tag))
+    print("mode %s  %d tasks  context %d chars  arms %s  reps %d"
+          % (shape or "short", len(tasks), len(CTX_TEXT) if long_mode else 0,
+             specs, reps), flush=True)
+    results = {s: [] for s, _b, _e in arms}
+    for rep in range(1, reps + 1):
+        for spec, budget, effort in arms:
+            rows = [run_task(tid, ins, chk, budget, key, context, effort)
+                    for tid, ins, chk in tasks]
+            results[spec].append({"rep": rep, "rows": rows})
+            ok = sum(1 for r in rows if r["ok"])
+            tk = sum(r["completion_tokens"] for r in rows)
+            pt = sum(r["prompt_tokens"] for r in rows)
+            sec = sum(r["secs"] for r in rows)
+            bad = sum(r["malformed"] for r in rows)
+            print("rep %d arm %-12s  ok %d/%d  toolcalls %2d  malformed %d  compl %5d  prompt %6d  %6.1fs"
+                  % (rep, spec, ok, len(tasks), sum(r["tool_calls"] for r in rows), bad, tk, pt, sec),
+                  flush=True)
+            for r in rows:
+                if not r["ok"] or r["error"] or r["malformed"]:
+                    print("      %-11s ok=%s steps=%d bad=%d err=%s ans=%r"
+                          % (r["id"], r["ok"], r["steps"], r["malformed"], r["error"], r["answer"][:60]))
+    print("\n=== summary (median over reps) ===")
+    print("%-6s %14s %10s %10s %10s %10s %10s" % ("arm", "ok/N (median)", "compl", "prompt",
+                                                  "malformed", "task s med", "sha set"))
+    for spec, _b, _eff in arms:
+        oks = [sum(1 for r in run["rows"] if r["ok"]) for run in results[spec]]
+        tks = [sum(r["completion_tokens"] for r in run["rows"]) for run in results[spec]]
+        pts = [sum(r["prompt_tokens"] for r in run["rows"]) for run in results[spec]]
+        bads = [sum(r["malformed"] for r in run["rows"]) for run in results[spec]]
+        per_task_secs = [sorted(r["secs"] for r in run["rows"])[len(tasks) // 2] for run in results[spec]]
+        shas = {r["sha"] for run in results[spec] for r in run["rows"] if r["ok"]}
+        print("%-12s %8s / %-2d    %10d %10d %10d %10.1f %10d"
+              % (spec, statistics.median(oks), len(tasks), statistics.median(tks), statistics.median(pts),
+                 statistics.median(bads), statistics.median(per_task_secs), len(shas)))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, ensure_ascii=False, indent=1))
+    print("\nsaved", out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
