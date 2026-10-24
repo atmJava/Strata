@@ -15,6 +15,18 @@ Single-stream decode spends 22–30 ms a window of which only 8.5–9.3 ms is th
 is per-token fixed overhead. The hardware is under-used because requests arrive one at a time, not because a
 kernel is slow. **Getting more concurrency is worth more than any change listed below.** (CODE_PLAN §24)
 
+## The decode cost curve (measured, three loads)
+
+| tokens in the window | ms / window | ms / token |
+|---|---|---|
+| T=1 (one stream) | 22.2 | 22.2 |
+| T≈2 (one stream, 2 slots busy) | 30.1 | 14.7 |
+| T=4 (four streams) | ≈37 (from 108 tok/s) | ≈9.3 |
+
+That is a fixed cost of ≈12 ms a window plus ≈4.4 ms for each token in it. The fixed part is the window's
+hand-offs and launches, and it is why filling the slots is worth more than any kernel change: at T=1 three
+quarters of the window is paid for one token.
+
 ## Closed, with the number that closed it
 
 | Idea | Result | Where |
