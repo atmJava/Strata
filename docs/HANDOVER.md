@@ -301,7 +301,7 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 ## 11. 上游与分支状态
 
 
-- fork `atmJava/Strata`，`main` 已 fast-forward 到 **`c33fa7ba` = 上游 `v0.2.4.1`（引擎 0.1.49.1）**（2026-10-24 合并）。
+- fork `atmJava/Strata`，`main` 与 **`upstream/main` 同一个提交**：**`8183c6b6`**（= `v0.2.4.1` `c33fa7ba` 之后**一个 docs 提交**，14 行；引擎 0.1.49.1），2026-10-24 合并。
   中间跳过了 `v0.2.3` / `v0.2.3.1` / `v0.2.4`：`v0.2.4.1` 的 259 个提交里，**我们跑的 Qwen 路径的引擎文件一个都没动**
   （`src/program/generate.cpp`、`src/prefill/prefill.cpp`、`src/core/verify.cpp`、`src/core/weights.cpp`、
   `include/strata/program/batch_read.hpp` 全部零改动），新东西是 DeepSeek-V4.1（`src/dsv41`、`tools/dsv41`）、trellis 工具、
@@ -310,8 +310,8 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
   **唯一碰到我们路径的是 CPU 专家/kernel**：`src/kernels/cpu` + `include/strata/kernels/cpu` 13 个文件 +920/−86
   （AVX2/AVX512 的 IQ 与 TQ kernel、`expert_layout`、`native_expert`）——这是我们 `--native` + CPU 专家池走的路，
   **部署 0.2.4.1 可能有解码收益，但没测**（见 §13）。
-- 工作分支 **`hw/server-adapt-0.2.3`**（远端 tip `c1aed1cf` = 把 `v0.2.4.1` 合进来的 merge commit；本轮以前是
-  `4b3811dc`）：文档 + 工装 + `patches/local-strata/`。**用 merge 而不是 rebase**（rebase 要 force push，不允许）。
+- 工作分支 **`hw/server-adapt-0.2.3`**（远端 tip `c6a34f67` = 两个 merge commit：`v0.2.4.1`、再对齐 `upstream/main`；
+  之前是 `4b3811dc`）：文档 + 工装 + `patches/local-strata/`。**用 merge 而不是 rebase**（rebase 要 force push，不允许）。
   旧的 `hw/server-adapt`（`bad482e7`）是 rebase 之前的历史，**别再往它推**。
 - **`hw/s1-concurrent-read`**：远端 `11cc25bd`（0.2.2 基），本地 `tmp/rebase-s1` = `b9b3f995`（已 rebase 到
   0.2.3.1）。**更正（L-013）**：那两行**已经在线上引擎二进制里**，所以"上生产"**不需要重编译**，
