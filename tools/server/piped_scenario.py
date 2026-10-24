@@ -26,6 +26,7 @@ Usage: piped_scenario.py [reps] [chars-for-B]
 from __future__ import annotations
 
 import json
+import os
 import re
 import statistics
 import sys
@@ -66,7 +67,11 @@ def decode_stream(stop: threading.Event, out: dict) -> None:
     like it produced nothing while it was in fact the very thing the slots were decoding - the run
     printed "A 0 tok" for every rep.  Reasoning text is counted too, since it also arrives per token.
     """
-    body = {"model": MODEL, "temperature": 0, "top_p": 1, "max_tokens": 400, "stream": True,
+    # PEER_MAX_TOKENS stretches the decode stream: at 400 tokens a four-stream rep can end its decode
+    # before the cold read even starts, which makes "the slots decoded N rows meanwhile" read as if the
+    # read starved the slots when it only outlasted them.
+    max_tokens = int(os.environ.get("PEER_MAX_TOKENS", "400"))
+    body = {"model": MODEL, "temperature": 0, "top_p": 1, "max_tokens": max_tokens, "stream": True,
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "user", "content": PROMPT_A}]}
     stamps: list[tuple[float, int]] = []
@@ -109,22 +114,30 @@ def main(argv: list[str]) -> int:
     reps = int(argv[1]) if len(argv) > 1 else 2
     chars = int(argv[2]) if len(argv) > 2 else PROMPT_B_TOKENS
     mode = (argv[3] if len(argv) > 3 else "coexist").lower()
+    peers = int(argv[4]) if len(argv) > 4 else 1
+    med = lambda xs: statistics.median(xs)                        # noqa: E731
     corpus = open(CORPUS, encoding="utf-8", errors="replace").read() if mode != "solo" else ""
 
-    print(f"  {reps} reps, mode={mode}: A decodes 400 tokens"
-          + (f" while B reads a cold prompt of ~{chars} 字符" if mode != "solo" else " alone"))
+    print(f"  {reps} reps, mode={mode}, {peers} 条解码流（每条 400 token）"
+          + (f" 同时 B 读一条全新冷提示词 ~{chars} 字符" if mode != "solo" else "，旁边没人读"))
     print("  注：A 那一侧数的是流式里收到的**字符**数（本提示词约 2 字符/token），不是 token 数；"
           "流里带 usage 时会另报 completion_tokens。跨臂比较请用同一单位，别把字符/s 当 tok/s。")
     rows = []
     for rep in range(1, reps + 1):
-        out: dict = {}
         stop = threading.Event()
-        thread = threading.Thread(target=decode_stream, args=(stop, out), daemon=True)
-        thread.start()
+        outs: list[dict] = []
+        threads: list[threading.Thread] = []
+        for _ in range(peers):
+            stream: dict = {}
+            outs.append(stream)
+            threads.append(threading.Thread(target=decode_stream, args=(stop, stream), daemon=True))
+        for th in threads:
+            th.start()
 
         if mode == "solo":
-            # the control: the same decode stream with nobody reading a cold prompt beside it
-            thread.join(timeout=180)
+            # the control: the same decode streams with nobody reading a cold prompt beside it
+            for th in threads:
+                th.join(timeout=180)
             t0, b_wall, b_tokens = 0.0, 0.0, None
             lines, reads, prompt_lines, refused = [], [], [], False
         else:
@@ -140,45 +153,56 @@ def main(argv: list[str]) -> int:
             b_wall = time.perf_counter() - t0
             b_tokens = done.get("usage", {}).get("prompt_tokens")
             stop.set()
-            thread.join(timeout=120)
+            for th in threads:
+                th.join(timeout=120)
             time.sleep(1.0)                                      # let the engine flush its lines
             lines = log_lines_from(marker)
             reads = [READ_LINE.search(l) for l in lines if READ_LINE.search(l)]
             prompt_lines = [PROMPT_LINE.search(l) for l in lines if PROMPT_LINE.search(l)]
             refused = any(REFUSAL in l for l in lines)
 
-        stamps = out.get("stamps", [])
+        # per decode stream: characters seen, rate over its own life, rate inside the B window, worst gap
+        per_stream = []
+        for stream in outs:
+            st = stream.get("stamps", [])
+            tot = sum(n for _, n in st)
+            sp = (st[-1][0] - st[0][0]) if len(st) > 1 else 0.0
+            ins = [(t, n) for (t, n) in st if t0 <= t <= t0 + b_wall] if b_wall else st
+            per_stream.append({
+                "chars": tot,
+                "span_s": round(sp, 1),
+                "chars_s_alone": round(tot / sp, 1) if sp else 0.0,
+                "chars_s_during_b": round(sum(n for _, n in ins) / b_wall, 1) if (b_wall and tot) else 0.0,
+                "worst_gap_during_b_s": round(max([ins[i][0] - ins[i - 1][0] for i in range(1, len(ins))], default=0.0), 2),
+                "worst_gap_overall_s": round(max([st[i][0] - st[i - 1][0] for i in range(1, len(st))], default=0.0), 2),
+            })
 
-        a_total = sum(n for _, n in stamps)
-        span = (stamps[-1][0] - stamps[0][0]) if len(stamps) > 1 else 0.0
-        a_rate_alone = a_total / span if span else 0.0
-        all_gaps = [stamps[i][0] - stamps[i - 1][0] for i in range(1, len(stamps))]
+        a_total = sum(s["chars"] for s in per_stream)
+        span = med([s["span_s"] for s in per_stream])
+        a_rate_alone = med([s["chars_s_alone"] for s in per_stream])
+        a_rate = med([s["chars_s_during_b"] for s in per_stream])
+        worst_gap = med([s["worst_gap_during_b_s"] for s in per_stream])
+        all_gaps = [s["worst_gap_overall_s"] for s in per_stream]
+        a_tok = sum(int(s["chars_s_during_b"] * s["span_s"]) for s in per_stream)
 
-        # A's speed while B was reading: chunk stamps inside the B window
-        inside = [(t, n) for (t, n) in stamps if t0 <= t <= t0 + b_wall] if b_wall else stamps
-        a_tok = sum(n for _, n in inside)
-        a_rate = a_tok / b_wall if b_wall and a_tok else 0.0
-        gaps = [inside[i][0] - inside[i - 1][0] for i in range(1, len(inside))]
-        worst_gap = max(gaps) if gaps else 0.0
-
-        row = {"rep": rep, "mode": mode, "b_prompt_tokens": b_tokens,
+        row = {"rep": rep, "mode": mode, "peers": peers, "b_prompt_tokens": b_tokens,
                "b_client_wall_s": round(b_wall, 1),
                "a_tokens_seen": a_total, "a_tok_s_alone": round(a_rate_alone, 1),
                "a_tok_s_during_b": round(a_rate, 1),
                "a_worst_gap_during_b_s": round(worst_gap, 2),
                "a_worst_gap_overall_s": round(max(all_gaps), 2) if all_gaps else 0.0,
                "gate_refused_this_rep": refused,
+               "streams": per_stream,
                "concurrent_reads": [[int(m.group(1)), int(m.group(2)), int(m.group(5))] for m in reads]}
         rows.append(row)
 
         if mode == "solo":
-            print(f"  rep {rep}: A alone {a_total} 字符 in {span:.1f}s = {a_rate_alone:.1f} 字符/s "
-                  f"({out.get('usage', {}).get('completion_tokens', '?')} tok 由 usage 报), "
-                  f"最长 chunk 间隔 {worst_gap:.2f}s")
+            print(f"  rep {rep}: {peers} 条流各自 solo，合计 {a_total} 字符 | 每条中位 {span:.1f}s 跑完 "
+                  f"= {a_rate_alone:.1f} 字符/s（每条最长 chunk 间隔中位 {worst_gap:.2f}s）")
         else:
             print(f"  rep {rep}: B prompt={b_tokens} client_wall={b_wall:.1f}s | "
-                  f"A {a_total} 字符 总, B 窗口内 {a_tok} 字符 = {a_rate:.1f} 字符/s, "
-                  f"最长 chunk 间隔 {worst_gap:.2f}s（全程 {max(all_gaps) if all_gaps else 0:.2f}s）")
+                  f"{peers} 条流在 B 窗口内合计 {a_tok} 字符，每条中位 {a_rate:.1f} 字符/s，"
+                  f"最长 chunk 间隔中位 {worst_gap:.2f}s（各流全程最长里取中位 {max(all_gaps) if all_gaps else 0:.2f}s）")
         for m in prompt_lines[-2:]:
             print(f"      engine: prompt {m.group(1)} = {m.group(2)} reused + {m.group(3)} read in {m.group(4)} ms")
         for m in reads[-3:]:
