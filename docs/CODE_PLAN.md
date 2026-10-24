@@ -362,3 +362,28 @@ layer's router, file tier)`）—— 但它服务的是**文件层**，而暴露
 
 **做法约束**：只动 `build-imma`，二进制走 `/opt/ai/engines/help/build/` + `mv` 部署；实验配置每次实验后
 `restore-prod.sh` 并验 md5；每晚 ≤2 次重启，超了就改成同 boot flag 交替。
+
+
+---
+
+## 17. S4 结果：重叠机制存在，但这台机器没有给它显存（2026-10-24 夜，实测）
+
+`STRATA_FS_SLOTS` 打开的是 **Foresight swap space**（`generate.cpp:9814`）—— 它正是"把预测到的专家提前拷进
+VRAM"的那套机制（`RouterLookahead::set_foresight`），也是唯一能直接遮住 S3 那 1.2–2.0 ms/窗口 staging 的现成东西。
+
+实测（`STRATA_FS_SLOTS=64` + `STRATA_SPLIT_TIMING=1`，其余同生产）：
+
+```
+strata serve: foresight swap: cannot allocate 2268 MiB on CUDA0 (raise --vram-reserve-mib by about that much) - swap space off
+```
+
+**结论**：每槽约 35 MiB，64 槽要 2.27 GiB；而这台机器的显存已经全给了驻留专家（`--vram-reserve-mib 1280`、
+12,288 槽、`--pcie-frac 0.31`），**没有 2.27 GiB 可给**。要腾出来只能减驻留槽 —— 那正是让 decode 快的那部分，
+用它换 8–14% 的 staging 重叠属于**拆东墙补西墙**。
+
+**所以 S4 关闭**（进 §6 不做清单），理由不是"没意义"，而是**在这台机器的显存预算内不成立**。
+这条也回答了"大显存是不是已经吃干"：是 —— 44 GB VRAM 全部换成了驻留专家，任何额外缓冲都要从那里切。
+
+**下一步（S5）**：剩下的最大项是"等 GPU"（9.25 ms/窗口，65–73%）。它按 24 层均摊约 0.39 ms/层，
+要动它只能合并 ring/减少每层同步 —— 结构性改动，需要先量每层等待的**分布**（新探针，1 次构建+1 次安装），
+并且必须承认它很可能超出今晚剩下的重启预算。若预算不够，就只写设计、不动代码。
