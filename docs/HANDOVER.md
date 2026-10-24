@@ -390,14 +390,14 @@ env**，我自己的 `prefill_help=0` 把它关了 —— 两个条件同时满�
 > 实测每层等待 **17.63 → 19.3 ms（+9%）**、decode 在噪声内 → 不采纳。至此 **decode 的四条调度候选全部有实测且全部否决**
 > （helper、显存换重叠、调层数、overlap 交接）。
 >
-> **（2026-10-24 夜，成本模型之后）** 一层一窗口的专家权重最多 78.6 MB、197 MFLOP；按实测量到的 0.29–0.37 ms
-> 折算是 **271 GB/s（HBM 的 44%）与 0.68 TFLOP/s** → **不是算力受限，是"从 VRAM 流专家权重"的效率问题**。
-> 区间之所以宽（20–44%），是因为**每层每窗口真正不同的专家数还没量**。
+> **（2026-10-24 夜，S7 实测之后 —— 这一条推翻了前面的成本模型）** `STRATA_DECODE_TIMING=1` + `STRATA_VERIFY_PROFILE=1`
+> 给出每窗口的 GPU 阶段账：**`VRAM hits` 只占 1.52 ms/窗口 = 0.063 ms/层**（19.83 命中 × 1.96 MB ≈ 39 MB，
+> ≈ 620 GB/s = **HBM 峰值**）→ **专家命中内核已经没有余量，改内核拿不到 +50%**。GPU 真正空闲的是
+> **`waitCPU` 1.56 ms/窗口**（+ waitA 0.53 + waitB 0.14）→ 每窗口约 2.2 ms、约 20% 的空转在**等 CPU 池**。
 >
-> **下一阶段第一件事（0 重启，读现成计数器）**：`ExpertDispatch` 的 `cache_hits` / `offload_entries` / `pcie_experts`
-> 已经在按请求累计（`include/strata/core/expert_source.hpp:604-612`），用它算出"每层每窗口的不同专家数"，把 20–44% 收窄。
-> 收窄之后才决定内核线：把上游 0.2.4.x 的 `s2_expert_grouped`（有逐位 parity 门 + `--bench`）搬来做同 boot A/B。
-> 判据：单窗口专家 GEMM 的字节效率从当前的 20–44% 提到 ≥60%，且 decode 配对 ≥5%；否则只交测量与设计。
+> **下一阶段（唯一靶子）**：CPU 池延迟/重叠。先量池的构成（`per layer-window: CPU experts 0.52 ms, 0.61 entries`
+> 说明每层只有 0.61 个 CPU 专家却要 0.52 ms），再决定是减 `--pcie-frac`、加池线程、还是改亲和性。
+> 判据：`waitCPU` 从 1.56 降到 <0.5 ms/窗口且 decode 配对 ≥5%；止损：一晚上没到这个数就只交测量。
 
 **代码计划见 [`CODE_PLAN.md`](CODE_PLAN.md)**（v2：P0 定位病因 → P1-A/B/C 三选一 → P2 head 分卡 → P3 结构级；含测量协议与不做清单）。
 
