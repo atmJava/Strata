@@ -6,8 +6,19 @@
 > [`FEATURE_PARITY.md`](FEATURE_PARITY.md)（功能清单、测试用例与验收标准）、
 > [`../tools/server/README.md`](../tools/server/README.md)（工装）。
 >
-> **状态：草案，待用户过目。** 本文件只回答"要做什么、怎么证明、怎么回退"；批准前**不动生产**。
-> 第一轮（W1）是**只读测量**，没有重启、没有配置改动。
+> **状态：已执行并收口（R0–R8，2026-10-25）。** 判决总表见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md) §8；
+> 每轮复盘见 [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)，证据见 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) L-046…L-052。
+> 生产当前运行 **A（原 0.2.2 / 0.1.47，health 200）**；W3 补丁默认关，按 `MULTIPATH_W3.md` §7 的方式启用。
+
+**执行结果（一句话版）**：
+
+- **W1 基线**：L-046（T3 27.2 s / 0.68 s；bench 72.7 / 120.5 tok/s；接受率 79.5%）。
+- **W2 配置臂**：**否决**——`STRATA_PIPED_READ_PIECE` 在生产的并发读 gate 下不触发（L-047）。
+- **W3 暂存读**：**部分采纳**——长读 TTFT 47.3→17.2 s、短读首 token 46.2→1.7 s；第二 token 仍等槽 31–34 s（L-049）。
+  引擎补丁 + 服务端补丁 + T3；默认关。
+- **W4 定容/预设**：**部分采纳**——`strata-022.mp-4x256.json` 命名 + `check_preset.py` + T7 负例 6/6（L-051/L-052）。
+
+第一轮（W1）是**只读测量**，没有重启、没有配置改动。
 
 ## 0. 一页纸
 
