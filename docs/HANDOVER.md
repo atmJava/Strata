@@ -74,11 +74,12 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 
 ## 5. 生产现状（2026-10-24 03:4x UTC 重新核实）
 
-**今天为 gate 的开/关实验、打开请求监视器、效果 A-B-A、trace 实验和 prefill 相图一共重启 13 次**（引擎会话 03:11:00、
-03:15:25、03:29:11、03:34:17、03:53:15、03:57:17、04:12:08、04:59:41、05:02:30、05:07:13、05:10:53、05:31:12、05:38:40 UTC，
-合计 ~1,890 s 冷加载），所以现在：`active`、`NRestarts=0`、MainPID **136438**（05:38:40Z 起）、引擎子进程 **136446**、
-vision 子进程 **136451**（见 §7 第 13 条）。
-**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **05:38:40Z 这个会话**重新攒（§11 第 4 条）。
+**今天为 gate 的开/关实验、打开请求监视器、效果 A-B-A、trace 实验、prefill 相图和 MMQ tab A-B-A 一共重启 18 次**
+（引擎会话 03:11:00、03:15:25、03:29:11、03:34:17、03:53:15、03:57:17、04:12:08、04:59:41、05:02:30、05:07:13、05:10:53、
+05:31:12、05:38:40、05:50:43（MMQ 臂，因检测坑白起一次）、05:52:47、05:58:35、06:02:54、06:07:07 UTC，合计 ~2,700 s 冷加载），
+所以现在：`active`、`NRestarts=0`、MainPID **145057**（06:09:44Z 起）、引擎子进程 **145070**、exe 是 `build/strata`、
+env 里**没有** `STRATA_MMQ_DIRECT`（见 §7 第 13 条）。
+**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **06:09:44Z 这个会话**重新攒（§11 第 4 条）。
 在**引擎子进程**的 `/proc/<pid>/environ` 里核实了 **15 个 `STRATA_*` 变量**，其中三条关键：
 **`STRATA_SM75_PERF=1`**、**`STRATA_EXP_MODE=8`**、**`STRATA_PIPED_CONCURRENT=1`**（开/关今天实测过，**L-019**）。
 空闲显存 814/906（03:45Z 的 CSV 行）、`.warn` 未触发。
@@ -123,6 +124,7 @@ vision 子进程 **136451**（见 §7 第 13 条）。
 | **那 0.7–0.9 s 全在 `Prefill::run` 里面（实测拆段）** | 461 token 重读 = `read (batched)` **977 ms** + refill 74 + windows 42 + checkpoint 10 ≈ 引擎自报 1,012 ms；4,528 = 3,664 + 318 + 38；45,010 冷 = 19,213（6 个 7,680 chunk 流水）。**准入 drain 只有 0.2–0.3 ms、首 token windows 恒定 37–42 ms、refill 在读之后** → 都不是。**拟合 ≈788 + 0.409×token**（固定 0.79 s、线性段 2,443 tok/s；小段拟合 947 + 0.600×token → 越小越吃亏）。**与上下文长度无关** → "会话 K/V 要从 RAM 流回来"这条猜测**被实测否掉** | **L-028** |
 | **重发同一块 token 不变快 → 固定成本不是专家 staging** | `stage_repeat_probe.py`（45K 上下文，每对"唯一块 + 同样的块再来一次"，块实测 529 token）：唯一干净的一对 **1,226 → 1,246 ms（+1.6%，<3%）**；另两对一行被我自己会话的 200K 请求污染、一行 `read=1` 可疑，**已剔除**。限制：只有一对、两次读之间生成过 ~300 token（专家槽可能已换出）、探针靠 grep 共享日志取数 | **L-029** |
 | **那 1 s 的相图：成本在专家权重那几相，唯一能拿掉的是 stage 1 的 `wait copy`** | `STRATA_PREFILL_TIMING=1` 的 21 相记账（先量了工装自己的代价：**+2.5–8%**）。461 token：stage 0 GPU 370 ms（gate/up 111=30%、dequant 63=17%、down 52=14%、kv stage 26、gdn 23、attn 15）、stage 1 GPU 610 ms（**wait copy 185=30%**、down 119、dequant 107）。每 token 效率 461 vs 4,524：gate/up **2.75×**、dequant **6.8×**、down 2.8×、kv stage 9×，而 **qsa attn 不变** → **固定成本=小批次也要把专家权重读/反量化/乘一遍**。冷读 45,010：GPU 16,305 ms，**PLE 1,014 ms 是一次性的**（之后 0）。可拿掉项 = stage 1 的 `wait copy`（≈18% 上界），但它要 `STRATA_MMQ_TAB=ON` + `MMQ_DIRECT=1`，**本机二进制没有**（§7 第 27 条） | **L-030** |
+| **`STRATA_MMQ_DIRECT=1`（MMQ tab 构建）买不到东西 → 不采纳** | A-B-A 三臂（现役 / tab+开关 / tab+关），引擎自报小读中位 **1,097 / 1,067 / 1,023 ms**、大读 **3,895 / 3,873 / 3,949**、冷读 19,7xx 三家一样 → **B 对 A −2.7%/−0.6%/−0.1%（<3%，不算结论），B 对同二进制关着的那臂还更慢 +4.3%**。开关确实生效（`48 of 48 layers`）。质量门：3 道贪心题里 2 道三臂逐字相同、1 道自由文本措辞不同。生产保持原二进制（已逐字节恢复） | **L-031** |
 | L-001 显存预留 | GPU0 空闲 504 → 804–810（现 ~850）；专家缓存 7,334 → **7,190 slot（−1.96%）**；命中中位 98.90 → 99.00%（p10 97.80→97.50），88/470 请求 | L-001 |
 | 噪声地板 | 同一基线两次跑，**每任务 token 方差均值 24.5%**；生产形态 `temperature: 0` **钉不住**长输出的哈希 | L-007 |
 | 思考侧 | `effort` 只是 prompt 里一句话（`serve/server.py` 的 `EFFORT_TURN`/`render_prompt`）；`low`≡`high`（−0.5%，噪声内）；`medium` 查表形态 −28%、**推理形态只 −7%**；`none/off` −41% token、−25% 墙钟但 **14 个推理任务丢 3–4 个**（真算错 + 空答案）；预算 ≤10% | L-005 / L-009 / L-010 |
@@ -210,10 +212,15 @@ vision 子进程 **136451**（见 §7 第 13 条）。
 26. **`strata serve: KV streaming: 98.5% of … block reads hit VRAM, 149.3 MiB read from RAM` 是解码期注意力的块读统计**
     （每生成一步都要读全部前缀的块），**不是提示词读的时间**。别用它解释"读为什么慢"——L-028 实测：重读 1,835 token 在
     ctx 49K 与 53K 都是 2.20–2.23 s，重读 4,535 token 在 58K/62K/67K 都是 3.98–4.05 s，**与上下文长度无关**。
-27. **`STRATA_MMQ_DIRECT=1` 在本机二进制里是空的**：我们的 build 没开 `STRATA_MMQ_TAB`（`strings build/strata |
-    grep -c prefill_mmq_tab` = **0**，引擎日志里也没有任何 MMQ 行），而文档说"without a build with STRATA_MMQ_TAB the
-    variable is ignored"。**设了它不会变快也不会变慢，别拿它做 A-B-A 浪费重启。** 要它得重编译
-    （`-DSTRATA_MMQ_TAB=ON`，代价：每卡多 36–38 MiB VRAM、二进制 +15 MB、每架构多 ~175 s 编译）。
+27. **`STRATA_MMQ_DIRECT=1` 在线上那份二进制里是空操作**：build 没开 `STRATA_MMQ_TAB`，凭据是它的字符串里有
+    `STRATA_MMQ_DIRECT=%d is ignored: this build has no pointer-table MMQ`（说明 `tab_built()` 是 false）。
+    **别再用 `strings | grep prefill_mmq_tab` 判这件事**——那个字符串两份二进制里都没有（它只是测试程序的名字），
+    我第一次就是这么误判的。要它得重编译：`cmake -DSTRATA_MMQ_TAB=ON`（`build-mmqtab/` 已经建好并通过，
+    二进制 95,188,296 B，比原版 **+16.1 MB**；每卡多 36–38 MiB VRAM）。**注意 `prefill_mmq_tab_test` 在 sm_75 上
+    直接 skip**（`needs a CUDA device of sm_80 or newer`）→ 逐位门在本机做不了，只能用同题贪心输出比对代替。
+28. **换引擎二进制时，路径里必须含 `build/strata`**：`use-config.sh` 靠 `pgrep -f 'build/strata --serve'` 找引擎，
+    把新二进制放在 `build-mmqtab/strata` 这种路径下，装完会等 120 s 后报 `RESTART NOT VISIBLE`（我这么白重启过一次）。
+    现在的做法：`/opt/ai/engines/mmq-tab/build/strata`。
 
 ## 8. 工装（都在 `/opt/ai/bin`，源码版本在 `tools/server/`，改完要 scp 上去）
 
@@ -239,6 +246,7 @@ vision 子进程 **136451**（见 §7 第 13 条）。
 | `trace_admission_phases.sh [ctx] [tag后缀]` | 快照配置 → 加 `env.STRATA_TRACE="1"` 重启（B 臂）→ 跑 `turn-ttft` → 恢复配置重启（A2 臂）→ 再跑一轮；把两次的 `strata serve: prompt …` 和 `strata trace: admission …` 并排打出来。**只对走 BGEN 的请求有用**（§7 第 25 条）。已跑，结果 **L-027**（trace 一行没打，但两臂对上了） |
 | `stage_repeat_probe.py [ctx] [block] [pairs]` | 判别"固定成本是专家 staging 还是每轮固定动作"：同一块 token 连发两次，比较引擎自报的读时间。**两个坑**：这台机器的 `grep -E` **不认 `\d`**（第一版因此一行都没取到，已改 `[0-9]`）；共享日志里会抓到**别人的请求**，必须用 ctx 校验（本轮就抓出一行 ctx=200K 的）。已跑，结果 **L-029** |
 | `prefill_phase_timing.sh [ctx] [小,大块] [每档轮数]` | 用引擎自带的 `STRATA_PREFILL_TIMING=1` 把提示词读的 GPU 时间按 **21 个具名阶段**记账 + host 侧一行（chunk setup / 等 chunk / PLE）；A-B-A 两臂各一次重启，`turn-ttft` 出数。已跑，结果见 **L-030** |
+| `mmq_direct_ab.sh` | **`STRATA_MMQ_DIRECT=1`（MMQ tab 构建）对线上二进制**的 A-B-A：A（现役）→ B（MMQ 构建 + 开关）→ A2（MMQ 构建、开关关，用来把二进制本身的影响分开）→ 逐字节恢复；每臂跑 `turn-ttft 300,3000 3 @45K` + 3 道固定贪心题当质量门。**引擎二进制必须放在路径里含 `build/strata` 的地方**——`use-config.sh` 用 `pgrep -f 'build/strata --serve'` 找引擎，`build-mmqtab/strata` 匹配不上，装完会报 `RESTART NOT VISIBLE`（这轮就踩了，B 臂白重启一次）。已跑，结果见 **L-031** |
 
 **本轮又搬进 `tools/server/` 的 7 份判据脚本**（原来只在 `/opt/ai/bin`）：`turn-ttft.py`（**DSH 形状的多轮会话**：每轮实际重读多少 + 首字延迟——就是首要指标那条路径）、
 `conv_cache_ab.py`（会话缓存 A/B：每条请求引擎实际重读多少）、`probe_determinism.py`（跑动差异是采样还是引擎——`agent_budget_ab.py` 的 docstring 直接引用它）、
@@ -326,6 +334,10 @@ vision 子进程 **136451**（见 §7 第 13 条）。
   读是在批次窗口收尾后才开始的，所以"读期间槽还在解码"只剩尾巴 4 行。这列在有空槽时（≤3 条流）照样能用。
 
 **还欠着的（按价值排序）**
+> **下一轮先做**：给判据①（真实 agent 任务墙钟）建一个**可重复的基线**——DSH 形状的多轮 tool-loop 任务（≥8 任务 × 3 次、
+> 温度 0、`reasoning_effort: high` 与我们自己的客户端一致），量墙钟 / 首字 / 空答案率 / 工具调用通过率，落一条基线台账。
+> 理由：首字这条路已经走到底（L-030 / L-031），真实请求墙钟中位 13.2 s 里约 12 s 是解码，**现在缺的是能判解码改动的尺子**，
+> 不是再猜一个旋钮。
 
 1. **#3724 到底适用不适用** **已判掉（L-016，整条是"静态阅读，未测"）**：那两行在本机**只被
    prompt 专家（gather 路径）和 drafter 的 Q8_0 投影走到**；**decode 专家不进 MMQ**（走
@@ -354,21 +366,17 @@ vision 子进程 **136451**（见 §7 第 13 条）。
    里面目前基本是实验自己的流量（上一个窗 03:34:17Z：45 个请求、接受率 78.25% of 901——小样本，别当结论）。
    等它攒够几百条**真实**请求再回看同一张表（截断率、suffix draft 接受率、命中率那三列）。
    注：L-026 已经把 DSH 形状的首字/重读/接受率单独量过一遍（热起来后接受率 ~99%），被动窗口值在**跨天趋势**。
-5. **引擎侧读路径：相图出完了（L-030），下一步是**一次有据可依的重编译**（MMQ_TAB + MMQ_DIRECT）。
-   - **已拆完**：461 token 的读 = **1,008–1,024 ms**（关 timing 那臂）。相图：stage 0（370 ms）= gate/up 111 + dequant 63
-     + gemm down 52；stage 1（610 ms）= **wait copy 185** + gate/up 119 + dequant 107。**每 token 效率 461 对 4,524：
-     gate/up 2.75×、dequant 6.8×、kv stage 9×，而 qsa attn 完全不变** → 固定成本就是"小批次也得把专家权重读/反量化/乘一遍"。
-     PLE（908–1,014 ms）只在冷建上下文和它之后第一次读出现，**一次性**。
-   - **可拿掉的上界 ≈18%**（stage 1 的 wait copy 185 / 1,024），且只对 resident 专家生效。要拿它必须
-     `-DSTRATA_MMQ_TAB=ON` + `STRATA_MMQ_DIRECT=1`——**本机二进制没有那条路径**（`strings | grep prefill_mmq_tab` = 0，§7 第 27 条）。
-   - **决定：下一轮就做这次重编译**（有实测目标、可 opt-in、默认路径逐位不变、文档自带逐位相等测试）。做法：
-     ① 独立 build 目录（不动现有 `build/`），`-DSTRATA_MMQ_TAB=ON`；② `--target strata` + `prefill_mmq_tab_test`（874 乘积逐位、九类型）；
-     ③ 配置加 `env.STRATA_MMQ_DIRECT="1"` 重启，A-B-A 跑 461/4,535 各 3 轮 + `quality_eval` 质量门；
-     ④ 赢才留、输就换回原二进制路径并恢复配置。代价：每架构多 ~175 s 编译、二进制 +15 MB、每卡多 36–38 MiB VRAM。
-   - **read-ahead（降级，L-024 / L-025）**：排队在服务端 `pick_slot`，引擎也不接无槽的 BGEN（12007），**没有"少准入"的旋钮**；
-     改动是**中等工程**，而且排队只在"满槽 + 冷读"时咬人（真实流量 TTFT 中位 0.80 s，L-021）→ **不优先**。
-   免停机的支线：静态读 `pick_slot` / 控制行 / `STRATA_ADMIT_SHORT_FIRST`（`server.py:319/322` 在 import 时读，
-   配置 `env` 键在 import 之后才应用 → 要生效得进 systemd 单元的环境，那是 root 侧改动）。
+5. **读路径的固定成本：已拆完、已试过一个补丁、**不采纳**；下一步换方向（不在这条路上继续花重启）。**
+   - **读的相图（L-030）**：461 token 的读 = **1,008–1,024 ms**；stage 0（370 ms）= gate/up 111 + dequant 63 + gemm down 52；
+     stage 1（610 ms）= **wait copy 185** + gate/up 119 + dequant 107。每 token 效率 461 对 4,524：gate/up 2.75×、dequant 6.8×、
+     kv stage 9×，**qsa attn 完全不变** → 固定成本就是"几十个 token 也得把专家权重读/反量化/乘一遍"。PLE（908–1,014 ms）是一次性的。
+   - **唯一能拿掉的 185 ms 已经试过（L-031）**：重建了 MMQ tab 二进制（`build-mmqtab/`，+16.1 MB），`STRATA_MMQ_DIRECT=1`
+     生效（48/48 层），**但端到端没有收益**（小读 −2.7% <3%；对同二进制关着的那臂反而更慢 +4.3%）→ **生产保持原二进制**，
+     `build-mmqtab/` 与 `/opt/ai/engines/mmq-tab/build/strata` 留盘备用。**这条路到此为止，别再花重启。**
+   - **方法论教训（L-031）**：同形状同二进制、三个臂的小读中位跨度 **7%**（1,023–1,097）→ 跨 boot 比小读时，
+     "<3% 不算结论"应当按 **~7%** 看待。
+   - **read-ahead（仍降级，L-024 / L-025）**：排队在服务端 `pick_slot`，引擎也不接无槽的 BGEN（12007），没有"少准入"的旋钮；
+     改动是中等工程，而且排队只在"满槽 + 冷读"时咬人（真实流量 TTFT 中位 0.80 s）→ **不优先**。
 
 6. **4 条流的"关着"对照**：L-020 只有 3 条流做了开/关；4 条流（生产满配）只测了开着。`gate_prod_streams.sh 4 3 60000`
    直接能跑（要 2 次重启 ≈ 300 s，决定权在我，§10 已表态 6）。**注意**：L-021 已经说明满槽时读基本不等重叠，

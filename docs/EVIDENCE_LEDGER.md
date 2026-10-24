@@ -1177,9 +1177,56 @@ dequant 556、router 422、select 333、combine 265。**PLE 只在冷建上下�
 （`host: … PLE 908 ms` 那一行就是它）——这是**一次性**的，不是每轮都付。
 
 **能拿掉的那块**：stage 1 的 **`wait copy` 185 ms**（占它 30%）——把这一 chunk 路由到的专家拷进 MMQ 要的定长缓冲
-（resident 的也拷）。`STRATA_MMQ_DIRECT=1` 正是"resident 专家就地读、不拷"，但**本机二进制没有那条路径**
-（`strings build/strata | grep -c prefill_mmq_tab` = 0，build 是 `STRATA_MMQ_TAB=OFF`）→ **设了是空操作**（§7 第 27 条）。
-要它 = **一次重编译**（`-DSTRATA_MMQ_TAB=ON`，文档给了逐位相等的测试 `prefill_mmq_tab_test`：874 个乘积与拷贝路径
-逐位相同、九种类型全过）。上界收益 ≈ 185 ms / 1,024 ms ≈ **18%**（只算 stage 1 的等待，且只对 resident 专家生效）。
+（resident 的也拷）。`STRATA_MMQ_DIRECT=1` 正是"resident 专家就地读、不拷"，但**线上那份二进制没有那条路径**
+（它的字符串里有 `STRATA_MMQ_DIRECT=%d is ignored: this build has no pointer-table MMQ`，说明 `tab_built()` 是 false；
+build 的 `STRATA_MMQ_TAB=OFF`）→ **设了是空操作**（§7 第 27 条）。
+**更正一条我自己的错证据**：我此前用 `strings build/strata | grep -c prefill_mmq_tab` = 0 当"没有 tab 路径"的凭据——
+**那是无效证据**（新开的 MMQ_TAB 构建里这个字符串也是 0，它只是测试程序的名字）；有效的是上面那条 ignored 字符串
+和体积差（新构建 95,188,296 B 对旧 79,076,000 B，**+16.1 MB**，正是文档说的九个指针表实例）。
+上界收益 ≈ 185 ms / 1,024 ms ≈ **18%**（只算 stage 1 的等待，且只对 resident 专家生效）。
+**另外**：文档自带的逐位相等测试 `prefill_mmq_tab_test` 在本机**跑不了**——它 `needs a CUDA device of sm_80 or newer: skipped`
+（2080 Ti 是 sm_75）→ 逐位门只能靠"同题贪心输出逐字比对"这种端到端替代（L-031）。
 
 **没测的**：MMQ_TAB 开起来之后实际能省多少（要重编译）；`--pcie-frac` / `STRATA_KV_PREFETCH` 对这几相的影响。
+
+---
+
+## L-031 · `STRATA_MMQ_DIRECT=1`（MMQ tab 构建）在这台机器上**买不到东西**——不采纳，生产保持原二进制（A-B-A，5 次重启；2026-10-24 05:50–06:10Z）
+
+**动机**：L-030 说 461 token 的读里 stage 1 的 `wait copy` 占 185/610 ms（30%），那是"把这个 chunk 路由到的专家
+（resident 的也）拷进 MMQ 要的定长缓冲"。`STRATA_MMQ_DIRECT=1` 正是 resident 专家就地读、不拷。线上二进制没有这条
+路径，于是按 §11 的计划重编译（`build-mmqtab/`，`-DSTRATA_MMQ_TAB=ON`，10.6 min @ -j6，产物 95,188,296 B / +16.1 MB），
+再用 `mmq_direct_ab.sh` 做 A-B-A。
+
+**臂**：A = 现役二进制（开关无关）；B = MMQ 构建 + `STRATA_MMQ_DIRECT=1`；A2 = **同一个** MMQ 构建、开关关（把二进制
+本身的差别分开）。每臂 `turn-ttft 300,3000 3 @45000` + 3 道固定贪心题；最后逐字节恢复（`config is byte-identical to
+the snapshot` ✓，引擎回到 `build/strata`）。
+
+**开关确实生效**：B 臂的引擎日志有 `strata: prompt MMQ reads resident experts in place (STRATA_MMQ_DIRECT=1): 48 of 48 layers`
++ `+256 B guard per sized slot`——**sm_75 上也能走**（这和"测试程序在本机 skip"不是一回事）。
+
+**结果（引擎自报的读时间，ms；同一形状、每臂 3 次）**：
+
+| 臂 | 小读（456–468 token）三次 | 中位 | 大读（4,531–4,535）三次 | 中位 | 冷读 45,017 |
+|---|---|---|---|---|---|
+| A 现役 | 1,465 / 1,005 / 1,097 | **1,097** | 3,884 / 3,895 / 3,982 | **3,895** | 19,736 |
+| B tab+1 | 1,436 / 973 / 1,067 | **1,067** | 3,869 / 3,891 / 3,873 | **3,873** | 19,716 |
+| A2 tab+0 | 1,483 / 1,023 / 1,019 | **1,023** | 3,917 / 3,981 / — | **3,949** | 19,701 |
+
+- **B 对 A**：小读 −2.7%、大读 −0.6%、冷读 −0.1% → **全在 <3% 线内，不算结论**。
+- **B 对 A2（同一个二进制，开关的唯一变量）**：小读 **+4.3%（更慢）**、大读 −1.9% → **开关没有帮忙**。
+- **A 对 A2（旧对新二进制，都关）**：小读 −6.7%（新二进制快）、大读 +1.4% → 也是噪声级。
+
+**结论：不采纳。** 生产保持 `build/strata`（已逐字节恢复并复核 exe/env）。L-030 里那 185 ms 的 `wait copy`
+**没有转化成首字时间**——在就地读这条路径上省下的拷贝，要么本来就和计算重叠、要么被未对齐访问之类抵掉了。
+`build-mmqtab/` 与 `/opt/ai/engines/mmq-tab/build/strata` 留在盘上（391M + 91M，磁盘余 161G）供以后复用。
+
+**质量门**：3 道固定贪心题里，第 2、3 题在三个臂上**逐字相同**（`cd13876a…`、`41b23f9a…`）；第 1 题是自由文本，
+三臂措辞都不同（跨 boot 本来就不保证逐字——文档说逐字复现要 `--prompt-cache 0 --adapt-swaps 0 --pcie-frac 0`）。
+所以质量门只到"确定性题逐字相同"这一档，**没做到逐位**。
+
+**两条方法论**（都写进 §7/§8 了）：① `prefill_mmq_tab_test` 在 sm_75 上直接 skip（`needs a CUDA device of sm_80 or newer`），
+逐位门在本机做不了；② `use-config.sh` 用 `pgrep -f 'build/strata --serve'` 找引擎，把二进制放在 `build-mmqtab/` 下装完会报
+`RESTART NOT VISIBLE`（白重启一次），现在放在 `/opt/ai/engines/mmq-tab/build/strata`。
+**还有一条关于噪声的实测**：同一个形状、同一个二进制，三个臂的小读中位从 1,023 到 1,097（**跨度 7%**）——
+所以"<3% 不算结论"这条线其实是**保守下限**，跨 boot 比小读时更要按 7% 看待。
