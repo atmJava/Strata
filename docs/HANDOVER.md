@@ -80,6 +80,10 @@
 
 E5-2680 v4（14c/28t，**只有 AVX2**）、62 GiB 内存、**2× RTX 2080 Ti 22528 MiB / sm_75**、
 NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0。
+**NVLink 实测**（2026-10-24）：`topo -m` = NV2，`nvlink -s` = 每卡 2 条 × 25.781 GB/s（单向 ~51.6 GB/s，
+本地 HBM 的 8.4%），`cudaDeviceCanAccessPeer` 双向 = 1。生产里跨卡流量只有 stage 交接 ~410 KB/窗口
+（走 mapped 主机内存），而 31% 的专家缓存走的是 **PCIe 主机内存**（`--pcie-frac 0.31`）——**NVLink 不是本机瓶颈**，
+理由与"什么时候才值得动用它"见 [`CODE_PLAN.md`](CODE_PLAN.md) §8。
 服务：`strata.service` → `/opt/ai/src/strata-0.2.2/run-022.sh` → **自建引擎 0.1.47**（上游现在 0.1.48）。
 引擎日志 `/opt/ai/src/strata-0.2.2/strata-022.log`（**logrotate 每天 00:00 转成 `.log.1`**）；
 服务日志 `/opt/ai/logs/strata-service.log`。GPU0 稳态负载下 ~70–78 ℃、空载 ~62 ℃（**负载驱动，正常**）。

@@ -62,6 +62,10 @@
 记录每层 `n_hits`、resident 命中数、每窗口移动字节 → 算 **achieved GB/s**；同时出**组大小直方图**（验 F2）。
 **kill criteria**：achieved ≥70% 峰值，或 `read-only ≈ def` → 专家 GEMM 这条线关闭，转 P2/其它相。
 
+**P0c · 互联账（和 P0b 同一次 trace，顺带记）**：每窗口跨卡字节里，多少走了 **NVLink（P2P）**、多少走了
+**PCIe/主机内存**（`--pcie-frac 0.31` 的那部分、stage 交接的 mapped 缓冲）。见 §8：这是为了把
+"NVLink 用没用上"从印象变成数字，一条 trace 的量，不额外重启。
+
 ---
 
 ## 3. P1（重写）· 只在 P0 指到具体病因后才动
@@ -117,3 +121,34 @@ MMQ 指针表（L-031）、TP 补丁（L-033）、`QFUSE`（L-043）、`EXPDEC`�
 
 > 台账 L-038/L-039/L-040 里"675 GB/s 贴着 616 GB/s 上限"与"29–40% 峰值 → 2.5–3× 余量"两处按本文件 §1 F5/F1 视为**待复核**；
 > 旧条目不改，引用时以本文件为准。
+
+---
+
+## 8. 硬件取向：NVLink 在这台机器上为什么不是杠杆（但确实在用）
+
+**硬件事实**（2026-10-24 现场查的，不是猜）：`nvidia-smi topo -m` = **NV2**（NVLink 桥在），
+`nvidia-smi nvlink -s` = 每卡 2 条 × **25.781 GB/s**，`cudaDeviceCanAccessPeer` 双向 = 1。
+即单向 ~51.6 GB/s、双向 ~103 GB/s，是本地 HBM（616 GB/s）的 **8.4%**。显存 2×22 GB。
+
+**结论：这一版生产形状里没有值得为 NVLink 写的代码。** 三条理由，都是可核的：
+
+1. **decode 里跨卡的东西只有 stage 交接**，而它是 **mapped pinned 主机内存**
+   （`generate.cpp:8977`："The hand-offs are mapped pinned memory"）：
+   `handoff_floats = hc·n_embd + n_embd + hc = 12,804` 浮点/行，`kVerifyMaxT = 8` → ~410 KB/窗口。
+   走 PCIe 读约 34 µs，走 NVLink 约 8 µs —— 差 **26 µs / 14,180 µs = 0.18%**，进不了判定线。
+2. **真正贵的跨界流量在 PCIe 上，不在两张卡之间**：`--pcie-frac 0.31` 是"31% 的专家缓存从主机内存来"
+   （~12 GB/s）。NVLink 连的是卡和卡，**不连主机内存**，救不了这条。所以历次真正有效的都是"少读字节"
+   （residency、`HC_Q8`），不是"换更快的链路"。
+3. **最吃 NVLink 的那个设计已经试过了**：TP 补丁（本地存档 `patches/local-strata/tp-0.2.0-beta.patch`，
+   里面确实 `cudaDeviceEnablePeerAccess` 双向打开）实测 **单流 +3%、4 并发更差**（L-033）。
+   一个每层都要 all-reduce 的设计在 NVLink 上只值 3%，说明这里的瓶颈是同步/延迟和显存，不是互联带宽。
+4. **想扩也扩不了**：把对卡当专家二级缓存（`--peer-device`，走 P2P）**与 `--layer_split` 互斥**
+   （`generate.cpp:3371`），而且两张卡各只剩 0.8–1.0 GB，装不下几十个专家（每专家 1.32 MB 原码 / 4.9 MB 预展开）。
+
+**它现在用在哪儿（别当成没启用）**：prefill 的"超容量溢出"会从对卡 arena 读专家行
+（`prefill.cpp:4737` 的 `pp->peer->slot_ptr`）；上游注释同时说明 **P2P 的 prompt 路径没有端到端验证过**
+（`prefill.cpp:2213` 的 warning）。P0c 就是为了确认这条在本机到底跑了多少字节。
+
+**条件触发的候选（不排期）**：只有"两张卡各腾出 ≥10 GB 显存 → 专家放对卡、走 NVLink 读"这一条能让
+NVLink 变成杠杆；而腾显存（KV int4 / 减 resident KV）本身是个比它更大的改动。触发条件写在这里，
+不写进路线图。
