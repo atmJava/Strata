@@ -81,7 +81,9 @@
 E5-2680 v4（14c/28t，**只有 AVX2**）、62 GiB 内存、**2× RTX 2080 Ti 22528 MiB / sm_75**、
 NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0。
 **NVLink 实测**（2026-10-24）：`topo -m` = NV2，`nvlink -s` = 每卡 2 条 × 25.781 GB/s（单向 ~51.6 GB/s，
-本地 HBM 的 8.4%），`cudaDeviceCanAccessPeer` 双向 = 1；PCIe 是 3.0 x16（~12 GB/s）。
+本地 HBM 的 8.4%），`cudaDeviceCanAccessPeer` 双向 = 1；PCIe 是 3.0 x16。
+**实测（`/tmp/p2p_bw.cu`，64 MiB `cudaMemcpyPeerAsync`，12 次取中位）：P2P 46.8 GB/s，主机方向 11.0 GB/s，
+比值 4.25×**（spec 的 91%）。
 它在 decode 里没有位置（跨卡只有 stage 交接 ~410 KB/窗口，改 P2P 也只省 0.18%），**在 prefill 里有**：
 `set_stage_helper` 让空闲的下一段 GPU 分担一部分专家的"流 + 算"，收益来自第二条 PCIe 链路、代价是跨卡交换——
 而 `split_help_frac` 的默认值（T>3.3k 不帮、且只在单 chunk）是在 **无 P2P 的 3090 对**上定的，我们的 4.5k

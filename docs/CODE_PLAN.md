@@ -133,8 +133,9 @@ MMQ 指针表（L-031）、TP 补丁（L-033）、`QFUSE`（L-043）、`EXPDEC`�
 ## 8. 硬件取向：NVLink 在这个项目里是干什么用的（对我上一版的更正）
 
 **硬件事实**（2026-10-24 现场查的，不是猜）：`topo -m` = **NV2**（桥在），`nvlink -s` = 每卡 2 条 ×
-**25.781 GB/s**（单向 ~51.6 GB/s，是本地 HBM 616 GB/s 的 8.4%），`cudaDeviceCanAccessPeer` 双向 = 1，
-显存 2×22 GB，**PCIe 3.0 x16（~12 GB/s）**。
+**25.781 GB/s**（单向 ~51.6 GB/s），`cudaDeviceCanAccessPeer` 双向 = 1，显存 2×22 GB，PCIe 3.0 x16。
+**实测**（`cudaMemcpyPeerAsync` 64 MiB × 12 取中位）：**P2P 46.8 GB/s，主机方向 11.0 GB/s = 4.25×**。
+这个 4.25× 是本文件所有"走 NVLink 还是走 host"的判断的底座 —— 之前几版我用的是 spec 值，不够。
 
 上一版我写"NVLink 不是杠杆"，理由里有一条是错的：我把"两卡各只剩 0.8–1.0 GB 空闲"当成了"没有可用显存"。
 **分层存储不是靠空闲，是靠把哪一层放在哪儿** —— 而这个项目的第二个 GPU 有三份用途：多一份 VRAM、
@@ -169,6 +170,9 @@ MMQ 指针表（L-031）、TP 补丁（L-033）、`QFUSE`（L-043）、`EXPDEC`�
 TP（每层 all-reduce、最吃互联的设计）在这台机器上只值 +3%（L-033），说明它不是"算力协作"的钥匙 ——
 它值钱的地方是**替空闲的卡分担 IO**。
 
-**下一步是测量，不是先改代码**：`STRATA_PREFILL_HELP_FRAC=0.4` 在这台机器上对 4.5k 新增 token 的 TTFT
-（1 次重启，`exp-env-ab.sh MEASURE=ttft`），见 §2 的 P0d。赢了才写代码（让 share 认 P2P、允许分块提示词
-启用 helper）；输了就写"NVLink 在 decode 与 prefill 都验证过不划算"，这条线彻底关闭。
+**下一步是测量，不是先改代码。** 已经踩过一次坑，记在这里：
+2026-10-24 10:07Z 那次 P0d（4,535 token，`HELP=1` + `FRAC=0.4`）两臂 TTFT 是 5.45 / 6.59 s，但引擎日志里
+**0 条 `peer GPU` / `peer-streamed experts`** —— helper 根本没接上（被 `single_chunk` 和 `--prefill-pipe` 的分块挡住），
+而同一臂内部 `host staging` 在 130↔286 ms 之间跳。**那一次两种结论都不成立，不准引用。**
+第二次只在 helper 设计上的区间测（300 / 1,500 token，单 chunk，只加 `STRATA_PREFILL_HELP=1`），
+判据第一条是"日志里出现 `peer GPU …` 且 `peer-streamed experts > 0`"，否则记"未触发"而不是"没用"。
