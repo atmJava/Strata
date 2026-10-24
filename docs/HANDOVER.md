@@ -301,10 +301,18 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 ## 11. 上游与分支状态
 
 
-- fork `atmJava/Strata`，`main` 已 fast-forward 到 **`7ddc17a3`（0.2.3.1）**。
-- 工作分支 **`hw/server-adapt-0.2.3`**（本地 `tmp/rebase-docs`；远端 tip 就是本地提交 `08507037`，
-  本轮新提交**直接 fast-forward 推上去**，不用 force）：文档 + 工装。旧的 `hw/server-adapt`（`bad482e7`）
-  是 rebase 之前的历史，**别再往它推**。
+- fork `atmJava/Strata`，`main` 已 fast-forward 到 **`c33fa7ba` = 上游 `v0.2.4.1`（引擎 0.1.49.1）**（2026-10-24 合并）。
+  中间跳过了 `v0.2.3` / `v0.2.3.1` / `v0.2.4`：`v0.2.4.1` 的 259 个提交里，**我们跑的 Qwen 路径的引擎文件一个都没动**
+  （`src/program/generate.cpp`、`src/prefill/prefill.cpp`、`src/core/verify.cpp`、`src/core/weights.cpp`、
+  `include/strata/program/batch_read.hpp` 全部零改动），新东西是 DeepSeek-V4.1（`src/dsv41`、`tools/dsv41`）、trellis 工具、
+  Terminal 测试与打包；`serve/server.py` 的 +119/−9 也只有 DeepSeek 分支（`arch == "deepseek41"`）与新的
+  `engine_ready_s` 配置键。
+  **唯一碰到我们路径的是 CPU 专家/kernel**：`src/kernels/cpu` + `include/strata/kernels/cpu` 13 个文件 +920/−86
+  （AVX2/AVX512 的 IQ 与 TQ kernel、`expert_layout`、`native_expert`）——这是我们 `--native` + CPU 专家池走的路，
+  **部署 0.2.4.1 可能有解码收益，但没测**（见 §13）。
+- 工作分支 **`hw/server-adapt-0.2.3`**（远端 tip `c1aed1cf` = 把 `v0.2.4.1` 合进来的 merge commit；本轮以前是
+  `4b3811dc`）：文档 + 工装 + `patches/local-strata/`。**用 merge 而不是 rebase**（rebase 要 force push，不允许）。
+  旧的 `hw/server-adapt`（`bad482e7`）是 rebase 之前的历史，**别再往它推**。
 - **`hw/s1-concurrent-read`**：远端 `11cc25bd`（0.2.2 基），本地 `tmp/rebase-s1` = `b9b3f995`（已 rebase 到
   0.2.3.1）。**更正（L-013）**：那两行**已经在线上引擎二进制里**，所以"上生产"**不需要重编译**，
   要决定的是 env `STRATA_PIPED_CONCURRENT` 开还是关、以及在**生产形态**补一次 A-B-A。
@@ -357,6 +365,12 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 > 温度 0、`reasoning_effort: high` 与我们自己的客户端一致），量墙钟 / 首字 / 空答案率 / 工具调用通过率，落一条基线台账。
 > 理由：首字这条路已经走到底（L-030 / L-031），真实请求墙钟中位 13.2 s 里约 12 s 是解码，**现在缺的是能判解码改动的尺子**，
 > 不是再猜一个旋钮。
+
+**新岔路（2026-10-24 合并上游时发现）**：`v0.2.4.1` 把 **CPU 专家/kernel 路径**改了 13 个文件（+920/−86：
+AVX2/AVX512 的 IQ/TQ kernel、`expert_layout`、`native_expert`），而我们的解码正是 `--native` + CPU 专家池。
+Qwen 的 GPU 引擎文件没动、`serve/server.py` 只动了 DeepSeek 分支，所以**升级的收益若存在，只可能在 CPU 专家这一段**。
+代价：重建（~5 min）、一次 156 s 重启、S1 补丁要按新基线重新打（`generate.cpp` 没变，理论上仍然能 `git apply`）、
+以及质量门。**判据**：同一 boot 的单流 decode + 4 路聚合各 ≥3 次，<3% 不动。要不要做，排在判据① 基线之后。
 
 **已经结掉的（别再当未决做）**
 
