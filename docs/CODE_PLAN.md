@@ -1,8 +1,11 @@
-# 代码优化计划（CODE_PLAN）· v2 · 2026-10-24
+# 代码优化计划（CODE_PLAN）· v3 · 2026-10-24 夜
 
 配套：[`RULES.md`](RULES.md)（怎么干活）、[`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)（已有结论）、
 [`HANDOVER.md`](HANDOVER.md)（状态与决策）。本文件只回答一件事：**接下来写什么代码、为什么、怎么证明、怎么回滚。**
 
+> **v3 是一次通宵无人值守的执行版。** 新增 §10 复盘、§11 helper 可达性（实测）、§12 通宵计划 R1–R6、
+> §13 无人值守规则。执行只看 §12，判据写在前面。
+>
 > **v2 是自我复核后的版本。** v1（`6e6d7017`）把 P1 定为"专家 GEMM 是算力受限，改用 sm_75 的 IMMA"。
 > 复核把这条前提否掉了（§1 F1/F2），并把"逐位相同"这个判据推翻（F3）。v1 留在 git 历史里，**不再作为执行依据**。
 
@@ -18,7 +21,7 @@
 | 实测硬件（可引用） | **NVLink 46.8 GB/s vs host 11.0 GB/s = 4.25×**（64 MiB `cudaMemcpyPeerAsync` ×12 取中位）；HBM 616 GB/s；VRAM 2×22 GB；PCIe 3.0 x16 |
 | **A1 字节账（2026-10-24，只读日志计数器）** | 冷启动第一个请求就把**整份专家包**从 RAM 层读一遍（~48,400 blob ≈ 34 GB，按 11.0 GB/s ≈ **3.0 s**，这就是首字的底）；稳态每个请求（一轮）中位 **5,711 blob ≈ 3.9 GB ≈ 359 ms**（11.0 GB/s），p90 20,981 blob。`files` 层与 `MB read` 是**文件层**的计数器（读它们之前先读 `generate.cpp:15554`，我第一版就错在这里），与主机 RAM 无关。 |
 | 重启 | 今天 40+ 次。**预算：一轮 ≤2 次，且必须先说清判据** |
-| 下一步（顺序固定） | ① `STRATA_PREFILL_HELP_DEBUG=1` 诊断（单次启动，不 A/B）→ ② 按诊断改两处（`pp->p2p` 可配、原生内核层是否放行）→ ③ 单次启动验证 `peer GPU` 行出现 → ④ 才做 A/B（TTFT + prefill wall） |
+| **helper 可达性（2026-10-24 实测，取代旧结论）** | ① `set_stage_helper` **确实被调用**（`serve=1 multi_gpu=1 stages=1 split_devs=1`，两个 stage 各一次）——旧说法“serve 里没接线”作废；② 生产 `--prefill-pipe 1` 时，**真实请求根本不进 `bind_stage_helper`**（只有 106 token 的建上下文撞到）；③ 改成 `--prefill-pipe 0` 后，6.8k 提示词**进来过**（被 `split_help_frac` 拒），但同一 boot 稍后又**不再进来**（2.3k/4.5k/6.8k 都没有记录）——说明还有一道**随状态变化**的门（`single_chunk` 或批量槽路径），未定；④ 结论：**helper 不是 env 能打开的**，要改的是“哪条路径去问它”，属于 P1 代码活 |
 
 **这张表的用法**：任何"要不要再试一次"的问题，先看上面两行（采纳/否决），再看"作废"那一行 ——
 **没触发 ≠ 不成立**，这是今天两次空转的教训。
@@ -229,3 +232,56 @@ TP 在这台机器上只值 +3%（L-033）说明它不是"算力协作"的钥匙
 约束可能是"48 层 × 4 路的小内核串行"，杠杆在 graph/层内合并。**一次 nsys 可判**，排在 ③ 之后。
 
 **未采纳**：无。评审没有一条被我驳回 —— 这在今天之前的三轮里是第一次。
+
+
+---
+
+## 10. 复盘：今天的时间花在哪，为什么
+
+**有效的**（都可复核）：measured P2P 46.8 vs host 11.0；A1 字节账（冷启动 34 GB、稳态 3.9 GB/轮）；
+`HC_Q8` 采纳；两次“作废运行”的教训写进流程；runtime flag（`include/strata/core/runtime_flag.hpp`）落地并独立验证。
+
+**浪费的**（按代价排）：
+1. **部署动作本身出错两次**：在链接完成前 `cp`（拷到旧二进制）、`cp` 到正在运行的二进制（`Text file busy`）→
+   多花 2 次冷装载（~7 min）。**规则**：构建后台跑完必须用 `md5sum`/`strings` 验**部署后的文件**；
+   覆盖运行中的二进制一律 `cp` 到 `.new` + `mv -f`。
+2. **读错计数器**（`files … MB read` 当主机字节）→ 一轮结论作废。**规则**：引用计数器前先读打印它的那 5 行源码。
+3. **在旧结论上锚定**：`pp->p2p=false` 的 `(measured there)` 我引用了两次，其实是“本机从未测过”。
+4. **重叠安装器**（10:13Z）一次；**A/B 脚本在引擎 READY 之前就发请求**一次（4 臂全空）。
+
+**代价**：今天 45+ 次重启。今晚预算：**每轮 ≤2 次**，而且**先写判据再动手**；不够就改成“同 boot flag 交替”。
+
+## 11. helper 的完整地图（2026-10-24 实测 + 静态）
+
+- **接线**：`generate.cpp:8766` `if (multi_gpu && !stages.empty())` → 对每个 stage 调 `set_stage_helper`（**实测进了，成功**）。
+- **启动后的门**（`set_stage_helper`，现在会打印）：`helper==nullptr/self`、`split_help_env()`、同设备、`mmq_plan().any`。**实测全过**。
+- **每次提示词的门**（`bind_stage_helper`，`prefill.cpp:2673`，`const bool helped = single_chunk && bind_stage_helper(n)`）：
+  - **只有 `single_chunk` 才调用**。生产 `--prefill-pipe 1` 下真实请求不走这里（实测：0 条记录）；
+  - `split_help_frac(T)`：默认规则在 ~3.3k 以上为 0；flag 文件/env 可覆盖；
+  - `T ≥ stream_all_min()`（1024）、`m.src != null`、`m.ring > STAGE`、`!fused_ring()`；
+  - 逐层 `mmq_plan().layer[l]` 且 `!fused::native_supported(...)`（我们 IQ3_XXS 在 sm_75 上 native 为 false → **过**）。
+- **仍未知**：`--prefill-pipe 0` 时为什么有时进、有时不进（2.3k/4.5k/6.8k 后来都没进）。**下一步只需一个探针**
+  （在 `single_chunk` 计算处打印 `n/cap/single_chunk`），不是猜。
+
+## 12. 通宵计划（执行只看这一节）
+
+原则：**每项先写判据与止损，再动手；一次只跑一个安装器；每轮 ≤2 次重启；改动默认关、逐位不变、可回滚。**
+
+| # | 任务 | 类型 | 重启 | 判据 / 止损 | 回滚 |
+|---|---|---|---|---|---|
+| **R1** | `single_chunk` 探针：在 `prefill.cpp` 计算 `single_chunk` 处打印 `n, cap, single_chunk, stages, pipe`（默认关，`STRATA_PREFILL_HELP_DEBUG=1` 才打） | 代码（只加日志） | 1 | 能解释“为什么 6.8k 进来过一次”，并给出**稳定**复现条件的结论；≥2 组不同 n 有记录 | 恢复 `prefill.cpp.bak-help` |
+| **R2** | 用 R1 的结论决定 helper 是否值得继续：若只有 ≤cap 的请求能帮，且 cap 随 VRAM 缩，则**关线**，把预算给 R3 | 决策 | 0 | 若“能帮到的提示词占比 <20% 的时间” → 关线（写进 §6 不做清单） | — |
+| **R3** | **每轮 3.9 GB 主机字节的来路**：用 `--stage-timing`/`STRATA_*_TIMING` 把“专家流 / KV 流 / 权重驻留”分开，按窗口统计；目标是找出**可去重**的部分（同一专家的 gate/up 与 down 是否各搬一次） | 测量（0 改动） | 0 | 若去重能省 ≥30% 字节 → 写 R4；否则转 R5 | — |
+| **R4** | **字节去重/预取**：只对“同一请求内已被读过的专家 blob”做一次去重（或按路由频次排序的预取），默认关 | 代码（内核/缓存） | 2（A/B） | 同 boot flag 交替，每臂 ≥3 提示词配对，TTFT 中位 −5% 才采纳；逐位门 `parity_window.py` 必过 | 去掉 flag＝回到今天的行为 |
+| **R5** | **结构性线索**：相图 36% 不在表里、`waitA` 1.54 ms/窗口。用一次 `nsys` 或 `STRATA_*_TIMING` 判是不是“48 层×4 路小内核串行”；若是，评估 graph/层内合并的原型 | 测量 → 可能代码 | 0→2 | 先出“时间去哪了”的表；没有 ≥5% 的候选就不写代码 | — |
+| **R6** | **收尾**：恢复生产（`restore-prod.sh`），验 `md5` 一致的配置、`NRestarts=0`、`/health`、16 env；把今晚的数字写进 `HANDOVER.md` 与 `EVIDENCE_LEDGER.md` | 运维 | 1 | 生产与 `strata-022.prod.json` byte-identical；`verify-running-config.sh` 的 VERDICT 行 | 已提交的文档就是回滚点 |
+
+**今晚不做的**：IMMA decode（F1/F2 已否）；对卡专家缓存（容量受限，判据是每窗口 miss <30 MB 即关线）；
+改 `--prefill-pipe`/`layer_split`/`--pipeline-windows` 这类已被实测否决的开关。
+
+## 13. 无人值守规则（今晚额外加的四条）
+
+1. **每次重启前**把“要跑什么、判据、回滚”写进 `docs/CODE_PLAN.md` 的本轮小节，再动手。
+2. **部署后验文件**：`md5sum` + `strings | grep <新字符串>` 对**部署路径**做，不对构建产物做。
+3. **一个安装器**：动手前 `pgrep -af "[u]se-config|[r]estore-prod|[f]lag-ab|[e]xp-env-ab"` 必须为空。
+4. **每轮结束必须留证据**：日志路径、脚本名、命令、以及“没测什么”。没有证据的轮次按未发生处理。
