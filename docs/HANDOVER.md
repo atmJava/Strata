@@ -158,14 +158,15 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 | `use-config.sh <config.json>` | **唯一**的安装/回退入口：备份→校验 args 是非空字符串列表→装→**等 PID 变**→等 `"loaded": true`（420 s）→打印引擎真实 env |
 | `run-arm.sh <label> [context]` | 跑一臂全套：bench 3 轮 + parity ×2 + 冷 prefill 13252×3 → `/opt/ai/logs/arm-<label>.log`；**缺工装或没 key 就拒绝跑** |
 | `parity_window.py [label] [lines] [max-tokens]` | 逐位门：自造 prompt（问 Event 0111）、`temperature: 0`、分别哈希 reasoning 与 content |
-| `bench-strata.py` / `cold-prefill.py` | 单流+4 并发 / 冷 prefill |
+| `bench-strata.py` / `cold-prefill.py` | 单流+4 并发 / 冷 prefill。`bench-strata.py` 现在**还报投机 draft 接受率**：测量段前后各读一次 `/metrics` 的累计计数取差，并写明窗口里有多少请求是别人的（`foreign_requests`），引擎中途重启过就说差值无意义 |
 | `exp-mode-ab.sh [--go]` | mode 4↔8 速度 A-B-A；**会识别线上已是 A 从而只要 2 次重启** |
 | `exp-mode8-quality.sh [--go]` | mode 8 的**质量** A-B-A（逐位 ×3 + 推理 harness ×3） |
 | `agent_budget_ab.py [long] [reason] <reps> <arms…>` | agent harness：臂写作 `<budget>[@<effort>]`（如 `0@medium`）；`AB_TAG` 后缀输出文件；`reason` 加 8 个**只能靠算**的可判分任务 |
 | `vram-perf-sample.sh` | cron `*/5 * * * *` 在跑（**别删**）；写 `/opt/ai/logs/vram-perf.csv`，低于 700 写 `.warn` |
 | `nvlink-crc-sample.timer` | systemd timer，active；`/opt/ai/logs/nvlink-crc.log` 至今 `crc/replay/recovery` 全 0 |
 | `passive_windows.py` | **免停机判据**：按引擎会话切窗口，报 `--spec` 接受率（引擎每请求写的 `drafts accepted A of B`）、suffix draft 接受率、专家命中中位/p10/min、`length` 截断数、"想到没答案"数、prompt 规模；`--band MIN:MAX` 只在同一 prompt 长度带内比较（固定 prompt 的 bench ≈293、parity ≈7.7K、cold-prefill ≈13.3K）；服务日志侧用 `--marker` + `--starts` 对齐时间戳。源码 `tools/server/passive_windows.py` |
-| `concurrent_reads.py` | 同样按会话切窗口，读 `read N tokens on a thread of its own in N ms (concurrent, …); the slots decoded N rows meanwhile`：报并发读次数、读总时长、期间槽解码行数、"0 行的读"占比，并用 `stages its blobs` 那条拒绝行判**gate 到底开没开**（不用猜二进制）。源码 `tools/server/concurrent_reads.py` |
+| `concurrent_reads.py` | 同样按会话切窗口，读 `read N tokens on a thread of its own in N ms (concurrent, …); the slots decoded N rows meanwhile`：报并发读次数、读总时长、期间槽解码行数、"0 行的读"占比，并用 `stages its blobs` 那条拒绝行判**gate 到底开没开**（不用猜二进制）。轮转后的尾文件没有 `engine started` 行，它会合成一个"session start unknown (rotated)"窗口而不是输出为空（以前为空，坑过一轮）。源码 `tools/server/concurrent_reads.py` |
+| `piped_scenario.py` | **造两条流的场景脚本**：A 流式解码 400 tokens，B 同时读 ~127K 冷提示词；报 B 的冷读（客户端墙钟 + 引擎自己那行 `prompt N = R reused + K read in M ms`）、A 在 B 窗口内的 tok/s、A 最长 chunk 间隔、以及引擎自报的"期间槽解码 N 行"。用来做 gate 的生产形态 A-B-A。**已部署、尚未跑过**（跑之前要有第二条流在场）。它替代 `/tmp/piped_scenario_127k.py`（L-004 的来源，文件已没了） |
 
 ## 9. 上游与分支状态
 
