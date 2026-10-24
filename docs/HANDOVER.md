@@ -74,10 +74,11 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 
 ## 5. 生产现状（2026-10-24 03:4x UTC 重新核实）
 
-**今天为 gate 的开/关实验、打开请求监视器、效果 A-B-A 和 trace 实验一共重启 11 次**（引擎会话 03:11:00、03:15:25、
-03:29:11、03:34:17、03:53:15、03:57:17、04:12:08、04:59:41、05:02:30、05:07:13、05:10:53 UTC，合计 ~1,570 s 冷加载），
-所以现在：`active`、`NRestarts=0`、MainPID **129107**（05:10:53Z 起）、引擎子进程 **129116**、vision 子进程 **129121**（见 §7 第 13 条）。
-**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **05:10:53Z 这个会话**重新攒（§11 第 4 条）。
+**今天为 gate 的开/关实验、打开请求监视器、效果 A-B-A、trace 实验和 prefill 相图一共重启 13 次**（引擎会话 03:11:00、
+03:15:25、03:29:11、03:34:17、03:53:15、03:57:17、04:12:08、04:59:41、05:02:30、05:07:13、05:10:53、05:31:12、05:38:40 UTC，
+合计 ~1,890 s 冷加载），所以现在：`active`、`NRestarts=0`、MainPID **136438**（05:38:40Z 起）、引擎子进程 **136446**、
+vision 子进程 **136451**（见 §7 第 13 条）。
+**19:10:55Z 那个 mode 8 会话被这些重启切断了**——被动窗口要从 **05:38:40Z 这个会话**重新攒（§11 第 4 条）。
 在**引擎子进程**的 `/proc/<pid>/environ` 里核实了 **15 个 `STRATA_*` 变量**，其中三条关键：
 **`STRATA_SM75_PERF=1`**、**`STRATA_EXP_MODE=8`**、**`STRATA_PIPED_CONCURRENT=1`**（开/关今天实测过，**L-019**）。
 空闲显存 814/906（03:45Z 的 CSV 行）、`.warn` 未触发。
@@ -118,7 +119,10 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 | **read-ahead 的改动点（静态阅读，未测）** | 引擎中途收新活（只排在飞的毫秒级窗口），读本身跑在自己线程上、最后才 42.6 ms 复制进槽；**唯一障碍是 `BGEN` 下命令那一刻就要有空槽**。改动 = 加一条不要槽的读命令（opt-in）。值：满槽时那条冷读的 **36–43 s**；代价：读改在 4 条流旁边跑（邻居今天已掉 35–60%，多一路掉多少**未测**） | **L-024** |
 | **read-ahead 是中等工程，不是一条命令（静态阅读，未测）** | 读本身跟槽无关（两个调用点 13482 / 13710），**卡在 K/V 落地**：准入要先 `kvg_ensure(…, quiesce)`，而 quiesce 要求设备安静（12542 / 15079 / 10514）；会话状态最后才复制（42.6 ms），checkpoint 在槽间搬的机制已经有一半（15436-15448）；parked conversation 是**按槽记账**的（起点不是现成件）。→ **要不要花重编译先过一个判据**：真实流量里有多少请求真撞上"冷读 + 满槽" | **L-025** |
 | **DSH 形状每轮首字 1–4 s，其中约 0.7 s 是每次读的固定成本** | `turn-ttft.py` 单流干净跑：冷读 45,017 token = **19.7–19.8 s**（2,275 tok/s）；重读 ≈460 → **1.01–1.09 s**、≈1,835 → **2.2 s**、≈4,535 → **4.0 s**。拟合 `读 ms ≈ 711 + 0.728×token`（**固定 0.7 s + 1,370 tok/s**；45K 大读是 2,275 tok/s，另一个区制）。**客户端首字只比引擎读多 0.05–0.10 s** → 那 0.7 s 在引擎里，不在服务端。热起来后 draft 接受率 ~99%、生成 108–134 tok/s（冷读后第一次只有 66–67 tok/s） | **L-026** |
-| **`STRATA_TRACE=1` 拆不到那 0.7 s（单流）** | 两臂（trace 开 / 关）的读时间逐档对得上（1,474/1,466、1,012/1,010、1,081/1,091、2,200/2,205、3,997/3,984 ms）→ **开 trace 的代价测不出**；但 `strata trace: admission` **一行都没打**，因为那条打印在**批量准入**里，而单流走的是 solo `GEN` 路径。要拆得让请求走 BGEN（有并发） | **L-027** |
+| **`STRATA_TRACE=1` 拆不到那 0.7 s（单流）** | 两臂（trace 开 / 关）的读时间逐档对得上（1,474/1,466、1,012/1,010、1,081/1,091、2,200/2,205、3,997/3,984 ms）→ **开 trace 的代价测不出**；但 `strata trace: admission` **一行都没打**，因为那条打印在**批量准入**里，而单流走的是 solo `GEN` 路径。**L-028 更正**：每步 trace 行单流也有（`read … (batched) in … ms` 等），只是没有 `admission` 那条——**别只 grep `admission`** | **L-027** |
+| **那 0.7–0.9 s 全在 `Prefill::run` 里面（实测拆段）** | 461 token 重读 = `read (batched)` **977 ms** + refill 74 + windows 42 + checkpoint 10 ≈ 引擎自报 1,012 ms；4,528 = 3,664 + 318 + 38；45,010 冷 = 19,213（6 个 7,680 chunk 流水）。**准入 drain 只有 0.2–0.3 ms、首 token windows 恒定 37–42 ms、refill 在读之后** → 都不是。**拟合 ≈788 + 0.409×token**（固定 0.79 s、线性段 2,443 tok/s；小段拟合 947 + 0.600×token → 越小越吃亏）。**与上下文长度无关** → "会话 K/V 要从 RAM 流回来"这条猜测**被实测否掉** | **L-028** |
+| **重发同一块 token 不变快 → 固定成本不是专家 staging** | `stage_repeat_probe.py`（45K 上下文，每对"唯一块 + 同样的块再来一次"，块实测 529 token）：唯一干净的一对 **1,226 → 1,246 ms（+1.6%，<3%）**；另两对一行被我自己会话的 200K 请求污染、一行 `read=1` 可疑，**已剔除**。限制：只有一对、两次读之间生成过 ~300 token（专家槽可能已换出）、探针靠 grep 共享日志取数 | **L-029** |
+| **那 1 s 的相图：成本在专家权重那几相，唯一能拿掉的是 stage 1 的 `wait copy`** | `STRATA_PREFILL_TIMING=1` 的 21 相记账（先量了工装自己的代价：**+2.5–8%**）。461 token：stage 0 GPU 370 ms（gate/up 111=30%、dequant 63=17%、down 52=14%、kv stage 26、gdn 23、attn 15）、stage 1 GPU 610 ms（**wait copy 185=30%**、down 119、dequant 107）。每 token 效率 461 vs 4,524：gate/up **2.75×**、dequant **6.8×**、down 2.8×、kv stage 9×，而 **qsa attn 不变** → **固定成本=小批次也要把专家权重读/反量化/乘一遍**。冷读 45,010：GPU 16,305 ms，**PLE 1,014 ms 是一次性的**（之后 0）。可拿掉项 = stage 1 的 `wait copy`（≈18% 上界），但它要 `STRATA_MMQ_TAB=ON` + `MMQ_DIRECT=1`，**本机二进制没有**（§7 第 27 条） | **L-030** |
 | L-001 显存预留 | GPU0 空闲 504 → 804–810（现 ~850）；专家缓存 7,334 → **7,190 slot（−1.96%）**；命中中位 98.90 → 99.00%（p10 97.80→97.50），88/470 请求 | L-001 |
 | 噪声地板 | 同一基线两次跑，**每任务 token 方差均值 24.5%**；生产形态 `temperature: 0` **钉不住**长输出的哈希 | L-007 |
 | 思考侧 | `effort` 只是 prompt 里一句话（`serve/server.py` 的 `EFFORT_TURN`/`render_prompt`）；`low`≡`high`（−0.5%，噪声内）；`medium` 查表形态 −28%、**推理形态只 −7%**；`none/off` −41% token、−25% 墙钟但 **14 个推理任务丢 3–4 个**（真算错 + 空答案）；预算 ≤10% | L-005 / L-009 / L-010 |
@@ -200,6 +204,16 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
     和 `BADM`）：**单流顺序请求走的是 solo `GEN` 路径，一行 trace 都不会有**（L-027 就是这么空手而归的）。
     想拆单流的开销，要么让请求走 BGEN（并发），要么去读 solo 路径自己的分段。判断"这次跑的是不是批量路径"：
     看日志里有没有 `slot N takes … tokens`。
+    **更正（L-028）**：其实 `STRATA_TRACE=1` 在单流下也打**每步**的行（`strata trace: read N tokens (batched) in X ms`、
+    `refilled … slots`、`lent …`、`checkpoint at …`、`window …`）——**只是没有 `admission of slot` 那条**。
+    所以拆单流的读**不用并发也能拆**，别只 grep `admission`。
+26. **`strata serve: KV streaming: 98.5% of … block reads hit VRAM, 149.3 MiB read from RAM` 是解码期注意力的块读统计**
+    （每生成一步都要读全部前缀的块），**不是提示词读的时间**。别用它解释"读为什么慢"——L-028 实测：重读 1,835 token 在
+    ctx 49K 与 53K 都是 2.20–2.23 s，重读 4,535 token 在 58K/62K/67K 都是 3.98–4.05 s，**与上下文长度无关**。
+27. **`STRATA_MMQ_DIRECT=1` 在本机二进制里是空的**：我们的 build 没开 `STRATA_MMQ_TAB`（`strings build/strata |
+    grep -c prefill_mmq_tab` = **0**，引擎日志里也没有任何 MMQ 行），而文档说"without a build with STRATA_MMQ_TAB the
+    variable is ignored"。**设了它不会变快也不会变慢，别拿它做 A-B-A 浪费重启。** 要它得重编译
+    （`-DSTRATA_MMQ_TAB=ON`，代价：每卡多 36–38 MiB VRAM、二进制 +15 MB、每架构多 ~175 s 编译）。
 
 ## 8. 工装（都在 `/opt/ai/bin`，源码版本在 `tools/server/`，改完要 scp 上去）
 
@@ -223,6 +237,8 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 | `enable_api_monitor.sh [peers] [peer-max-tokens] [reps]` | 打开服务端请求监视器（配置顶层键 `"api_monitor": true`，重启）并**当场 dump** `GET /api/requests`：每条请求的 `wallclock_s` / `first_token_s`（=用户感知 TTFT）/ `queue_s` / `load_s`。监视器只留 100 条、不落盘，**跑完必须马上读**（脚本会 dump 到 `/opt/ai/logs/L021-*.log` 和 `/opt/ai/tmp/L021-requests-111.json`）。**回退**：`use-config.sh /opt/ai/tmp/monitor-off-20261024T041201Z.json`。已跑，结果 **L-021** |
 | `turn-ttft.py <tag> [新增,逗号] [每档轮数] [上下文token] [生成token]` | **DSH 形状的多轮探针**（首要指标那条路径）：`messages` 累积 + 每轮塞一段唯一内容当工具输出，量"这一轮实际要重读多少"、首字、生成速率；`temperature: 0` + `reasoning_effort: none`；结果追加 `/opt/ai/logs/turn-ttft.jsonl`。**本轮修了三个坑**：引擎日志路径写死在 0.1.40.1 那套安装（现在 `TTFT_LOG`/`TTFT_CFG` 可指）、**不发 api key**（0.2.2 之后 401）、`block()` 的 token 估算差 4 倍（原来 `/3`，"45000"实际造出 180,018 token → 撞上下限吃 400，现在 `/12`），并且**撞到 400 也会把已量的行写进 jsonl**（以前直接崩、什么都留不下）。已跑，结果 **L-026** |
 | `trace_admission_phases.sh [ctx] [tag后缀]` | 快照配置 → 加 `env.STRATA_TRACE="1"` 重启（B 臂）→ 跑 `turn-ttft` → 恢复配置重启（A2 臂）→ 再跑一轮；把两次的 `strata serve: prompt …` 和 `strata trace: admission …` 并排打出来。**只对走 BGEN 的请求有用**（§7 第 25 条）。已跑，结果 **L-027**（trace 一行没打，但两臂对上了） |
+| `stage_repeat_probe.py [ctx] [block] [pairs]` | 判别"固定成本是专家 staging 还是每轮固定动作"：同一块 token 连发两次，比较引擎自报的读时间。**两个坑**：这台机器的 `grep -E` **不认 `\d`**（第一版因此一行都没取到，已改 `[0-9]`）；共享日志里会抓到**别人的请求**，必须用 ctx 校验（本轮就抓出一行 ctx=200K 的）。已跑，结果 **L-029** |
+| `prefill_phase_timing.sh [ctx] [小,大块] [每档轮数]` | 用引擎自带的 `STRATA_PREFILL_TIMING=1` 把提示词读的 GPU 时间按 **21 个具名阶段**记账 + host 侧一行（chunk setup / 等 chunk / PLE）；A-B-A 两臂各一次重启，`turn-ttft` 出数。已跑，结果见 **L-030** |
 
 **本轮又搬进 `tools/server/` 的 7 份判据脚本**（原来只在 `/opt/ai/bin`）：`turn-ttft.py`（**DSH 形状的多轮会话**：每轮实际重读多少 + 首字延迟——就是首要指标那条路径）、
 `conv_cache_ab.py`（会话缓存 A/B：每条请求引擎实际重读多少）、`probe_determinism.py`（跑动差异是采样还是引擎——`agent_budget_ab.py` 的 docstring 直接引用它）、
@@ -338,19 +354,22 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
    里面目前基本是实验自己的流量（上一个窗 03:34:17Z：45 个请求、接受率 78.25% of 901——小样本，别当结论）。
    等它攒够几百条**真实**请求再回看同一张表（截断率、suffix draft 接受率、命中率那三列）。
    注：L-026 已经把 DSH 形状的首字/重读/接受率单独量过一遍（热起来后接受率 ~99%），被动窗口值在**跨天趋势**。
-5. **引擎侧读路径：先拆那 0.7 s 的固定成本（现在的第一优先），read-ahead 降级。**
-   - **固定成本（L-026）**：普通 agent 回合的首字 = **0.7 s 固定 + 读**（小读 ~1,370 tok/s、45K 大读 2,275 tok/s），
-     460 token 那档里固定成本占 ~60%；**客户端首字只比引擎自报的读多 0.05–0.10 s** → 它**在引擎里，不在服务端**。
-     下一步：**让请求走 BGEN**（并发跑 `turn-ttft.py`，或配一个并发探针），`STRATA_TRACE=1` 才会打出
-     `strata trace: admission …` 的分段（drain / prompt(read, windows, checkpoints = sync+save+evict, rest) /
-     first window / slot copy / slot freed / checkpoint copy）。单流拆不到（L-027，§7 第 25 条）。
-     免停机能做的一半：静态读 solo `GEN` 路径有没有自己的分段计时。
-   - **read-ahead（降级，L-024 / L-025）**：排队在服务端 `pick_slot`（全忙返回 None），引擎也不接无槽的 BGEN（12007）；
-     **没有"少准入"的旋钮**；改动是**中等工程**（K/V 落地要 quiesce、parked conversation 按槽记账），不是加条命令。
-     而且 L-026 显示普通回合只要 0.7 s + 读，排队只在"满槽 + 冷读"时咬人，真实流量 TTFT 中位 0.80 s（L-021）
-     → **先不花这次重编译**；等 (a) 拆完固定成本再看它值不值。
-   免停机的支线：静态读 `pick_slot` / 控制行 / `STRATA_ADMIT_SHORT_FIRST`（`server.py:319` 读的是**服务端进程**的环境，
-   配置 `env` 键在 import 之后才应用 → 要生效得进 systemd 单元的环境，那是 root 的活）。
+5. **引擎侧读路径：相图出完了（L-030），下一步是**一次有据可依的重编译**（MMQ_TAB + MMQ_DIRECT）。
+   - **已拆完**：461 token 的读 = **1,008–1,024 ms**（关 timing 那臂）。相图：stage 0（370 ms）= gate/up 111 + dequant 63
+     + gemm down 52；stage 1（610 ms）= **wait copy 185** + gate/up 119 + dequant 107。**每 token 效率 461 对 4,524：
+     gate/up 2.75×、dequant 6.8×、kv stage 9×，而 qsa attn 完全不变** → 固定成本就是"小批次也得把专家权重读/反量化/乘一遍"。
+     PLE（908–1,014 ms）只在冷建上下文和它之后第一次读出现，**一次性**。
+   - **可拿掉的上界 ≈18%**（stage 1 的 wait copy 185 / 1,024），且只对 resident 专家生效。要拿它必须
+     `-DSTRATA_MMQ_TAB=ON` + `STRATA_MMQ_DIRECT=1`——**本机二进制没有那条路径**（`strings | grep prefill_mmq_tab` = 0，§7 第 27 条）。
+   - **决定：下一轮就做这次重编译**（有实测目标、可 opt-in、默认路径逐位不变、文档自带逐位相等测试）。做法：
+     ① 独立 build 目录（不动现有 `build/`），`-DSTRATA_MMQ_TAB=ON`；② `--target strata` + `prefill_mmq_tab_test`（874 乘积逐位、九类型）；
+     ③ 配置加 `env.STRATA_MMQ_DIRECT="1"` 重启，A-B-A 跑 461/4,535 各 3 轮 + `quality_eval` 质量门；
+     ④ 赢才留、输就换回原二进制路径并恢复配置。代价：每架构多 ~175 s 编译、二进制 +15 MB、每卡多 36–38 MiB VRAM。
+   - **read-ahead（降级，L-024 / L-025）**：排队在服务端 `pick_slot`，引擎也不接无槽的 BGEN（12007），**没有"少准入"的旋钮**；
+     改动是**中等工程**，而且排队只在"满槽 + 冷读"时咬人（真实流量 TTFT 中位 0.80 s，L-021）→ **不优先**。
+   免停机的支线：静态读 `pick_slot` / 控制行 / `STRATA_ADMIT_SHORT_FIRST`（`server.py:319/322` 在 import 时读，
+   配置 `env` 键在 import 之后才应用 → 要生效得进 systemd 单元的环境，那是 root 侧改动）。
+
 6. **4 条流的"关着"对照**：L-020 只有 3 条流做了开/关；4 条流（生产满配）只测了开着。`gate_prod_streams.sh 4 3 60000`
    直接能跑（要 2 次重启 ≈ 300 s，决定权在我，§10 已表态 6）。**注意**：L-021 已经说明满槽时读基本不等重叠，
    所以这条对照的预期差别比 3 流那轮小——做之前先想清楚它还能回答什么。

@@ -1063,3 +1063,123 @@ medium 1/3 = 0.33，**一样**。
 **顺带**：`BADM`（批量准入回执，`15480`）在单流下也一样不会出现——以后按"有没有 `slot N takes` 行"判这次跑的是不是批量路径。
 
 **没测的**：拆那 0.7 s（下一步要么并发跑 turn-ttft 让它走 BGEN，要么静态找 solo 路径的分段）。
+
+---
+
+## L-028 · 那 0.7 s 拆开了：全在 `Prefill::run` 里面，不在准入/refill/windows/checkpoint（实测，来自 L-027 那次 trace 开的 boot；2026-10-24 05:07–05:10Z）
+
+L-027 说"trace 一行没打"是**我只 grep 了 `strata trace: admission`**。同一 boot 的日志里其实有一整套**每步**的 trace 行
+（`generate.cpp:10993` 那条通用行 + checkpoint / refill / lent / read 各处），把引擎自报的 `prompt N ms` 拆开了：
+
+| 重读大小 | `read N tokens (batched)`（= `Prefill::run`） | 专家 refill（读完之后） | windows（首 token） | checkpoint save / evict | 引擎自报 prompt 总时间 |
+|---|---|---|---|---|---|
+| **461** token | **977.2 ms** | 74.0 ms（869 slots，2 stages） | 42.3 ms | 10.4 / 0.0 ms | **1,012 ms** |
+| 2,135 token | **2,228.6 ms** | 155.6 ms（1,824 slots） | 37.9 ms | 10.5 / 0.0 ms | 2,230 ms |
+| 4,528 token | **3,664.1 ms** | 318.2 ms（2,886 slots） | 37.7 ms | — / 0.7 ms | 3,997 ms |
+| 45,010 token（冷） | **19,213.5 ms**（6 个 7,680 的 chunk，2 stages 流水） | 读完之后才 refill | — | 每 chunk 0.0–0.8 ms | 19,831 ms |
+
+**读部分自己的速率**：461 → 472 tok/s；2,135 → 958；4,528 → 1,236；45,010 → **2,343 tok/s**。
+**按 461 与 45,010 两端拟合：`read_part ms ≈ 788 + 0.409×token`（固定约 0.79 s，线性段 2,443 tok/s）**；
+只按 2,135 与 4,528 拟合是 `947 + 0.600×token`（1,667 tok/s）——**大读能吃到流水，越小越吃亏**，
+所以"固定约 0.8–0.95 s"这个数**是分段拟合出来的，不是同一段实测**（标清楚）。
+
+**所以那 0.7–0.9 s 不在这些地方**：准入的 drain（0.2–0.3 ms）、专家 refill（74–318 ms，在读**之后**）、
+首 token 的 windows（37–42 ms，几乎恒定）、checkpoint 保存/驱逐（10 ms / 0–0.8 ms）。
+**全在 `Prefill::run`（`read_part` → `sp.run`，`generate.cpp:13482`）里面。**
+
+**顺带否掉一条我自己的猜测（实测）**：我原先怀疑是"会话 K/V 要从 RAM 重新流进来"。看 `KV streaming: 73.07% of
+33888 block reads hit VRAM, 36.8 MiB read from RAM` 这条像是证据，**但它是解码期注意力的块读**（每步都要读全部
+前缀的块），不是提示词读的时间；而且实测**读的时间不随会话大小变**：1,835 token 的重读在 ctx 49K 与 53K 都是
+2.20–2.23 s，4,535 token 的重读在 ctx 58K / 62K / 67K 都是 3.98–4.05 s → **与上下文长度无关**，这条猜测**不成立**。
+
+**剩下的嫌疑（静态阅读，未测）**：`Prefill::run` 里的**每轮固定动作**——pinned upload 预留（13575 就在计时外）、
+PLE 表、chunk 计划——以及**为新 token 路由到的专家做 staging**（trace 里 `lent 869 slots for 512 tokens`：512 个 token
+要借 869 个专家槽，约 1.7 槽/token）。这两个谁占多少，**本轮没测**。
+
+**下一轮该做的判别实验（免停机）**：同一轮内容**重复发两次**（第二次 token 值与第一次相同 → 要路由的专家集相同、
+多半还在 VRAM 层里）：若第二次读明显快 → 固定成本在**专家 staging**；若一样快 → 在**每轮固定动作**（upload/表/计划）。
+
+---
+
+## L-029 · 重复同一块 token 并不更快 → 固定成本**不是**为新 token 路由的专家 staging（免停机，A-B 配对；2026-10-24 05:24–05:29Z）
+
+**问题**：L-028 把 0.7–0.9 s 钉在 `Prefill::run` 里，剩两个嫌疑：**(a) 为新 token 路由到的专家做 staging**
+（取决于"哪些专家"，与 token 值有关）、**(b) 每轮固定动作**（pinned upload 预留、PLE 表、chunk 计划——与 token 值无关）。
+判别：**同一块 token 连发两次**。第二次的 token 值与第一次相同 → 路由到的专家集相同，如果成本是 (a)，第二次应该明显便宜。
+
+**做法**：`stage_repeat_probe.py`（新增，`tools/server/`）——45,000 token 上下文，每对"唯一块 + 同样的块再来一次"，
+块实测 529 token（名义 460），3 对；greedy、`reasoning_effort: none`；读时间取引擎自报的 `prompt N tokens = … read in X ms`。
+
+**结果**：
+
+| 对 | 唯一块（引擎读） | 同一块重发 | 差 |
+|---|---|---|---|
+| 1 | 1,841 ms | 1,892 ms | +2.8%（**这两行不是本探针的请求**，ctx=200,6xx 是我自己会话的，已剔除） |
+| 2 | 109 ms（**read=1，异常行**，剔除） | 1,162 ms | — |
+| 3 | **1,226 ms** | **1,246 ms** | **+1.6%** |
+
+**唯一一对干净的配对：重发同一块 1,246 对 1,226 ms（+1.6%，<3%）→ 没有变便宜。**
+**所以固定成本不是 (a)**——至少在"重发间隔一轮、中间还生成过 ~300 token"这个条件下不是。
+
+**必须写明的限制**：① 只有一对干净数据（另两对一行被别的请求污染、一行 `read=1` 可疑）；
+② 两次读之间生成过约 300 token，VRAM 层的专家槽（`refilled 869 slots`）可能已经被换掉，"专家还在"这个前提**没被验证**；
+③ 探针靠 grep 共享日志取数，并发时会张冠李戴——**能用 ctx 校验的要校验**（这次就是靠 ctx=200K 才发现污染的）。
+
+**下一步**：引擎里本来就有 `STRATA_PREFILL_TIMING=1`（`prefill.cpp:2500-2543`）——把提示词读的 GPU 时间按
+**21 个具名阶段**记账（embed+steps / gdn / qsa proj / indexer / select / attn / router / **host grouping** / gather /
+**wait copy** / dequant / gemm gate/up / gemm down / combine / ple / kv stage / …），另外单打一行 host 侧
+（**chunk setup（PLE 行、专家流计划）**、等每个 chunk、每个 chunk 之后、PLE）。这正是分辨 (b) 里哪一项的工装，
+`prefill_phase_timing.sh` 已写好（2 次重启），本轮已开跑。
+
+---
+
+## L-030 · 那 1 s 的相图：小批次的成本在**专家权重**这几相，唯一能拿掉的是 stage 1 的 `wait copy`（2 次重启；2026-10-24 05:31–05:39Z）
+
+**工装**：引擎自带 `STRATA_PREFILL_TIMING=1`（`src/prefill/prefill.cpp:2500-2543`）——在计算流上按顺序打 CUDA 事件，
+把两次标记之间的时间记给前一相，**21 个具名相**；另有一行 host 侧（chunk setup / 等每个 chunk / 每 chunk 之后 / PLE）。
+层切 2 段 → 同一次读**打两行**（每段一行）。`prefill_phase_timing.sh`：开 timing 重启跑一轮 → 恢复配置重启再跑一轮。
+原始输出 `/opt/ai/logs/L030-prefill-timing-20261024T053111Z.log`。
+
+**先量工装自己的代价**（同样 `turn-ttft 300,3000 3 @45K` 形状，各在新 boot 上）：
+
+| 读 | 关 timing（恢复后那臂） | 开 timing | 差 |
+|---|---|---|---|
+| 461 token | 1,474 / 1,008 / 1,024 ms（中位 **1,024**） | 1,494 / 1,043 / 1,107（中位 **1,107**） | +8.1%（末两轮 +3.5% / +8.1%） |
+| 4,535 token | 3,942 / 3,923 / 4,002（中位 **3,942**） | 4,038 / 4,075 / 4,099（中位 **4,075**） | +3.4% |
+| 冷 45,017 | **19,734 ms** | 20,225 ms | +2.5% |
+
+→ **这相图不是免费的，读的绝对数偏 2.5–8%**；下面只用它看**相对占比**，绝对秒数请用关 timing 那臂（或 L-026）。
+
+**相图（timing 臂，461 token；stage 0 GPU 370 ms / stage 1 GPU 610 ms）**：
+
+| 相 | stage 0 | stage 1 |
+|---|---|---|
+| gemm gate/up | **111 ms（30%）** | 119 ms（19.5%） |
+| **wait copy** | 1 ms（0.1%） | **185 ms（30.4%）** |
+| dequant | 63 ms（17%） | 107 ms（17.6%） |
+| gemm down | 52 ms（14%） | 60 ms（9.8%） |
+| kv stage | 26 ms（6.9%） | 26 ms（4.2%） |
+| gdn / qsa attn / hc read / qsa proj | 23 / 15 / 19 / 11 ms | 22 / 15 / 19 / 11 ms |
+| 其余（router、select、combine、gather、host grouping…） | 各 ≤7 ms | 各 ≤7 ms |
+
+**4,524 token 那档的同一张表**（stage 0 GPU 1,657 / stage 1 GPU 1,786）：gate/up 396 / 413、gemm down 181 / 201、
+qsa attn 154 / 151、gdn 145 / 147、hc read 144 / 144、dequant 91 / **152**、qsa proj 82、qsa select 64、router 39、
+combine 27、kv stage 27、wait copy 3 / 41（**5.5% / 8.5% → 2.3%**）。
+
+**每 token 的效率（stage 0，461 对 4,524）**：gate/up **0.241 → 0.0875 ms/token（2.75×）**、dequant **0.137 → 0.020（6.8×）**、
+gemm down **0.113 → 0.040（2.8×）**、kv stage **0.056 → 0.006（9×）**，而 **qsa attn 0.033 → 0.034（几乎不变）**。
+→ **"固定成本"的真身是专家权重这几相：小数量的 token 也要把这些专家的权重读/反量化/乘一遍，摊不薄。**
+纯按 token 走的相（注意力）在小批次上一点都不吃亏。
+
+**冷读 45,010 token 的相图**：GPU 时间线 16,305 ms、墙 17,006、host staging 106 ms；gate/up 3,005（18.4%）、
+qsa attn 1,508、gemm down 1,505、hc read 1,500、gdn 1,401、embed+steps 1,257、**ple 1,014（6.2%）**、qsa proj 777、
+dequant 556、router 422、select 333、combine 265。**PLE 只在冷建上下文和"冷建之后的第一次读"上出现（908–1,014 ms），之后是 0**
+（`host: … PLE 908 ms` 那一行就是它）——这是**一次性**的，不是每轮都付。
+
+**能拿掉的那块**：stage 1 的 **`wait copy` 185 ms**（占它 30%）——把这一 chunk 路由到的专家拷进 MMQ 要的定长缓冲
+（resident 的也拷）。`STRATA_MMQ_DIRECT=1` 正是"resident 专家就地读、不拷"，但**本机二进制没有那条路径**
+（`strings build/strata | grep -c prefill_mmq_tab` = 0，build 是 `STRATA_MMQ_TAB=OFF`）→ **设了是空操作**（§7 第 27 条）。
+要它 = **一次重编译**（`-DSTRATA_MMQ_TAB=ON`，文档给了逐位相等的测试 `prefill_mmq_tab_test`：874 个乘积与拷贝路径
+逐位相同、九种类型全过）。上界收益 ≈ 185 ms / 1,024 ms ≈ **18%**（只算 stage 1 的等待，且只对 resident 专家生效）。
+
+**没测的**：MMQ_TAB 开起来之后实际能省多少（要重编译）；`--pcie-frac` / `STRATA_KV_PREFETCH` 对这几相的影响。
