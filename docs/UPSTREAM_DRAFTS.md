@@ -1,26 +1,22 @@
-# 上游回帖（A/B/C **已于 2026-10-24 02:08 UTC 发出**）
+# 上游：我们**不再往上游发东西**（2026-10-24 用户定），发过的三条**已删除**
 
-| 草稿 | 贴到哪 | 状态 | 链接 |
-|---|---|---|---|
-| A（#2275 并发读：gate 的判定条件） | #2275 | 已发 2026-10-24 02:08:13Z | [issuecomment-6378566315](https://github.com/Niko1221/Strata/issues/2275#issuecomment-6378566315) |
-| B（#2197 第七台 sm_75 + 那条例外） | #2197 | 已发 2026-10-24 02:08:15Z | [issuecomment-6378566608](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378566608) |
-| C（#2197 mode 8 的本机数据） | #2197 | 已发 2026-10-24 02:08:16Z | [issuecomment-6378566819](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378566819) |
-| D（#3724 MMQ tile 上限在本机的适用性） | #3724 | **未发，等 atmJava 点头**（2026-10-24 新写，纯静态阅读） | — |
-| E（回 rafatxf 的提问：chunk 那个免费检查的结果） | #2197 | **未发，等 atmJava 点头**（2026-10-24 新写） | — |
+**规矩（2026-10-24 上午用户下的，覆盖此前所有做法）**：**不回帖、不开 PR、不提交任何东西**到
+`Niko1221/Strata`。本篇因此从"待发草稿"变成**留档**：里面的英文正文是我们台账的上游侧副本，
+以后不再发布，也不再改措辞给人看。
 
-**发出去之后上游动了**：rafatxf 2026-10-24 02:19:34Z 回 [#2197](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378674185)——
-说这台机器是新 CPU 级别、两条结果都收进 body；mode 8 的 +8.5%/+7.9%（对 0.7% 的 A/A2 抖动）是**目前报过的最大增益**，
-body 那句"三套配置 +2.7~4.9%"要改成四套；也接受我们"`--spec` 关不掉、门控的其实是 spec 窗口"那条。
-**他反问我们两个便宜检查**（见草稿 E 与 L-017）。#2275 与 #3724 到 02:46Z 为止**没人再回**。
+| 草稿 | 原本对着哪条 thread | 状态 |
+|---|---|---|
+| A（#2275 并发读：gate 的判定条件） | #2275 | 2026-10-24 02:08:13Z 发过 → **已删**（DELETE 204，再 GET 404） |
+| B（#2197 第七台 sm_75 + 那条例外） | #2197 | 2026-10-24 02:08:15Z 发过 → **已删**（同上） |
+| C（#2197 mode 8 的本机数据） | #2197 | 2026-10-24 02:08:16Z 发过 → **已删**（同上） |
+| D（#3724 MMQ tile 上限在本机的适用性） | #3724 | **未发，按新规不再发** |
+| E（回 rafatxf 的提问） | #2197 | **未发，按新规不再发** |
 
-发之前的状态（留档）：A/B 早先写好未发，C 是 2026-10-24 按 L-011/L-012 的数据新写的；
-atmJava 批准"先写 C，三份一起发"。发之前核过上游动静：#2197 最后一条是 rafatxf 2026-10-23 21:54Z
-（在核 yusheng227507 的 DFlash2 那一行到底跑的是什么），#2275 最后一条是 Adamyno 2026-10-22 21:09Z，
-#3724 仍然 0 评论，**#2326 已 closed**（Niko1221 2026-10-19：改动已在 0.2.0-beta 的 main 里，跟踪器重置所以关掉）。
-
-规则依据：CONTRIBUTING.md —— 先说问题与结果，再说做法，验证部分把"跑过的 / 跑挂的 / 没跑的"分开写，
-读代码得到的结论标 *unconfirmed static analysis*，没测的要写出来。**三份都只是评论，没有开 PR**
-（PR 等维护者表示愿意接：A 里那句"要不要改 gate 判定条件"就是去问这个的）。
+**留下的痕迹（我们不动它）**：rafatxf 2026-10-24 02:19:34Z 在我们 B/C 底下回了一条
+[issuecomment-6378674185](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378674185)，
+说这台机器是新 CPU 级别、两条都收进 body、mode 8 的 +8.5%/+7.9% 是他目前见过最大增益。
+**那是他的评论**（我们不是维护者，删不掉也不该删），我们的三条已删，所以他那条现在指向已消失的引用。
+**结论仍然记在台账里**（L-011/L-012/L-015/L-016/L-017），不依赖上游是否采纳。
 
 ---
 
@@ -316,10 +312,11 @@ divergent start used the same chunk every neighbouring start used. The expert-sl
 config (`--batch: 4 slot sessions on CUDA0` in the production shape, one slot in the gate shape), not of the
 start, so it cannot separate the two either.
 
-What I cannot give you: the raw output of that T2 run is not on disk. The script lived in `/tmp` and its
-output went into my notes only, so I can restate the hashes (`aac0a04d109391fe` for the nine,
-`00281f843ecd3543` for the divergent first request) but not re-derive them from a log. The script is in git
-now and future runs append to `/opt/ai/runs`, so if it happens again there will be a file behind it.
+What I cannot give you: the per-run stdout of that T2 pass was not kept — the script lived in `/tmp`. I can
+restate the hashes (`aac0a04d109391fe` for the nine, `00281f843ecd3543` for the divergent first request) from
+the contemporaneous record I keep for this box (§7.6 of its tuning plan, which has dated backups), but not
+re-derive them from engine logs. The script is in git now and future runs append to `/opt/ai/runs`, so if it
+happens again there will be a file behind it.
 
 Two things from the same window that I think belong near the cold-start line, because both make "restart it
 until it matches" misleading:
