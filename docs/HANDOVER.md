@@ -150,6 +150,13 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
     也是同一台。"发起后台任务后立刻 `job_output wait`、等待期间我不生成"这条**只保护主会话**：
     子代理活着的时候它就是那一路并发，单流腰斩照旧（L-014 那次 bench 单流中位 37.4 tok/s，
     比 L-011 的 73.5 低一半，原因就是当时有个子代理在跑）。**规矩：有子代理在跑，别在这台机器上测速度。**
+17. **`ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected` 是正常行**：
+    2026-10-22→23 那 71 次引擎启动里 **70 次都有**，它来自 **vision 子进程**（CPU、14 线程），**不是 GPU 掉了**。
+    看到这句别去查驱动。
+18. **native pack 的配置缺 `--prefill` 会被引擎自己拒掉，然后 systemd 每 18 秒撞一次**：
+    引擎打 `is a native (IQ) pack: it needs --native SHARD1, --spec T (T >= 2) and --prefill CHUNK` 就退出，
+    连撞 11 次（2026-10-23 05:17:56–05:20:54）看起来完全像崩溃循环。**判据：看有没有那句 "it needs ..."**
+    （有=配置被拒；没有=真出事）。同一条也说明 `--spec`/`--prefill` 在 native pack 上是硬要求，不是可调项。
 
 ## 8. 工装（都在 `/opt/ai/bin`，源码版本在 `tools/server/`，改完要 scp 上去）
 
@@ -184,6 +191,12 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
   提到 `EXP_MODE` 的另外两条 #2069 / #2355 都是 closed，mode 4/0/8 的对照就在 **#2197**。
 - **三份回帖已于 2026-10-24 02:08Z 发出**（A→#2275、B+C→#2197，链接在 `docs/UPSTREAM_DRAFTS.md` 顶部）。
   **没有开 PR**：A 里那句"要不要把 gate 的判定条件改掉"就是先去问这个的。
+- **上游回了**：rafatxf 2026-10-24 02:19:34Z 在 [#2197](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378674185)
+  说这台机器是新 CPU 级别、两条都收进 body；**mode 8 的 +8.5%/+7.9%（对 0.7% A/A2 抖动）是他目前见过的最大增益**，
+  body 那句"三套配置 +2.7~4.9%"要改成四套；也接受我们"`--spec` 在 native pack 上关不掉、门控的其实是 spec 窗口"。
+  **他反问两个便宜检查**：(a) 比那次分歧启动与正常启动的 `prompt chunk auto` 行；(b) 钉 `--prefill N` 再重启几次。
+  **(a) 已做完（L-017）：chunk 从来没变过（53/53 都是 8192 tokens / 96-slot ring），他的猜测在引擎日志里找不到支持。**
+  (b) 要重启，等停机窗口。**草稿 D（#3724）与草稿 E（回 rafatxf）都写好了、未发，等用户点头。**
 
 ## 10. 用户已表态 / 仍未决（别自己决定）
 
@@ -224,8 +237,16 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
    工装已进 git：`bench-strata.py`（现在带接受率）、`warm-measure.py`、`read-gap.py`、`passive_windows.py`、
    `concurrent_reads.py`。**缺一个脚本**：那条"一条流在解码、另一条读 127K 冷提示词"的场景，原来在
    `/tmp/piped_scenario_127k.py`，**2026-10-24 去看不在了**（L-004 预言的坑真发生了），要重写进 git。
-2. **#3724 到底适用不适用**：读码 + 一次 profile 就能判掉，**不用重编译**（`--resident-experts` 走
-   Strata 自己的 `iq_kernels.cu`，专家矩阵很可能不经过 ggml 的 MMQ；dense 层要过——这条是**静态阅读，未测**）。
+2. ~~**#3724 到底适用不适用**~~ **已判掉（L-016，整条是"静态阅读，未测"）**：那两行在本机**只被
+   prompt 专家（gather 路径）和 drafter 的 Q8_0 投影走到**；**decode 专家不进 MMQ**（走
+   `iq_kernels.cu` 的 `native_expert_grouped`）、**dense 层也不进**——我原先在 §11 旧版里猜"dense 要过 MMQ"
+   **是错的**，dense 的 MMQ 入口是 **HIP-only**（`gemm.cu` 里 `#if ... && defined(__HIPCC__)`）。
+   形状推算 `nwork ≥ 100 > nsm(68)` → 与今天完全一致，只有 down 的"1 专家尾组 + `ntx=1`"会少开 8 个 block。
+   **结论：改动会被走到，但收益预计噪声级 → 决定不为它花重编译 + 停机（等用户追认）。**
+   真要花一次重启，值的是 `STRATA_PREFILL_MMQ=0` 对默认（证明 prompt 到底走不走 MMQ、多大），不是 backport。
+   另记一条 build 坑：Strata 把这个调度器**镜像**在 `moe_mmq_tab.cuh:427`，CMake 对 `mmq.cuh:875..1571`
+   做指纹，backport 会让 `STRATA_MMQ_TAB` 自动关掉（今天它 OFF，所以暂无影响）。
+   **Draft D 已写好、未发**（见 §9 与 `docs/UPSTREAM_DRAFTS.md`）。
 3. **`/opt/ai/bin` 剩余脚本继续搬进 git**：本轮搬了 `passive_windows.py`、`concurrent_reads.py`，外加 9 个
    判据脚本（`nvlink-crc-sample.sh`、`t2check.py`、`thinking-budget-ab.sh`、`soak-analyze.py`、`warm-measure.py`、
    `read-gap.py`、`metrics-peek.py`、`verify-running-config.sh`、`check-session-warnings.sh`）。
@@ -240,6 +261,11 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 5. **被动窗口继续长样本**：mode 8 生产窗口现在 105 个请求 / 82,847 draft，等它到几百请求再回看同一张表
    （尤其截断率与 suffix draft 接受率那两列）。
 6. **medium 思考预算**：L-010 说它在推理形态只省 7%，还没做"设成默认"的 A-B-A（免重启，随时能做）。
+7. **上游要的第二项检查 (b)**：钉 `--prefill N`（N 大于被测提示词）再重复几次重启——**要重启**，
+   和 gate 的 A-B-A 并到同一个停机窗口最省。第一项 (a) 已做完（L-017：chunk 53/53 都是 8192/96-slot）。
+   顺带留了个没查清的小尾巴：71 次启动里有 **7 次既没打 chunk-auto 也没打配置拒绝那句**
+   （`10-22 04:48:13`、`06:55:29`、`10-23 05:21:12`、`05:24:24`、`05:27:44`、`06:57:28`、`18:38:40`），
+   **为什么这 7 次没打，不知道**。
 
 ## 12. 目标状态
 

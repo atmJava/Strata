@@ -642,3 +642,82 @@ rate 那一列被并发污染（75.30 对 86.30 主要是负载不同，不是 m
 
 **工装**：`concurrent_reads.py` 补了轮转日志的兜底——尾文件里没有 `engine started` 行时，以前**整段输出
 为空**（本轮就踩了），现在合成一个标着"session start unknown (rotated mid-session)"的窗口并照样统计。
+
+---
+
+## L-016 · #3724（llama.cpp #30553 backport）在本机**只被一部分路径走到**，静态判定：收益预计噪声级（2026-10-24）
+
+**这条整条都是"静态阅读，未测"**：读码 + 只读探针（`nm`/`sed -n`/`grep`/GGUF header），**没跑基准、
+没重启、没编译**。结论由一个只读子代理给出，我**自己复核了全部承重事实**（下面标"我复核"的条目）。
+
+**线上构建的事实**（`/opt/ai/src/strata-0.2.2/build/CMakeCache.txt`，我复核）：
+`GGML_CUDA:BOOL=OFF`、`GGML_CUDA_FORCE_CUBLAS:BOOL=OFF`、`CMAKE_CUDA_ARCHITECTURES=75`、
+`STRATA_MMQ_TAB:BOOL=OFF`；`build/ggml/src/` 只有 `libggml-base.a` 与 `libggml-cpu.a`。
+`nm -C build/strata`：**`ggml_cuda_should_use_mmq` 0 个**、`mul_mat_q_case<(ggml_type)18>` 1 个
+（18 = IQ3_XXS）、`launch_mul_mat_q<` 1344 个。
+→ **ggml 那个 `should_use_mmq` 在我们的产物里是死代码**；真正决定走不走 MMQ 的是 Strata 自己的
+`src/prefill/moe_mmq.cu` 里 `mmq::supported()` / `mmq::fits()`。
+
+**哪条路经过被改的那一行**（pin 的 `mmq.cuh:1444`，我复核过内容就是
+`block_nums_stream_k(... tiles_efficiency_percent >= 90 ? ntiles_dst : nsm ...)`）：
+
+- **走**：prompt/prefill 的专家（`prefill.cpp:1176/1185` → `moe_mmq.cu:428` 的 `p.tab` 为假
+  （`STRATA_MMQ_DIRECT` 未设、`STRATA_MMQ_TAB=OFF`，引擎 env 里这三项都没有，我复核）→
+  `moe_mmq.cu:455 mul_mat_q_case<IQ3_XXS>` → `mmq.cuh:1561→1478→1396→1444`）；drafter 的批量 Q8_0 投影。
+- **不走**：**decode 的专家**（`verify.cpp:2031` → `iq_kernels.cu:5050 native_expert_grouped`，Strata 自有
+  kernel）、**dense 层**（`native_mmvq` / cuBLAS `Gemm`；dense 的 MMQ 入口 `gemm.cu:1159-1160` 是
+  **HIP-only** 且要 `STRATA_DENSE_MMQ=1`）。整个 `src/` 没有一处 `ggml_mul_mat(`。
+- GGUF 只读探针：dense 张量是 IQ4_XS/Q6_K/Q4_K/Q5_K/Q8_0/Q5_K/BF16，**IQ3_XXS 只在 6 层的 gate/up 专家上**。
+
+**所以**：issue 里那个 **"+12.66% 短对话 decode" 在我们的构建里不可能来自这一行**（decode 根本不进 MMQ）。
+
+**形状推算**（静态，`nsm=68` 是 2080 Ti 的 datasheet 值、未实测）：`nwork = ntiles_dst × ceil(ncols_x/256)`；
+gate/up 1280×2560 → `nty=10`、k 拆 10 → `nwork ≥ 100 > 68` → `min(nsm, nwork) = nsm`，**与今天完全一样**；
+只有 down（2560×640：`nty=20`、k 拆 3）在**恰好 1 个专家的尾组且 `ntx=1`** 时 `nwork=60 < 68`，少开 8 个 block。
+**判定：改动会被走到，但本机可观测收益预计是噪声级。**
+
+**一条 build 交互，合并前该知道**：Strata 把这个调度器**镜像**了一份在 `src/prefill/moe_mmq_tab.cuh:427`
+（我复核：那一行与 pin 的 1444 逐字相同），而 CMake 对镜像区（`mmq.cuh:875..1571`，**含 1444**）做指纹，
+对不上就自动关掉 `STRATA_MMQ_TAB` 并打 `mmq.cuh differs from the mirrored scheduler`。今天它本来就 OFF，
+所以对行为无影响；但**backport 之后谁要开 TAB/direct，必须把同样两行镜像进去并重登记哈希**，
+否则 gather 路径与 tab 路径的 grid 规则分叉（PR 自己说 partial iterations 会改 FP32 求和分组，
+那就打破了镜像宣称的 bitwise 等价）。另：仓库 0.2.3.1 的 pin 仍是 `3cf03257`（2026-09-20），
+**升 pin 也拿不到 #30553**（它 2026-10-19 才合进上游 main）。
+
+**方向决定（我做的，等用户追认）**：**不为 #3724 花重编译 + 停机**。要花的话，更值的**一次重启**是
+`STRATA_PREFILL_MMQ=0` 对默认（证明 prompt 到底走不走 MMQ、量级多大），而不是 backport 那两行。
+**没查清的**：运行时真实 `smpbo/nsm`、`J_best` 取值、"1 专家尾组 + ntx=1"在生产里出现的频率、
+drafter 批量路径是否真启用——都没有计数器能看出来。
+
+---
+
+## L-017 · 上游问的那个"免费检查"做完了：prompt chunk 从来没变过；顺带钉死两条机器常识（2026-10-24）
+
+rafatxf 在 [#2197](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378674185)（2026-10-24 02:19:34Z）
+回我们 Draft B 那条"重启后首请求会不一样"，给了两个便宜检查：**(a)** 比那次启动与正常启动的
+`prompt chunk auto: N tokens` 与 expert-cache slot 行；**(b)** 把 `--prefill N` 钉死再重启几次。
+
+**(a) 做完了，纯读日志，没停机。** 原始材料 `/opt/ai/src/strata-0.2.2/strata-022.log.1`
+（覆盖 2026-10-22 02:12:03 → 2026-10-23 19:10:57，**71 次引擎启动**）：
+
+- **53 次打了 auto-chunk 决定，值全部相同：`prompt chunk auto: 8192 tokens, a 96-slot ring`（53/53）**。
+- 出问题那批 arm 所在的启动都在里面，且值一样：`04:49:49`、`04:56:19`、`05:01:41`、`05:04:18`、`05:10:03`
+  （arm 日志 `/opt/ai/logs/arm-base-A.log` 04:49、`arm-sm75-A.log` 04:52:46–04:55:36、`arm-base-B.log` 05:01、
+  `arm-sm75kv-A.log` 05:09）。
+- → **他那个"chunk 被切得不一样"的猜测，在引擎自己写的日志里找不到支持**。
+- **诚实的缺口**：那次分歧的 t2 原始输出**不在盘上**（`t2check.py` 当时在 `/tmp`，输出也没留），
+  哈希只记在台账里。脚本本轮已进 git，以后这类跑会落到 `/opt/ai/runs`。
+
+**顺带两条常识（都进 `HANDOVER.md` §7）**：
+
+1. **`ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected` 是正常行**：
+   71 次启动里 **70 次都有**，它来自 **vision 子进程**（跑在 CPU、14 线程），**不是 GPU 掉了**。
+   以前没核过，看到这行容易以为出了事。
+2. **native pack 的配置缺 `--prefill` 会让引擎自己拒绝启动并被 systemd 连撞**：
+   2026-10-23 **05:17:56–05:20:54 连续 11 次**启动打了
+   `is a native (IQ) pack: it needs --native SHARD1, --spec T (T >= 2) and --prefill CHUNK` 然后退出，
+   **每 18 秒撞一次**，看起来像崩溃循环，其实是配置被拒。71 次里有 11 次是这种；
+   另有 7 次没有 chunk-auto 行但也没打这句（`10-22 04:48:13`、`10-22 06:55:29`、`10-23 05:21:12`、
+   `05:24:24`、`05:27:44`、`06:57:28`、`18:38:40`）——**为什么这 7 次没打，没查清**。
+
+**(b) 没做**：要重启，等停机窗口（和 gate 的 A-B-A 可以并到同一个窗口里）。

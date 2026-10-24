@@ -5,6 +5,13 @@
 | A（#2275 并发读：gate 的判定条件） | #2275 | 已发 2026-10-24 02:08:13Z | [issuecomment-6378566315](https://github.com/Niko1221/Strata/issues/2275#issuecomment-6378566315) |
 | B（#2197 第七台 sm_75 + 那条例外） | #2197 | 已发 2026-10-24 02:08:15Z | [issuecomment-6378566608](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378566608) |
 | C（#2197 mode 8 的本机数据） | #2197 | 已发 2026-10-24 02:08:16Z | [issuecomment-6378566819](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378566819) |
+| D（#3724 MMQ tile 上限在本机的适用性） | #3724 | **未发，等 atmJava 点头**（2026-10-24 新写，纯静态阅读） | — |
+| E（回 rafatxf 的提问：chunk 那个免费检查的结果） | #2197 | **未发，等 atmJava 点头**（2026-10-24 新写） | — |
+
+**发出去之后上游动了**：rafatxf 2026-10-24 02:19:34Z 回 [#2197](https://github.com/Niko1221/Strata/issues/2197#issuecomment-6378674185)——
+说这台机器是新 CPU 级别、两条结果都收进 body；mode 8 的 +8.5%/+7.9%（对 0.7% 的 A/A2 抖动）是**目前报过的最大增益**，
+body 那句"三套配置 +2.7~4.9%"要改成四套；也接受我们"`--spec` 关不掉、门控的其实是 spec 窗口"那条。
+**他反问我们两个便宜检查**（见草稿 E 与 L-017）。#2275 与 #3724 到 02:46Z 为止**没人再回**。
 
 发之前的状态（留档）：A/B 早先写好未发，C 是 2026-10-24 按 L-011/L-012 的数据新写的；
 atmJava 批准"先写 C，三份一起发"。发之前核过上游动静：#2197 最后一条是 rafatxf 2026-10-23 21:54Z
@@ -217,3 +224,114 @@ one prompt in the same arm give three different `text_sha256` values and differe
 environment, not just in the config file), with one command to revert. On this box the mode-4 default for
 Turing is leaving about 8% of single-stream decode on the table, and we saw no cost we could measure.
 
+
+---
+
+## 草稿 D（发去 #3724）— **未发，等 atmJava 点头**
+
+> 2026-10-24 新写。这条**全是读代码**，一条都没测，所以正文第一句就标 static reading。
+> 对上游的价值有两点：**(1)** 告诉上报者"在 Strata 自己的构建里 decode 不进 MMQ，那 +12.66% 不可能来自这一行"；
+> **(2)** mirror + CMake 指纹这个坑——backport 会让 `STRATA_MMQ_TAB` 自己关掉。
+
+### Same ggml pin, 2×2080 Ti: in a Strata build this line is reached by the prompt path only, and the shape says the effect here would be small
+
+We run the pin this issue names (`3cf03257`, 2026-09-20 — still the pin in 0.2.3.1) on 2× RTX 2080 Ti
+(sm_75), a Qwen3 MoE IQ3_XXS pack, engine 0.1.47, CUDA 13.0, driver 595.71.05.
+
+**Everything below is static reading, unconfirmed.** No measurement, no build, no run. We did not measure
+prefill with and without MMQ, and we did not profile which grid the kernel launches with.
+
+**1. The ggml function that gates this is not in our binary at all.** Our build is configured
+`GGML_CUDA=OFF`: `build/ggml/src/` holds `libggml-base.a` and `libggml-cpu.a` only, and
+`nm -C build/strata` has no `ggml_cuda_should_use_mmq`. Strata takes the handful of ggml-cuda host symbols
+it needs from `src/prefill/ggml_cuda_host.cu` and decides for itself in `mmq::supported()` / `mmq::fits()`
+(`src/prefill/moe_mmq.cu`). For the record that function would answer *true* for IQ3_XXS on sm_75 —
+IQ3_XXS is in the whitelist at `mmq.cu:292`, the 48 KiB shared-memory test passes on Turing's 64 KiB, and
+`turing_mma_available()` returns true at `mmq.cu:319-321`, before the `ne11 < MMQ_DP4A_MAX_BATCH_SIZE` test,
+so batch size never enters the decision — but in this product that path is dead code.
+
+**2. Where `mmq.cuh:1444` is actually reached here.** Prompt experts, through the gather path:
+`prefill.cpp:1176/1185` → `moe_mmq.cu:428` (`p.tab` is false: `STRATA_MMQ_TAB=OFF` in the build cache and
+`STRATA_MMQ_DIRECT` unset in the running process) → `moe_mmq.cu:455`,
+`mul_mat_q_case<GGML_TYPE_IQ3_XXS>` → `mmq.cuh:1561 → 1478 → 1396 → 1444`. The symbol
+`mul_mat_q_case<(ggml_type)18>` is present in the running binary, so the path is compiled in. The drafter's
+batched Q8_0 projections reach the same launcher. **Not reached:** decode experts
+(`verify.cpp:2031` → `native_expert_grouped` in `src/kernels/cuda/iq_kernels.cu`) and the dense layers
+(`native_mmvq`, or cuBLAS through `Gemm` — the dense MMQ entry in `src/prefill/gemm.cu` is
+`#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)`, HIP-only and off here). A read of the pack's GGUF
+header says the same thing from the other side: dense tensors are IQ4_XS / Q6_K / Q4_K / Q5_K / Q8_0 / BF16,
+and IQ3_XXS appears only on expert tensors. So a decode-only gain cannot come from this line in a Strata
+build; it would have to come from a ggml-served path.
+
+**3. On this card the prompt-path effect looks small even where it is reached.** With the PR's
+`nwork = ntiles_dst * ceil(ncols_x / K_vram)` and `K_vram = MMQ_ITER_K = 256`: the gate/up projections are
+1280×2560, so `nty = ceil(1280/128) = 10` and 10 k-splits give `nwork ≥ 100`, against `nsm = 68` SMs on a
+2080 Ti (datasheet, not measured here) — `min(nsm, nwork) = nsm`, which is exactly today's grid. The down
+projection (2560×640: `nty = 20`, 3 k-splits) only lands under the cap when a group holds a single expert
+and `ntx = 1`, where `nwork = 60 < 68` and eight blocks are dropped. We have no counter that says how often
+that case occurs in a real request.
+
+**4. A build interaction worth knowing before this lands in a tree Strata pins.** Strata mirrors this
+scheduler in `src/prefill/moe_mmq_tab.cuh`; its line 427 is byte-identical to the pinned `mmq.cuh:1444`.
+CMake fingerprints the mirrored region — `mul_mat_q_process_tile` through `#define DECL_MMQ_CASE`, which is
+`mmq.cuh:875..1571` and contains 1444 — against a registered hash, and on a mismatch turns `STRATA_MMQ_TAB`
+off by itself with `mmq.cuh differs from the mirrored scheduler`. It is OFF today, so the backport changes
+nothing about that flag now; but after the backport, anyone turning the tab path on gets the gather path's
+new grid rule and the tab path's old one unless the mirror is updated in the same change and the hash
+re-registered. The PR notes that partial iterations change the FP32 summation grouping, which is precisely
+what would break the bitwise equivalence the mirror documents.
+
+**What we did not test.** (1) Nothing was run, so every number above is arithmetic on tile shapes.
+(2) We did not compare prefill with MMQ on and off (`STRATA_PREFILL_MMQ=0` against the default).
+(3) We did not measure `smpbo` or `nsm` at runtime, and did not confirm which `J` the launcher picks per
+group. (4) We did not follow whether the drafter's batched projection is enabled in a two-card
+`--layer-split 24` run. (5) We have no way to compare against the reporter's 2080 Ti + 4070 SUPER pair,
+and did not try to explain the reported decode numbers.
+
+**So, from our side:** the change is reachable on sm_75 in a Strata build, but only on the prompt path, and
+the shapes we can compute say it is a no-op for the two projections that dominate that path. If someone
+wants a cheap check before spending a rebuild on it: print `ntiles_dst`, `nsm`, `tiles_efficiency_percent`
+and `nwork` once per (type, J) at `mmq.cuh:1444` — that is a host-side print, one target to rebuild
+(`strata_mmq`) and one relink, and it says on the real workload whether the `< 90` branch is ever taken with
+`nwork < nsm`.
+
+---
+
+## 草稿 E（回 rafatxf 在 #2197 的提问）— **未发，等 atmJava 点头**
+
+> 2026-10-24 写。他问的两个检查里**免费那个（比 prompt chunk）已经做完了**（L-017，纯读日志、没停机）：
+> **chunk 从来没变过（53/53 都是 8192 tokens / 96-slot ring）**，他那条猜测在引擎自己写的日志里找不到支持。
+> 顺手把同窗口挖到的两条"看着像出事其实没事/看着像崩溃其实是配置被拒"写进去——这两条对上游写 body 有用。
+> 第二个检查（钉 `--prefill`）要重启，等停机窗口。
+
+### The free check first: the chunk did not change, and here is what the retained log does say
+
+Thanks — the chunk hypothesis is the one I can test without touching the box, so I did that one first.
+
+`strata-022.log.1` here covers 2026-10-22 02:12:03 → 2026-10-23 19:10:57 and 71 engine starts. Of those, 53
+logged the auto-chunk decision, and **all 53 say the same thing**: `prompt chunk auto: 8192 tokens, a 96-slot
+ring`. The starts the `=0` / `=1` arms ran in are among them (04:49:49, 04:56:19, 05:01:41, 05:04:18,
+05:10:03; the arm windows are in `/opt/ai/logs/arm-*.log`), so on the evidence the engine wrote down, the
+divergent start used the same chunk every neighbouring start used. The expert-slot line is a function of the
+config (`--batch: 4 slot sessions on CUDA0` in the production shape, one slot in the gate shape), not of the
+start, so it cannot separate the two either.
+
+What I cannot give you: the raw output of that T2 run is not on disk. The script lived in `/tmp` and its
+output went into my notes only, so I can restate the hashes (`aac0a04d109391fe` for the nine,
+`00281f843ecd3543` for the divergent first request) but not re-derive them from a log. The script is in git
+now and future runs append to `/opt/ai/runs`, so if it happens again there will be a file behind it.
+
+Two things from the same window that I think belong near the cold-start line, because both make "restart it
+until it matches" misleading:
+
+- 11 consecutive starts at 2026-10-23 05:17:56–05:20:54 printed `is a native (IQ) pack: it needs --native
+  SHARD1, --spec T (T >= 2) and --prefill CHUNK` and exited, 18 s apart. A config the pack refuses restarts
+  like a crash loop; someone counting restarts would call that instability.
+- `ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected` appears in 70 of those 71
+  starts and comes from the CPU vision helper. It reads like a dead card and means nothing on this box.
+
+Check (b) — pin `--prefill N` above the prompt and repeat the restarts — needs the restarts, so it goes into
+the next window I am allowed to take the box down for; folding it into the mode-8 revert/install cycles is the
+cheapest way to get it. Until then the fallback you propose is what our evidence supports, and I would add
+the honest half-sentence: we have not attributed the divergence, and the one mechanism we could check
+against the log did not move.
