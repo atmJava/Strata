@@ -37,13 +37,13 @@
 | **F2** | 单步 token 预算混批：所有 shipped profile 都是 `MAX_BATCHED_TOKENS=2048`；`request_token_budget = min(token_budget, input_budget - draft_slots)` | `scheduler.py:126-130, 624-627, 946`；`launcher.sh:6035` | **是** | `--prefill` 分块 + `STRATA_BATCH_DECODE_SHARE`，没有覆盖 decode+prefill 的统一预算 | W2 → W3 | T3 | **部分采纳**（L-049；W2 配置臂否决见 L-047；并发部分搁置） |
 | **F3** | 前缀缓存语义：refcount 共享 + CoW、命中块只读、最后一个 prompt token 重算取 logits、`num_cached_tokens` 计数 | `single_type_kv_cache_manager.py:300-322, 448-468`；`kv_cache_manager.py:275-285`；`tests/v1/core/prefix_cache/*` | **是** | 有 prompt cache / conversation cache；缺"缓存计数"的对外口径与测试 | 暴露统计 + 测试 | T4 | **采纳**（T4 通过：`cached_tokens` ≥50%，第二次读不慢于第一次，L-046/L-050） |
 | **F4** | 投机解码（MTP/DFlash2）与**接受率验证实践**：混批里 MTP 在 chunk 边界留 lookahead；验证器 KV 精确；接受率有测试 | `tests/v1/spec_decode/*`；`scheduler.py:583-602`；CHANGELOG v0.2.2 | **是（验证方法）** | 已有 `--spec 8 --mtp-max-t 4`，热接受率 ~99%（L-026） | 验证实践（不开关，只补测试） | T5 | **采纳**（T5 门槛：offer≥20 且接受率≥50%；实测窗口 69.3%、累计 70.5%、bench 78–82%） |
-| **F5** | SSD 前缀 KV 持久化 #243：`OffloadingConnector` + FS tier（`checkpoint-<sha256>`、每 block 一个 `.bin`、`PYTHONHASHSEED=0`），命中异步装入 `WAITING_FOR_REMOTE_KVS` | `launcher.sh:1748-1807`；`kv_offload/file_mapper.py:121-148`；`offloading/scheduler.py:1036-1209`；验证 1,568/1,929（重启）等 | **是（重启场景）** | 无；重启冷加载 ~165 s | 暂缓（P3，触发条件：重启频率或冷读占比升高） | T6 | 暂缓 |
-| **F6** | profile 定容与启动门：命名 `<decoder>-<kv>-<N>x<CTX>-<msg>`（N=`MAX_NUM_SEQS`，CTX=`floor(MAX_MODEL_LEN/1000)`）；launcher 启动后强制 `N×CTX ≤ GPU KV tokens`；health + smoke + 审计 | `profiles/README.md:21-24`；`launcher.sh:176-205, 5803-5809, 5337-5391` | **是** | 有参数（`--kv-resident`/会话槽/预留），**无预设、无启动门** | W4 预设 + 校验脚本 | T7 | 在办 |
-| **F7** | OpenAI（及 Anthropic）API 契约：chat/completions、流式、usage、错误码 | `tests/entrypoints/openai/`（70 文件） | **是** | Strata 已有 serve（自研 + 单测） | 抽样黑盒测试 | T1 | 在办 |
+| **F5** | SSD 前缀 KV 持久化 #243：`OffloadingConnector` + FS tier（`checkpoint-<sha256>`、每 block 一个 `.bin`、`PYTHONHASHSEED=0`），命中异步装入 `WAITING_FOR_REMOTE_KVS` | `launcher.sh:1748-1807`；`kv_offload/file_mapper.py:121-148`；`offloading/scheduler.py:1036-1209`；验证 1,568/1,929（重启）等 | **是（重启场景）** | 无；重启冷加载 ~165 s | 暂缓（P3，触发条件：重启频率或冷读占比升高） | T6 | **搁置**（触发条件未出现；T6 未建，见 R7） |
+| **F6** | profile 定容与启动门：命名 `<decoder>-<kv>-<N>x<CTX>-<msg>`（N=`MAX_NUM_SEQS`，CTX=`floor(MAX_MODEL_LEN/1000)`）；launcher 启动后强制 `N×CTX ≤ GPU KV tokens`；health + smoke + 审计 | `profiles/README.md:21-24`；`launcher.sh:176-205, 5803-5809, 5337-5391` | **是** | 有参数（`--kv-resident`/会话槽/预留），**无预设、无启动门** | W4 预设 + 校验脚本 | T7 | **部分采纳**（预设命名 `strata-022.mp-4x256.json` + `check_preset.py` 静态/运行中对账 + T7 负例 6/6；fork 的 `N×CTX ≤ KV tokens` 在 KV 流式下不适用，已写进工具输出） |
+| **F7** | OpenAI（及 Anthropic）API 契约：chat/completions、流式、usage、错误码 | `tests/entrypoints/openai/`（70 文件） | **是** | Strata 已有 serve（自研 + 单测） | 抽样黑盒测试 | T1 | **采纳**（T1 6/6：health、models、usage、流式、400、401） |
 | **F8** | TP/PP 混合拓扑 | launcher TP/PP 支持 | **部分**：层切分已有；TP 已存档（L-033，单流 +3% 噪声内） | 不移植 TP；PP 不存在于 Strata | — | — | 否决（TP） |
 | **F9** | FP8/NVFP4 权重路线 | README 的模型表 | **否**：权重栈完全不同（Strata 是 IQ pack，`--native`） | — | — | — | 否决 |
 | **F10** | vLLM 内核（Marlin/FlashInfer/TurboQuant/FlashQLA） | csrc/、vllm/attention | **否**：引擎不同，不可移植 | — | — | — | 否决 |
-| **F11** | KV 压力下的抢占与优先级（`fcfs`/`priority`，preempt 后回队首、重算） | `request_queue.py:75-158`；`scheduler.py:883-933` | **暂缓**：Strata 满槽排队在服务端（W3 先解决准入），多路下是否需要优先级未测 | — | W3 之后再评 | — | 搁置 |
+| **F11** | KV 压力下的抢占与优先级（`fcfs`/`priority`，preempt 后回队首、重算） | `request_queue.py:75-158`；`scheduler.py:883-933` | **暂缓**：Strata 满槽排队在服务端（W3 先解决准入），多路下是否需要优先级未测 | — | W3 之后再评 | — | **搁置**（W3 已交付 TTFT；满槽时是否需要优先级/抢占仍无需求证据；有需求再评） |
 
 **判据**（与 `MULTIPATH_STANDARD.md` 一致）：F1/F2 看 T3；F3 看 T4；F4 看 T5；F6 看 T7；
 F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
@@ -117,6 +117,27 @@ F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
 - 不移植 F8 TP（L-033 已存档）、F9 权重路线、F10 vLLM 内核。
 - 不为了"功能齐全"做引擎级重写；每个代码改动默认关、独立 build、可回退。
 - 不把 vLLM 的调度器数据结构照搬；只落"步契约"与验收测试（§3）。
+
+## 8. 判决总表（2026-10-24 收口）
+
+| 项 | 判决 | 证据 | 交付形态 |
+|---|---|---|---|
+| F1 步契约（decode 优先 + 残余预算 + 晚 prefill） | **部分采纳** | L-049：长读 TTFT 47.3→17.2 s、短读首 token 46.2→1.7 s；第二 token 仍等槽 31–34 s | W3 暂存读补丁（默认关，`STRATA_BATCH_STAGED_READ` + `STRATA_MP_STAGED_READ`）+ 服务端补丁 + T3 |
+| F2 单步 token 预算混批 | **部分采纳** | 同 F1；W2 配置臂否决（L-047） | 同上（W3 是当前最小近似） |
+| F3 前缀缓存语义 | **采纳** | T4：`cached_tokens` ≥50%，第二次读不慢（L-046/L-050） | 现有 prompt/conversation cache + T4 |
+| F4 投机接受率验证实践 | **采纳** | T5：窗口 69.3%、累计 70.5%；bench 78–82%（L-050） | T5 门槛（offer≥20、≥50%） |
+| F5 SSD 前缀 KV 持久化 | **搁置** | 触发条件（重启频率/冷读占比）未出现；T6 未建（L-051） | 无（P3，条件触发再评） |
+| F6 定容/预设/启动门 | **部分采纳** | `check_preset.py` 对生产 OK；T7 负例 6/6（L-051/L-052）；fork 的 `N×CTX ≤ KV tokens` 在 KV 流式下不适用 | 预设名 `strata-022.mp-4x256.json` + `check_preset.py` + T7 |
+| F7 OpenAI API 契约 | **采纳** | T1 6/6（health、models、usage、流式、400、401） | `tools/server/tests/test_mp_api.py` |
+| F8 TP | **否决** | L-033：TP +3% 在噪声内；生产 2 卡层切分已够 | — |
+| F9 FP8/NVFP4 权重 | **否决** | 权重栈不同（IQ pack / `--native`），不可移植 | — |
+| F10 vLLM 内核 | **否决** | 引擎不同（CUDA/HIP/Metal 自研），不可移植 | — |
+| F11 抢占与优先级 | **搁置** | W3 已交付 TTFT；满槽优先级/抢占无需求证据（L-051） | 无（有需求再评） |
+
+**"完整可用"的自检**：每项有判决（上表 11/11）；采纳项都有可运行测试（T1/T3/T4/T5/T7）；
+代码项默认关、可回退（W3 补丁 + 服务端补丁 + `check_preset.py`）；所有数字来自生产机 A-B-A（L-046…L-052）。
+**未做**（明确记录）：T6（F5 搁置）；N×CTX 矩阵扫描（F6 只做静态/运行中对账 + 负例）；
+W3 的 3 流形状与聚合吞吐（B 的 bench 未跑）。
 
 ## 8. 版本行
 

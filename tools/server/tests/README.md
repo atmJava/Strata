@@ -33,6 +33,7 @@ test), `MP_MODEL` (default `qwen3.8-flash-next-iq3_xxs`).
 | `test_mp_admission.py` (T3) | **xfail** | waits until /metrics reports 4 busy slots, then first AND second token ≤2 s; the xfail message carries the numbers (L-048) |
 | `test_mp_prefix.py` (T4) | **pass** | prompt cache is on in production; `cached_tokens` is reported |
 | `test_mp_spec.py` (T5) | **pass** | offer≥20 and acceptance≥50% from `/metrics` totals; the window may include other traffic |
+| `test_mp_preset.py` (T7) | **pass** | negative cases for `check_preset.py`; no server needed |
 
 When W3 lands, T3's `pytest.xfail` turns into an assertion (delete the xfail branch); an xfail that stays after the
 feature ships is a failed acceptance, not a pass.
@@ -54,3 +55,4 @@ path in the round's `MULTIPATH_LOG` entry.
 | `test_mp_admission.py` | T3: 4 streams + cold reader; 4-busy-slot gate, first + second token ≤2 s, neighbour stall ≤1 s |
 | `test_mp_prefix.py` | T4: second read hits the prefix cache |
 | `test_mp_spec.py` | T5: draft acceptance floor (spec must be on) |
+| `test_mp_preset.py` | T7: `check_preset.py` refuses wrong presets (unit, no server) |

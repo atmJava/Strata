@@ -6,6 +6,40 @@
 
 ---
 
+## R8 · 2026-10-25 · 预设负例（T7 6/6）+ 清单收口
+
+- **改了什么**：新增 `tools/server/tests/test_mp_preset.py`（T7 负例：`--batch` 不等于 `parallel`、
+  `--batch-groups` 不整除、`--max-context` 超上限、缓存/预留低于下限、`--kv-resident` 低于引擎下限），
+  6/6 通过；`check_preset.py` 对生产配置 **OK**。
+- **数字**：T7 负例 6/6；`check_preset.py` 退出码 0（4x256、groups 2x2、KV 流式、引擎 0.1.47 形状一致）。
+- **清单收口**：F1/F2 **部分采纳**、F3/F4/F7 **采纳**、F6 **部分采纳**、F5/F11 **搁置**、F8/F9/F10 **否决**——
+  **每项都有判决**（见 FEATURE_PARITY 末尾“判决总表”）。
+- **四问**：① cron/timer —— 正常；② 残留进程 —— 无；③ vram-perf —— 未读；④ 方向 —— 收口，跑最终回归。
+- **预算**：重启 0、构建 0。未超支。
+- **没测什么**：T6（SSD KV，F5 搁置，未建）；N×CTX 矩阵扫描（F6 只做静态/运行中对账 + 负例）。
+- **下一轮第一件事**：无（本轮为收口轮）：跑最终回归（T1–T5、T7），确认生产健康，然后交最终报告。
+
+---
+
+## R7 · 2026-10-25 · 预设校验（F6/T7）+ 清单判决（F5/F7/F11）
+
+- **改了什么**：新增 `tools/server/check_preset.py`（F6/T7）：检查 `parallel==--batch`、`--batch-groups` 整除、
+  `--max-context`/`--kv-resident`/`--conversation-cache-mib`/`--vram-reserve-mib` 下限，并在 `/metrics` 可达时
+  与**运行中的引擎**对账（batch_slots/max_context/kv_resident）；打印预设名 `strata-022.mp-<N>x<CTX>.json`。
+  对生产配置跑了一遍：**OK**（4x256、groups 2x2、KV 32768 cells 流式、引擎 0.1.47 形状一致）。
+- **清单判决**：F6 **部分采纳**（预设命名 + 校验工具；fork 的 `N×CTX ≤ KV tokens` 在 Strata 的 KV 流式下
+  **不适用**，工具会明确打印这一点）；F7 **采纳**（T1 6/6）；F11 **搁置**（W3 已交付 TTFT，抢占/优先级仍无需求证据）；
+  F5 **搁置**（触发条件未出现，T6 未建）。
+- **数字**：`check_preset.py` 退出码 0；打印 `4 x 256000 = 1024000 tokens`、`KV streams beyond 32768 cells`、
+  `engine 0.1.47 matches`。0 重启。
+- **四问**：① cron/timer —— 正常；② 残留进程 —— 无；③ vram-perf —— 未读；④ 方向 —— 清单只剩 F5 的 T6 与
+  F8–F10（已否决）待收口，下一轮做 W4 的 4x256 预设落地与文档收口。
+- **预算**：重启 0、构建 0。未超支。
+- **没测什么**：`check_preset.py` 对**错误配置**的拒绝（只跑了正确配置——下一轮补一个负例测试）；预设矩阵（N×CTX 扫描）。
+- **下一轮第一件事**：R8 = 预设负例测试（故意错的配置必须被拒）+ `strata-022.mp-4x256.json` 入仓 + 文档收口。
+
+---
+
 ## R6 · 2026-10-25 · T5 接受率验收 + T1/T2/T4 复跑（A 上，只读流量）
 
 - **改了什么**：新增 `tools/server/tests/test_mp_spec.py`（T5：3 条 200-token 请求，从 `/metrics`
