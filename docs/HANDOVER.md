@@ -146,6 +146,10 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
     （右对齐贴时间戳），别按行号硬编。
 15. **别只靠 mtime 钉"线上源码是哪一份"**：`cp -p` 会保留 mtime。要钉死就用**反向打补丁再比哈希**——
     `patch -R` 之后与上游 blob 逐字节相同才算数（L-013 就是这么定的）。
+16. **子代理也是这台机器上的第二路流**（本轮踩到）。本会话的 token 来自这台机器，派出去的子代理打的
+    也是同一台。"发起后台任务后立刻 `job_output wait`、等待期间我不生成"这条**只保护主会话**：
+    子代理活着的时候它就是那一路并发，单流腰斩照旧（L-014 那次 bench 单流中位 37.4 tok/s，
+    比 L-011 的 73.5 低一半，原因就是当时有个子代理在跑）。**规矩：有子代理在跑，别在这台机器上测速度。**
 
 ## 8. 工装（都在 `/opt/ai/bin`，源码版本在 `tools/server/`，改完要 scp 上去）
 
@@ -217,11 +221,20 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
    冷读时长与邻居流；**不要只看单流 tok/s**。
 2. **#3724 到底适用不适用**：读码 + 一次 profile 就能判掉，**不用重编译**（`--resident-experts` 走
    Strata 自己的 `iq_kernels.cu`，专家矩阵很可能不经过 ggml 的 MMQ；dense 层要过——这条是**静态阅读，未测**）。
-3. **`/opt/ai/bin` 剩余判据脚本继续搬进 git**（本轮搬了 `passive_windows.py`、`concurrent_reads.py`；
-   172 个文件里仍有一批只在服务器上、没有版本）。
-4. **被动窗口继续长样本**：mode 8 生产窗口现在 105 个请求 / 82,847 draft，等它到几百请求再回看同一张表
+3. **`/opt/ai/bin` 剩余脚本继续搬进 git**：本轮搬了 `passive_windows.py`、`concurrent_reads.py`，外加 9 个
+   判据脚本（`nvlink-crc-sample.sh`、`t2check.py`、`thinking-budget-ab.sh`、`soak-analyze.py`、`warm-measure.py`、
+   `read-gap.py`、`metrics-peek.py`、`verify-running-config.sh`、`check-session-warnings.sh`）。
+   **两个坑还留着**：(a) `verify-running-config.sh` 与 `check-session-warnings.sh` 在服务器上是 **root 所有**
+   （2026-10-15/16 用 sudo 建的），git 里是**修好的版本**（原来硬编 `/opt/ai/src/strata-0.1.40.1`，验的是退役
+   部署），服务器上那份**要 sudo 才能换**——用 root 先问用户。(b) `restart-strata.sh`、`swap-engine.sh` 里
+   各有一句明文 sudo 密码，**在密码那条定下来之前别搬进公开仓库**。
+4. **`verify-running-config.sh` 现在是"线上到底跑的是哪份配置"的标准答案**：它比 cmdline/env/进程时间三样。
+   本轮跑出来的事实是——引擎 cmdline **59 个 arg**、配置里 **54 个**，多的三个是服务端注入的
+   `--serve`、自动算的 `--layer-split 24`、以及从 `parallel: 4` 推出来的 `--batch 4`；ENV 一致、进程比配置新
+   → **线上跑的就是磁盘上这份**。以前那份脚本只认前两个注入项，会把正确状态报成 DIFFERENT。
+5. **被动窗口继续长样本**：mode 8 生产窗口现在 105 个请求 / 82,847 draft，等它到几百请求再回看同一张表
    （尤其截断率与 suffix draft 接受率那两列）。
-5. **medium 思考预算**：L-010 说它在推理形态只省 7%，还没做"设成默认"的 A-B-A（免重启，随时能做）。
+6. **medium 思考预算**：L-010 说它在推理形态只省 7%，还没做"设成默认"的 A-B-A（免重启，随时能做）。
 
 ## 12. 目标状态
 

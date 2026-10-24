@@ -9,6 +9,8 @@
   - temperature=0 消除采样随机性
   - 4 路用不同主题，让它们路由到不同专家（贴近真实多子代理场景）
   - 记录引擎自报的 pool_workers / batch_slots，验证配置确实生效
+  - 记投机 draft 接受率：取 /metrics 累计计数在测量段前后的差（引擎每请求都写 drafts accepted，
+    服务端存累计值；以前两样都没人读，L-011 那一列因此是空的），并写明窗口里有多少请求是别人的
 
 用法：bench-strata.py <label>
 """
@@ -80,6 +82,52 @@ def engine_info() -> dict:
 WARMUP_PROMPT = "用一句话说明什么是 DNS 解析。"
 
 
+def metrics_totals() -> dict:
+    """读服务端的累计计数。计数在引擎启动时归零，所以两次读数的差就是中间发生的事——
+    前提是 `since` 没动（中间重启过，差值就没有意义）。
+
+    这就是基准终于能报投机 draft 接受率的办法：引擎每请求都写 `drafts accepted A of B`，
+    服务端也存着累计值，但基准以前两样都不读，所以 L-011 那一列是空的。"""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(METRICS, headers=AUTH), timeout=8) as response:
+            data = json.loads(response.read().decode())
+        totals = data.get("totals", {})
+        return {
+            "since": totals.get("since"),
+            "requests": totals.get("requests"),
+            "drafts_offered": totals.get("drafts_offered"),
+            "drafts_accepted": totals.get("drafts_accepted"),
+            "eng_tokens": totals.get("eng_tokens"),
+            "prompt_tokens": totals.get("prompt_tokens"),
+            "reused_tokens": totals.get("reused_tokens"),
+        }
+    except Exception as error:                       # noqa: BLE001
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
+def acceptance_between(t0: dict, t1: dict, expected_requests: int) -> dict:
+    """两次 /metrics 累计值之差，并把"这台机器上还有别人在跑"这件事写清楚。
+
+    期望请求数 = 每轮 1 个单流 + 4 个并发 = 5×轮数。差值里的请求数若比这个大，
+    多出来的就是别人的流量（很可能是驱动这次实验的那个 agent 会话自己），
+    接受率就被污染了——所以这里明写 foreign_requests，而不是假装整段都是我们的。"""
+    if "error" in t0 or "error" in t1:
+        return {"error": t0.get("error") or t1.get("error")}
+    if t0.get("since") != t1.get("since"):
+        return {"error": "引擎中途重启过（since 变了），差值无意义"}
+    offered = (t1["drafts_offered"] or 0) - (t0["drafts_offered"] or 0)
+    accepted = (t1["drafts_accepted"] or 0) - (t0["drafts_accepted"] or 0)
+    requests = (t1["requests"] or 0) - (t0["requests"] or 0)
+    return {
+        "drafts_offered": offered,
+        "drafts_accepted": accepted,
+        "acceptance_pct": round(100.0 * accepted / offered, 2) if offered else None,
+        "requests_in_window": requests,
+        "requests_from_this_bench": expected_requests,
+        "foreign_requests": max(0, requests - expected_requests),
+    }
+
+
 def main(argv: list[str]) -> int:
     label = argv[0] if argv else "unlabeled"
     reps = int(argv[1]) if len(argv) > 1 else 3
@@ -95,6 +143,7 @@ def main(argv: list[str]) -> int:
     print("  [warmup] 预热 …", flush=True)
     w = call(WARMUP_PROMPT)
     print(f"        预热完成 {w['tokens']} tokens / {w['wall_s']:.1f}s")
+    t0 = metrics_totals()                             # 从这里开始算累计差
 
     singles: list[float] = []
     aggregates: list[float] = []
@@ -138,6 +187,18 @@ def main(argv: list[str]) -> int:
     print(f"  中位数：单请求 {result['single_tok_s_median']} tok/s | "
           f"4 并发聚合 {result['concurrent_agg_tok_s_median']} tok/s | "
           f"墙钟 {result['concurrent_wall_s_median']}s | 最慢单个 {result['concurrent_slowest_s_median']}s")
+
+    t1 = metrics_totals()
+    acc = acceptance_between(t0, t1, 5 * reps)
+    result["draft_acceptance"] = acc
+    if "error" in acc:
+        print(f"  投机 draft 接受率：读不到（{acc['error']}）")
+    else:
+        print(f"  投机 draft 接受率 {acc['acceptance_pct']}%（{acc['drafts_accepted']}/{acc['drafts_offered']}）"
+              f"  窗口内请求 {acc['requests_in_window']}，其中本基准 {acc['requests_from_this_bench']}、"
+              f"别人 {acc['foreign_requests']}")
+        if acc["foreign_requests"]:
+            print("        注：窗口里有别人的流量，接受率不是纯本基准的")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     with OUT.open("a", encoding="utf-8") as handle:
