@@ -156,6 +156,13 @@ MMQ 指针表（L-031）、TP 补丁（L-033）、`QFUSE`（L-043）、`EXPDEC`�
 正好是 NVLink 管的那一段。**这就是"为什么要有 NVLink"**：不是搬权重，是让本来闲着的那块卡在 prefill
 期间变成第二份 host 带宽 + 第二份算力，交换走 NVLink 而不是主机内存往返。
 
+**还有一处更关键的（源码，2026-10-24 核过）：helper 自己把 P2P 关掉了。**
+`set_stage_helper` 里写死 `pp->p2p = false;  // the mapped host route, whether or not the cards could reach each other
+(measured there)` —— 也就是说**它即使跑起来，跨卡那段也走主机内存（11.0 GB/s），不用 NVLink（实测 46.8）**。
+而通用的 peer 路径（`--peer-device`）是 `pp->p2p = peer->p2p();`（`prefill.cpp:2056`），**管道现成**：
+一行开关就能让 helper 走 P2P，然后在这台机器上重测。这才是"为这台硬件改代码"的第一个具体项，
+而不是调 `split_help_frac`。
+
 **它现在为什么关着**，两个原因都跟我们这台的硬件相反：
 - `split_help_frac(T)`（`prefill.cpp` 约 1900 行）：表是在 **2× RTX 3090、PCIe 4.0、无 P2P** 上测的，
   规则写成 "T 大于 ~3.3k 就不帮"；我们的提示词是 **4,535 新增 token → share = 0**。
@@ -174,5 +181,11 @@ TP（每层 all-reduce、最吃互联的设计）在这台机器上只值 +3%（
 2026-10-24 10:07Z 那次 P0d（4,535 token，`HELP=1` + `FRAC=0.4`）两臂 TTFT 是 5.45 / 6.59 s，但引擎日志里
 **0 条 `peer GPU` / `peer-streamed experts`** —— helper 根本没接上（被 `single_chunk` 和 `--prefill-pipe` 的分块挡住），
 而同一臂内部 `host staging` 在 130↔286 ms 之间跳。**那一次两种结论都不成立，不准引用。**
-第二次只在 helper 设计上的区间测（300 / 1,500 token，单 chunk，只加 `STRATA_PREFILL_HELP=1`），
-判据第一条是"日志里出现 `peer GPU …` 且 `peer-streamed experts > 0`"，否则记"未触发"而不是"没用"。
+第二次（10:13Z）也**作废**：我在上一个安装器还在 restore 时就起了它（两个安装器重叠，违反"一次只跑一个"），
+它的 A 臂热身正好撞上重启；而且事后从源码看清了 —— 它本来也不可能接上。
+**helper 的运行条件一共四道**（`bind_stage_helper`）：`split_help_frac(T) > 0`、`T ≥ stream_all_min()`（默认 1024）、
+`m.src && m.ring > STAGE && !fused_ring()`、以及**逐层** `mmq_plan().layer[l]` 为真且
+`!fused::native_supported(gu_type, d_type)` —— 最后这条针对的正是 IQ3_XXS 这类"有原生融合内核"的层，
+而 helper 的注释写明 "the peer computes on MMQ only"。
+所以下一步不是再跑一次 A/B，而是**加一个诊断**（`STRATA_PREFILL_HELP_DEBUG=1`，在每道门打印一行"被哪条拒了"），
+在 `build-imma` 里编、单次启动跑，先拿到"为什么没接上"的确定答案。
