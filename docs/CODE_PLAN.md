@@ -344,3 +344,21 @@ TP 在这台机器上只值 +3%（L-033）说明它不是"算力协作"的钥匙
 `STRATA_IO_PF_STAGE`、`STRATA_FILL_AHEAD`、`STRATA_IQ_PREFETCH`、`STRATA_HANDOFF_PIPE`。
 **下一轮**：把这 7 个中与 decode 驻留路径相关的几个接进 `runtime_flag`（1 次构建 + 1 次安装），
 然后**同 boot 交替**逐个 A/B（0 重启/个），判据：decode tok/s 配对中位 **+5%** 且 staging 值下降；否则不采纳。
+
+
+---
+
+## 16. 下一轮卡片（S4，交接给下一轮的第一件事）
+
+**已知**：decode 每窗口 11–14 ms，其中 `等 GPU` 占 65–73%，`host staging` 占 stage 0 的 8–14%（1.16–1.97 ms）；
+stage 1 的 staging ≈ 0。**"routing-aware prefetch" 已经开着**（`strata generate: routing-aware prefetch on (the next
+layer's router, file tier)`）—— 但它服务的是**文件层**，而暴露出来的 staging 是 **RAM 层**的 blob→VRAM 拷贝。
+
+**所以 S4 只有两种写法，先做 (a)**：
+- **(a) 把 lookahead 扩到 RAM 层**（或给 `ram_stage` 路径加"提前一层"）：逐位安全（只是把拷贝提前），默认关，
+  flag 可 A/B。判据：`STRATA_SPLIT_TIMING` 的 `host staging` 从 1.2–2.0 ms/窗口降到 <0.5 ms，且 decode 配对 **+5%**。
+- **(b)** 若 (a) 的窗口里 staging 已经被算进"等 GPU"（即重叠本来就有、1.97 ms 只是残余），那就改攻"等 GPU"本身：
+  先量每层 ring 等待的分布（24 层 × 0.39 ms），再看能不能把两层的提交合并成一个 ring。
+
+**做法约束**：只动 `build-imma`，二进制走 `/opt/ai/engines/help/build/` + `mv` 部署；实验配置每次实验后
+`restore-prod.sh` 并验 md5；每晚 ≤2 次重启，超了就改成同 boot flag 交替。
