@@ -381,7 +381,7 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 功能清单与验收见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md)，口径见 [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)，
 执行规则与每轮复盘见 [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) / [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)。
 目标 `goal-402218d9-57d7-4af1-aea0-391a1494acd9`（active，上限 1000 轮）。
-**当前轮：R1 完成（W1 基线，L-046：冷读准入 27.2 s / 邻居停顿 0.68 s）；下一轮 R2 = W2 读分片配置臂（≤2 重启）。**
+**当前轮：R2 完成（W2 读分片臂否决，L-047；已恢复 A 并逐字节一致）；下一轮 R3 = W3 构建（独立 `build-mp/`，默认关补丁 + 逐位/质量门）。**
 
 **（2026-10-24 夜更新）helper 这条线已经判完并关闭**：`--prefill-pipe 1` 时真实请求不进 `bind_stage_helper`
 （`planned_C < n` → `single_chunk=false`），`--prefill-pipe 0` 时才进；而启动时 `split_help_env()` 让 **flag 文件优先于
