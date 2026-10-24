@@ -7,6 +7,7 @@
 |---|---|---|---|
 | [`RULES.md`](RULES.md) | **工作章程**（怎么干活，先读） | 决策权、每轮五步、写代码/证据/记录/停机规则 | 接手第一件事 |
 | [`HANDOVER.md`](HANDOVER.md) | **现行入口**（每轮更新） | 决策表、生产现状、坑、未决与下一轮 | 每次接手的第一份 |
+| [`CODE_PLAN.md`](CODE_PLAN.md) | **代码计划**（写什么、怎么证明、怎么回滚） | P1 IMMA 解码内核 / P2 head 分卡 / P3 结构级 + 不做清单 + 测量协议 | 要动代码之前 |
 | [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) | **现行台账**（L-000…L-034） | 每条结论 + 原始日志路径 + 判决（采纳/否决/结论/参考） | 要数字、要判据、要"这条试过没有" |
 | [`../tools/server/README.md`](../tools/server/README.md) | **现行工装手册** | 每个脚本干什么、怎么部署、实验脚本的固定形状、构建 | 跑任何测量之前 |
 | [`SERVER_ADAPT_REQUIREMENTS.md`](SERVER_ADAPT_REQUIREMENTS.md) | 草案（2026-10-24） | 适配需求清单，§10 有 8 项待裁决 | 想知道"用户当初要什么" |
