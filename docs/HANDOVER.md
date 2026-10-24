@@ -81,9 +81,11 @@
 E5-2680 v4（14c/28t，**只有 AVX2**）、62 GiB 内存、**2× RTX 2080 Ti 22528 MiB / sm_75**、
 NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0。
 **NVLink 实测**（2026-10-24）：`topo -m` = NV2，`nvlink -s` = 每卡 2 条 × 25.781 GB/s（单向 ~51.6 GB/s，
-本地 HBM 的 8.4%），`cudaDeviceCanAccessPeer` 双向 = 1。生产里跨卡流量只有 stage 交接 ~410 KB/窗口
-（走 mapped 主机内存），而 31% 的专家缓存走的是 **PCIe 主机内存**（`--pcie-frac 0.31`）——**NVLink 不是本机瓶颈**，
-理由与"什么时候才值得动用它"见 [`CODE_PLAN.md`](CODE_PLAN.md) §8。
+本地 HBM 的 8.4%），`cudaDeviceCanAccessPeer` 双向 = 1；PCIe 是 3.0 x16（~12 GB/s）。
+它在 decode 里没有位置（跨卡只有 stage 交接 ~410 KB/窗口，改 P2P 也只省 0.18%），**在 prefill 里有**：
+`set_stage_helper` 让空闲的下一段 GPU 分担一部分专家的"流 + 算"，收益来自第二条 PCIe 链路、代价是跨卡交换——
+而 `split_help_frac` 的默认值（T>3.3k 不帮、且只在单 chunk）是在 **无 P2P 的 3090 对**上定的，我们的 4.5k
+提示词正好落在关掉的一侧。测量与代码项见 [`CODE_PLAN.md`](CODE_PLAN.md) §8 / P0d。
 服务：`strata.service` → `/opt/ai/src/strata-0.2.2/run-022.sh` → **自建引擎 0.1.47**（上游现在 0.1.48）。
 引擎日志 `/opt/ai/src/strata-0.2.2/strata-022.log`（**logrotate 每天 00:00 转成 `.log.1`**）；
 服务日志 `/opt/ai/logs/strata-service.log`。GPU0 稳态负载下 ~70–78 ℃、空载 ~62 ℃（**负载驱动，正常**）。
@@ -371,7 +373,11 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 
 ## 13. 未决 / 待观察
 
-> **下一轮先做**：**P0** —— 三点剖析 + 字节账（**先证明病因，再决定写不写内核**）。
+> **下一轮先做**：**P0d**（一行 env、1 次重启）再 **P0** —— 前者是 prefill 的 peer helper（NVLink 唯一有量级
+> 的位置：`STRATA_PREFILL_HELP_FRAC=0.4`，测 4.5k 新增 token 的 TTFT，−5% 以上才继续），后者是三点剖析 + 字节账
+> （**先证明病因，再决定写不写内核**）。
+> 上一轮我在 NVLink 上判错过一次：只看"两卡各剩 0.8–1.0 GB 空闲"就说它不是杠杆，漏了 helper 用的是**空闲那张卡
+> 在 prefill 期间的档期**（不是空闲显存）。更正写在 [`CODE_PLAN.md`](CODE_PLAN.md) §8。
 > 为什么不是 IMMA：v1 计划（`6e6d7017`）的"算力受限"被复核否掉了 —— 满带宽只要 4.9 T MAC/s，`dp4a` 可供 27 T
 > （余量 5.5×）；而且 512 专家 top-10 在 4 并发下每组只有 1 行，`m16n8k32` 的 16 行里 15 行是空的。
 > 详见 [`CODE_PLAN.md`](CODE_PLAN.md) §1 的六条复核（F1–F6）。

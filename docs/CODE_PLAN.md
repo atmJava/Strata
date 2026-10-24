@@ -66,6 +66,12 @@
 **PCIe/主机内存**（`--pcie-frac 0.31` 的那部分、stage 交接的 mapped 缓冲）。见 §8：这是为了把
 "NVLink 用没用上"从印象变成数字，一条 trace 的量，不额外重启。
 
+**P0d · prefill 的 peer helper（1 次重启；NVLink 唯一有量级的位置，见 §8）**
+`STRATA_PREFILL_HELP_FRAC=0.4`，测 4.5k 新增 token 的 TTFT（`exp-env-ab.sh MEASURE=ttft`，两档各 ≥3 轮）。
+判据：TTFT 中位 **−5% 以上**才继续；赢了就排代码项（`split_help_frac` 认 P2P + 允许分块提示词启用 helper），
+输了就记"NVLink 在 decode 与 prefill 都验证过不划算"，整条线关闭。
+**先做它**：最便宜，而且这是上一轮我判断错了的地方。
+
 ---
 
 ## 3. P1（重写）· 只在 P0 指到具体病因后才动
@@ -124,31 +130,45 @@ MMQ 指针表（L-031）、TP 补丁（L-033）、`QFUSE`（L-043）、`EXPDEC`�
 
 ---
 
-## 8. 硬件取向：NVLink 在这台机器上为什么不是杠杆（但确实在用）
+## 8. 硬件取向：NVLink 在这个项目里是干什么用的（对我上一版的更正）
 
-**硬件事实**（2026-10-24 现场查的，不是猜）：`nvidia-smi topo -m` = **NV2**（NVLink 桥在），
-`nvidia-smi nvlink -s` = 每卡 2 条 × **25.781 GB/s**，`cudaDeviceCanAccessPeer` 双向 = 1。
-即单向 ~51.6 GB/s、双向 ~103 GB/s，是本地 HBM（616 GB/s）的 **8.4%**。显存 2×22 GB。
+**硬件事实**（2026-10-24 现场查的，不是猜）：`topo -m` = **NV2**（桥在），`nvlink -s` = 每卡 2 条 ×
+**25.781 GB/s**（单向 ~51.6 GB/s，是本地 HBM 616 GB/s 的 8.4%），`cudaDeviceCanAccessPeer` 双向 = 1，
+显存 2×22 GB，**PCIe 3.0 x16（~12 GB/s）**。
 
-**结论：这一版生产形状里没有值得为 NVLink 写的代码。** 三条理由，都是可核的：
+上一版我写"NVLink 不是杠杆"，理由里有一条是错的：我把"两卡各只剩 0.8–1.0 GB 空闲"当成了"没有可用显存"。
+**分层存储不是靠空闲，是靠把哪一层放在哪儿** —— 而这个项目的第二个 GPU 有三份用途：多一份 VRAM、
+**多一条 PCIe 链路**、和对卡之间 ~4× 于主机内存的交换带宽。三份用途里，NVLink 撑的是第三份。
 
-1. **decode 里跨卡的东西只有 stage 交接**，而它是 **mapped pinned 主机内存**
-   （`generate.cpp:8977`："The hand-offs are mapped pinned memory"）：
-   `handoff_floats = hc·n_embd + n_embd + hc = 12,804` 浮点/行，`kVerifyMaxT = 8` → ~410 KB/窗口。
-   走 PCIe 读约 34 µs，走 NVLink 约 8 µs —— 差 **26 µs / 14,180 µs = 0.18%**，进不了判定线。
-2. **真正贵的跨界流量在 PCIe 上，不在两张卡之间**：`--pcie-frac 0.31` 是"31% 的专家缓存从主机内存来"
-   （~12 GB/s）。NVLink 连的是卡和卡，**不连主机内存**，救不了这条。所以历次真正有效的都是"少读字节"
-   （residency、`HC_Q8`），不是"换更快的链路"。
-3. **最吃 NVLink 的那个设计已经试过了**：TP 补丁（本地存档 `patches/local-strata/tp-0.2.0-beta.patch`，
-   里面确实 `cudaDeviceEnablePeerAccess` 双向打开）实测 **单流 +3%、4 并发更差**（L-033）。
-   一个每层都要 all-reduce 的设计在 NVLink 上只值 3%，说明这里的瓶颈是同步/延迟和显存，不是互联带宽。
-4. **想扩也扩不了**：把对卡当专家二级缓存（`--peer-device`，走 P2P）**与 `--layer_split` 互斥**
-   （`generate.cpp:3371`），而且两张卡各只剩 0.8–1.0 GB，装不下几十个专家（每专家 1.32 MB 原码 / 4.9 MB 预展开）。
+**它对错的三个位置：**
 
-**它现在用在哪儿（别当成没启用）**：prefill 的"超容量溢出"会从对卡 arena 读专家行
-（`prefill.cpp:4737` 的 `pp->peer->slot_ptr`）；上游注释同时说明 **P2P 的 prompt 路径没有端到端验证过**
-（`prefill.cpp:2213` 的 warning）。P0c 就是为了确认这条在本机到底跑了多少字节。
+| 位置 | 现状 | 结论 |
+|---|---|---|
+| decode 的 stage 交接 | mapped 主机内存（`generate.cpp:8977`），`handoff_floats = 12,804` × 8 行 ≈ **410 KB/窗口** | 改 P2P 也只省 26 µs = **0.18%** → 不值得写代码 |
+| `--peer-device`（对卡当专家二级缓存） | **与 `--layer_split` 互斥**（`generate.cpp:3371`） | 我们是 layer split → 用不上 |
+| **prefill 的 stage helper** | **对我们的提示词尺寸默认是关的** | **这才是 NVLink 在本项目的设计用途，而我们把它关了** |
 
-**条件触发的候选（不排期）**：只有"两张卡各腾出 ≥10 GB 显存 → 专家放对卡、走 NVLink 读"这一条能让
-NVLink 变成杠杆；而腾显存（KV int4 / 减 resident KV）本身是个比它更大的改动。触发条件写在这里，
-不写进路线图。
+**第三行就是答案。** `set_stage_helper`（`generate.cpp:8898`）在单 chunk 提示词时让**空闲的下一段 GPU**
+"边流边算"这一段的一部分专家 —— `prefill.cpp:2626` 的注释写得很直白：
+"the next stage's GPU idles while this one reads; it streams and computes a share of this stage's experts then"。
+它的收益来源是**第二条 PCIe 链路**（两块卡各有一条，prefill 时一块在空转），代价是**激活与结果要跨卡** ——
+正好是 NVLink 管的那一段。**这就是"为什么要有 NVLink"**：不是搬权重，是让本来闲着的那块卡在 prefill
+期间变成第二份 host 带宽 + 第二份算力，交换走 NVLink 而不是主机内存往返。
+
+**它现在为什么关着**，两个原因都跟我们这台的硬件相反：
+- `split_help_frac(T)`（`prefill.cpp` 约 1900 行）：表是在 **2× RTX 3090、PCIe 4.0、无 P2P** 上测的，
+  规则写成 "T 大于 ~3.3k 就不帮"；我们的提示词是 **4,535 新增 token → share = 0**。
+- helper 只在 `single_chunk` 时启用；`--prefill-pipe 1` 会把 4.5k 切成多块 → 更不启用。
+- 而这台机器的两个条件都**更有利**：PCIe 3.0（~12 GB/s，只有 3090 的一半 → "多一条链路"的收益翻倍），
+  外加真桥（跨卡 51.6 GB/s，而不是主机内存往返）。
+- 顺带一处对不上：那段注释自己的表在 4k–8k 上 helper 是**赢**的（6K 2038 → 1471，−28%），
+  而它下面的规则在 3.3k 就把 share 关掉。两者不该同时成立 —— 这也正是该在这台机器上重测的理由。
+
+**所以 NVLink 的正确结论是**：decode 里没有它的位置（跨卡 410 KB/窗口，0.18%）；**prefill 里它是唯一有量级的
+位置**（TTFT 3.95 s 里约一半压在专家权重流上，而 31% 的专家来自主机内存，走的是最慢的那条路）。
+TP（每层 all-reduce、最吃互联的设计）在这台机器上只值 +3%（L-033），说明它不是"算力协作"的钥匙 ——
+它值钱的地方是**替空闲的卡分担 IO**。
+
+**下一步是测量，不是先改代码**：`STRATA_PREFILL_HELP_FRAC=0.4` 在这台机器上对 4.5k 新增 token 的 TTFT
+（1 次重启，`exp-env-ab.sh MEASURE=ttft`），见 §2 的 P0d。赢了才写代码（让 share 认 P2P、允许分块提示词
+启用 helper）；输了就写"NVLink 在 decode 与 prefill 都验证过不划算"，这条线彻底关闭。
