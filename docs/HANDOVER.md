@@ -288,6 +288,14 @@ MainPID **147049**（服务进程 06:20:13Z 起）、引擎子进程 **147064**�
 `archive/` 里是逐日旧文档（含 8 份 `.bak`、vLLM 时代、旧索引），只读。旧 `/opt/ai/README.md` 那 282 行也进了 archive，
 顶层现在是 43 行的指针。systemd 单元的 `Documentation=` 已指向 `HISTORY.md`。
 
+**服务器上的源码树（2026-10-24 清理过）**：`/opt/ai/src` 现在只有 `strata-0.2.2`（在线）、`llama.cpp-3cf03257`
+（ggml 依赖）、`strata-0.1.40.1`（**运行时依赖**：`.venv` / `strata-vision` / `expert-profile.bin`，别删）、
+`server-dashboard-0.2.6`。13 个过时树（0.1.45、0.1.45-tp、0.2.0-beta、0.2.0-tp、上游 main 快照、
+llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的东西在
+`/opt/ai/backups/outdated-src-20261024/`（`MANIFEST.md` 说清删了什么、为什么、留了什么）。
+**本机唯一一处本机代码优化（TP 张量并行）已归档到 [`patches/local-strata/`](../patches/local-strata/README.md)，
+判定不合并**（L-033：只作用单流窗口、+3% 在噪声线内、移植要跨两个上游版本）。
+
 ---
 
 ## 11. 上游与分支状态
