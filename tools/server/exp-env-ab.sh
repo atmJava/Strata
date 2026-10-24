@@ -8,6 +8,7 @@
 # MEASURE=ttft switches the arm from bench-strata (decode) to turn-ttft (time to first token).
 # Usage: exp-env-ab.sh <label> [reps] KEY=VAL|cg:KEY=VAL [KEY=VAL ...]   ("cfg:key=value" for a top-level key)
 #   e.g. exp-env-ab.sh hc-fuse 3 STRATA_QFUSE=1 STRATA_HC_UPMIX=1
+#        exp-env-ab.sh pipewin 3 "arg:--pipeline-windows=2"
 #        exp-env-ab.sh split25 3 cfg:layer_split=25
 # Output: /opt/ai/logs/L0xx-env-<label>-<UTC ts>.log   (L-number as printed in the first line; rename at will)
 set -u
@@ -86,7 +87,20 @@ changes = []
 args = cfg.get("args") or []
 for pair in sys.argv[3:]:
     k, _, v = pair.partition("=")
-    if k.startswith("cfg:"):
+    if k.startswith("arg:"):
+        flag, _, val = k[4:].partition("=")
+        if flag in args:
+            i = args.index(flag)
+            old = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("--") else None
+            if old is not None:
+                args[i + 1] = val
+            else:
+                args.insert(i + 1, val)
+            changes.append("%s %r -> %r (args)" % (flag, old, val))
+        else:
+            args += [flag, val]
+            changes.append("%s (absent) -> %r (args)" % (flag, val))
+    elif k.startswith("cfg:"):
         key = k[4:]
         changes.append("config %s %r -> %r" % (key, cfg.get(key), v))
         cfg[key] = v
