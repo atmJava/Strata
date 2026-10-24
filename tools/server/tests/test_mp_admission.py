@@ -6,6 +6,7 @@ stalls for more than 1 s.  Before W3 this is expected to fail - the reader queue
 36-43 s at full slots (L-020/L-021) - so the failure is recorded as xfail with
 its numbers, not hidden.
 """
+import os
 import threading
 import time
 
@@ -13,11 +14,13 @@ import pytest
 
 import mp_client as mp
 
-NEIGHBOURS = [
-    "用大约 200 字解释混合专家（MoE）模型的路由。",
-    "用大约 200 字解释 KV 缓存为什么随上下文线性增长。",
-    "用大约 200 字解释投机解码为什么不改变输出。",
-    "用大约 200 字解释 PCIe 带宽为什么是这种机器的瓶颈。",
+NEIGHBOUR_TOKENS = int(os.environ.get("MP_NEIGHBOUR_TOKENS", "192"))
+
+NEIGHBOURS = [   # long decodes: a ~200-character answer ends in ~4 s and hides the queue (see MP_NEIGHBOUR_TOKENS)
+    "写一篇大约 1200 字的说明文，解释混合专家（MoE）模型的路由机制、负载均衡与专家容量。",
+    "写一篇大约 1200 字的说明文，解释 KV 缓存为什么随上下文线性增长，以及它如何影响显存。",
+    "写一篇大约 1200 字的说明文，解释投机解码为什么不改变输出分布，以及接受率如何影响加速比。",
+    "写一篇大约 1200 字的说明文，解释 PCIe 带宽为什么是这种机器的瓶颈，以及层切分如何缓解。",
 ]
 READER = ("请阅读下面这段唯一文本并回答最后的问题。\n"
           + ("这是一段用于冷启动测试的唯一文本，编号 ADMISSION-" + "x" * 40 + "。\n") * 20
@@ -33,7 +36,7 @@ def test_reader_admitted_within_2s_at_full_slots(server):
     failures: list[str] = []
 
     def neighbour(index: int) -> None:
-        body = mp.chat_body(NEIGHBOURS[index], max_tokens=192, stream=True)
+        body = mp.chat_body(NEIGHBOURS[index], max_tokens=NEIGHBOUR_TOKENS, stream=True)
         last = None
         try:
             for event, elapsed in mp.stream_chat(body):

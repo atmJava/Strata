@@ -79,6 +79,9 @@ F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
 | **T6** | SSD 前缀 KV：重启后同 prompt TTFT | `test_mp_persist.py`（暂缓） | 重启后首请求 TTFT 达标 | F5 落地后 |
 | **T7** | 定容矩阵：1/2/3/4 路 | `test_mp_matrix.py` 或 `bench-strata.py` | 健康/无截断/聚合 | 服务器 |
 
+**R1 基线（2026-10-24，L-046）**：T3 在 4×1200-token 流 + 452-token 冷读下，读者首 token **27.23 s**、邻居停顿
+0.68 s；bench 单流 72.7 / 4 路聚合 120.5 tok/s；piped 冷读墙钟 14.1 s。T3 在 W3 前保持 xfail，xfail 消息带当时数字。
+
 **xfail 纪律**：功能未落地时，测试可以 `@pytest.mark.xfail(strict=False, reason=...)`，但 reason 必须写清
 "等哪个 W 项 / 哪条台账"；功能落地后**改 strict 并删掉 xfail**，否则视为未验收。
 

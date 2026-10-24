@@ -41,7 +41,7 @@ METRICS = BASE + "/metrics"
 AUTH = {"Authorization": "Bearer 111", "Content-Type": "application/json"}
 MODEL = "qwen3.8-flash-next-iq3_xxs-abliterated"
 LOG = "/opt/ai/src/strata-0.2.2/strata-022.log"
-CORPUS = "/opt/ai/docs/strata-parameters-0.2.2-20261022.md"
+CORPUS = os.environ.get("MP_CORPUS") or "/opt/ai/docs/archive/strata-parameters-0.2.2-20261022.md"
 
 PROMPT_A = "用中文详细解释混合专家模型的路由与负载均衡，尽量写长。"
 PROMPT_B_TOKENS = 127_000
