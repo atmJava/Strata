@@ -381,10 +381,15 @@ env**，我自己的 `prefill_help=0` 把它关了 —— 两个条件同时满�
 同 boot 配对结果：**1.5k −3.0/−3.9%（4/4 胜，但 <5% 不算结论）**、**4.5k +4.8/+18.9/+8.1%（0/6 胜）** → 我们的负载
 （4.5k+ 新增）没有收益，**helper 关闭**，`prefill_help=0` 保持。
 
-> **下一轮先做（S3）**：给 `prefill.cpp` 的窗口路径加**每窗口 host 字节 + 等待时间**打印（默认关，
-> `STRATA_PREFILL_HELP_DEBUG=1` 之外的独立开关），把 A1 量到的 **3.9 GB/轮**分成"被计算遮住的"与"真等待的"。
-> 判据：等待占比 >30% → 写 S4（预取提前一层 / 按 stage 拆 H2D 流）；<10% → 结论"字节不是瓶颈"，转 S5（nsys 看 36% 缺口）。
-> 测量一律用新工装：`flag-ab.sh`（同 boot 交替）+ `paired_ttft.py`（逐条配对），别再用跨 boot 中位数。
+**（2026-10-24 夜，S3–S5 已做完）** 窗口时间的账结清了：每窗口 11–14 ms 里 **9.25 ms 是"等 GPU"（65–73%）**、
+2.8 ms 是 CPU 池、**1.2–2.0 ms 是 host staging（8–14%）**，其余 commit。
+`host staging` 的现成重叠机制（Foresight swap space）要 **2.27 GiB 显存**，而这台机器的 44 GB 已全给驻留专家 → **不成立**。
+"等 GPU" 用新探针量出是 **48 层 × 0.37 ms、完全均匀**（最慢 L1 0.50 ms），**没有热点** → 调层数/调参都没用。
+
+> **下一阶段唯一的真候选（设计级）**：`Verifier::chain_overlap()`（`verify.cpp:2678`）—— 两 stage **共享 flag 缓冲**、
+> 主机不参与交接。生产日志的 `one hand-off per window` 说明我们走的是每层一次主机交接的非 chain 路径。
+> 要做的是在驱动里让相邻 stage 共用同一份 flag 缓冲（**改 `generate.cpp` 的 stage 构造**，加开关、默认关、可回滚）。
+> 判据：`STRATA_WAIT_LAYERS` 的 0.37 ms/层显著下降，且 decode 配对 ≥5%；止损：一晚做不出可编译/可回滚的版本就只交设计。
 
 **代码计划见 [`CODE_PLAN.md`](CODE_PLAN.md)**（v2：P0 定位病因 → P1-A/B/C 三选一 → P2 head 分卡 → P3 结构级；含测量协议与不做清单）。
 
