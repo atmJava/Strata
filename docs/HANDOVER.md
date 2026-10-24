@@ -375,9 +375,11 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 
 ## 13. 未决 / 待观察
 
-> **下一轮先做**：**P0d**（一行 env、1 次重启）再 **P0** —— 前者是 prefill 的 peer helper（NVLink 唯一有量级
-> 的位置：`STRATA_PREFILL_HELP_FRAC=0.4`，测 4.5k 新增 token 的 TTFT，−5% 以上才继续），后者是三点剖析 + 字节账
-> （**先证明病因，再决定写不写内核**）。
+> **下一轮先做**：**P0d 诊断**（单次启动，不做 A/B）—— 打上 `patches/local-strata/help-debug-0.2.2.patch`
+> 在 `build-imma` 里编，开 `STRATA_PREFILL_HELP=1 STRATA_PREFILL_HELP_DEBUG=1`，看 `bind_stage_helper` 到底被哪道门拒。
+> 为什么不是先测：今天两次 TTFT 运行都作废（helper 从没绑定；第二次是我重叠了安装器），**没触发 ≠ 不成立**。
+> 拿到门之后再决定改哪一行（候选：`pp->p2p` 可配 / 放行某道门），然后才是 A/B（判据第一条是日志里出现 `peer GPU` 行）。
+> 之后是 **P0**：三点剖析 + 字节账（先证明病因，再决定写不写内核）。
 > 上一轮我在 NVLink 上判错过一次：只看"两卡各剩 0.8–1.0 GB 空闲"就说它不是杠杆，漏了 helper 用的是**空闲那张卡
 > 在 prefill 期间的档期**（不是空闲显存）。更正写在 [`CODE_PLAN.md`](CODE_PLAN.md) §8。
 > 为什么不是 IMMA：v1 计划（`6e6d7017`）的"算力受限"被复核否掉了 —— 满带宽只要 4.9 T MAC/s，`dp4a` 可供 27 T
