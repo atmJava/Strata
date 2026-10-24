@@ -50,21 +50,27 @@ def main():
         i += 1
     wins = []
     for path in logs:
-        with path.open(errors="replace") as handle:
-            for line in handle:
-                m = START.search(line)
-                if m:
-                    wins.append({"start": m.group(1), "reads": [], "refusals": 0, "big_read": 0})
-                if not wins:
-                    continue
-                w = wins[-1]
-                m = READ.search(line)
-                if m:
-                    w["reads"].append((int(m.group(1)), int(m.group(2)), int(m.group(5))))
-                elif REFUSE in line:
-                    w["refusals"] += 1
+        lines = path.open(errors="replace").read().splitlines()
+        if lines and not any(START.search(line) for line in lines):
+            # logrotate cut this file mid-session, so the running session has no start line in it.
+            # Without a fallback the tool prints nothing for the window you actually care about.
+            wins.append({"start": "unknown (%s: rotated mid-session, this is the session tail)" % path.name,
+                         "reads": [], "refusals": 0, "big_read": 0, "partial": True})
+        for line in lines:
+            m = START.search(line)
+            if m:
+                wins.append({"start": m.group(1), "reads": [], "refusals": 0, "big_read": 0})
+            if not wins:
+                continue
+            w = wins[-1]
+            m = READ.search(line)
+            if m:
+                w["reads"].append((int(m.group(1)), int(m.group(2)), int(m.group(5))))
+            elif REFUSE in line:
+                w["refusals"] += 1
     if since:
-        wins = [w for w in wins if w["start"] >= since]
+        # a window with no known start cannot be date-filtered; it is a rotated tail, so it is recent
+        wins = [w for w in wins if w.get("partial") or w["start"] >= since]
     shown = wins if full else wins[-12:]
     if len(shown) != len(wins):
         print("(showing the last %d of %d sessions; --full for all)\n" % (len(shown), len(wins)))
