@@ -387,3 +387,29 @@ strata serve: foresight swap: cannot allocate 2268 MiB on CUDA0 (raise --vram-re
 **下一步（S5）**：剩下的最大项是"等 GPU"（9.25 ms/窗口，65–73%）。它按 24 层均摊约 0.39 ms/层，
 要动它只能合并 ring/减少每层同步 —— 结构性改动，需要先量每层等待的**分布**（新探针，1 次构建+1 次安装），
 并且必须承认它很可能超出今晚剩下的重启预算。若预算不够，就只写设计、不动代码。
+
+
+---
+
+## 18. S5 结果：等待是**均匀**的，没有单点可修（2026-10-24 夜，实测）
+
+新探针 `STRATA_WAIT_LAYERS=1`（默认关，`verify.cpp` 在每层 ring 回来的那一刻累加，每 64 窗口打印一次）：
+
+```
+strata serve: layer waits, ms per window (STRATA_WAIT_LAYERS, 12544 windows):
+  sum 17.63 ms over 48 layers; L0 0.21 L1 0.50 L2 0.34 L3 0.48 L4 0.35 L5 0.39 ... slowest L1 0.50 ms
+```
+
+**读数**：
+1. 48 层共 17.6 ms/窗口（≈ 每 stage 8.8 ms，与 S3 的 9.25 / 8.61 一致）→ **0.37 ms/层**。
+2. 分布**均匀**：最慢的 L1 也只有 0.50 ms，L0 0.21 ms。**没有"某几层特别慢"的热点**，所以调层、调层数都没用。
+3. 这不是"某个内核慢"，而是**每层一次 ring 交接的固定成本**（`verify.cpp:2890-2941`：raise flag → GPU 跑完 → rang 回来）。
+
+**唯一能改变它的结构性开关**已在代码里：`Verifier::chain_overlap()`（`verify.cpp:2678`）——
+"两个 stage 通过共享 flag 直接交接、主机不参与"。它要求 `next_->hflag_in_h_ == hflag_out_h_`（两 stage **共享同一份
+flag 缓冲**）。生产日志里那句 `one hand-off per window` 说明我们走的是**非 chain** 路径，也就是每层都要主机参与一次交接。
+**要拿到这部分收益，得让 stage 之间共享 flag 缓冲 —— 驱动层改动，不是今晚剩下的预算能安全做的。**
+
+**所以本轮结束时的判断**：decode 的 65–73% 是"每层 0.37 ms 的交接成本 × 48 层"，均匀、无热点；
+下一步是**设计级**改动（chain 交接），不是调参或小改内核。这条已写进 HANDOVER 作为下一阶段的候选，
+而不是今晚硬上。
