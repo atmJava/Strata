@@ -420,3 +420,23 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 4. **验窗 K/V 读量化池 vs 读原始**：fork 为此写了约 210 行 kernel；Strata 现在是 append→读回（`verify.cpp`），
    可用 `kv_q8_parity` 合成数据判定（<50 MB），收益未知。
 
+### 6.2 Turing 默认化（W0/W1/W2/W5/W6）：看过、**不采纳**
+
+工作区里曾有一组把 Turing 系列默认打开的改动（`sm75_series.hpp` 让系列"未设也算开"、
+`qsa_prompt_attn.cu` 让 Q4 tensor core 与 v2 寄存器暂存默认开、`moe_fused.cu` 让 MoE 提示内核默认开、
+`gemm.cu` 的注释把 BF16→FP16 默认算成已生效）。决定：**移除**，本树回到 opt-in（`STRATA_SM75_PERF=1`）。
+
+理由（按重要性）：
+
+1. **一项都没有在本机测过**。`docs/SM75_PORT_PLAN.md` 自己写着"不在移植期间跑测量/调参"，而仓库规则是
+   "只有实测更快才改默认，并给出测量对象"。默认化等于把未测的行为推给每一个 7.5 用户。
+2. **三处换的是求和顺序**：Q4 的 m16n8k8 对、v2 寄存器暂存、BF16→FP16 tensor core GEMM——它们不是"逐位相同"，
+   而是"数值在 FP32 量级上不同"。这与本轮其它 transplant 的验收口径（逐位/可判定的 parity）不一致。
+3. **`gemm.cu` 那处连代码都没改**：只有注释声称"7.5 默认走 FP16 tensor core"，实际条件仍是 7.0–7.4，
+   这种"文档改了、代码没改"的状态最危险。
+4. 真要默认化，前置条件是本机能跑端到端：`parity_window` + 同一 prompt 的 teacher-forced KL + 冷/热各 3 轮的
+   prompt 速度（本仓库对 12.0 卡就是这么做的）。这项工作没有做，所以不采纳，而不是"以后再说"。
+
+保留的部分：`sm75_series.hpp` 新增 `sm75_series_setting()`（区分 unset/0/1），默认语义不变；测试
+`mtp_logits_width_test` 现在断言"未设 = 关、`=1` 才开"，把这条决定钉在回归里。
+

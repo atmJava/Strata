@@ -12,7 +12,7 @@
 //     Blackwell sm_120 gets 6 and Strix Halo/UMA 5 (include/strata/core/draft_cap.hpp:8-16; the "Ampere-like
 //     returns 0" claim is docs/VLLM_PORT_PLAN.md:70).
 //   * The Turing series is a 7.5-and-only-7.5 predicate, on by default there and unable to touch any other
-//     compute capability (include/strata/core/sm75_series.hpp:38-52, include/strata/core/tc_sm75.hpp:29-31).
+//     compute capability (include/strata/core/sm75_series.hpp:24-45, include/strata/core/tc_sm75.hpp:29-31).
 //
 // TWO MODES, THE SAME ASSERTIONS.  `STRATA_TEST_REAL_ENGINE` (set by CMakeLists.txt when `TARGET strata_engine`
 // exists, i.e. a CUDA or HIP build) calls the real `MtpDrafter::bind_bytes`.  Its width inputs are private and
@@ -405,16 +405,20 @@ void run_turing_series() {
     CHECK(!s::is_sm75(8, 6), "sm_86 is not Turing");
     CHECK(!s::is_sm75(12, 0), "sm_120 is not Turing");
 
-    // The default: the series is ON for a 7.5 card (sm75_series.hpp:38, :48).  main() unsets STRATA_SM75_PERF
-    // before this runs, so this is the documented default and not the caller's environment.
+    // The default: the series is OFF unless STRATA_SM75_PERF=1 (sm75_series.hpp:24, :40 - the repo changes a default
+    // only where it measured it faster, and this branch's Turing default-on was measured nowhere).  main() unsets
+    // STRATA_SM75_PERF before this runs, so this is the documented default and not the caller's environment.
     CHECK(s::sm75_series_setting() == -1, "STRATA_SM75_PERF is unset for this test");
-    CHECK(s::sm75_series(), "the series default is on");
-    CHECK(s::sm75_default(7, 5), "Turing: the series is on by default");
+    CHECK(!s::sm75_series(), "the series is off by default");
+    CHECK(!s::sm75_default(7, 5), "Turing: off until asked for");
     CHECK(!s::sm75_default(8, 0), "Ampere: never on");
     CHECK(!s::sm75_default(12, 0), "sm_120: never on");
+    // (STRATA_SM75_PERF=1 cannot be exercised here: the value is read once per process, and the checks above already
+    // read it - a second process would be needed, like the emulated-CC cases below.  The =1 path is covered by the
+    // data path: every Turing kernel switch calls sm75_default, whose env branch is the one line above.)
 
     // tc_sm75.hpp:29-31: its own switch wins, but only on a 7.5 card.
-    CHECK(s::core::tc_sm75_enabled(7, 5), "STRATA_TC_SM75 unset on a 7.5: follows the series (on)");
+    CHECK(!s::core::tc_sm75_enabled(7, 5), "STRATA_TC_SM75 unset on a 7.5: follows the series (off)");
     CHECK(!s::core::tc_sm75_enabled(8, 6), "sm_86: off whatever the series says");
     put("STRATA_TC_SM75", "0");
     CHECK(!s::core::tc_sm75_enabled(7, 5), "STRATA_TC_SM75=0 turns it off on a 7.5");
