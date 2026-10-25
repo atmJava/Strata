@@ -18,9 +18,9 @@ import sys
 REQUIRED = ("轮次", "项", "验收判据", "实现", "测试", "生产", "证据", "回滚", "台账",
             "剩余未完成项", "没测什么")
 NON_PASS = re.compile(r"xfail|skip|FAIL|TODO|未跑", re.IGNORECASE)
-ROUND_RE = re.compile(r"^## (R\d+|V\d+)\b.*$", re.MULTILINE)
+ROUND_RE = re.compile(r"^## (R\d+|V\d+[a-z]?)\b.*$", re.MULTILINE)
 # V0–V3 are batch headings (SELF_ITERATION_PLAN §4); they carry the same Gate as a round.
-BATCH_ROW = re.compile(r"^V\d+$")
+BATCH_ROW = re.compile(r"^V\d+[a-z]?$")
 GATE_RE = re.compile(r"^### Gate\b", re.MULTILINE)
 
 

@@ -147,6 +147,13 @@ def test_batch_round_heading_is_validated():
     assert round_gate.validate_log(batch, None) == []          # also the default (first) block
 
 
+def test_lettered_batch_rows_are_not_backlog():
+    # V2b/V2c are split batches too (SELF_ITERATION_PLAN §4.3) and must not inflate the backlog.
+    with_batch = QUEUE.replace("| S2 |", "| V2b | fused A-B | z | 待做 | | 批次行 |\n| S2 |")
+    ids, unfinished, problems = round_gate.parse_queue(with_batch)
+    assert "V2b" in ids and unfinished == 2 and problems == []
+
+
 def test_batch_rows_are_not_backlog_items():
     # A V-row is a batch milestone: it must be a known id, but it adds nothing to the backlog count.
     with_batch = QUEUE.replace("| S2 |", "| V1 | 免停机批 | z | 进行中 | | 批次行 |\n| S2 |")

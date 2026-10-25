@@ -85,6 +85,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 ### batch — one batch, one matrix run
 | file | what it does | notes |
 |---|---|---|
+| `ops-v2-window.sh` | V2 窗口的安装/回滚驱动：`snapshot`（引擎 + serve/ + tokenizer + launcher + config，`md5sum -c` 核对）、`install --go`（`cp .new && mv` + `use-config.sh` + 核对）、`restore --go`、`check`；默认 dry-run |
 | `run-matrix.py` | runs the whole batch matrix once: each item has its criterion, timeout and log; writes `summary.json` and one log per item | `--batch V1 --list` / `--dry-run` / `--only` / `--skip`; never restarts anything |
 | `check_assert_lock.py` | V1-4: compiles the one decode-attention object with the default shape, then with `STRATA_QSA_ATTN_CHUNK=128` and requires the static_assert to reject it | uses the build dir's `make -n`; writes only `/tmp` |
 

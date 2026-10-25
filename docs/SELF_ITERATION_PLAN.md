@@ -101,7 +101,9 @@
 |---|---|---|---|---|---|
 | **V0 准备批** | 版本戳脚本、测试矩阵 runner、探针与日志规范、回滚包与**回滚演练**、基线快照（四问 + `/metrics` 累计 + `vram-perf.csv`） | 0 | 0 | 不测生产（只跑本地） | 一份"开批就绪"检查表，全绿才开 V1 |
 | **V1 免停机批** | V1-1…V1-4（纯构建期/纯 host，不动生产）+ harness 基准修好 + 补丁追不追平仓库的决定 | 1（实验目录） | 0 | 一次矩阵 | 版本戳基线 + 测试矩阵第一版结果 |
-| **V2 窗口批** | V1-5 + V2-1…V2-4：一次装、一次跑完（含 staged 演练、fused A-B-A、S0b A-B、warmup 实测） | 1 | 1 个窗口，重启 ≤2 | 一次矩阵 + 同 boot A-B-A | 每项判决（采纳/否决/未达）+ 台账条目 |
+| **V2a 部署窗口** | V2-1 staged 跑通/不遗留 + V2-4 warmup + 显存账：装一次、跑一次 | 1 | 1 个窗口，重启 ≤2（部署 1；起不来回滚 1） | 一次矩阵 | 每项判决 + 台账条目；生产落在新代码上或干净回滚 |
+| **V2b fused A-B** | V2-2 `STRATA_PF_FUSED=1/0`（两臂各 3 跑，中位+离散度；末跑做漂移探） | 0（用 V2a 的构建） | 1 个窗口，重启 2（每臂 1；`requested()` 是进程级 static） | 每臂 3 跑 | 采纳/否决（≥3% 才下结论） |
+| **V2c S0b A-B** | V2-3 `STRATA_PIPED_CONCURRENT=1/0`（两臂各 3 跑） | 0 | 1 个窗口，重启 2（`pr_conc` 是进程级 static） | 每臂 3 跑 | 采纳/否决 |
 | **V3 容量与投机批** | V3-1…V3-3 | 1 | 1 个窗口，重启 ≤2 | 一次矩阵（`BENCH_N=6/8`） | 容量点选定 + 吞吐数字（带口径） |
 
 **批内不许加东西**：开批后新发现的项写进 `WORK_QUEUE.md` 标 `[发现]`，进下一批。这条是 C2 的硬边界。
@@ -212,18 +214,19 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
 `isa_guard_check` 2.36 s、64/256 锁死、staged wedge 3 passed。**0 生产改动、0 重启。** 首跑 12 failed 的
 唯一原因是测试 venv 缺 `jinja2`/`regex`（已写进 `tools/server/tests/README.md`）。
 
-### V2 窗口批（下一批；准备现在做，窗口排 00:00 后）
+### V2a 部署窗口（下一批；准备已做，窗口排 00:00 后）
 
-0. **准备（不碰生产）**：`ops-v2-window.sh`（默认 dry-run）——安装/回滚/核对；用构建出的
-   `build75/strata --help` 核对生产 config 的 54 个 args（缺一个就是"装上起不来"）；回滚用 V0 快照
-   `/opt/ai/tmp/rollback-V0-20261025T124629Z/`，窗口前再取一份。
-1. **一次装**：快照 → 引擎/server/launcher 用 `cp .new && mv -f` → `use-config.sh`（唯一入口）→
-   `verify-running-config.sh` + md5 + `strings` 双核（**构建成功不算跑的新代码**）。
-2. **一次矩阵**：V2-1 staged 跑通/不遗留（S0c/S0d 的服务器判据）、V2-2 fused `STRATA_PF_FUSED=1/0` 同 boot A-B、
-   V2-4 warmup、显存账（P2 的 6×192K/8×128K 静态账）；每项判据/超时/日志进 `run-matrix.py --batch V2`。
-3. **回滚**：矩阵后恢复 V0 快照 → `cmp -s` → health；若 health 连续 2 次失败，立即恢复并停轮。
-4. **预算**：本批 ≤2 重启；**S0b 的 1/0 两臂各需一次重启**（`pr_conc` 是进程级 static），不塞进本批
-   （拆 V2b，00:00 后日预算重置，两批合计 4 ≤6）。
+0. **准备（已做，不碰生产）**：`tools/server/ops-v2-window.sh`（默认 dry-run；`snapshot --go` 已在 21:10
+   取好 `/opt/ai/tmp/pre-V2-20261025T131022Z/` 并 `md5sum -c` 全过）；0.1.49.1 的 `--help` 不列全 54 个 args
+   （`--mtc`/`--pcie-frac`/`--vram-reserve-mib` 只在 `strings` 里），所以 args 兼容性只能靠**启动**验证——
+   这就是本批的第一个门。
+1. **一次装**：`ops-v2-window.sh install --go`（引擎 `cp .new && mv`；`serve/` 整树换；`tokenizer` 换；
+   launcher/config 不动）→ `use-config.sh`（唯一入口）→ md5 + `grep` 标记 + health +
+   `verify-running-config.sh`（要 ARGS MATCH）。起不来：`restore --go` 立刻回滚并停轮。
+2. **一次矩阵**：V2-1 staged 跑通/不遗留（长读 >4096 tokens + 取消后下一请求正常 + `/metrics` 计数）、
+   V2-4 warmup、显存账（6×192K/8×128K 静态账）。V2-2/V2-3 拆到 V2b/V2c（各需一次重启/臂）。
+3. **回滚**：矩阵后**不回滚**（生产落在新代码上）；若 health 连续 2 次失败 → `restore --go` 并停轮。
+4. **预算**：本批 ≤2 重启；V2b/V2c 各 ≤2；三批合计 5–6，仍在日预算 6 内。
 
 ## 12. 本文件怎么自我更新
 
@@ -234,6 +237,9 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
 ---
 
 **版本行**
+- v4 · 2026-10-25 21:12 · V2 拆批：`STRATA_PF_FUSED` 与 `STRATA_PIPED_CONCURRENT` 都是进程级 static
+  （每个 A/B 臂一次重启），V2 一批 ≤2 重启装不下，拆 V2a（部署+staged+warmup+显存）/V2b（fused A-B）/
+  V2c（S0b A-B）；判据未动。
 - v3 · 2026-10-25 21:10 · V1 收尾：§4.2 进度（V1 五项全 PASS + 证据路径）、§11 改为 V2 窗口批
   （准备/一次装/一次矩阵/回滚/预算，S0b 拆 V2b）；判据与阈值未动。
 - v2 · 2026-10-25 20:51 · V0 收尾：§5.1 探针/日志约定与实测仪器代价、§11 改为 V1 的具体动作、
