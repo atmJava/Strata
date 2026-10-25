@@ -381,7 +381,9 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 功能清单与验收见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md)，口径见 [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)，
 执行规则与每轮复盘见 [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) / [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)。
 目标 `goal-402218d9-57d7-4af1-aea0-391a1494acd9`（active，上限 1000 轮）。
-**规则 v0.2 生效（2026-10-25）**：`MULTIPATH_RULES.md` 改为 DoD + 每轮 Gate + 禁止清单 + 用户确认；
+**规则 v0.3 生效（2026-10-25）**：通用规则独立成 `PORTING_RULES.md` v1（DoD、每轮 Gate 11 字段、禁止清单、
+阻塞、收口需用户确认）；`MULTIPATH_RULES.md` 缩成项目适配层（事实/预算/真实脚本名/文档落点）。门禁脚本
+`tools/server/round_gate.py`（自测 11/11）。**没有 PASS 的验收测试，就不算这轮做完；不得自行 complete。**：`MULTIPATH_RULES.md` 改为 DoD + 每轮 Gate + 禁止清单 + 用户确认；
 门禁脚本 `tools/server/round_gate.py`（自测 7/7）。**没有 PASS 的验收测试，就不算这轮做完；不得自行 complete。**
 当前真实状态（`FEATURE_PARITY.md` §10）：F3/F4/F6/F7 验收通过；**F1/F2 已落地但验收未过**（T3 xfail，第二 token 38.6 s）；
 **12 项 S 项采纳·待实现**；F5/F11 搁置待用户确认；N×CTX 容量矩阵待测。**剩余 14 项 + 1 矩阵。**

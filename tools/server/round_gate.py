@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""round_gate.py - check that a round's log entry in docs/MULTIPATH_LOG.md carries a valid Gate sheet.
-
-docs/MULTIPATH_RULES.md (v0.2) says a round does not exist unless its Gate sheet is filled and
-the test line says PASS (xfail/skip = FAIL).  This is the machine check: run it after writing a
-round, before committing.
+"""round_gate.py - check a round's log entry against the Gate sheet (PORTING_RULES.md §3).
 
 Usage:
   round_gate.py [log] [--round R11]
-Exit code 0 when the checked round passes, 1 otherwise (each problem printed).
+Exit 0 when the checked round passes; 1 otherwise (each problem printed).
+
+The gate is a format + wording check, not proof the feature works: it rejects missing fields,
+non-PASS test lines (xfail/skip/FAIL/TODO/未跑) and empty values where a value is required.
 """
 from __future__ import annotations
 
@@ -15,7 +14,9 @@ import argparse
 import re
 import sys
 
-REQUIRED = ("项", "验收判据", "实现", "测试", "生产", "台账", "剩余未完成采纳项")
+REQUIRED = ("轮次", "项", "验收判据", "实现", "测试", "生产", "证据", "回滚", "台账",
+            "剩余未完成项", "没测什么")
+NON_PASS = re.compile(r"xfail|skip|FAIL|TODO|未跑", re.IGNORECASE)
 ROUND_RE = re.compile(r"^## (R\d+)\b.*$", re.MULTILINE)
 GATE_RE = re.compile(r"^### Gate\b", re.MULTILINE)
 
@@ -29,39 +30,65 @@ def _round_blocks(text: str) -> list[tuple[str, str]]:
     return blocks
 
 
+def _gate_section(block: str) -> str | None:
+    gate = GATE_RE.search(block)
+    if not gate:
+        return None
+    section = block[gate.start():]
+    next_heading = re.search(r"^#{2,3} ", section[len("### Gate"):], re.MULTILINE)
+    return section[: len("### Gate") + next_heading.start()] if next_heading else section
+
+
+def _field(section: str, key: str) -> str | None:
+    match = re.search(rf"^-[ \t]*{key}[ \t]*[:：][ \t]*(.*)$", section, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
 def validate_log(text: str, round_name: str | None = None) -> list[str]:
     blocks = _round_blocks(text)
     if not blocks:
         return ["no '## R<n>' round heading found in the log"]
     names = [name for name, _ in blocks]
     if round_name:
-        match = next((block for name, block in blocks if name == round_name), None)
-        if match is None:
+        block = next((body for name, body in blocks if name == round_name), None)
+        if block is None:
             return [f"round {round_name} not found (rounds: {', '.join(names[:6])}...)"]
-        block = match
     else:
         block = blocks[0][1]
 
-    errors: list[str] = []
-    gate = GATE_RE.search(block)
-    if not gate:
+    section = _gate_section(block)
+    if section is None:
         return ["no '### Gate' section in the round"]
-    section = block[gate.start():]
-    next_heading = re.search(r"^#{2,3} ", section[len("### Gate"):], re.MULTILINE)
-    if next_heading:
-        section = section[: len("### Gate") + next_heading.start()]
 
+    errors: list[str] = []
     for key in REQUIRED:
-        if not re.search(rf"^-\s*{key}\s*[:：]", section, re.MULTILINE):
+        if _field(section, key) is None:
             errors.append(f"Gate is missing '- {key}:'")
 
-    test_line = next((line for line in section.splitlines()
-                      if re.match(r"^-\s*测试\s*[:：]", line)), None)
+    def value(key: str) -> str:
+        return _field(section, key) or ""
+
+    test_line = _field(section, "测试")
     if test_line is not None:
-        if not re.search(r"→\s*PASS", test_line):
+        if "→" not in test_line or "PASS" not in test_line:
             errors.append("Gate test line does not say '→ PASS'")
-        if re.search(r"XFAIL|FAIL|skip", test_line, re.IGNORECASE):
-            errors.append("Gate test line records a non-PASS result (xfail/skip/FAIL does not count)")
+        if NON_PASS.search(test_line):
+            errors.append("Gate test line records a non-PASS result (xfail/skip/FAIL/TODO/未跑 does not count)")
+
+    if not value("项"):
+        errors.append("Gate item ('项') is empty")
+    if not value("证据"):
+        errors.append("Gate evidence ('证据') is empty")
+    if value("生产") and not value("回滚"):
+        errors.append("Gate changed production but left '回滚' empty")
+    if not value("没测什么"):
+        errors.append("Gate '没测什么' is empty")
+
+    remaining = value("剩余未完成项")
+    if remaining and not re.match(r"^\d+", remaining):
+        errors.append("Gate '剩余未完成项' must start with an integer")
+    if value("实现") == "" and not value("项").startswith("测量"):
+        errors.append("Gate implementation ('实现') is empty and this is not a measurement round")
     return errors
 
 
