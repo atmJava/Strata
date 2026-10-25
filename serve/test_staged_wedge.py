@@ -23,7 +23,7 @@ import serve.server as _server
 
 # the staged read (BREAD -> BRDY -> BADOPT) ships as the mp-w3 server patch: on a tree whose serve/server.py is the
 # plain base the feature is absent and these cases skip instead of failing (same rule as the other backend-gated tests)
-_HAS_STAGED_READ = "BREAD " in inspect.getsource(_server.StrataEngine.generate_batched)
+_HAS_STAGED_READ = 'f"BREAD ' in inspect.getsource(_server.StrataEngine.generate_batched)
 
 # A trimmed FAKE_BATCH (serve/test_parallel.py) plus the staged lines.  Modes:
 #   die-on-bread  exit the process the moment BREAD arrives (the engine died mid-read)
@@ -145,6 +145,7 @@ class StagedWedge(unittest.TestCase):
         # staging on, but only for prompts over 4096 tokens by default: the requests that fill the slots must not
         # take the staged path (only the tests' long request does, via stage_long_prompts())
         self.env = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ": "1",
+                                                "STRATA_BATCH_STAGED_READ": "1",
                                                 "STRATA_MP_STAGED_READ_MIN_TOKENS": "4096"})
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -175,16 +176,32 @@ class StagedWedge(unittest.TestCase):
         return False
 
     def fill_slots(self, svc, n=2):
-        """Start n streaming requests so every slot is busy (the staged path needs pick_slot None)."""
+        """Start n streaming requests and wait until every slot is busy (the staged path needs pick_slot None)."""
         threads = []
+
+        def stream(cancel, k):
+            try:
+                list(svc.run(list(f"LONGREPLY {k}".encode()), True, [], 40, {}, cancel))
+            except BaseException:      # noqa: BLE001 - the engine may die under the request; the test decides below
+                pass
+
         for k in range(n):
             cancel = threading.Event()
-            t = threading.Thread(target=lambda: list(svc.run(list(f"LONGREPLY {k}".encode()),
-                                                              True, [], 40, {}, cancel)), daemon=True)
+            t = threading.Thread(target=stream, args=(cancel, k), daemon=True)
             threads.append((t, cancel))
             t.start()
-        self.assertTrue(self.wait_log("BGEN"), "the arriving request must move the solo one into a slot")
+        end = time.monotonic() + 5.0
+        while time.monotonic() < end:
+            if sum(1 for b in self.engine_of(svc).slot_busy if b) >= n:
+                return threads
+            time.sleep(0.02)
+        self.assertTrue(self.wait_log("BGEN"), "the arriving requests must move the solo one into a slot")
+        self.fail(f"only {sum(1 for b in self.engine_of(svc).slot_busy if b)} of {n} slots became busy")
         return threads
+
+    @staticmethod
+    def engine_of(svc):
+        return svc.engine
 
     def run_with_timeout(self, svc, ids, timeout=8.0):
         """svc.run in a guarded thread: a wedged admission waits forever, a healthy one answers."""
@@ -219,13 +236,15 @@ class StagedWedge(unittest.TestCase):
         self.assertTrue(box.get("result"), "the request after the restart must stream something")
 
     def test_request_after_a_dead_engine_is_admitted(self):
+        # a dead engine is restarted by the next request instead of wedging it (the staged-state cleanup itself is
+        # covered by test_engine_dying_during_bread_..., which is the only one that can stage before the death)
         e = self.engine("brdy")
-        e.close()                              # dead before any request: the next one restarts it (never wedges)
+        e.close()
         svc = self.service(e)
         box = self.run_with_timeout(svc, list(b"anything"))
-        self.assertIsNone(e.mp_staged)
         self.assertNotIn("error", box, f"the request that restarts the engine failed: {box.get('error')!r}")
         self.assertTrue(box.get("result"), "the restarting request must stream something")
+        self.assertIsNone(e.mp_staged, "nothing staged happened, and nothing may be left behind")
 
     def test_staged_read_completes_and_adopts_when_a_slot_frees(self):
         e = self.engine("brdy")
