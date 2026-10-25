@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""R5 long-read probe: four long decodes fill the slots, then a 22.7K-token cold read joins.
+"""Long-read probe: N long decodes fill the slots, then a cold ~22.7K-token read joins.
 
-Measures the reader's first token (TTFT), second token (the stall a slot must fill), total wall,
-and the neighbours' totals.  Prints one JSON object.
+Measures the reader's first/second/total, the neighbours' totals, and - the important part -
+the neighbours' worst token gap *while the reader is being read*, which is what a staged read
+must not blow up (a 17 s read that pauses every decode by 17 s is not "multi-path usable").
+
+Prints one JSON object.  Usage: probe_long_read.py [base_url] [N]
 """
 import json
 import sys
@@ -16,7 +19,7 @@ KEY = "111"
 MODEL = "qwen3.8-flash-next-iq3_xxs"
 CORPUS = open("/tmp/corpus.md", encoding="utf-8").read()
 PROMPT = "写一篇大约 1200 字的说明文，解释混合专家（MoE）模型的路由机制、负载均衡与专家容量。"
-NONCE = str(__import__("time").time_ns())
+NONCE = str(time.time_ns())
 READER = CORPUS + f"\n\n（本次探针唯一标识 {NONCE}）请用一句话回答：以上文档开头第一个标题是什么？"
 
 
@@ -29,9 +32,10 @@ def open_stream(text, max_tokens):
 
 
 def run(text, max_tokens, out):
-    t0 = time.time()
+    start = time.time()          # wall clock: gaps are compared across streams
     first = second = None
     chars = 0
+    times: list[float] = []
     with open_stream(text, max_tokens) as response:
         for raw in response:
             line = raw.decode("utf-8", "replace").strip()
@@ -47,13 +51,19 @@ def run(text, max_tokens, out):
             content = delta.get("content")
             if not content:
                 continue
-            now = time.time() - t0
+            now = time.time()
             if first is None:
-                first = now
+                first = now - start
             elif second is None:
-                second = now
+                second = now - start
             chars += len(content)
-    out.update(first=first, second=second, total=time.time() - t0, chars=chars)
+            times.append(now)
+    out.update(first=first, second=second, total=time.time() - start, chars=chars, start=start, times=times)
+
+
+def worst_gap(times, lo, hi):
+    picked = [t for t in times if lo <= t <= hi]
+    return max((b - a for a, b in zip(picked, picked[1:])), default=0.0)
 
 
 def busy_slots():
@@ -73,18 +83,26 @@ while time.time() < deadline and sum(1 for s in states if s != "idle") < N:
     time.sleep(0.2)
     states = busy_slots()
 busy = sum(1 for s in states if s != "idle")
+
 read = {}
-threading.Thread(target=run, args=(READER, 16, read)).start()
+reader = threading.Thread(target=run, args=(READER, 16, read))
+reader.start()
 while read.get("total") is None:
     time.sleep(0.05)
-for t in threads:
+for t in threads + [reader]:
     t.join()
+
+reader_from = read["start"]
+reader_to = read["start"] + (read.get("second") or read["total"])
+gaps = [worst_gap(n["times"], reader_from, reader_to) for n in neigh]
+overall = [worst_gap(n["times"], n["start"], n["start"] + n["total"]) for n in neigh]
 print(json.dumps({
-    "slots_busy": busy, "slots": states,
-    "reader_prompt_tokens_hint": "~22.7K",
+    "slots_busy": busy, "slots": states, "streams": N,
     "reader_first_s": round(read["first"], 2) if read.get("first") else None,
     "reader_second_s": round(read["second"], 2) if read.get("second") else None,
     "reader_total_s": round(read["total"], 2),
     "reader_chars": read["chars"],
     "neighbour_total_max_s": round(max(n["total"] for n in neigh), 2),
+    "neighbour_gap_max_in_reader_window_s": round(max(gaps), 2),
+    "neighbour_gap_max_overall_s": round(max(overall), 2),
 }, indent=1))
