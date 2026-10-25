@@ -785,39 +785,55 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // DFlash2 taps: set_taps (the drafter) or STRATA_TAP_FILE (the research dump); off, and nothing is allocated or captured, otherwise
     const char* tap_path = std::getenv("STRATA_TAP_FILE");
     if (tap_path != nullptr && tap_path[0] == '\0') tap_path = nullptr;
-    if ((tap_path != nullptr || !tap_req_.empty()) && lb_ == 0 && le_ == g.n_layers) {
-        tap_layers_.clear();
+    if (tap_path != nullptr || !tap_req_.empty()) {
+        // The whole model's taps first (ascending, each layer once; the last layer is never one: its completed output is the
+        // head's R).  A layer split's stage keeps the ones its range [lb_, le_) holds: its tap_dev() is [max_t][that many]
+        // [n_embd], tap_layers_local() lists them, and one stage keeps them all (tap_layers_local() == tap_layers()).
+        tap_layers_all_.clear();
         if (tap_path == nullptr) {
-            for (int l : tap_req_) if (l >= 0 && l < g.n_layers - 1) tap_layers_.push_back(l);
+            for (int l : tap_req_) if (l >= 0 && l < g.n_layers - 1) tap_layers_all_.push_back(l);
         } else {
             const char* tl = std::getenv("STRATA_TAP_LAYERS");
             std::string list = tl != nullptr && tl[0] != '\0' ? tl : "5,15,25,35,45";
             for (size_t i = 0; i < list.size();) {
                 const size_t j = list.find(',', i);
                 const int l = std::atoi(list.substr(i, j == std::string::npos ? std::string::npos : j - i).c_str());
-                if (l >= 0 && l < g.n_layers - 1) tap_layers_.push_back(l);
+                if (l >= 0 && l < g.n_layers - 1) tap_layers_all_.push_back(l);
                 if (j == std::string::npos) break;
                 i = j + 1;
             }
         }
+        std::sort(tap_layers_all_.begin(), tap_layers_all_.end());
+        tap_layers_all_.erase(std::unique(tap_layers_all_.begin(), tap_layers_all_.end()), tap_layers_all_.end());
+        tap_layers_.clear();
+        for (int l : tap_layers_all_) if (l >= lb_ && l < le_) tap_layers_.push_back(l);
         tap_slot_.assign((size_t) g.n_layers, -1);
         for (size_t i = 0; i < tap_layers_.size(); ++i) tap_slot_[(size_t) tap_layers_[i]] = (int) i;
         const size_t nt = tap_layers_.size();
-        if (nt == 0 || cudaMalloc((void**) &tap_dev_, (size_t) T * nt * N * 4) != cudaSuccess ||
-            (tap_path != nullptr && (cudaMalloc((void**) &tap_scratch_, (size_t) HC * N * 4) != cudaSuccess ||
-                                     !mapped((size_t) T * nt * N * 4, (void**) &h_tap_, (void**) &m_tap_)))) {
-            err = "verify: the DFlash2 tap buffers could not be allocated";
-            return false;
+        if (nt > 0) {
+            if (cudaMalloc((void**) &tap_dev_, (size_t) T * nt * N * 4) != cudaSuccess ||
+                (tap_path != nullptr && (cudaMalloc((void**) &tap_scratch_, (size_t) HC * N * 4) != cudaSuccess ||
+                                         !mapped((size_t) T * nt * N * 4, (void**) &h_tap_, (void**) &m_tap_)))) {
+                err = "verify: the DFlash2 tap buffers could not be allocated";
+                return false;
+            }
+            if (tap_path != nullptr) {
+                tap_file_ = std::fopen(tap_path, "wb");
+                if (tap_file_ == nullptr) { err = std::string("verify: cannot write STRATA_TAP_FILE ") + tap_path; return false; }
+                const int32_t hdr[4] = {0x50415453 /* 'STAP' */, 1, (int32_t) N, (int32_t) nt};
+                std::fwrite(hdr, sizeof hdr, 1, tap_file_);
+                // global layer ids (a split stage's records keep the model's numbering; give each stage its own file)
+                for (int l : tap_layers_) { const int32_t v = l; std::fwrite(&v, sizeof v, 1, tap_file_); }
+                std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: %zu taps of %lld floats per row\n", tap_path, nt, (long long) N);
+                if (lb_ != 0 || le_ != g.n_layers)
+                    std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: stage layers [%lld, %lld), tap layers %d..%d (global)\n",
+                                 tap_path, (long long) lb_, (long long) le_, tap_layers_.front(), tap_layers_.back());
+            }
+            tap_on_ = true;
+        } else if (tap_path != nullptr) {
+            std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: no tap in this stage's layers [%lld, %lld); nothing is dumped\n",
+                         tap_path, (long long) lb_, (long long) le_);
         }
-        if (tap_path != nullptr) {
-            tap_file_ = std::fopen(tap_path, "wb");
-            if (tap_file_ == nullptr) { err = std::string("verify: cannot write STRATA_TAP_FILE ") + tap_path; return false; }
-            const int32_t hdr[4] = {0x50415453 /* 'STAP' */, 1, (int32_t) N, (int32_t) nt};
-            std::fwrite(hdr, sizeof hdr, 1, tap_file_);
-            for (int l : tap_layers_) { const int32_t v = l; std::fwrite(&v, sizeof v, 1, tap_file_); }
-            std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: %zu taps of %lld floats per row\n", tap_path, nt, (long long) N);
-        }
-        tap_on_ = true;
     }
     if (bal_ != nullptr) {   // set_pcie_balance: four stamp words per (layer, group)
         if (!mapped((size_t) g.n_layers * 2 * 4 * 8, (void**) &h_bal_, (void**) &m_bal_)) {
@@ -2200,9 +2216,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (remote_opt_) remote_opt_->combine(bo_ + tb * N, y_dummy_ + tb * N, tb, n,
                               device_plan_ ? skip_ + grp : nullptr, ring, cs);
         stamp(l, 24, grp);
-        if (tap_on_ && !batch_rec_ && l < (int64_t) tap_slot_.size() && tap_slot_[(size_t) l] >= 0) {
+        if (tap_on_ && l < (int64_t) tap_slot_.size() && tap_slot_[(size_t) l] >= 0) {
             // the layer's completed output: R with this FFN half's write applied (the next layer's read would fold it), the mean of
-            // the hc streams, all rows of the group in one launch
+            // the hc streams, all rows of the group in one launch.  A batch window (one group, row t = slot brow_[t]) writes
+            // its S rows in that order; rows past S keep what the previous window left (tap_dev_ is [max_t][nt][n_embd]).
             const int64_t nt = (int64_t) tap_layers_.size();
 #if defined(STRATA_HAVE_DFLASH2)
             strata::kernels::df2_tap_gr(Rt(tb), HC * N, bo_ + tb * N, N, inj2_ + tb * HC, HC, tap_dev_ + ((size_t) tb * nt + (size_t) tap_slot_[(size_t) l]) * N,
@@ -2342,7 +2359,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (nan_guard_on()) strata::kernels::logits_nonfinite_rows(head_logits_, T, (int) n_vocab_, m_nf_, cs);
     }
     stamp(g.n_layers, 1, 0);
-    if (tap_on_ && !batch_rec_ && tap_file_ != nullptr) copy_from_mapped(m_tap_, tap_dev_, (int64_t) T * (int64_t) tap_layers_.size() * N, cs);
+    // the window's rows (a batch window's S too) into the mapped copy: run() appends its records from it.  A batch
+    // window has per-sequence positions, so it fills the buffers and appends nothing (its caller reads tap_dev_).
+    if (tap_on_ && tap_file_ != nullptr) copy_from_mapped(m_tap_, tap_dev_, (int64_t) T * (int64_t) tap_layers_.size() * N, cs);
     return true;
 }
 

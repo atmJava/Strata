@@ -324,10 +324,18 @@ public:
     const float* final_R(int t) const;
     const float* final_R_all() const { return next_ ? next_->final_R_all() : R_; }
     /// DFlash2 (before init): keep the completed outputs of these layers (zero-based; the mean of the hc streams) for every row of
-    /// each window in a device buffer, tap_dev() = [max_t][n_taps][n_embd] floats, valid until the next window.  Single-stage
-    /// verifiers only; STRATA_TAP_FILE (research dump) turns the same buffer on without this call.
+    /// each window in a device buffer, tap_dev() = [max_t][n_taps_this_stage][n_embd] floats, valid until the next window.
+    /// A layer split's stage records only requested ∩ [layer_begin, layer_end) (the last layer is never a tap): its slots
+    /// follow tap_layers_local(), global ids ascending, so the caller assembles the stages' buffers by global slot.  One
+    /// stage records every requested layer, so there tap_layers_local() == tap_layers().  STRATA_TAP_FILE (research dump)
+    /// turns the same buffer on without this call; each stage writes the file it is given, with global layer ids.
     void set_taps(const std::vector<int>& layers) { tap_req_ = layers; }
     const float* tap_dev() const { return tap_dev_; }
+    /// The whole model's tap layers, ascending: the global slots a caller assembles the stages' tap_dev() buffers into.
+    const std::vector<int>& tap_layers() const { return tap_layers_all_; }
+    /// This stage's tap layers, ascending: the global ids tap_dev() holds, in the buffer's order (a subset of tap_layers()).
+    const std::vector<int>& tap_layers_local() const { return tap_layers_; }
+    /// This stage records at least one tap (a layer split's stage may record none: not "the window has every tap").
     bool tapping() const { return tap_on_; }
 
     /// The GPU plan the pool writes each layer (VRAM hits + the PCIe share of the misses); give it to the
@@ -569,9 +577,10 @@ private:
     // (pos, token, taps) records to the file.
     bool tap_on_ = false;
     std::vector<int> tap_req_;                    ///< set_taps
-    std::vector<int> tap_layers_;                 ///< the tapped layer ids (zero-based, completed outputs)
-    std::vector<int> tap_slot_;                   ///< layer -> slot in tap_layers_, or -1
-    float* tap_dev_ = nullptr;                    ///< [max_t][n_taps][n_embd]
+    std::vector<int> tap_layers_all_;             ///< every tap layer of the model (validated, ascending)
+    std::vector<int> tap_layers_;                 ///< this stage's taps: global ids, ascending (tap_dev_'s slots)
+    std::vector<int> tap_slot_;                   ///< this stage: global layer -> slot in tap_layers_, or -1
+    float* tap_dev_ = nullptr;                    ///< [max_t][this stage's n_taps][n_embd]
     float* tap_scratch_ = nullptr;                ///< one row's streams, [hc][n_embd]
     float* h_tap_ = nullptr;     float* m_tap_ = nullptr;       ///< the mapped copy of tap_dev_
     std::FILE* tap_file_ = nullptr;
