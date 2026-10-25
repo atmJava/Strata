@@ -638,21 +638,22 @@ class StagedProtocol(FakeEngineCase):
         self.assertIsNone(e.mp_staged, "the restarted engine must not inherit a staged mark")
 
     def test_badopt_refused_clears_state_and_next_request_is_admitted(self):
-        """The engine refuses the adoption (`ERR BADOPT: slot busy`); the server must clean up and go on."""
+        """The engine refuses the adoption (`ERR BADOPT: slot busy`): the server cancels the staged read, retries the
+        request and the caller gets its answer - a momentarily busy slot is not the conversation's fault (#1994)."""
         e = self.engine("badopt-refuse-forgive")
         svc = self.service(e)
         fills = self.fill_slots(svc)
         run = self.start_staged(svc, list(b"a read whose slot is already busy"), max_new=64)
         self.wait_until(lambda: self.log_count("BRDY_SENT") == 1 and e.mp_staged is True,
                         "the read must be staged and waiting for a slot", 10.0)
-        fills[0][1].set()                        # free a slot: the server adopts, the engine refuses
+        fills[0][1].set()                        # free a slot: the server adopts, the engine refuses once
         self.wait_until(lambda: self.log_count("BADOPT_REFUSED") == 1,
                         "the server must try to adopt the staged read", 15.0)
-        self.assertTrue(run["done"].wait(10.0), "a refused adoption must end the request")
+        self.assertTrue(self.wait_log("BCANCEL_RAW", timeout=5.0),
+                        "after ERR BADOPT: slot busy the server must cancel the staged read")
+        self.assertTrue(run["done"].wait(15.0), "a refused adoption must not leave the request hanging")
         err = run["box"]["error"]
-        self.assertIsInstance(err, ValueError,
-                              f"the engine's ERR BADOPT must reach the caller as ValueError, got {err!r}")
-        self.assertIn("BADOPT", str(err), f"the error must carry the engine's reason, got {err!r}")
+        self.assertIsNone(err, f"a refused adoption is retried, not failed: got {err!r}")
         self.assert_clean(e)
         for _, c in fills:
             c.set()
@@ -660,13 +661,10 @@ class StagedProtocol(FakeEngineCase):
         box = self.run_with_timeout(svc, list(b"next request after the refusal"), max_new=8)
         self.assert_request_ok(box, "the request after a refused adoption")
 
-    @unittest.expectedFailure
     def test_badopt_refusal_must_bcancel_the_engines_staged_read(self):
-        """KNOWN SERVER GAP, NOT FIXED HERE: after `ERR BADOPT: slot busy` the server clears its own state but
-        never sends BCANCEL (serve/server.py, the BADOPT refusal branch: `except ValueError` only handles
-        `BGEN:`; the finalizer only cancels while phase is staged/staged_wait).  generate.cpp keeps the staged
-        read pending on that same guard, so the next read would be refused with "a staged read is pending".
-        This case is the report: xfail until the server cancels on that path."""
+        """`ERR BADOPT: slot busy` leaves the engine's staged read pending, so the server must cancel it
+        (serve/server.py, the BADOPT refusal branch); otherwise every later read is refused with
+        "a staged read is pending"."""
         e = self.engine("badopt-refuse")
         svc = self.service(e)
         fills = self.fill_slots(svc)
@@ -675,18 +673,14 @@ class StagedProtocol(FakeEngineCase):
         fills[0][1].set()
         self.wait_until(lambda: self.log_count("BADOPT_REFUSED") == 1,
                         "the server must try to adopt the staged read", 15.0)
-        self.assertTrue(run["done"].wait(10.0), "a refused adoption must end the request")
+        self.assertTrue(self.wait_log("BCANCEL_RAW", timeout=5.0),
+                        "after ERR BADOPT: slot busy the server must send BCANCEL")
+        self.assertTrue(run["done"].wait(15.0), "the retried request must finish")
         self.assert_clean(e)
-        # the engine still holds the staged read: the server must cancel it, or every later read is refused
-        self.assertTrue(self.wait_log("BCANCEL_RAW", timeout=2.0),
-                        "after ERR BADOPT: slot busy the server must send BCANCEL (existing server gap: it does "
-                        "not; the engine keeps its staged read pending)")
 
-    @unittest.expectedFailure
     def test_after_badopt_refusal_the_next_request_is_admitted(self):
-        """KNOWN SERVER GAP (same as above), seen from the next request: with the engine's staged read left
-        pending, its GEN/BGEN is refused (`ERR a staged read is pending; adopt or cancel it first`) and the
-        request fails.  xfail until the server sends BCANCEL on the BADOPT refusal path."""
+        """The same fix seen from the next request: with the staged read cancelled, its GEN/BGEN is not met with
+        `ERR a staged read is pending; adopt or cancel it first`."""
         e = self.engine("badopt-refuse")
         svc = self.service(e)
         fills = self.fill_slots(svc)
