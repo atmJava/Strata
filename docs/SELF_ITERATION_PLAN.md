@@ -134,8 +134,8 @@
 - **相位名**：staged 路径 `BREAD` / `BRDY` / `BADOPT` / `BCANCEL`，正常解码 `T` / `DONE`；
   "请求 id + 阶段"要能 grep 到一条请求的一生。
 - **每请求时延**：`done["metrics"]` 的 `queue_ms / ttft_ms / itl_ms_mean / wall_ms / tokens`
-  （S2；现网已带，无需开关）。**仪器代价**（V0 本机实测，5×200k 次）：中位 **1.37 µs/请求**，
-  离散度 6.8%（`tools/server/probe-instrument-cost.py`）——对 1 s 请求 0.00014%、对 30 tok/s 的
+  （S2；现网已带，无需开关）。**仪器代价**（V0 本机实测，5×200k 次）：中位 **1.36–1.40 µs/请求**（3 次独立运行，各 5×200k，离散度 3.0–8.9%；
+  `tools/server/probe-instrument-cost.py`，日志 `/opt/ai/logs/V0-probe-cost-20261025T1258Z.log`）——对 1 s 请求 0.00014%、对 30 tok/s 的
   一个 token 0.004%，可当免费；**没量**引擎侧 `STRATA_*_TIMING` 与 btrace 写盘（要窗口）。
 - **相位计时**：优先复用 `--stage-timing` / `STRATA_*_TIMING`，不新写（`RULES.md` §3）。
 - **taps**：`STRATA_TAP_FILE=/tmp/t%d.stap` + `tools/server/tap_parity.py compare|merge`。
@@ -222,7 +222,7 @@ harness 改用 0.2.2 基准（两条红转绿）、补丁追平 `46d12fa9`、矩
 ---
 
 **版本行**
-- v2 · 2026-10-25 21:0x · V0 收尾：§5.1 探针/日志约定与实测仪器代价、§11 改为 V1 的具体动作、
+- v2 · 2026-10-25 20:51 · V0 收尾：§5.1 探针/日志约定与实测仪器代价、§11 改为 V1 的具体动作、
   §4.2 进度（V1-1 基线已在 V0 测出）；判据与阈值未动。
 - v1 · 2026-10-25 20:30 · 初版。依据用户当日要求（自我决策/自我更新目标/自我执行/批次化验证/准备先行）
   与 `RULES.md` v3、`PORTING_RULES.md` v1.1（§12 无人值守）、`EVERGREEN_LOOP.md` v1、`MULTIPATH_RULES.md` v0.3

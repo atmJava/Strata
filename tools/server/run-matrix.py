@@ -46,6 +46,9 @@ BATCHES: dict[str, list[dict]] = {
         dict(id="V1-2", what="the server unit tests on the server source tree",
              criterion="0 failed, 0 errors (skips are printed, never counted as a pass)",
              where="ssh", timeout=900, judge="pytest",
+             # a port with nothing on it: the ten live-server cases skip instead of sending real traffic
+             # to production.  Their live run is a V2/V3 window item, not this one.
+             env={"MP_BASE_URL": "http://127.0.0.1:9"},
              cmd=["{py}", "-m", "pytest", "{src}/tools/server/tests", "-q"]),
         dict(id="V1-3", what="isa_guard_check (CTest)",
              criterion="ctest PASS", where="ssh", timeout=900, judge="exit0",
@@ -67,6 +70,10 @@ PYTEST_SUMMARY = re.compile(r"(\d+) (passed|failed|skipped|error|errors)")
 
 def expand(argv: list[str], values: dict[str, str]) -> list[str]:
     return [token.format(**values) for token in argv]
+
+
+def expand_env(env: dict[str, str], values: dict[str, str]) -> dict[str, str]:
+    return {key: value.format(**values) for key, value in env.items()}
 
 
 def judge(kind: str, returncode: int, output: str) -> tuple[str, str]:
@@ -128,7 +135,9 @@ def main(argv: list[str]) -> int:
         for item in selected:
             print(f"{item['id']}  {item['where']:5s}  {item['criterion']}")
             print(f"       {item['what']}")
-            print(f"       cmd: {' '.join(expand(item['cmd'], values))}")
+            env = expand_env(item.get("env", {}), values)
+            prefix = (" ".join(f"{k}={v}" for k, v in env.items()) + " ") if env else ""
+            print(f"       cmd: {prefix}{' '.join(expand(item['cmd'], values))}")
         return 0
 
     os.makedirs(out_dir, exist_ok=True)
@@ -138,7 +147,10 @@ def main(argv: list[str]) -> int:
     for item in selected:
         log_path = os.path.join(out_dir, item["id"] + ".log")
         command = expand(item["cmd"], values)
+        env = expand_env(item.get("env", {}), values)
         if item["where"] == "ssh":
+            if env:
+                command = ["env"] + [f"{k}={v}" for k, v in env.items()] + command
             command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", options.host] + command
         printable = " ".join(shlex.quote(token) for token in command)
         if options.dry_run:
@@ -146,7 +158,8 @@ def main(argv: list[str]) -> int:
             continue
         started = time.time()
         try:
-            done = subprocess.run(command, capture_output=True, text=True, timeout=item["timeout"])
+            run_env = dict(os.environ, **env) if item["where"] == "local" else None
+            done = subprocess.run(command, capture_output=True, text=True, timeout=item["timeout"], env=run_env)
             output = done.stdout + done.stderr
             result, detail = judge(item["judge"], done.returncode, output)
         except subprocess.TimeoutExpired as exc:
