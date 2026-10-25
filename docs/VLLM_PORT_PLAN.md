@@ -6,6 +6,10 @@
 > 挂点分析。逐项覆盖矩阵见 `docs/PORT_AUDIT_COVERAGE.md`（59 个优化项）。
 > 本文档只收**经过两侧源码核实**的判定；标注"未实测"的推断不得作为承诺。
 > 姊妹文档：`SM75_PORT_PLAN.md`（SM75 适配规则 W0–W8，已近收尾）。本文档是其后的**优化层**。
+>
+> **本页最后同步：2026-10-25 20:16，HEAD `46d12fa9`。** 运行状态看 `STATE.md`；每项的当前判定看 §5 状态表；
+> 本轮做了什么、刻意停在哪看 §6。服务端 staged read（W3）已于今日提交进仓库（`681fd256`+`46d12fa9`），
+> 本文里"W3 未提交"的措辞按 §6.3 读。
 
 ## 0. 边界（用户约定）
 
@@ -277,12 +281,14 @@ CUDA_VISIBLE_DEVICES=1 P4_DUMP_DIR=/tmp/p4/<v>/dump /tmp/p4/<v>/bench --ctx 1310
 29.5/36.6/62.9/77.3——冷启动慢 +39/+35/+9/+0.3%（T=1 最大，T=4 几乎为零）。以后这类比较必须预热 + 交错 A/B，
 而且要看**启动时 SM 时钟已 ≥1905 MHz**才算预热（跑 5 次预热不够，空闲 3 s 就掉回 300）。
 
-注：`qsa_block_scores` 在 7.5 卡上的**默认路径是 `block_scores_halve_kernel`**（`qsa_select.cu:1723` 分支，
-逐位相同），bench 的标签写的 "(multi)" 是历史名——上表的 37.2/39.9/49.6/51.0 实际是 Turing 默认的 halve 路径，
-所以这个对比就是 rows vs 生产默认，结论可直接用。
+注（口径，2026-10-25 20:16 按 HEAD 更正）：`qsa_block_scores` 的分派在 `qsa_select.cu:1694-1706`
+（`scores_halve_on()`）——**默认走 `block_scores_multi_kernel`**；`block_scores_halve_kernel` 只在
+`STRATA_SCORES_HALVE=1` 或 Turing 系列开着（`STRATA_SM75_PERF=1`）时才走，两者逐位相同
+（`qsa_select_rows_parity_test`）。本节的前两次测量做在"Turing 系列默认化还在工作区"的状态里，跑的是 halve 臂
+（bench 标签 "(multi)" 当时是历史名）；第三次复测按它自己的记录跑在默认 = multi 的口径下（Turing 默认化已移除，§6.2）。上表 (a) 的 scores 是
+二次复现值 **37.2/39.9/44.8/45.0**（第一次记的 49.6/51.0 复现不出，见本节末的复测说明）。halve 与 multi 逐位相同，
+所以"rows vs 生产默认"这个对比在两个口径下都成立，结论不受影响。
 
-
-#
 **第三次复测（功耗上限 250→280 W 之后，同一 build）**：`qsa_rows_bench --ctx 131072` 预热到 1920 MHz，
 attn **29.2 / 35.9 / 62.2 / 76.8 µs**（+15.9 µs/行，与上表预热组一致），层合计 109.8 / 116.7 / 151.0 / 163.9
 （+18.0 µs/行；T=3/4 比上表高 1.4-2.0%，因为默认的 scores 现在是 `multi` 内核——Turing 的 halve 属 opt-in 系列）。
@@ -293,6 +299,7 @@ attn **29.2 / 35.9 / 62.2 / 76.8 µs**（+15.9 µs/行，与上表预热组一�
 6.1/35.9/68.0 µs（线性于块数），到 256K 已占该层时间的 48%，层每行增量 15.3→17.3→20.3 µs。所以"长上下文 decode
 更贵"成立，但贵在**选块**不在 attn；层每行增量 15.3→17.3→20.3 µs（32K→128K→256K）就是 +33%，按 15.9-17.2 µs/行
 去估 229K 的账会偏小。
+
 ## P5 · server 侧 Qwen3 parser 正确性修复 → **判定：已覆盖，不移植**（2026-10-25 核实；本节的 `server.py` 行号是
 **工作区**（W3 staged-read 已打）的基准，HEAD 上会偏移）
 
@@ -317,26 +324,27 @@ S0c 在队列里。本项产出即本页。**
 
 ### P6b · S0c（staged read 失败/取消清理）用例与一个真实缺陷（2026-10-25）
 
-用例 `serve/test_staged_wedge.py`（已提交 `bfe515ca`；本地假引擎说 batch+staged 协议，3 例）。**它在 HEAD 上按设计
-skip 3 例**（HEAD 的 `serve/server.py` 没有 staged 代码，用例用 `f"BREAD ` 是否出现在 `generate_batched` 里来判），
-只有把未提交的 staged-read（W3）放进工作区才真跑——那种状态下 `pytest` 2.0 s 3 passed：
+用例 `serve/test_staged_wedge.py`（已提交 `bfe515ca`；本地假引擎说 batch+staged 协议，3 例）。**2026-10-25 20:14 在
+HEAD 上重跑：3 passed（2.22 s）**——staged 代码已随 `681fd256` 提交进仓库，所以"按设计 skip 3 例"那个前置条件
+（用例看 `generate_batched` 里有没有 `f"BREAD "`）已经不成立了；它当初在 HEAD 上 skip 是设计如此，不是坏。
 
 1. 引擎在 BREAD 期间死 → 请求报 `EngineDied`、`mp_staged` 必须清空、重启后下一请求正常准入（S0c 判据）；
 2. 引擎在任何请求前就死 → 下一请求重启引擎并照常准入（不卡死）；
 3. 全槽占满 → 长请求 BREAD→BRDY 后等槽；释放槽后必须 BADOPT 采用并跑完、`mp_staged` 清空。
 
-**用例抓到一个真缺陷（同批 staged-read 代码里，未提交）**：`serve/server.py` 的 staged 等待分支
+**用例抓到过一个真缺陷（已修；2026-10-25 20:16 核实在仓库里）**：staged 等待分支当时写的是
 `yield "ping", None` —— `generate_batched` 的消费者是 `_run` 的 token 循环（只认 `None` 心跳），元组会被当
 token 送进 detokenizer，`TypeError: '>=' not supported between tuple and int`，即"读到一半等槽"的请求必崩
-（BRDY 之后 100% 复现）。改为 `yield None` 后三例全绿。用例已提交（`bfe515ca`），**那一行 `yield None` 仍未提交**
-——它属别人未提交的 W3 staged-read 改动，随 W3 一起提交更合适，本页只记录判据与结论。（`serve/server.py` 里另有 4 处
+（BRDY 之后 100% 复现）。改成 `yield None` 后三例全绿；这一行现在在 `serve/server.py:1914` 和 `:1987`
+（后者旁边就是解释这个洞的注释），随 `681fd256` 一起提交。（`serve/server.py:5349,5410` 那两处
 `yield "ping", None` 是 `_run` 自己的 `("event", Event)` 协议，不是同一个洞；审查时不要一起"修"。）
 
-另外两处**代码读出来的缺口**（未实测，属 W3 未提交代码，交回 W3 作者）：
-- 假引擎不校验 `STRATA_BATCH_STAGED_READ`（真实引擎要它，`generate.cpp:11395`）：用例现在把两个 env 都设上，
-  但仍只是"照生产的样子设"，假引擎不读它，所以"生产 env 漏配"这种情况用例证明不了；
-- 真实引擎在槽忙时回 `ERR BADOPT: slot busy`，而 `serve/server.py` 是在读 BADM **之前**清 `mp_staged`、失败时
-  不发 BCANCEL → 引擎侧 `staged_admit.pending` 残留，后续准入可能被拒（按代码推断，未复现）。
+当初随这批代码记下的两处缺口，现在的状态（2026-10-25 20:16 按 HEAD 核对）：
+- **仍未闭合**：假引擎不校验 `STRATA_BATCH_STAGED_READ`（真实引擎要它，`generate.cpp:11451`）。用例把两个 env
+  都设上，但那只是"照生产的样子设"，假引擎不读它，所以"生产 env 漏配"这种情况用例证明不了；
+- **已修**：引擎在槽忙时回 `ERR BADOPT: slot busy`（`generate.cpp:12086`），server 在这个分支发 `BCANCEL`、
+  drain `BCANCELLED`，再把请求放回等槽队列重试（`serve/server.py:2018,2059-2062`，`681fd256`）；协议用例里
+  对应的两条 xfail 已转成 pass（`77d469b5`）。
 
 失败路径的清理（`finally` 里 `mp_staged = None` + BCANCEL/BCANCELLED）经用例 1 验证有效；用例 3 验证
 采用路径不遗留。这也把 fork 的"失败即出队"判据在 Strata 上落成了可回归的用例。
@@ -344,9 +352,11 @@ token 送进 detokenizer，`TypeError: '>=' not supported between tuple and int`
 ## 3. 验证基线（本机已跑通，2026-10-25）
 
 - 本地：CPU-only 构建 100%；`iq_avx1_parity`（all rows match）、`iq_avx2_parity`（0 failures）。
-- 移植基线树（本机 2026-10-25 建立）：服务器 `/opt/ai/src/strata-port-20261025`（= 本地工作区 rsync，
-  含未提交的 W3 改动），`build75`：Release / `arch=75` / cuda-13.0 nvcc / `GGML_DIR=/opt/ai/src/llama.cpp-3cf03257`
+- 移植基线树（本机 2026-10-25 建立）：服务器 `/opt/ai/src/strata-port-20261025`（= 本地工作区 rsync），
+  `build75`：Release / `arch=75` / cuda-13.0 nvcc / `GGML_DIR=/opt/ai/src/llama.cpp-3cf03257`
   / `BUILD_TESTS=ON`；构建 detached（nice 19，`/tmp/port-build-20261025.log`），不动生产目录。
+  **状态注（2026-10-25 20:16）**：这份快照建立时 W3 staged read 还是工作区里的未提交改动；它已在 `681fd256`
+  提交（收尾 `46d12fa9`），所以要用仓库当前的 staged 行为做验证，得**重新 rsync + 重新构建**，别沿用旧快照。
 - 服务器（既有记录，`SM75_PORT_PLAN` §6）：`-arch=75` 全量 EXIT=0，5 个 parity 全 0。
 - 移植每一项的验收 = 构建 + 对应 parity + 微基准数字（≥5% 且同 boot A/B）+ 本表格状态更新；
   端到端吞吐留给部署窗口，用 `bench-strata.py` / `parity_window.py` 口径。
@@ -378,7 +388,7 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 | P3c fused_iq Turing IQ3_XXS | 已实现·opt-in（未达 1.5× 门槛，不翻默认） | parity PASS（fused vs MMQ rel RMS 1.2e-4，2080 Ti/build75）；速度 1.16/1.13/1.01× @R=12/160/626 全路；探针 unset=0 / PF_FUSED=1 → 1 / SM75=0 → 0；`STRATA_PF_FUSED=1` 才启用（§P3c） |
 | P4 tile 扫描 | 完成·**默认不动** | 每行大头=attn over selection（预热 15.9 / 冷启 12.1 µs/行 vs scores +2.6）；QSAROWS 在 Turing T≥3 反向，不默认开；tile 扫描证明 128/256 与 256/256 **数值是错的**、32/128 崩溃，`static_assert(CHUNK==64 && THREADS==256)` 已锁死（要扫先重写 64-cell 相位）；decode attn 是纯标量 FMA（0 HMMA） |
 | P5 parser 修复 | 已覆盖·不移植 | `server.py:5988-6001,6044`、`serve/dsml.py:172,211` + 各自测试（2026-10-25 核实） |
-| P6 barrier 对照分析 | 已完成·不移植 | 三洞察两条已有等价机制、第三条=S0c；S0c 用例 `serve/test_staged_wedge.py`（已提交 `bfe515ca`）在**含未提交 staged 代码的工作区** 3 passed（HEAD 上按设计 skip），并抓到 `yield ("ping", None)` 真缺陷（§P6b） |
+| P6 barrier 对照分析 | 已完成·不移植 | 三洞察两条已有等价机制、第三条=S0c；S0c 用例 `serve/test_staged_wedge.py`（`bfe515ca`）**在 HEAD 上 3 passed（2026-10-25 20:14 本机实测，2.22 s）**——staged 代码已随 `681fd256` 进仓库，原先"HEAD 上按设计 skip"的前置条件已不成立；它抓到的 `yield ("ping", None)` 缺陷也已修（§P6b） |
 | 不移植清单的逐条证据复核 | 已完成 | 本文档 §1（2026-10-25 源码核实） |
 
 ## 6. 本轮交付与刻意留下的边界（2026-10-25）
@@ -402,6 +412,7 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
    真要更快得先重写 64-cell 相位（`CHUNK/64` 子 tile + running max），那是新的实现工作，不是调参。
 5. **P1 的吞吐数字**：`220.84 vs 116.04` 是 fork 在 NVFP4/FP8 路线上的数据，Strata 侧只在拿到权重 + 部署窗口后
    才谈得上数字（§4 口径）。
+
 ### 6.1 2026-10-25 的全面移植审查（四份报告 + 由此产生的修复）
 
 `PORT_AUDIT_COVERAGE.md`（fork 59 项逐条对照）、`PORT_AUDIT_DEFAULTS.md`（默认路径不变性）、
@@ -447,4 +458,23 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 
 保留的部分：`sm75_series.hpp` 新增 `sm75_series_setting()`（区分 unset/0/1），默认语义不变；测试
 `mtp_logits_width_test` 现在断言"未设 = 关、`=1` 才开"，把这条决定钉在回归里。
+
+### 6.3 服务端 staged read（W3）已进仓库，生产补丁落后一个 commit（2026-10-25 20:16 核实）
+
+本轮把 W3 的 staged read 从"工作区里的未提交改动"变成了仓库代码：`681fd256`（引擎
+`src/program/generate.cpp` +125、服务端 `serve/server.py` +169：槽占满时先把 prompt 读进主 session、
+原地移交，并修掉 `BADOPT` 被拒后的 pending 残留）、`46d12fa9`（BRDY 字段不全按协议错误抛、取消路径的
+drain 上限 10 s）。本文其余章节凡是写"W3 未提交"的地方，按本节读：代码已提交，判据与结论不变。
+
+本机（不是服务器、不是生产）实测的两条：`serve/test_staged_wedge.py` **3 passed / 2.22 s**；
+`pytest tools/server/tests -q` **2 failed / 55 passed / 10 skipped**，两条红的是
+`tools/server/tests/staged_patch_harness.py:56` 把补丁打在仓库 `serve/server.py` 上（补丁里的代码已在仓库里），
+不是移植代码坏。细节与修法写在 `tools/server/patches/README.md`。
+
+**遗留的两件事**（都在 `tools/server/patches/README.md` 记着，不在本文做）：
+
+1. **补丁落后**：`mp-w3-server-0.2.2.patch` 里没有 `46d12fa9` 的两处（`BCANCEL_DRAIN_S`、BRDY 严格解析），
+   而 R12/R13 两处修复只在补丁的**工作区副本**里（`HEAD` 的副本没有）。从干净 checkout 部署会拿到更旧的行为。
+2. **harness 基准要改**：让 `staged_patch_harness.py` 指向一份 0.2.2 的 `serve/server.py` 副本，而不是仓库文件，
+   这样"补丁本身"才真的在被测。
 

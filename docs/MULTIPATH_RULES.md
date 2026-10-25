@@ -11,14 +11,19 @@
 
 - 生产：`atm@192.168.3.14`，`strata.service` → `/opt/ai/src/strata-0.2.2/run-022.sh`，配置 `strata-022.json`，
   端口 8080，API key `111`；2× RTX 2080 Ti 22.5 GB，Xeon E5-2680 v4，62 GiB。
-- 当前形态（2026-10-25 起）：W3 暂存读**生产启用**，阈值 4096；引擎 `4f6f635f`、server `e8edc558`；
-  回滚备份 `/opt/ai/tmp/mp-w3-A3-*`（引擎/server/launcher/config 快照）。
+- 当前形态（2026-10-25 起）：W3 暂存读**生产启用**，阈值 4096；**现网四件实测**（V0，2026-10-25 20:40，
+  `tools/server/probe-version-stamp.py`）：引擎 `383b426a`、server `a3c7df58`、launcher `9b6bf792`、
+  config `6c362d01`。旧文档的 `4f6f635f`/`e8edc558` 来自更早的部署，**不是现网**；`52b84d54` 是
+  patch 工作树 `/opt/ai/src/strata-mp` 的 server hash，也不是现网（详见 `STATE.md` 版本戳基线）。
+  回滚备份：当前态 `/opt/ai/tmp/rollback-V0-20261025T124629Z/`（字节核对过）；`mp-w3-A3-*` 是
+  **W3 前**的旧快照（与现网不相同）。
 - 部署唯一入口：`/opt/ai/bin/use-config.sh <json>`；装后 `verify-running-config.sh`；回滚 = 停服 → cp 回 → use-config。
 - 测试从 kali 跑：`MP_BASE_URL=http://192.168.3.14:8080 MP_API_KEY=111 python3 -m pytest tools/server/tests ...`。
 
 ## 2. 预算（本项目口径）
 
-- 每轮重启 ≤2 次；第 3 次在复盘写理由。
+- 一批 = **1 次构建 + 1 个窗口 + 1 次完整矩阵**（`SELF_ITERATION_PLAN.md` §2 C1/C2）；批内每项一个默认关的
+  独立开关，矩阵含"全开"与"逐项关"两臂。每批重启 ≤2 次；第 3 次在复盘写理由。
 - 一次引擎构建 ≈10.6 min（`tools/server/README.md`）；构建单独计。
 - 4 路聚合噪声地板：跨 boot ≤9%（L-040）只作趋势；同会话 <3% 不下结论。
 - 小读/首字跨 boot 按 ~7%（L-031）。
@@ -71,5 +76,7 @@
 **变更记录**
 - v0.1 · 2026-10-24 · 初稿（已被替代）。
 - v0.2 · 2026-10-25 · DoD + Gate + 禁止清单（通用部分已迁到 `PORTING_RULES.md`）。
+- v0.4 · 2026-10-25 · §1 现网四件 hash 改为 V0 实测值（旧值非现网）；§2 预算改为批口径（1 次构建 + 1 个窗口 + 1 次矩阵，批内多项各带开关），与
+  `SELF_ITERATION_PLAN.md` §2 C1/C2 对齐；判据未动。
 - v0.3 · 2026-10-25 · 拆分：通用规则独立成 `PORTING_RULES.md` v1；本文件缩成项目适配层（事实、预算、
   真实脚本名、文档落点、四问），事故复盘移出正文。
