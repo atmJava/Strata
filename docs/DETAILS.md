@@ -2545,6 +2545,7 @@ CUDA card, where it measured +1..3 % prompt speed on a Tesla P100 at 30-60K toke
 
 Options that change answers (other summation order) are separate and explicit: `STRATA_SELECT_SIMT=1|2` (FP32 tiled block scorer,
 KL 0.01 against the warp scorer per #2071), `STRATA_PA_V2T=1` (v2 prompt attention, #2092/#2146), `STRATA_PF_FUSED=1` (fused int8
-prompt experts for the Q2_0 pack, #2145; a 7.5 card sets its kernels up by default - its own switch, not the
-`STRATA_SM75_PERF` series - the pair still needs `STRATA_PF_FUSED=1`, and `STRATA_PF_FUSED_SM75=0` puts a 7.5 card back
-on MMQ; sm_80+ is unchanged), `STRATA_BF16_TC=1` with `STRATA_XN_F16` (#2091).
+prompt experts for the Q2_0 pack, #2145; a 7.5 card sets its kernels up only when asked - `STRATA_PF_FUSED=1` or
+`STRATA_PF_FUSED_SM75` set explicitly (its own switch, not the `STRATA_SM75_PERF` series) - and the pair still needs
+`STRATA_PF_FUSED=1`: `STRATA_PF_FUSED_SM75=1` alone leaves a 7.5 card on MMQ, an unrequested one makes no kernel setup
+call and prints no banner, and `STRATA_PF_FUSED_SM75=0` keeps MMQ in every case; sm_80+ is unchanged), `STRATA_BF16_TC=1` with `STRATA_XN_F16` (#2091).

@@ -864,10 +864,15 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                 err = "verify: the DFlash2 tap buffers could not be allocated";
                 return false;
             }
-            // A layer split used to open the file on the stage that reaches the head only, because every stage opening
-            // one path "wb" would truncate the last one's records.  That rule stays for a path without "%d"; with "%d"
-            // each stage has its own file and every stage writes its own rows.
+            // Only the whole model writes to a path without "%d": every stage opening one path "wb" would truncate the
+            // last one's records, and a split stage's records are its own layers only, so a shared file would hold a
+            // subset with no marker.  A layer split must use "%d" (one file per stage); this stage then says so below
+            // instead of silently writing nothing.
             const bool whole_model = lb_ == 0 && le_ == g.n_layers;
+            if (tap_path != nullptr && !tap_path_per_stage_ && !whole_model)
+                std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: this stage's layers [%lld, %lld) record no dump (a layer split "
+                                     "needs a \"%%d\" in the path: one file per stage)\n", tap_file_path.c_str(),
+                             (long long) lb_, (long long) le_);
             if (tap_path != nullptr && (tap_path_per_stage_ || whole_model)) {
                 tap_file_ = std::fopen(tap_file_path.c_str(), "wb");
                 if (tap_file_ == nullptr) { err = std::string("verify: cannot write STRATA_TAP_FILE ") + tap_file_path; return false; }
@@ -3197,6 +3202,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         // a stage-private STRATA_TAP_FILE ("%d"): the graph copied this stage's taps into the mapped buffer already
         // (record_window does it in the overlapped branch too), so its records go out here - the `le_ < n_layers`
         // write below is never reached in the overlapped split
+        // a stage-private STRATA_TAP_FILE ("%d"): this stage appends its own records before forwarding.  Without "%d" the
+        // shared file is written by the whole model only (see init), so nothing is appended here.
         if (tap_on_ && tap_file_ != nullptr && tap_path_per_stage_) tap_write(T, tokens, pos0);
         commit_pending_ = false;
         if (prof_on_ && G == 1) collect_profile();
@@ -3241,6 +3248,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         ++windows;
         // a stage-private STRATA_TAP_FILE ("%d"): this stage appends its own records before forwarding.  Without "%d" the
         // stages share one file and, as before, only the stage that reaches the head appends (the others would interleave).
+        // a stage-private STRATA_TAP_FILE ("%d"): this stage appends its own records before forwarding.  Without "%d" the
+        // shared file is written by the whole model only (see init), so nothing is appended here.
         if (tap_on_ && tap_file_ != nullptr && tap_path_per_stage_) tap_write(T, tokens, pos0);
         return next_ == nullptr || next_->run(T, tokens, pos0, pool, next_user_, out, err);
     }

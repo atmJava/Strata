@@ -1312,9 +1312,11 @@ const DevInfo& dev_info() {
         const char* v = std::getenv("STRATA_PF_FUSED_SM75");
         return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1;
     }();
+    // (the same reading as requested() and native_supported: only a leading '1' asks for it, so "true"/"2" cannot
+    // set the kernels up while the consumer still answers false)
     static const bool fused_asked = [] {
         const char* v = std::getenv("STRATA_PF_FUSED");
-        return v != nullptr && v[0] != '\0' && std::atoi(v) != 0;
+        return v != nullptr && v[0] == '1';
     }();
     const bool sm75 = sm75_env > 0 || (sm75_env < 0 && major == 7 && minor == 5 && fused_asked);
     if (major < 8 && !(major == 7 && minor == 5 && sm75)) return d;

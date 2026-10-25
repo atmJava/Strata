@@ -1,12 +1,14 @@
 // include/strata/prefill/moe_fused_iq.hpp - #136: the fused int8 prompt experts (moe_fused.hpp) for the native GGUF
 // packs (tools/iq_pack.py: an expert is its raw GGUF slices [gate rows | up rows | down rows], formats per layer in
-// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; HIP: MMQ).  These kernels
-// are set up by default on a compute capability 7.5 (Turing) card (their own switch, STRATA_PF_FUSED_SM75 - not the
-// STRATA_SM75_PERF series, whose kernels live in sm75_series.hpp): dev_info sets them up per kernel and prints one
-// banner, so the default launch path is still MMQ - the fused pairs need STRATA_PF_FUSED=1 like every other covered
-// format.  With it, the production pack's pair (gate/up IQ3_XXS, down IQ4_NL) runs where its
-// shapes fit the card's shared memory, and the Q2_0/Q2_0 pair runs the fused kernels on a 7.5 card too (before this it
-// needed STRATA_PF_FUSED_SM75=1 there - that switch's default is what changed, not the pair)
+// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; HIP: MMQ).  On a compute
+// capability 7.5 (Turing) card the kernels are set up only when the fused path is asked for - STRATA_PF_FUSED=1, or
+// STRATA_PF_FUSED_SM75 set explicitly (their own switch, not the STRATA_SM75_PERF series, whose kernels live in
+// sm75_series.hpp) - and dev_info then sets them up per kernel and prints one banner; an unrequested 7.5 card makes no
+// cudaFuncSetAttribute call and prints nothing, so its default launch path is MMQ, exactly as before.  The switch is
+// read once, at the first dev_info() call.  With STRATA_PF_FUSED=1, the production pack's pair (gate/up IQ3_XXS, down
+// IQ4_NL) runs where its shapes fit the card's shared memory, and the Q2_0/Q2_0 pair runs the fused kernels on a 7.5
+// card too (before this it needed STRATA_PF_FUSED_SM75=1 there - that switch's default is what changed, not the pair).
+// STRATA_PF_FUSED_SM75=1 on its own does NOT enable any fused path: the consumer still asks for STRATA_PF_FUSED.
 // (checked per kernel in moe_fused_iq.cu; the IQ pair runs at 2 warps a row when the 4-warp shape does not fit);
 // STRATA_PF_FUSED_SM75=0 keeps the MMQ path there in every case.
 //

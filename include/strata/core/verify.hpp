@@ -578,7 +578,8 @@ private:
     // (the residual with its pending FFN write applied, the mean of the hc streams) per row; run() appends
     // (pos, token, taps) records to the file.  A "%d" in the path is replaced by the stage's layer_lo (0: whole model),
     // so a layer split writes one file per stage and every stage appends its own records; no "%d": the path as given,
-    // as before (only the stage that reaches the head appends).
+    // and ONLY the whole model writes (a stage of a layer split records no dump - it says so at init; a split needs
+    // "%d", because every stage truncating one shared path would leave only the last one's rows).
     bool tap_on_ = false;
     bool tap_path_per_stage_ = false;             ///< STRATA_TAP_FILE held "%d": each stage's own file, so every stage appends
     std::vector<int> tap_req_;                    ///< set_taps
