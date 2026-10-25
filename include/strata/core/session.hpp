@@ -60,6 +60,18 @@ struct SessionState {
     int64_t gdn_ord0 = 0;                 ///< global GDN ordinal of `gdn_state` row 0
     int64_t gdn_alloc = 0;                ///< allocated GDN rows
     int qsa_primary() const { return (int) qsa_ord0; }
+    /// **THE SESSION THIS ONE'S RoPE TABLE BELONGS TO (P2 item 1), or null when this session built its own.**
+    ///
+    /// `session_init(..., share_rope_from = donor)` sets it: every QSA state here then points its `cos_tab`/
+    /// `sin_tab` at the DONOR's table and has `owns_rope == false`, so this session never frees it. **The donor
+    /// must be built first and released LAST** - a released donor leaves these pointers dangling, and
+    /// `session_release` has no way to reach a borrower to notice. `session_rope_owner` is what reads it, and it
+    /// answers nullptr once the chain's owner has been released, so a NEW borrow of a dead donor fails instead of
+    /// handing out the dangling table.
+    ///
+    /// The table is identical in every QSA layer and in every session of a stage, so this is 1 table per DEVICE
+    /// instead of 1 per session: 48 MiB at 192K, six duplicate slots' worth per stage.
+    const SessionState* rope_donor = nullptr;
     /// The doorbell the host loop polls.  Null until a caller provides one - the engine runs without it, and
     /// neither `session_token` nor `session_replay` looks at it.
     const Doorbell* db = nullptr;
@@ -95,13 +107,37 @@ struct SessionState {
 /// [layer_lo, layer_hi) carves only that range's per-layer state (a split stage runs a slice of the model);
 /// the default full range is byte-identical to the old whole-model carve.  Pure arithmetic - safe to call for
 /// a candidate range before anything is allocated, which is how the layer-split search prices a placement.
+///
+/// `borrow_rope = true` is the ACROSS-SESSION share (P2 item 1): no QSA state here carries the RoPE table at
+/// all, because `session_init` is pointed at another session's (`share_rope_from`).  It saves exactly one table
+/// - `max_cells * (n_rot/2) * 4 * 2` bytes, 48 MiB at 192K and 64 MiB at 262K for the compiled geometry - and
+/// **the flag has to match the `session_init` call**: sizing with `true` and then passing no donor carves an
+/// arena one table short, while sizing with `false` and passing a donor only wastes it.  The default `false` is
+/// byte-for-byte today's formula.
 uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int64_t layer_lo = 0,
-                       int64_t layer_hi = -1);
+                       int64_t layer_hi = -1, bool borrow_rope = false);
 /// Carves `base` (DEVICE memory) into `s`.  Returns the bytes used.  Same range convention as `session_bytes`.
+///
+/// `share_rope_from` non-null: every QSA state in the new session BORROWS that session's RoPE table instead of
+/// building its own, so it owns nothing to free.  The donor must be a session that already owns a table (built
+/// before this call, released after it) and must be compatible - same device, same `max_cells`, same
+/// `layer_lo`, and the QSA geometry this `g` implies.  **An incompatible or table-less donor returns 0**, before
+/// anything is carved, rather than silently building a private table: a wrong table is a wrong rotation, not a
+/// fault, so a quiet fallback would be the expensive outcome.
 uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void* base, SessionState& s,
-                      int64_t layer_lo = 0, int64_t layer_hi = -1);
+                      int64_t layer_lo = 0, int64_t layer_hi = -1,
+                      const SessionState* share_rope_from = nullptr);
+/// **THE QSA STATE THAT OWNS THE RoPE TABLE `s` USES** - `&s.qsa_states[s.qsa_ord0]` when that state built it,
+/// the donor's when `s` borrowed (walking a borrow chain), and nullptr when there is none: no QSA state, no
+/// table built yet, or the owner has already been released.  This is the pointer `session_init` hands to
+/// `qsa_state_init`'s `share_rope`, and the only place the borrow chain is interpreted.
+const QsaState* session_rope_owner(const SessionState& s);
 /// Before the memory `session_init` carved is freed: forgets what points into it from outside the session (the
 /// rope kernels' registered angle table, #280), so a later session never rotates by freed memory.
+///
+/// Frees only what THIS session built: a session initialized with `share_rope_from` owns no table, so releasing
+/// it does nothing to the donor's.  **A donor must be released AFTER every session that borrowed from it** -
+/// nothing in a borrower records a release, and the table it points at is the donor's memory.
 void session_release(SessionState& s);
 /// Zeroes every layer's state - the residual to `R_init`, everything else to zero, so a fresh sequence starts
 /// from the reference's own `zeros()`.

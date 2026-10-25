@@ -15,6 +15,7 @@
 #include <cuda_runtime.h>
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -53,7 +54,8 @@ static uint64_t ple_hist_bytes() {
     return (uint64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM * sizeof(float);
 }
 
-uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int64_t layer_lo, int64_t layer_hi) {
+uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int64_t layer_lo, int64_t layer_hi,
+                       bool borrow_rope) {
     if (layer_hi < 0 || layer_hi > g.n_layers) layer_hi = g.n_layers;
     if (layer_lo < 0) layer_lo = 0;
     // QSA layers are `l % interval == interval-1`, so exactly `bound / interval` of them live below `bound`
@@ -65,8 +67,14 @@ uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int
     n += gdn_buffers_bytes(g);
     n += (uint64_t) gdn_n * gdn_state_floats(g) * 4;
     // One QSA state carries the RoPE table; the others borrow it (P7: 64 MiB per layer at 262K).
+    // `borrow_rope` says even the FIRST one borrows it - from ANOTHER SESSION (`session_init`'s
+    // `share_rope_from`) - so the table comes out of this session's arena entirely. Which state carries it does
+    // not matter to the arithmetic: one `with_rope` state and `q_n - 1` without is exactly `q_n` without when
+    // the first one borrows too, and the table is a 16-byte multiple (max_cells * 128 bytes at n_rot = 64), so
+    // the difference is exactly one table and no alignment slack either way.
     if (g.n_qsa_layers() > 0)
-        n += qsa_state_bytes(g, max_cells, true) + (uint64_t) (q_n - 1) * qsa_state_bytes(g, max_cells, false);
+        n += qsa_state_bytes(g, max_cells, !borrow_rope) +
+             (uint64_t) (q_n - 1) * qsa_state_bytes(g, max_cells, false);
     n += qsa_buffers_bytes(g, max_cells);
     n += moe_buffers_bytes(g, k);
     n += block_buffers_bytes(g);
@@ -74,10 +82,62 @@ uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int
     return align_up(n, SESSION_STATE_ALIGN) + 4096;
 }
 
+const QsaState* session_rope_owner(const SessionState& s) {
+    // A SESSION THAT BORROWED STILL ANSWERS WITH THE ONE STATE THAT HOLDS THE TABLE.  Walking `rope_donor`
+    // rather than testing the session's own primary only is what makes a chain (a stage's first session owning,
+    // the rest borrowing, any of them offered as donor) resolve to the single real owner - and it is also the
+    // cheap lifetime guard: `session_release` clears `owns_rope`, so a chain whose owner has been released ends
+    // at nullptr and a NEW borrow of it fails in `session_init` instead of silently taking a dangling pointer.
+    // The bound is a cycle guard (nothing can build one today, since a donor must already exist), not a depth
+    // anyone should rely on.
+    const SessionState* cur = &s;
+    for (int depth = 0; cur != nullptr && depth < 8; ++depth) {
+        if (cur->qsa_states == nullptr || cur->qsa_alloc <= 0) return nullptr;
+        const QsaState& primary = cur->qsa_states[cur->qsa_ord0];
+        if (primary.owns_rope && primary.cos_tab != nullptr) return &primary;
+        cur = cur->rope_donor;
+    }
+    return nullptr;
+}
+
 uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void* base, SessionState& s,
-                      int64_t layer_lo, int64_t layer_hi) {
+                      int64_t layer_lo, int64_t layer_hi, const SessionState* share_rope_from) {
     if (layer_hi < 0 || layer_hi > g.n_layers) layer_hi = g.n_layers;
     if (layer_lo < 0) layer_lo = 0;
+    // THE BORROWED TABLE, RESOLVED BEFORE ANYTHING IS CARVED.  Every check below is a way the donor's table
+    // could be the wrong table for this session, and each one returns 0 with the arena untouched instead of
+    // falling back to a private copy: sharing is opt-in by argument, so a caller that asked for it and silently
+    // got neither sharing nor a failure would be paying for the table it thought it had removed.
+    const QsaState* rope = nullptr;
+    if (share_rope_from != nullptr) {
+        rope = session_rope_owner(*share_rope_from);
+        if (share_rope_from == &s || rope == nullptr) return 0;      // self, or no live table to borrow
+        if (share_rope_from->max_cells != max_cells) return 0;
+        // THE SAME STARTING LAYER: `qsa_ord0` - and with it every state's global ordinal and the primary's
+        // index - is `layer_lo / interval`, so a donor that starts elsewhere has a differently-indexed state
+        // array.  A stage's sessions borrow from THAT STAGE's first session for exactly this reason.  The table
+        // itself does not depend on the range, so `layer_hi` is not part of the test.
+        if (share_rope_from->layer_lo != layer_lo) return 0;
+        // THE GEOMETRY THE TABLE WAS BUILT FOR, from what the donor's own state records.  The table is
+        // `max_cells x (n_rot/2) x 2 floats`, and `n_rot` is not a field of QsaState - the `g` in this process
+        // is (one model per process), so what can disagree is the page size and the indexer block, which the
+        // primary state's own page count and pooled rows encode; `max_cells` above is the table's LENGTH, and
+        // the primary's copy of it is checked directly.  A ring's table covers a window, not a sequence.
+        const strata::kernels::QsaShapes sh = qsa_shapes(g);
+        if (rope->max_cells != max_cells) return 0;
+        if (sh.page_size > 0 && rope->n_pages != (max_cells + sh.page_size - 1) / sh.page_size) return 0;
+        if (sh.idx_block > 0 && rope->idx_pooled_rows != max_cells / sh.idx_block + 2) return 0;
+        if (rope->kv_mode == 2) return 0;
+        // THE DEVICE: asked of the allocation itself rather than of a field that could go stale.  A table on
+        // another device is a pointer this device cannot read, and the rotation would fault or read garbage.
+        cudaPointerAttributes attr{};
+        int device = 0;
+        if (cudaPointerGetAttributes(&attr, rope->cos_tab) != cudaSuccess) {
+            (void) cudaGetLastError();   // not a CUDA allocation: nothing to borrow, and no stale error left
+            return 0;
+        }
+        if (cudaGetDevice(&device) != cudaSuccess || attr.device != device) return 0;
+    }
     uint8_t* p = (uint8_t*) base;
     uint64_t used = 0;
     auto take = [&](uint64_t bytes) {
@@ -90,6 +150,7 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     s.k = k;
     s.layer_lo = layer_lo;
     s.layer_hi = layer_hi;
+    s.rope_donor = share_rope_from;
     const int64_t I = std::max<int64_t>(g.qsa_interval, 1);
     const int64_t q_n_range = layer_hi / I - layer_lo / I;
     s.qsa_ord0 = layer_lo / I;
@@ -105,7 +166,10 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     // same way, which is a coupling with nothing to gain.  Only the range's ordinals are initialized; the
     // rest stay value-initialized nulls.  The FIRST ALLOCATED one (the session's primary, ordinal qsa_ord0)
     // owns the RoPE table that the others - and the prefill staging identity, and the MTP drafter - borrow.
-    const uint64_t first = qsa_state_bytes(g, max_cells, true), rest = qsa_state_bytes(g, max_cells, false);
+    // With `share_rope_from` NOBODY here owns it: the first state is sized without the table too, and every
+    // state points at the donor's, so `owns_rope` stays false everywhere and `session_release` frees nothing.
+    const uint64_t first = qsa_state_bytes(g, max_cells, rope == nullptr),
+                   rest = qsa_state_bytes(g, max_cells, false);
     s.qsa_state_arena = take(g.n_qsa_layers() > 0 ? first + (uint64_t) (s.qsa_alloc - 1) * rest : 0);
     s.qsa_states = new QsaState[(size_t) g.n_qsa_layers()]();
     s.qsa_buf_arena = take(qsa_buffers_bytes(g, max_cells));
@@ -115,8 +179,18 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     // attention read null host pointers at the first request ("illegal memory access"), so the session fails here
     for (int64_t j = 0; j < s.qsa_alloc; ++j)
         if (qsa_state_init(g, max_cells, qp + (j == 0 ? 0 : first + (uint64_t) (j - 1) * rest),
-                           s.qsa_states[s.qsa_ord0 + j], j == 0 ? nullptr : &s.qsa_states[s.qsa_ord0]) == 0)
+                           s.qsa_states[s.qsa_ord0 + j], j == 0 ? rope : &s.qsa_states[s.qsa_ord0]) == 0)
             return 0;
+#ifndef NDEBUG
+    // THE OWNERSHIP INVARIANT THE RELEASE PATH DEPENDS ON (P2 item 1): one owner when this session built the
+    // table, NONE when it borrowed one - so releasing a borrower can never free the donor's memory, and
+    // releasing a full session still frees exactly the one table it built.
+    for (int64_t j = 0; j < s.qsa_alloc; ++j) {
+        const QsaState& q = s.qsa_states[s.qsa_ord0 + j];
+        assert(q.owns_rope == (j == 0 && rope == nullptr));
+        assert(q.cos_tab != nullptr && q.sin_tab != nullptr);
+    }
+#endif
     qsa_buffers_init(g, max_cells, s.qsa_buf_arena, s.qsa_bufs);
 
     s.moe_arena = take(moe_buffers_bytes(g, k));
@@ -127,14 +201,22 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     // `session_zero`; it survives every token, which is the whole point of a conv history.
     s.ple_hist = (float*) take(ple_hist_bytes());
     s.R = s.block.R;
+#ifndef NDEBUG
+    // THE ARENA THIS CARVED FITS WHAT THE CALLER WAS TOLD TO ALLOCATE.  `session_bytes`' `borrow_rope` and this
+    // call's `share_rope_from` have to agree; the dangerous direction is sizing BORROWED and initializing
+    // without a donor, which is one table short and a silent overflow of whatever follows the arena.
+    assert(used <= session_bytes(g, max_cells, k, layer_lo, layer_hi, rope != nullptr));
+#endif
     return used;
 }
 
 void session_release(SessionState& s) {
+    // the ALLOCATED ordinals start at qsa_ord0: a split range (layer_lo > 0) that owned its table used to be skipped
+    // here, leaking the table and leaving its #280 registry entry behind
     for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
-        if (s.qsa_states[j].owns_rope) {
-            strata::kernels::rope_table_release(s.qsa_states[j].cos_tab);
-            s.qsa_states[j].owns_rope = false;
+        if (s.qsa_states[s.qsa_ord0 + j].owns_rope) {
+            strata::kernels::rope_table_release(s.qsa_states[s.qsa_ord0 + j].cos_tab);
+            s.qsa_states[s.qsa_ord0 + j].owns_rope = false;
         }
 }
 
