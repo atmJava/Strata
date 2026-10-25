@@ -17,15 +17,29 @@
 #include <cstdlib>
 #include <cstring>
 
+// P4 (docs/VLLM_PORT_PLAN.md): the decode attention's work item is one CHUNK of cells over THREADS threads.  The
+// defaults are the measured shape; these two macros exist so tests/cuda can build the same kernel at another tile in
+// a sweep (no env switch: a card serving a model does not pick them at run time).
+#ifndef STRATA_QSA_ATTN_CHUNK
+#define STRATA_QSA_ATTN_CHUNK 64
+#endif
+#ifndef STRATA_QSA_ATTN_THREADS
+#define STRATA_QSA_ATTN_THREADS 256
+#endif
+
 namespace strata::kernels {
 namespace {
 
 constexpr int HD = 256;          // head_dim
 constexpr int G = 12;            // query heads per KV head (24 / 2)
 static_assert(HD == strata::core::kCompiledGeometry.head_dim && G == strata::core::kCompiledGeometry.n_head / strata::core::kCompiledGeometry.n_head_kv, "qsa_decode_attn is compiled for core/geometry.hpp");
-constexpr int CHUNK = 64;        // cells per block
-constexpr int THREADS = 256;
+constexpr int CHUNK = STRATA_QSA_ATTN_CHUNK;        // cells per block
+constexpr int THREADS = STRATA_QSA_ATTN_THREADS;
 constexpr int WARPS = THREADS / 32;
+// G * CHUNK / THREADS heads per thread: only the shapes that divide evenly are meaningful (64/256 -> 3, 128/256 -> 6,
+// 32/128 -> 3).  The defaults are the measured ones; the macros are for the tile sweep (tests/cuda, P4), not a knob.
+static_assert(G * CHUNK % THREADS == 0 && THREADS >= CHUNK && THREADS % 32 == 0,
+              "qsa_decode_attn: G*CHUNK must divide THREADS, THREADS >= CHUNK, THREADS a multiple of 32");
 
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
