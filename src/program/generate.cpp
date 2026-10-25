@@ -13135,6 +13135,7 @@ int main(int argc, char** argv) {
                 // the last 2047 prompt rows' taps (the block's whole window), as the CLI's prompt path asks for them
                 sp.set_taps(df2.tap_layers(), std::max<int64_t>(0, n - 2047), 2048);
                 sp.on_taps = [&](const float* taps, int64_t rows, int64_t pos0, std::string& e) -> bool {
+                    if (!df2_req) return true;   // the drafter failed earlier in this prompt: the taps are not wanted
                     if (!df2.context(taps, rows, pos0, e)) {
                         // the drafter's ring cannot follow this prompt: finish the request on the MTP (a failed feed
                         // would make every later draft wrong, so the drafter goes away rather than guessing)
@@ -15318,24 +15319,25 @@ int main(int argc, char** argv) {
                         // the committed window's rows (n_new = a + 1 at pos0 = p) and then the block for its last
                         // committed token - the CLI's draft_next (generate.cpp:16617-16652), with the window T the
                         // serial loop above chose.  The taps pointer is the one prepare() captured on.
-                        int32_t dd[strata::core::Dflash2Drafter::kDrafts];
-                        float pp[strata::core::Dflash2Drafter::kDrafts];
-                        drafted = df2.draft(ver.tap_dev(), a + 1, p, outv[(size_t) a], dd, pp, err);
-                        if (!drafted) {
-                            // a graph/kernel failure mid-request: say it once and let the MTP finish this window and
-                            // every later one, rather than failing a request that the MTP can serve
-                            std::fprintf(stderr, "strata serve: --draft dflash2: %s; the rest of this session decodes on the MTP\n", err.c_str());
-                            use_df2 = false;
-                            df2_req = false;
-                            df2.release();
-                            drafted = mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p);
-                        }
-                        if (drafted) {
+                        int32_t dd[strata::core::Dflash2Drafter::kDrafts] = {};
+                        float pp[strata::core::Dflash2Drafter::kDrafts] = {};
+                        const bool from_df2 = df2.draft(ver.tap_dev(), a + 1, p, outv[(size_t) a], dd, pp, err);
+                        if (from_df2) {
                             for (size_t i = 0; i < drafts.size() && i < (size_t) strata::core::Dflash2Drafter::kDrafts; ++i) {
                                 drafts[i] = dd[i];
                                 dprob[i] = pp[i];
                             }
                             df2_ctx_next = p + a + 1;   // these rows are in the ring now
+                        } else {
+                            // a graph/kernel failure mid-request: say it once and let the MTP finish this window and
+                            // every later one, rather than failing a request that the MTP can serve.  The MTP's own
+                            // drafts are the ones used: dd/pp (which the failed call may have left half-written) are
+                            // not copied over them.
+                            std::fprintf(stderr, "strata serve: --draft dflash2: %s; the rest of this session decodes on the MTP\n", err.c_str());
+                            use_df2 = false;
+                            df2_req = false;
+                            df2.release();
+                            drafted = mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p);
                         }
                     } else
 #endif

@@ -818,7 +818,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                 for (int n = 1;; ++n) {
                     cand = tap_file_path + tag + std::to_string(n);
                     std::error_code ec;
-                    if (used.insert(cand).second && !std::filesystem::exists(cand, ec)) break;
+                    // a name that exists (or that the file system cannot even answer for) is not free; and a name too
+                    // long for the path limit is shortened at the path's end rather than left to fail at fopen
+                    if (ec || cand.size() > 240) {
+                        cand = "tap-" + std::to_string((long long) getpid()) + "-" + std::to_string(n) + ".stap";
+                        ec.clear();
+                    }
+                    if (used.insert(cand).second && !std::filesystem::exists(cand, ec) && !ec) break;
                 }
                 std::fprintf(stderr, "strata verify: STRATA_TAP_FILE %s is already open in this process; this verifier writes %s\n",
                              tap_file_path.c_str(), cand.c_str());

@@ -2528,7 +2528,7 @@ unless noted; the gain is small on these two cards and larger on the Turing card
 sm_86 as well as sm_61: bit-exact, and the time to the first token of a 150 / 300 / 450-token prompt fell 11-15% on the RTX 3060 and 6-10% on the RTX A4000 (5 of 5 pairs each).
 `STRATA_DEQUANT_WIDE=0` turns it off.
 
-### RTX 20 (Turing, sm_75) kernel series (on by default on a 7.5 card, engine 0.1.48)
+### RTX 20 (Turing, sm_75) kernel series (opt-in, 0.1.45)
 
 Kernels by rafatxf (#2069-#2072, #2093, #2220-#2222), imanu86 (#2081) and xrip (#1821) for compute capability 7.5. They were measured
 on one RTX 2080 Ti (decode +5..6 % at 4K-32K, prompts at depth up to +30 %, per the PRs) and are bitwise equal to the kernels they

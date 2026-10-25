@@ -6,7 +6,7 @@
 // banner, so the default launch path is still MMQ - the fused pairs need STRATA_PF_FUSED=1 like every other covered
 // format.  With it, the production pack's pair (gate/up IQ3_XXS, down IQ4_NL) runs where its
 // shapes fit the card's shared memory, and the Q2_0/Q2_0 pair runs the fused kernels on a 7.5 card too (before this it
-// needed STRATA_PF_FUSED_SM75=1 there - the series default is what changed, not the pair)
+// needed STRATA_PF_FUSED_SM75=1 there - that switch's default is what changed, not the pair)
 // (checked per kernel in moe_fused_iq.cu; the IQ pair runs at 2 warps a row when the 4-warp shape does not fit);
 // STRATA_PF_FUSED_SM75=0 keeps the MMQ path there in every case.
 //
