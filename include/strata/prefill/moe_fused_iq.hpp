@@ -1,6 +1,9 @@
 // include/strata/prefill/moe_fused_iq.hpp - #136: the fused int8 prompt experts (moe_fused.hpp) for the native GGUF
 // packs (tools/iq_pack.py: an expert is its raw GGUF slices [gate rows | up rows | down rows], formats per layer in
-// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; sm_75 and HIP: MMQ).
+// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; HIP: MMQ).  On a compute
+// capability 7.5 (Turing) card the production pack's pair (gate/up IQ3_XXS, down IQ4_NL) is on by default where its
+// kernels fit the card's shared memory (checked per kernel in moe_fused_iq.cu; the IQ pair runs at 2 warps a row when
+// the 4-warp shape does not fit); STRATA_PF_FUSED_SM75=0 keeps the MMQ path there.
 //
 // The grouping on the GPU (fused::group), the per-expert pointers (fused::Batch: a cache slot or a ring slot, no
 // gather) and the launch shape are the Q2_0 path's.  What differs is the load stage: the i-quant blocks are decoded to

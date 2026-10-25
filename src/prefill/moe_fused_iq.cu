@@ -1187,7 +1187,10 @@ unsigned blocks(int64_t n, int per) { return (unsigned) ((n + per - 1) / per); }
 struct DevInfo {
     bool done = false, ok = false;
     bool w12 = false;   // gfx12 (RDNA4): the native kernels only - the Q2_0 pack's (moe_fused.cu) are not ported there
-    bool t75 = false;   // Turing (STRATA_PF_FUSED_SM75): the Q2_0 / Q2_0 layers only (what was set up and checked there)
+    bool t75 = false;   // Turing (STRATA_PF_FUSED_SM75): what was set up and checked there (the Q2_0 / Q2_0 pair, and
+                        // the production pack's IQ3_XXS / IQ4_NL when its shapes fit the card's 64 KB: t75_iq)
+    bool t75_iq = false;          // Turing: the IQ3_XXS gate/up + IQ4_NL down kernels are set up (at least at WW=2)
+    bool t75_iq_ww4 = false;      // ... and at the wide WW=4 shape too; else experts_native runs the IQ pair at WW=2 only
     bool s120 = false;  // compute capability 12.0 (sm120_series.hpp): the default for the formats measured there
     int sms = 0, occ = 1;
 };
@@ -1221,6 +1224,13 @@ template <int T, bool GU, int WW> bool setup_ww(int& occ) {
     return true;
 }
 template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(occ) && setup_ww<T, GU, 2>(occ); }
+// Turing: the codebook formats at the wide shape sit close to the card's cap (IQ3_XXS gate/up at WW=4: 60,672 B with
+// its 1 KB grid at ASTAGES 2; IQ2_S would need 67,840).  Try 4 warps a row, fall back to the 2-warp shape (46,592 B),
+// and report which one fits (ww4); experts_native then never launches the IQ pair at a shape that was not set up.
+template <int T, bool GU> bool setup_t75(int& occ, bool& ww4) {
+    ww4 = setup_ww<T, GU, 4>(occ);
+    return setup_ww<T, GU, 2>(occ);
+}
 #endif
 
 #if defined(__HIPCC__)
@@ -1295,13 +1305,31 @@ const DevInfo& dev_info() {
     major = strata::cc_major_of(major);   // STRATA_EMULATE_CC counts (tests)
     minor = strata::cc_minor_of(minor);
     cudaDeviceGetAttribute(&d.sms, cudaDevAttrMultiProcessorCount, dev);
-    // Turing (sm_75): the same kernels with plain copies and m8n8k16 MMAs, opt-in (STRATA_PF_FUSED_SM75=1)
-    static const bool sm75 = [] { const char* v = std::getenv("STRATA_PF_FUSED_SM75"); return v != nullptr && v[0] == '1'; }();
+    // Turing (sm_75): the same kernels with plain copies (no cp.async below sm_80) and m8n8k16 MMAs.  The default on a
+    // 7.5 card, decided here and not by the deck; STRATA_PF_FUSED_SM75=0 keeps the MMQ path.
+    static const int sm75_env = [] {
+        const char* v = std::getenv("STRATA_PF_FUSED_SM75");
+        return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1;
+    }();
+    const bool sm75 = sm75_env > 0 || (sm75_env < 0 && major == 7 && minor == 5);
     if (major < 8 && !(major == 7 && minor == 5 && sm75)) return d;
     int occ = 1 << 20;
-    if (major < 8) {   // Turing: the canonical Q2_0 pack's kernels (the codebook formats' do not fit 64 KB at 4 warps a row)
+    if (major < 8) {   // Turing: the canonical Q2_0 pack's kernels, plus the production pack's (gate/up IQ3_XXS, down
+                       // IQ4_NL) where their shared-memory shapes fit the card - checked per kernel here, not assumed
         d.t75 = true;
         d.ok = setup_one<T_Q2_0, true>(occ) && setup_one<T_Q2_0, false>(occ);
+        bool w4gu = false, w4d = false;
+        if (d.ok) d.t75_iq = setup_t75<T_IQ3_XXS, true>(occ, w4gu) && setup_t75<T_IQ4_NL, false>(occ, w4d);
+        d.t75_iq_ww4 = d.t75_iq && w4gu && w4d;
+        static bool said = false;
+        if (!said) {
+            said = true;
+            std::fprintf(stderr, "strata: prompt fused experts (sm_75): Q2_0 / Q2_0 %s, IQ3_XXS / IQ4_NL %s"
+                                 " (WW=2 %d B, WW=4 %d B %s)\n", d.ok ? "set up" : "does not fit",
+                         d.t75_iq ? (d.t75_iq_ww4 ? "set up at both shapes" : "set up at WW=2 only") : "does not fit",
+                         (int) smem_bytes(T_IQ3_XXS, 2, 2), (int) smem_bytes(T_IQ3_XXS, 4, 2),
+                         (w4gu && w4d) ? "fits" : "does not fit");
+        }
         d.occ = d.ok ? occ : 1;
         cudaGetLastError();
         return d;
@@ -1413,6 +1441,12 @@ bool native_supported(int gu_type, int d_type) {
     if (env < 0) {
         if (gu_type != T_IQ2_S && gu_type != T_IQ3_XXS && gu_type != T_IQ3_S && gu_type != T_IQ4_XS) return false;
         const DevInfo& d = dev_info();
+        // Turing: nothing here changes the default (the fused pairs stay opt-in, STRATA_PF_FUSED=1).  The production
+        // pack's IQ3_XXS gate/up + IQ4_NL down kernels are set up on a 7.5 card (dev_info checked their shared-memory
+        // shapes) but measured only 1.13x on their grouped launch at R=160 (2080 Ti, 2026-10-25) - below the 5%
+        // end-to-end gate and with the fused-vs-MMQ 2e-4 numerics VLLM_PORT_PLAN P3c records.  The default path stays
+        // MMQ there until a deployed A/B says otherwise; STRATA_PF_FUSED_SM75=0 keeps MMQ anyway.
+        if (d.t75) return false;
         // 12.0 cards with 80+ SMs only (RTX PRO 5000 / 6000, RTX 5080 / 5090): on an RTX 5070 (48 SMs, IQ2_XS pack, experts
         // partly in RAM) the fused kernels were 4.7% slower on 20K prompts (0/6 pairs) - it keeps MMQ unless STRATA_PF_FUSED=1
         return d.ok && d.s120 && d.sms >= 80 && !d.t75 && d_covered_on(d_type, d);
@@ -1422,7 +1456,10 @@ bool native_supported(int gu_type, int d_type) {
     if (env < 0 && gu_type != T_IQ3_S && gu_type != T_IQ3_XXS && !(gu_type == T_Q2_0 && strata::core::kGfx12PromptDefaultsOn)) return false;
     const DevInfo& d = dev_info();
     if (!d.ok || !d_covered_on(d_type, d)) return false;
-    if (d.t75 && (gu_type != T_Q2_0 || d_type != T_Q2_0)) return false;
+    // Turing: the pairs dev_info set up there - the canonical Q2_0 pack's, and (STRATA_PF_FUSED_SM75=0 aside) the
+    // production pack's IQ3_XXS / IQ4_NL
+    if (d.t75 && !((gu_type == T_Q2_0 && d_type == T_Q2_0) ||
+                   (d.t75_iq && gu_type == T_IQ3_XXS && d_type == T_IQ4_NL))) return false;
     if (env < 0) return d.w12;
     return requested() || d.w12;
 }
@@ -1521,7 +1558,9 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
         return;
     }
 #endif
-    const int ww = pick_ww(n, n_expert);
+    int ww = pick_ww(n, n_expert);
+    // a 7.5 card where the IQ shapes only fit the 2-warps-a-row buffers (dev_info checked): never launch the WW=4 one
+    if (d.t75 && !d.t75_iq_ww4 && (g.gu_type == T_IQ3_XXS || g.d_type == T_IQ4_NL)) ww = 2;
     // the most 64-row tiles the batch can have (every row in it, plus a partial tile per expert) - the items of the
     // ones inside a larger item end at once
     const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
