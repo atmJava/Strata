@@ -67,12 +67,13 @@ fork 在 Triton TQ decode 上发现 BLOCK_KV=2 对 Turing 寄存器/shared 平�
   （服务器 ≤1 GiB 内可跑）；只有胜出 ≥5%（跨 boot 噪声门，`runtime_flag` 同 boot A/B）才动默认。
 - 验证：`qsa_rows_bench`/`qsa_select_bench` 扩展 + parity 全绿。
 
-### P5 · server 侧 Qwen3 parser 正确性修复（"更强"，小）
+### P5 · server 侧 Qwen3 parser 正确性修复 → **判定：已覆盖，不移植**（2026-10-25 核实）
 
-fork 修复：tool-call 函数名只在首个 delta 发（此前每个 argument 片段重复）；截断参数流保留
-`finish_reason=length` 防客户端执行不完整 JSON；`<think>` marker 跨 block 保留。
-- 要做：对照 `serve/server.py` 的 tool/thinking 解析找同类 bug；有则移植修复 + 负例测试（`tests/terminal` 模式）。
-- 验证：纯本地 pytest。
+fork 修复的三件事 Strata 都有等价实现且各有测试：①函数名只在 `tool_start` 发一次
+（`serve/server.py:5988-5991`，后续 delta 只带 arguments）；②输出截断在参数流中间时
+finish_reason 不给 `tool_calls`、非流式合并时丢弃不完整 call（`server.py:5999-6001,6044` "#211"，
+`serve/test_tool_call_unclosed.py`、`test_tool_call_envelope.py`）；③`<think>` 跨块与无 `</think>`
+恢复在 `serve/dsml.py:172,211`（`test_parser_hold.py`、`test_reasoning_loop_recovery.py`）。
 
 ### P6 · 调度：prefill frontier/barrier 思路（候选，等 S0b 定性后再动）
 
@@ -84,6 +85,9 @@ fork 的 `--prefill-batch-barrier`：cohort 的 prefill_frontier 对齐步长；
 ## 3. 验证基线（本机已跑通，2026-10-25）
 
 - 本地：CPU-only 构建 100%；`iq_avx1_parity`（all rows match）、`iq_avx2_parity`（0 failures）。
+- 移植基线树（本机 2026-10-25 建立）：服务器 `/opt/ai/src/strata-port-20261025`（= 本地工作区 rsync，
+  含未提交的 W3 改动），`build75`：Release / `arch=75` / cuda-13.0 nvcc / `GGML_DIR=/opt/ai/src/llama.cpp-3cf03257`
+  / `BUILD_TESTS=ON`；构建 detached（nice 19，`/tmp/port-build-20261025.log`），不动生产目录。
 - 服务器（既有记录，`SM75_PORT_PLAN` §6）：`-arch=75` 全量 EXIT=0，5 个 parity 全 0。
 - 移植每一项的验收 = 构建 + 对应 parity + 微基准数字（≥5% 且同 boot A/B）+ 本表格状态更新；
   端到端吞吐留给部署窗口，用 `bench-strata.py` / `parity_window.py` 口径。
@@ -112,6 +116,6 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 | P2 accounting 审计 | 待做 | |
 | P3 GDN recurrent 移植 | 待做 | |
 | P4 tile 扫描 | 待做 | |
-| P5 parser 修复 | 待做 | |
+| P5 parser 修复 | 已覆盖·不移植 | `server.py:5988-6001,6044`、`serve/dsml.py:172,211` + 各自测试（2026-10-25 核实） |
 | P6 barrier 对照分析 | 待做 | |
 | 不移植清单的逐条证据复核 | 已完成 | 本文档 §1（2026-10-25 源码核实） |
