@@ -107,6 +107,19 @@ staged 队首 + 客户端断开 → BCANCEL
 - 超时/断连：发 `BCANCEL`。
 - 默认关：`STRATA_MP_STAGED_READ=1`（服务端 env）才启用；否则走原 `pick_slot` 等待。
 
+**生产启用（2026-10-25，L-053）**：已启用并保留，形态是
+
+```sh
+# /opt/ai/src/strata-0.2.2/run-022.sh（备份 /opt/ai/tmp/mp-w3-A3-run-022.sh）
+export STRATA_MP_STAGED_READ=1
+export STRATA_MP_STAGED_READ_MIN_TOKENS=4096   # 短提示不暂存：避免"首 token 后静默"
+# 引擎侧：strata-022.json 的 env 里 STRATA_BATCH_STAGED_READ=1
+```
+
+- 实测：长读 22.7K 首 token **17.1 s**（原 47.3 s）、短读 452 保持 **40.9 s**、邻居停顿 **0.97 s**、4 路聚合 **130.2 tok/s**。
+- 回滚：停服 → 从 `/opt/ai/tmp/mp-w3-A3-*` 恢复引擎/server/`run-022.sh`/config 快照 → 起。
+- 第二 token 仍等槽（33.8 s）：这是 v1 的边界，不是配置问题。
+
 **部署注意（R4 踩到的坑）**：`strata-022.json` 的 `env` 只进**引擎子进程**，服务端进程看不到
 （`/proc/<server>/environ` 里没有）。所以服务端开关要在 `run-022.sh` 里 `export STRATA_MP_STAGED_READ=1`
 （备份原脚本，测完恢复），而不是只加进配置 `env`。

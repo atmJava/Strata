@@ -1,5 +1,5 @@
---- strata-0.2.2/serve/server.py	2026-10-21 09:07:39.000000000 +0000
-+++ strata-mp/serve/server.py	2026-10-24 16:31:15.050719097 +0000
+--- /opt/ai/tmp/mp-w3-A3-server.py	2026-10-21 09:07:39.000000000 +0000
++++ strata-mp/serve/server.py	2026-10-25 01:16:39.966356809 +0000
 @@ -1138,6 +1138,8 @@
          # (its flag leaked) and would keep every later request waiting for a slot that nothing will free.
          self.slot_claims: set[int] = set()
@@ -22,17 +22,18 @@
              elif line.startswith("YIELDED "):            # the read gave way (BYIELD): <slot> <tokens read>
                  f = line.split()
                  if len(f) >= 3 and f[1].lstrip("-").isdigit() and f[2].isdigit():
-@@ -1772,6 +1780,9 @@
+@@ -1772,6 +1780,10 @@
          stop_sent = False
          yields, solo_again, refused = 0, 0, 0
          admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
 +        staged_ready = None       # STRATA_MP_STAGED_READ: ("brdy", n, max_new, cont) once read without a slot
 +        staged_attempts = 0
 +        staged_enabled = os.environ.get("STRATA_MP_STAGED_READ") == "1" and not embeddings
++        staged_min_tokens = int(os.environ.get("STRATA_MP_STAGED_READ_MIN_TOKENS") or "0")
          try:
              while True:   # a request in a slot that is left alone goes back to the solo path
                  if not holding:
-@@ -1846,6 +1857,54 @@
+@@ -1846,6 +1858,55 @@
                          prompt = list(ids) + out            # promoted: it continues in a batch slot from here
                  while True:
                      if slot is None:
@@ -40,7 +41,8 @@
 +                        # session first (BREAD, no slot) and adopt it the moment a slot frees (BADOPT).  One staged
 +                        # read at a time: while it exists, other admissions wait for it (it is first in line).
 +                        if (staged_enabled and staged_ready is None and self.mp_staged is None
-+                                and staged_attempts < 1):
++                                and staged_attempts < 1
++                                and (staged_min_tokens <= 0 or len(prompt) >= staged_min_tokens)):
 +                            staged_attempts += 1
 +                            if not holding:
 +                                ok = yield from self._take_control(cancel, len(prompt))
@@ -87,7 +89,7 @@
                          # a free slot (they free themselves at BDONE, which needs no control lines): the one that holds
                          # the start of this prompt (its conversation's last turn), else the one used longest ago.
                          # With none free the control lines are given back while waiting: a slot can be held by a read
-@@ -1856,7 +1915,8 @@
+@@ -1856,7 +1917,8 @@
                              if deadline is not None and time.monotonic() >= deadline:
                                  raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                              with self.slot_cv:
@@ -97,7 +99,7 @@
                                  if slot is not None:
                                      self.slot_busy[slot] = True
                                      self.slot_claims.add(slot)
-@@ -1871,7 +1931,7 @@
+@@ -1871,7 +1933,7 @@
                                  self.ctl.release()
                                  holding = False
                              with self.slot_cv:
@@ -106,7 +108,7 @@
                                      if (ENGINE_STALL_S or 0) > 0 and time.monotonic() - admit_since >= ENGINE_STALL_S:
                                          # the stall check of #1317 only watches a request on the control lines; one
                                          # waiting here is covered by looking for a slot nobody owns, and by saying so
-@@ -1882,7 +1942,7 @@
+@@ -1882,7 +1944,7 @@
                                                    f"for a free slot (busy: {busy}, in use: {sorted(self.slot_claims)}, "
                                                    f"ending: {sorted(self.slot_releasing)}) (issue #1603)", flush=True)
                                      self._reap_orphan_slots()
@@ -115,7 +117,7 @@
                                      wait_remaining = deadline - time.monotonic() if deadline is not None else 1.0
                                      self.slot_cv.wait(timeout=min(1.0, max(0, wait_remaining)))
                              if cancel.is_set():
-@@ -1906,6 +1966,7 @@
+@@ -1906,6 +1968,7 @@
                          holding, born = True, self.gen                  # (the engine it now has the control lines of)
                      while not self.slot_q[slot].empty():
                          self.slot_q[slot].get_nowait()
@@ -123,7 +125,7 @@
                      head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
                      live = {"slot": slot, "request_id": getattr(cancel, "_strata_request_id", None),
                              "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0, "generated": 0,
-@@ -1915,7 +1976,15 @@
+@@ -1915,7 +1978,15 @@
                          raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                      self.slot_live[slot] = live
                      self._last_done = None                  # (#879: this admission's DONE decides below)
@@ -140,7 +142,7 @@
                      if deadline is not None:
                          cancel._strata_queue_deadline = None
                      started = getattr(cancel, "_strata_queue_started", None)
-@@ -2043,6 +2112,15 @@
+@@ -2043,6 +2114,15 @@
              # a consumer that left early (or an error): keep the engine and this server in step
              btrace("finally phase", phase, "slot", slot, "holding", holding)
              try:

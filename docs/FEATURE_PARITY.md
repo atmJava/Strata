@@ -33,8 +33,8 @@
 
 | ID | 功能 | fork 证据（文件:行 / 版本） | 对 Strata 有用？ | Strata 现状 | 移植形态 | 测试 | 判决（待） |
 |---|---|---|---|---|---|---|---|
-| **F1** | 多路 continuous batching 的**步契约**：每请求是 cursor（`computed` vs `target`）；每步先喂饱 running decodes，剩余预算给 waiting prefill；晚到 prefill 只推迟"还没吐 token"的请求（`num_output_tokens==0`） | `scheduler.py:606-615, 727, 1185-1235, 734-740`；CHANGELOG v0.2.2-post1 | **是（核心）** | 槽一起解码、`BGEN` 中途入批；**无统一 per-step 预算**；满槽时读根本发不出去 | W2（配置）→ W3（代码） | T2/T3 | **部分采纳**（L-049：长读 TTFT 47.3→17.2 s；第二 token 仍等槽；opt-in，默认关） |
-| **F2** | 单步 token 预算混批：所有 shipped profile 都是 `MAX_BATCHED_TOKENS=2048`；`request_token_budget = min(token_budget, input_budget - draft_slots)` | `scheduler.py:126-130, 624-627, 946`；`launcher.sh:6035` | **是** | `--prefill` 分块 + `STRATA_BATCH_DECODE_SHARE`，没有覆盖 decode+prefill 的统一预算 | W2 → W3 | T3 | **部分采纳**（L-049；W2 配置臂否决见 L-047；并发部分搁置） |
+| **F1** | 多路 continuous batching 的**步契约**：每请求是 cursor（`computed` vs `target`）；每步先喂饱 running decodes，剩余预算给 waiting prefill；晚到 prefill 只推迟"还没吐 token"的请求（`num_output_tokens==0`） | `scheduler.py:606-615, 727, 1185-1235, 734-740`；CHANGELOG v0.2.2-post1 | **是（核心）** | 槽一起解码、`BGEN` 中途入批；**无统一 per-step 预算**；满槽时读根本发不出去 | W2（配置）→ W3（代码） | T2/T3 | **采纳并已生产启用**（L-053：长读首 token 47.3→17.1 s；短读 <4096 token 不暂存，保持 40.9 s；第二 token 仍等槽 33.8 s；`STRATA_MP_STAGED_READ_MIN_TOKENS=4096`） |
+| **F2** | 单步 token 预算混批：所有 shipped profile 都是 `MAX_BATCHED_TOKENS=2048`；`request_token_budget = min(token_budget, input_budget - draft_slots)` | `scheduler.py:126-130, 624-627, 946`；`launcher.sh:6035` | **是** | `--prefill` 分块 + `STRATA_BATCH_DECODE_SHARE`，没有覆盖 decode+prefill 的统一预算 | W2 → W3 | T3 | **采纳并已生产启用**（同 F1；W2 配置臂否决见 L-047；统一 per-step 预算仍未移植） |
 | **F3** | 前缀缓存语义：refcount 共享 + CoW、命中块只读、最后一个 prompt token 重算取 logits、`num_cached_tokens` 计数 | `single_type_kv_cache_manager.py:300-322, 448-468`；`kv_cache_manager.py:275-285`；`tests/v1/core/prefix_cache/*` | **是** | 有 prompt cache / conversation cache；缺"缓存计数"的对外口径与测试 | 暴露统计 + 测试 | T4 | **采纳**（T4 通过：`cached_tokens` ≥50%，第二次读不慢于第一次，L-046/L-050） |
 | **F4** | 投机解码（MTP/DFlash2）与**接受率验证实践**：混批里 MTP 在 chunk 边界留 lookahead；验证器 KV 精确；接受率有测试 | `tests/v1/spec_decode/*`；`scheduler.py:583-602`；CHANGELOG v0.2.2 | **是（验证方法）** | 已有 `--spec 8 --mtp-max-t 4`，热接受率 ~99%（L-026） | 验证实践（不开关，只补测试） | T5 | **采纳**（T5 门槛：offer≥20 且接受率≥50%；实测窗口 69.3%、累计 70.5%、bench 78–82%） |
 | **F5** | SSD 前缀 KV 持久化 #243：`OffloadingConnector` + FS tier（`checkpoint-<sha256>`、每 block 一个 `.bin`、`PYTHONHASHSEED=0`），命中异步装入 `WAITING_FOR_REMOTE_KVS` | `launcher.sh:1748-1807`；`kv_offload/file_mapper.py:121-148`；`offloading/scheduler.py:1036-1209`；验证 1,568/1,929（重启）等 | **是（重启场景）** | 无；重启冷加载 ~165 s | 暂缓（P3，触发条件：重启频率或冷读占比升高） | T6 | **搁置**（触发条件未出现；T6 未建，见 R7） |
@@ -117,6 +117,37 @@ F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
 - 不移植 F8 TP（L-033 已存档）、F9 权重路线、F10 vLLM 内核。
 - 不为了"功能齐全"做引擎级重写；每个代码改动默认关、独立 build、可回退。
 - 不把 vLLM 的调度器数据结构照搬；只落"步契约"与验收测试（§3）。
+
+## 9. 清单外的漏项（2026-10-25 重新盘点，子代理只读审计）
+
+对 fork 的 serving / 多路功能做了一次清单外审计（静态阅读，未跑服务）：15 项新候选 S1–S15。
+判决按“可移植性 × 对 2×2080 Ti 的价值 × 改动面”分级；**采纳 ≠ 已实现**，P1 排进后续轮次并补验收测试。
+
+| ID | 项 | 判决 | 理由（一句话） |
+|---|---|---|---|
+| S1 | API 侧准入上限（`max_num_queued_*`，503） | **采纳 P1** | 纯服务端；4 槽时防止排队打爆 TTFT |
+| S2 | 响应体带每请求时延（TTFT/generation/queue/ITL） | **采纳 P1** | 服务端已有全部时间戳，补字段即可 |
+| S3 | 每请求投机接受率（summary/detailed） | **采纳 P1** | 引擎已算 accepted/proposed，暴露即可调 `--spec` |
+| S4 | 思考 token 预算（sampler 强制） | **否决** | Strata 已有 `reasoning_budget_tokens`（生产 12288），重复 |
+| S5 | reasoning 感知的结构化输出 + 异步语法编译 | **搁置** | 需要语法后端 + sampler bitmask，改动面大；有需求再评 |
+| S6 | 延迟等待队列（grammar/remote-KV 等） | **搁置** | 依附 S5；Strata 无这些等待态 |
+| S7 | 断开 → 取消 → 引擎 abort | **采纳 P1** | 服务端已有 cancel，补引擎幂等 abort 即可；先核现状 |
+| S8 | SSE 保活（`--sse-keep-alive-interval`） | **采纳 P1** | 纯 Python；cloudflare/lan 隧道会用得上 |
+| S9 | 流式输出合并（背压） | **采纳 P2** | 慢客户端不拖引擎；服务端 merge 语义 |
+| S10 | 阶段时延 + 等待原因指标 | **采纳 P2** | 引擎已有时间戳/状态，`/metrics` 暴露 |
+| S11 | 全 ISL 准入 + KV 水位 | **采纳 P2** | 256K 下防过准入；全量检查很便宜 |
+| S12 | 优雅停机（drain/abort） | **采纳 P2** | 重启窗口更安全，也给 F5 留 flush 窗口 |
+| S13 | profile schema 契约（命名/校验） | **采纳 P2** | 纯 launcher/CI，和 F6 的预设命名同源 |
+| S14 | 增量 detokenizer 的 stop 缓冲 | **采纳 P2** | 流式 stop 串泄漏的经典坑，服务端可做 |
+| S15 | 结构化工具调用（structural tag） | **搁置** | 依赖 S5 的语法后端 |
+| — | prefill 批屏障（fork 的 `--prefill-batch-barrier`） | **搁置** | 与 F1 的晚 prefill 策略重叠，先做实验再定 |
+| — | warmup/JIT 冷编译预热 | **搁置** | 只在运行时重编译/捕获时有用，未证实 Strata 需要（静态，未验证） |
+| — | 批量 chat 端点 `/v1/chat/completions/batch` | **搁置** | 全有或全无语义，对 4 槽收益不明 |
+| — | `cache_salt` 前缀缓存命名空间 | **采纳 P2** | 小改动；多租户会话隔离用得上 |
+| — | KV 驻留/前缀命中窗口指标 | **搁置** | 观测项，调缓存淘汰时再上 |
+
+**审计口径**：以上来自对 `/home/kali/IdeaProjects/vLLM-2080Ti-Definitive`（93c9013）的只读审计，
+证据是代码行号；**运行时行为均未在本机验证**（static, unconfirmed）。P1 项排进 R11+，每项落地时补测试。
 
 ## 8. 判决总表（2026-10-24 收口）
 

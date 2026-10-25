@@ -11,6 +11,7 @@ import time
 import urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://192.168.3.14:8080"
+N = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 KEY = "111"
 MODEL = "qwen3.8-flash-next-iq3_xxs"
 CORPUS = open("/tmp/corpus.md", encoding="utf-8").read()
@@ -61,13 +62,13 @@ def busy_slots():
     return [s.get("state", "?") for s in live.get("slots", [])]
 
 
-neigh = [{} for _ in range(4)]
-threads = [threading.Thread(target=run, args=(PROMPT, 1200, neigh[i])) for i in range(4)]
+neigh = [{} for _ in range(N)]
+threads = [threading.Thread(target=run, args=(PROMPT, 1200, neigh[i])) for i in range(N)]
 for t in threads:
     t.start()
 deadline = time.time() + 30
 states = busy_slots()
-while time.time() < deadline and sum(1 for s in states if s != "idle") < 4:
+while time.time() < deadline and sum(1 for s in states if s != "idle") < N:
     time.sleep(0.2)
     states = busy_slots()
 busy = sum(1 for s in states if s != "idle")

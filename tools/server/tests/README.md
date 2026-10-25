@@ -30,7 +30,7 @@ test), `MP_MODEL` (default `qwen3.8-flash-next-iq3_xxs`).
 |---|---|---|
 | `test_mp_api.py` (T1) | **pass** | the server's API contract is in production |
 | `test_mp_batch.py` (T2) | pass or **skip/xfail** | exactness settings (`STRATA_IQ_MT_MIN=1` etc.) are not production; mismatch is reported |
-| `test_mp_admission.py` (T3) | **xfail** | waits until /metrics reports 4 busy slots, then first AND second token ≤2 s; the xfail message carries the numbers (L-048) |
+| `test_mp_admission.py` (T3) | **xfail** | waits until /metrics reports 4 busy slots, then first AND second token ≤2 s; production stages only prompts ≥4096 tokens (`STRATA_MP_STAGED_READ_MIN_TOKENS`), so a 452-token reader stays un-staged (L-053) |
 | `test_mp_prefix.py` (T4) | **pass** | prompt cache is on in production; `cached_tokens` is reported |
 | `test_mp_spec.py` (T5) | **pass** | offer≥20 and acceptance≥50% from `/metrics` totals; the window may include other traffic |
 | `test_mp_preset.py` (T7) | **pass** | negative cases for `check_preset.py`; no server needed |

@@ -381,7 +381,7 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 功能清单与验收见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md)，口径见 [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)，
 执行规则与每轮复盘见 [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) / [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)。
 目标 `goal-402218d9-57d7-4af1-aea0-391a1494acd9`（active，上限 1000 轮）。
-**当前轮：R8 完成（T7 负例 6/6；清单 11 项全部有判决，FEATURE_PARITY §8 判决总表；文档收口）。生产 A 运行中，health 200。**
+**当前轮：R9 完成（W3 暂存读**生产启用**，阈值 4096：长读首 token 17.1 s、短读 40.9 s 不假开始；bench 聚合 130.2 tok/s；L-053；回滚备份 `/opt/ai/tmp/mp-w3-A3-*`）。生产运行 B，health 200。R10：S1–S15 判决已入 FEATURE_PARITY §9，P1 项排期。**
 
 **（2026-10-24 夜更新）helper 这条线已经判完并关闭**：`--prefill-pipe 1` 时真实请求不进 `bind_stage_helper`
 （`planned_C < n` → `single_chunk=false`），`--prefill-pipe 0` 时才进；而启动时 `split_help_env()` 让 **flag 文件优先于
