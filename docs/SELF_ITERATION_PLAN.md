@@ -224,7 +224,9 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
    → health 200（日志 `/opt/ai/logs/V2-prep-mock-config-20261025T1320Z.log`）；0.1.49.1 引擎拿生产 54 个
    args（模型路径换成 /nonexistent）→ 只报 `cannot open`，**没有 unknown argument**
    （`/opt/ai/logs/V2-prep-argcheck-20261025T1320Z.log`）；`serve/` 的 ROOT 资产、`tools/strata_tokenizer.py`
-   依赖、`/opt/ai/strata-data/mtp/rt` 都在。
+   依赖、`/opt/ai/strata-data/mtp/rt` 都在。另做了一次**静态阅读（未测）**：引擎侧
+   `BRDY <live> <max_new> <0|1>` 四字段与 server 的严格解析（`len>=4`、两个 digit、第三个 0/1）对齐；
+   `BCANCEL` → `BCANCELLED`，两侧 drain 都是 10 s。
 1. **一次装**：`ops-v2-window.sh install --go`（引擎 `cp .new && mv`；`serve/` 整树换；`tokenizer` 换；
    launcher/config 不动）→ `use-config.sh`（唯一入口）→ md5 + `grep` 标记 + health +
    `verify-running-config.sh`（要 ARGS MATCH）。起不来：`restore --go` 立刻回滚并停轮。
