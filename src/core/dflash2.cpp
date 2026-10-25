@@ -46,8 +46,8 @@ using CudaPtr = std::shared_ptr<void>;
 
 }  // namespace
 
-Dflash2Drafter::~Dflash2Drafter() {
-    if (device_ < 0) return;
+void Dflash2Drafter::release() {
+    if (device_ < 0) return;      // already released (or never loaded): the destructor calls this
     prof_report();
     prof_free();
     const OnDevice on_device(device_);
@@ -72,6 +72,24 @@ Dflash2Drafter::~Dflash2Drafter() {
     for (cudaEvent_t e : ev_ctx_) if (e) cudaEventDestroy(e);
     if (ev_a_) cudaEventDestroy(ev_a_);
     if (ev_b_) cudaEventDestroy(ev_b_);
+    // every handle is gone: null it and mark the instance released, so a second call (or the destructor) does nothing.
+    // A fallback to the MTP calls this, because a drafter that failed to bind still holds the pack and its ring.
+    auto z = [](auto*& p) { p = nullptr; };
+    z(d_meta_); z(xq_); z(xqp_); z(xdp_); z(xqc_); z(xdc_); z(rt_ctx_); z(rt_blk_);
+    for (int l = 0; l < 8; ++l) { z(kring_[l]); z(vring_[l]); }
+    z(fcy_); z(hctx_); z(kc_); z(vc_); z(h_); z(xn_); z(xc_); z(dyn_); z(q_); z(qn_); z(k_); z(v_); z(kblk_); z(ao_); z(o_);
+    z(gate_); z(up_); z(mlp_); z(part_); z(fn_); z(logits_); z(topval_); z(hsel_); z(toptok_); z(topscratch_);
+    logits_cap_ = 0;
+    z(h_meta_); z(h_out_);
+    z(cs_); z(cs2_);
+    z(ev_fork_); z(ev_join_); z(ev_a_); z(ev_b_);
+    for (cudaEvent_t& e : ev_ctx_) e = nullptr;
+    for (cudaGraphExec_t& e : exec_) e = nullptr;
+    device_ = -1;
+}
+
+Dflash2Drafter::~Dflash2Drafter() {
+    release();
 }
 
 // STRATA_DF2_PROFILE=1 (measurement only): the round runs without its graph and an event follows every stage; the per-stage averages print at exit
@@ -132,6 +150,27 @@ const Dflash2Drafter::Tensor& Dflash2Drafter::find(const std::string& name) cons
     throw std::runtime_error("dflash2: tensor " + name + " is missing from the pack");
 }
 
+// A few bytes from three places of the pack: enough to tell a different pack of the same shape from a copy, without
+// reading 0.76 GiB (an empty sample means "could not read it", and the caller then trusts the index alone).
+static std::vector<uint8_t> sample_pack(const std::string& path) {
+    std::vector<uint8_t> out;
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) return out;
+    std::fseek(f, 0, SEEK_END);
+    const long size = std::ftell(f);
+    if (size <= 0) { std::fclose(f); return out; }
+    const long chunk = 8192;
+    const long offs[3] = {0, std::max(0L, size / 2 - chunk / 2), std::max(0L, size - chunk)};
+    uint8_t buf[8192];
+    for (long off : offs) {
+        if (std::fseek(f, off, SEEK_SET) != 0) { out.clear(); break; }
+        const size_t got = std::fread(buf, 1, (size_t) std::min(chunk, size - off), f);
+        out.insert(out.end(), buf, buf + got);
+    }
+    std::fclose(f);
+    return out;
+}
+
 bool Dflash2Drafter::load(const std::string& path, int device, std::string& err, const Dflash2Drafter* shared) {
     if (shared == this) { err = "dflash2: an instance cannot share its own pack"; return false; }
     device_ = device;
@@ -183,6 +222,7 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
         return false;
     }
     pack_bytes_ = total;
+    pack_path_ = path;
     if (shared != nullptr) {
         // Both sides parsed the same index: the tensor table and the layer/config rows decide that it is the same pack (a copied file
         // is fine; a re-packed or re-shaped one is not).  The head's row width is checked in bind(), where the head is known.
@@ -195,6 +235,14 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
             const Tensor& a = tensors_[i];
             const Tensor& b = shared->tensors_[i];
             same = a.name == b.name && a.dtype == b.dtype && a.rows == b.rows && a.cols == b.cols && a.off == b.off && a.bytes == b.bytes;
+        }
+        // A re-pack of the same shape would pass the index check above, so a sample of the file's own bytes is compared
+        // too: a copy reads the same and passes, a different pack of the same shape does not.
+        const std::vector<uint8_t> mine = sample_pack(path), theirs = sample_pack(shared->pack_path_);
+        if (!mine.empty() && !theirs.empty() && mine != theirs) {
+            err = "dflash2: incompatible shared weights (the pack bytes differ from " + shared->pack_path_ +
+                  ", though its shape and layer table match; re-pack written in place?)";
+            return false;
         }
         if (!same) { err = "dflash2: incompatible shared weights (a different device, pack size or layer table)"; return false; }
         blob_ = shared->blob_;
@@ -320,8 +368,17 @@ bool Dflash2Drafter::bind_raw(EmbedFn embed, const void* head_w, int head_type, 
 }
 
 bool Dflash2Drafter::alloc_logits(std::string& err) {
-    if (!logits_ && cudaMalloc((void**) &logits_, (size_t) kDrafts * (size_t) n_dvocab_ * 4) != cudaSuccess) { err = "dflash2: the draft logits do not fit"; return false; }
-    vram_ += (uint64_t) kDrafts * (uint64_t) n_dvocab_ * 4;
+    const size_t need = (size_t) kDrafts * (size_t) n_dvocab_ * sizeof(float);
+    if (logits_ != nullptr && logits_cap_ >= need) return true;      // a re-bind at the same (or a narrower) width
+    if (logits_ != nullptr) {                                         // a wider head: replace the buffer, count it once
+        cudaFree(logits_);
+        logits_ = nullptr;
+        vram_ -= logits_cap_;
+        logits_cap_ = 0;
+    }
+    if (cudaMalloc((void**) &logits_, need) != cudaSuccess) { err = "dflash2: the draft logits do not fit"; return false; }
+    logits_cap_ = need;
+    vram_ += need;
     return true;
 }
 

@@ -5475,7 +5475,7 @@ int main(int argc, char** argv) {
         if (o.draft == "dflash2") {
             const char* why = o.mtp.empty() ? "it needs --mtp (the fallback) and --spec 2 or more"
                               : !native_pack ? "it needs a native pack"
-                              : multi_gpu || o.batch > 0 ? "it is for one card without --batch or a layer split in this build"
+                              : multi_gpu || o.batch > 0 || !o.layer_split.empty() ? "it is for one card without --batch or a layer split in this build"
                               : o.draft_model.empty() ? "it needs --draft-model PACK (tools/dflash2_pack.py)" : nullptr;
             if (why == nullptr) {
                 if (df2.load(o.draft_model, 0, err)) {
@@ -9191,18 +9191,21 @@ int main(int argc, char** argv) {
         if (use_df2 && !ver.tapping()) {
             std::fprintf(stderr, "strata serve: --draft dflash2: the verifier keeps no taps here; the MTP drafts instead\n");
             use_df2 = false;
+            df2.release();                // the pack blob is already allocated at this point
         }
         if (use_df2 && !df2.bind(wt, &native_head, o.mtp_draft_vocab.empty() ? o.mtp + "/draft_vocab.bin" : o.mtp_draft_vocab, err)) {
             std::fprintf(stderr, "strata serve: --draft dflash2: %s. It needs about 1.2 GiB of VRAM in all (the pack 0.76 GiB, buffers and K/V ring "
                                  "0.25 GiB, a draft head 0.2 GiB); --vram-reserve-mib 1900 keeps it (the expert cache gives up about 2.5%% of its experts "
                                  "to the CPU). The MTP drafts instead.\n", err.c_str());
             use_df2 = false;
+            df2.release();
         }
         if (use_df2 && !df2.prepare(ver.tap_dev(), err)) {
             std::fprintf(stderr, "strata serve: --draft dflash2: %s. It needs about 1.2 GiB of VRAM in all (the pack 0.76 GiB, buffers and K/V ring "
                                  "0.25 GiB, a draft head 0.2 GiB); --vram-reserve-mib 1900 keeps it (the expert cache gives up about 2.5%% of its experts "
                                  "to the CPU). The MTP drafts instead.\n", err.c_str());
             use_df2 = false;
+            df2.release();
         }
         // the taps pointer prepare() captured on must be the one every draft() reads (it is ver.tap_dev(), fixed after
         // init); requests that ask for sampling or penalties decode on the MTP (said once, below)
@@ -13132,7 +13135,15 @@ int main(int argc, char** argv) {
                 // the last 2047 prompt rows' taps (the block's whole window), as the CLI's prompt path asks for them
                 sp.set_taps(df2.tap_layers(), std::max<int64_t>(0, n - 2047), 2048);
                 sp.on_taps = [&](const float* taps, int64_t rows, int64_t pos0, std::string& e) -> bool {
-                    if (!df2.context(taps, rows, pos0, e)) return false;
+                    if (!df2.context(taps, rows, pos0, e)) {
+                        // the drafter's ring cannot follow this prompt: finish the request on the MTP (a failed feed
+                        // would make every later draft wrong, so the drafter goes away rather than guessing)
+                        std::fprintf(stderr, "strata serve: --draft dflash2: %s; this session decodes on the MTP\n", e.c_str());
+                        use_df2 = false;
+                        df2_req = false;
+                        df2.release();
+                        return true;
+                    }
                     df2_ctx_next = std::max<int64_t>(df2_ctx_next, pos0 + rows);
                     return true;
                 };
@@ -13322,9 +13333,14 @@ int main(int argc, char** argv) {
                         const int64_t skip = q < tf ? std::min<int64_t>(T, tf - q) : 0;
                         if (skip < T) {
                             const size_t nt = df2.tap_layers().size();
-                            if (!df2.context(ver.tap_dev() + (size_t) skip * nt * (size_t) g.n_embd, T - skip, q + skip, e))
-                                return false;
-                            df2_ctx_next = std::max<int64_t>(df2_ctx_next, q + T);
+                            if (!df2.context(ver.tap_dev() + (size_t) skip * nt * (size_t) g.n_embd, T - skip, q + skip, e)) {
+                                std::fprintf(stderr, "strata serve: --draft dflash2: %s; this session decodes on the MTP\n", e.c_str());
+                                use_df2 = false;
+                                df2_req = false;
+                                df2.release();
+                            } else {
+                                df2_ctx_next = std::max<int64_t>(df2_ctx_next, q + T);
+                            }
                         }
                     }
 #endif
@@ -15262,11 +15278,13 @@ int main(int argc, char** argv) {
                 // draft call below is skipped and cannot feed it through its own n_new = a + 1 rows.
                 if (merged && df2_req && T > 1 && p >= df2_ctx_next) {
                     if (!df2.context(ver.tap_dev(), T - 1, p, err)) {
-                        if (adapt_thr.joinable()) adapt_thr.join();
-                        std::printf("ERR %s\n", err.c_str());
-                        return 1;
+                        std::fprintf(stderr, "strata serve: --draft dflash2: %s; this session decodes on the MTP\n", err.c_str());
+                        use_df2 = false;
+                        df2_req = false;
+                        df2.release();
+                    } else {
+                        df2_ctx_next = p + T - 1;
                     }
-                    df2_ctx_next = p + T - 1;
                 }
 #endif
                 // the window's first a + 1 tokens are in the session now (the last output is not: it is next x)
@@ -15303,6 +15321,15 @@ int main(int argc, char** argv) {
                         int32_t dd[strata::core::Dflash2Drafter::kDrafts];
                         float pp[strata::core::Dflash2Drafter::kDrafts];
                         drafted = df2.draft(ver.tap_dev(), a + 1, p, outv[(size_t) a], dd, pp, err);
+                        if (!drafted) {
+                            // a graph/kernel failure mid-request: say it once and let the MTP finish this window and
+                            // every later one, rather than failing a request that the MTP can serve
+                            std::fprintf(stderr, "strata serve: --draft dflash2: %s; the rest of this session decodes on the MTP\n", err.c_str());
+                            use_df2 = false;
+                            df2_req = false;
+                            df2.release();
+                            drafted = mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p);
+                        }
                         if (drafted) {
                             for (size_t i = 0; i < drafts.size() && i < (size_t) strata::core::Dflash2Drafter::kDrafts; ++i) {
                                 drafts[i] = dd[i];
@@ -16304,6 +16331,7 @@ int main(int argc, char** argv) {
                                  "0.25 GiB, a draft head 0.2 GiB); --vram-reserve-mib 1900 keeps it (the expert cache gives up about 2.5%% of its experts "
                                  "to the CPU). The MTP drafts instead.\n", err.c_str());
             use_df2 = false;
+            df2.release();
         }
         if (use_df2 && !df2.prepare(ver.tap_dev(), err)) {
             std::fprintf(stderr, "strata generate: --draft dflash2: %s. It needs about 1.2 GiB of VRAM in all (the pack 0.76 GiB, buffers and K/V ring "

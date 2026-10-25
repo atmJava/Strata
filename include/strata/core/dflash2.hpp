@@ -58,6 +58,9 @@ public:
 
     /// A new request: the ring is empty again.
     void reset() { have_ctx_ = 0; }
+    /// Frees everything this instance owns (the destructor calls it). A `bind`/`prepare` failure that falls back to
+    /// the MTP calls it too: the pack blob, the head reference and the ring would otherwise stay allocated.
+    void release();
     /// Context rows without a draft: `n` rows of taps (device, [n][5 * n_embd]) for positions pos0 ... pos0 + n - 1.
     bool context(const float* taps_dev, int64_t n, int64_t pos0, std::string& err);
     /// One round: the new context rows (n_new in 1..8: the committed window rows, taps device [n_new][5 * n_embd], positions pos0 ...),
@@ -133,7 +136,9 @@ private:
     int32_t* dvocab_ = nullptr;
     uint8_t* dhead_ = nullptr;      ///< the draft vocabulary's head rows (owned), or null with head_w_ the whole head
     std::shared_ptr<void> dvocab_owner_, dhead_owner_;   ///< the same lifetime rule as blob_owner_
+    size_t logits_cap_ = 0;                 ///< bytes in logits_ (a wider re-bind replaces it; vram_bytes counts it once)
     int64_t head_row_bytes_ = 0;    ///< the draft head's row width, for the shared compatibility check
+    std::string pack_path_;         ///< the file this instance loaded (a shared load compares a byte sample with it)
     const NativeHead* head_src_ = nullptr;   ///< the head bind() was given
     std::vector<int32_t> dvocab_host_;       ///< host copy of the draft vocabulary (a few hundred KiB), for the check
     const Dflash2Drafter* shared_ = nullptr; ///< the instance the pack and the draft head came from (its bind() must have run)
