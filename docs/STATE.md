@@ -23,6 +23,17 @@
   static_assert 拒；V1-5 staged wedge 3 passed。
 - 首跑 12 failed 的原因是测试 venv 缺 `jinja2`（补后 8 failed）与 `regex`（补后 0）；不是代码缺陷。
 
+## V2a 窗口检查表（00:05，按序）
+
+1. `python3 tools/server/four-questions.py`（有残留进程就停）+ `python3 tools/server/preflight.py`。
+2. `sh /opt/ai/tmp/ops-v2-window.sh snapshot --go`（窗口时的新快照，`md5sum -c` 过）——
+   再 `install --go`（它用最新快照；起不来 `restore --go`）。
+3. 装后核对：`probe-version-stamp.py --expect-engine-md5 84a0d410…` + `verify-running-config.sh` 的 ARGS MATCH
+   + 服务日志 `staged read` 计数基线；认进程用 `pgrep -f 'build/strata --serve'`，不看日志最后一行。
+4. `python3 tools/server/run-matrix.py --batch V2`（V2-0 → V2-4 → V1-5 → V2-1，6 邻居）。
+5. 可选 `sh tools/server/ops-v2-s0c-kill.sh --go`（第 2 次重启；先看到 `staged read sent` 增量才杀）。
+6. 落账 L-058、STATE、Gate、§4.2、§11、队列；提交。
+
 ## 版本戳基线（V0 实测：`tools/server/probe-version-stamp.py`，2026-10-25 20:46）
 
 | 件 | md5 | 备注 |
