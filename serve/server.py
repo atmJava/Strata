@@ -1160,6 +1160,8 @@ class StrataEngine:
         # (its flag leaked) and would keep every later request waiting for a slot that nothing will free.
         self.slot_claims: set[int] = set()
         self.slot_releasing: set[int] = set()
+        self.mp_staged = None            # STRATA_MP_STAGED_READ: True while a read is staged in the engine (only
+                                         # its owner may BADOPT; other admissions wait, FCFS)
         self._orphan_seen: dict[int, float] = {}
         # what each slot's sessions hold (prompt + every token a window fed), so a conversation's next turn goes to
         # the slot that has its start (the engine checks it again); when the slot was last used
@@ -1526,6 +1528,12 @@ class StrataEngine:
                 f = line.split()
                 self._ctl_result = ("badm", len(f) >= 3 and f[2] == "1")
                 return
+            elif line.startswith("BRDY "):       # STRATA_MP_STAGED_READ: the read is done, no slot yet
+                f = line.split()
+                self._ctl_result = ("brdy", int(f[1]) if len(f) > 1 else 0,
+                                    int(f[2]) if len(f) > 2 else 0,
+                                    len(f) > 3 and f[3] == "1")
+                return
             elif line.startswith("YIELDED "):            # the read gave way (BYIELD): <slot> <tokens read>
                 f = line.split()
                 if len(f) >= 3 and f[1].lstrip("-").isdigit() and f[2].isdigit():
@@ -1794,6 +1802,10 @@ class StrataEngine:
         stop_sent = False
         yields, solo_again, refused = 0, 0, 0
         admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
+        staged_ready = None       # STRATA_MP_STAGED_READ: ("brdy", n, max_new, cont) once read without a slot
+        staged_attempts = 0
+        staged_enabled = os.environ.get("STRATA_MP_STAGED_READ") == "1" and not embeddings
+        staged_min_tokens = int(os.environ.get("STRATA_MP_STAGED_READ_MIN_TOKENS") or "4096")
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
@@ -1868,6 +1880,55 @@ class StrataEngine:
                         prompt = list(ids) + out            # promoted: it continues in a batch slot from here
                 while True:
                     if slot is None:
+                        # STRATA_MP_STAGED_READ: with every slot busy, read this prompt into the engine's main
+                        # session first (BREAD, no slot) and adopt it the moment a slot frees (BADOPT).  One staged
+                        # read at a time: while it exists, other admissions wait for it (it is first in line).
+                        if (staged_enabled and staged_ready is None and self.mp_staged is None
+                                and staged_attempts < 1
+                                and (staged_min_tokens <= 0 or len(prompt) >= staged_min_tokens)):
+                            staged_attempts += 1
+                            if not holding:
+                                ok = yield from self._take_control(cancel, len(prompt))
+                                if not ok:
+                                    return
+                                holding, born = True, self.gen
+                            with self.slot_cv:
+                                self.mp_staged = True
+                            try:
+                                self._last_done = None
+                                self._ctl_mode, self._ctl_result, self._yielded = "batch", None, None
+                                self._ctl_erred = False
+                                phase = "staged"   # before the send: a dead engine must still clear mp_staged in the finally
+                                self._send(f"BREAD {left}{keys} {','.join(str(int(t)) for t in prompt)}")
+                                print(f"[strata] parallel: staged read sent (no free slot; {len(prompt)} prompt tokens)", flush=True)
+                                for x in self._control(cancel, pending.append):
+                                    while pending:
+                                        t = pending.pop(0)
+                                        out.append(t)
+                                        yield t
+                                    if x is None:
+                                        yield None
+                                res = self._ctl_result
+                                if res is not None and res[0] == "brdy" and res[3]:
+                                    staged_ready = res
+                                    print(f"[strata] parallel: staged read done ({res[1]} tokens); waiting for a slot", flush=True)
+                                    phase = "staged_wait"
+                                else:
+                                    # max_new 1 (nothing left to adopt) or a cancelled read: drop the staged state
+                                    self._send("BCANCEL")
+                                    self._drain_control("BCANCELLED", born=born)
+                                    with self.slot_cv:
+                                        self.mp_staged = None
+                                        self.slot_cv.notify_all()
+                                    phase = "none"
+                                    return
+                            except ValueError as e:
+                                with self.slot_cv:
+                                    self.mp_staged = None
+                                    self.slot_cv.notify_all()
+                                phase = "none"
+                                print(f"[strata] parallel: staged read refused ({e}); falling back to BGEN",
+                                      flush=True)
                         # a free slot (they free themselves at BDONE, which needs no control lines): the one that holds
                         # the start of this prompt (its conversation's last turn), else the one used longest ago.
                         # With none free the control lines are given back while waiting: a slot can be held by a read
@@ -1878,7 +1939,8 @@ class StrataEngine:
                             if deadline is not None and time.monotonic() >= deadline:
                                 raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                             with self.slot_cv:
-                                slot = self.pick_slot(prompt)
+                                slot = (self.pick_slot(prompt)
+                                        if (staged_ready is not None or self.mp_staged is None) else None)
                                 if slot is not None:
                                     self.slot_busy[slot] = True
                                     self.slot_claims.add(slot)
@@ -1893,7 +1955,7 @@ class StrataEngine:
                                 self.ctl.release()
                                 holding = False
                             with self.slot_cv:
-                                if self.pick_slot(prompt) is None:
+                                if (staged_ready is None and self.mp_staged is not None) or self.pick_slot(prompt) is None:
                                     if (ENGINE_STALL_S or 0) > 0 and time.monotonic() - admit_since >= ENGINE_STALL_S:
                                         # the stall check of #1317 only watches a request on the control lines; one
                                         # waiting here is covered by looking for a slot nobody owns, and by saying so
@@ -1904,11 +1966,21 @@ class StrataEngine:
                                                   f"for a free slot (busy: {busy}, in use: {sorted(self.slot_claims)}, "
                                                   f"ending: {sorted(self.slot_releasing)}) (issue #1603)", flush=True)
                                     self._reap_orphan_slots()
-                                if self.pick_slot(prompt) is None:
+                                if (staged_ready is None and self.mp_staged is not None) or self.pick_slot(prompt) is None:
                                     wait_remaining = deadline - time.monotonic() if deadline is not None else 1.0
                                     self.slot_cv.wait(timeout=min(1.0, max(0, wait_remaining)))
                             if cancel.is_set():
+                                if phase == "staged_wait":
+                                    print("[strata] parallel: staged read cancelled while waiting for a slot "
+                                          "(never adopted)", flush=True)
                                 return
+                            if staged_ready is not None and not holding:
+                                # S0d/F1F2: the read is done and this request waits for a slot.  One keep-alive per
+                                # loop lets the client see the wait (an idle-timeout client no longer aborts a
+                                # healthy queue) and lets the transport write, so a hang-up reaches `cancel`.
+                                # generate_batched yields tokens and None heartbeats (its consumer is the token
+                                # loop in _run, not run(): a ("ping", None) here reaches the detokenizer as a token)
+                                yield None
                             if not holding:
                                 ok = yield from self._take_control(cancel, len(prompt))
                                 if not ok:
@@ -1928,6 +2000,7 @@ class StrataEngine:
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
+                    was_staged = staged_ready is not None
                     head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
                     live = {"slot": slot, "request_id": getattr(cancel, "_strata_request_id", None),
                             "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0, "generated": 0,
@@ -1937,7 +2010,15 @@ class StrataEngine:
                         raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                     self.slot_live[slot] = live
                     self._last_done = None                  # (#879: this admission's DONE decides below)
-                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                    if was_staged:      # the prompt is already read: adopt it into this slot, no re-read
+                        self._send(f"BADOPT {slot}")
+                        print(f"[strata] parallel: staged read adopted into slot {slot}", flush=True)
+                        staged_ready = None
+                        with self.slot_cv:
+                            self.mp_staged = None
+                            self.slot_cv.notify_all()
+                    else:
+                        self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                     if deadline is not None:
                         cancel._strata_queue_deadline = None
                     started = getattr(cancel, "_strata_queue_started", None)
@@ -1971,6 +2052,28 @@ class StrataEngine:
                                 note_progress()
                                 yield None
                     except ValueError as e:
+                        # A refused BADOPT: the engine kept the staged read (it adopted nothing), so it must be
+                        # cancelled here - otherwise the next request meets "a staged read is pending" and the
+                        # engine's stage buffers stay held.
+                        if self._ctl_erred and str(e).startswith("BADOPT:"):
+                            print(f"[strata] parallel: the engine refused to adopt the staged read into slot {slot} "
+                                  f"({e}); cancelling it and waiting for another slot", flush=True)
+                            try:
+                                self._send("BCANCEL")
+                                self._drain_control("BCANCELLED", born=born)
+                            except EngineDied:
+                                raise
+                            refused += 1
+                            if refused > self.BGEN_REFUSALS_MAX:
+                                raise GpuBusy("the engine's batch slots are not free right now; try again in a moment",
+                                              retry_after=5) from e
+                            self.slot_live[slot] = None
+                            self.slot_held[slot] = []
+                            phase = "none"
+                            self._ctl_erred = False
+                            self._park_slot(slot)
+                            slot = None
+                            continue
                         # #1994: the engine says this slot is not free (its view and ours differ for a moment, or a
                         # slot it still holds).  That is not the request's fault and nothing was read: park the slot
                         # for a moment (busy here too), and wait for another one - never a 400 for the conversation.
@@ -2065,6 +2168,23 @@ class StrataEngine:
             # a consumer that left early (or an error): keep the engine and this server in step
             btrace("finally phase", phase, "slot", slot, "holding", holding)
             try:
+                if phase in ("staged", "staged_wait") or staged_ready is not None:
+                    took = False
+                    if not holding and self.gen == born and self.alive():
+                        self.ctl.acquire()          # the lines were given back while waiting for a slot
+                        took = True
+                    try:
+                        with self.slot_cv:
+                            self.mp_staged = None
+                            self.slot_cv.notify_all()
+                        if self.gen == born and self.alive():
+                            self._send("BCANCEL")
+                            self._drain_control("BCANCELLED", born=born)
+                        phase = "none"
+                        staged_ready = None
+                    finally:
+                        if took:
+                            self.ctl.release()
                 if phase in ("solo", "admit") and (self.gen != born or not self.alive()):
                     phase = "none"                      # #1012: its engine is gone: nothing to stop or drain
                 if phase in ("solo", "admit") and self._ctl_erred:
@@ -3869,6 +3989,7 @@ class Service:
         # while a model is loading or a request is between MCP rounds; the engine's own slots remain unchanged.
         self.max_queue: int | None = None
         self.queue_timeout_s: float | None = None
+        self.admission_policy = "wait"                   # F1F2: "wait" (default) or "refuse" (no waiting at all)
         self.admission_reserved = 0
         self.admission_rejected = 0
         self.queue_timeouts = 0
@@ -5167,6 +5288,7 @@ class Service:
         st = {} if par else self.status
         rate = collections.deque(maxlen=32) if par else self.rate
         request_id = uuid.uuid4().hex[:12]
+        request_started = time.time()                      # S2: this request's own clock, from the queue on
         setattr(cancel, "_strata_request_id", request_id)
         deadline = time.monotonic() + self.queue_timeout_s if self.queue_timeout_s is not None else None
         if deadline is not None:
@@ -5205,7 +5327,10 @@ class Service:
                     left = deadline - time.monotonic() if deadline is not None else QUEUE_BEAT_S
                     if left <= 0:
                         raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
-                    got = self.fifo.acquire(timeout=min(QUEUE_BEAT_S, left))
+                    # F1F2: admission_policy=refuse answers at once instead of holding the request: the
+                    # turn is not free, so there is no wait to keep alive.
+                    wait_for = 0.0 if self.admission_policy == "refuse" else min(QUEUE_BEAT_S, left)
+                    got = self.fifo.acquire(timeout=wait_for)
                     if got:
                         if cancel.is_set():
                             self.fifo.release()
@@ -5214,6 +5339,8 @@ class Service:
                             self.fifo.release()
                             raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                         turn.callback(self.fifo.release)
+                    elif self.admission_policy == "refuse":
+                        raise QueueWaitExpired("admission_policy=refuse: no free engine turn; retry later")
                     else:
                         yield "ping", None
             with turn:
@@ -5243,8 +5370,9 @@ class Service:
                             queued_counted = False
                             self.terminal_requests[request_id].update(state="waiting", admitted_at=time.time())
                             self._terminal_event_locked(request_id, "admitted")
+                        request_admitted = time.time()      # S2: when the engine (a slot) took this request
                         st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
-                                  generated=0, started=time.time(), first_token=None, tool=None, tail="",
+                                  generated=0, started=request_admitted, first_token=None, tool=None, tail="",
                                   max_tokens=max_new, reasoning_recoveries=0, thinking_budget=budget)
                         if par:
                             self.live_reqs[id(st)] = (st, rate)
@@ -5606,6 +5734,18 @@ class Service:
         done = {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
                 "timings": timings, "reasoning_tokens": thinking_n,
                 "reasoning_recoveries": recovery_count}
+        # S2: what a client's own clock could only guess - when this request started waiting, when the engine
+        # admitted it, when its first token came and how far apart the rest were.  (The row is popped before
+        # this point, so the two stamps are the locals set above.)
+        first_at = st.get("first_token")
+        now = time.time()
+        done["metrics"] = {
+            "queue_ms": int(round((request_admitted - request_started) * 1000)),
+            "ttft_ms": int(round((first_at - request_started) * 1000)) if first_at else None,
+            "itl_ms_mean": round((now - first_at) * 1000 / (n - 1), 1) if first_at and n > 1 else None,
+            "wall_ms": int(round((now - request_started) * 1000)),
+            "tokens": n,
+        }
         if stops is not None and stops.hit is not None:
             done["stop_sequence"] = stops.hit
         yield "done", done
@@ -5892,6 +6032,8 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
                              "prompt_tokens_details": {"cached_tokens": x.get("reused") or 0}}
             if x.get("timings"):
                 last["timings"] = x["timings"]          # llama.cpp's field: the speed its clients show
+            if x.get("metrics"):
+                last["metrics"] = x["metrics"]          # S2: queue/ttft/itl of this request
             yield last
 
 
@@ -5938,6 +6080,8 @@ def openai_collect(chunks) -> dict:
            "usage": last["usage"]}
     if last.get("timings"):
         out["timings"] = last["timings"]
+    if last.get("metrics"):
+        out["metrics"] = last["metrics"]
     return out
 
 
@@ -8166,6 +8310,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                     help="maximum inference calls waiting beyond effective engine slots; 0 refuses overload")
     ap.add_argument("--queue-timeout", type=float, default=None,
                     help="maximum seconds waiting for the first engine turn (0.1..600; off by default)")
+    ap.add_argument("--admission-policy", choices=("wait", "refuse"), default=None,
+                    help="wait for a free engine turn (default) or refuse at once with 429 queue_wait_timeout")
     ap.add_argument("--batch-telemetry", action=argparse.BooleanOptionalAction, default=None,
                     help="opt in to low-rate engine decode-window samples for /v1/telemetry")
     ap.add_argument("--offline", action="store_true",
@@ -8260,12 +8406,16 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     if max_queue is not None and (isinstance(max_queue, bool) or not isinstance(max_queue, int)
                                   or not 0 <= max_queue <= 4096):
         ap.error("--max-queue / max_queue must be a whole number in 0..4096")
-    queue_timeout = a.queue_timeout if a.queue_timeout is not None else cfg.get("queue_timeout")
+    # F1F2/T3a: `admission_wait_s` is the config name for the same bound (the user's "通过参数控制"), so both
+    # read as one knob; it no longer requires max_queue, a lone bound on the wait is useful on its own.
+    queue_timeout = a.queue_timeout if a.queue_timeout is not None else cfg.get("queue_timeout",
+                                                                              cfg.get("admission_wait_s"))
     if queue_timeout is not None and (isinstance(queue_timeout, bool) or not isinstance(queue_timeout, (int, float))
                                       or not math.isfinite(queue_timeout) or not 0.1 <= queue_timeout <= 600):
         ap.error("--queue-timeout / queue_timeout must be finite seconds in 0.1..600")
-    if queue_timeout is not None and max_queue is None:
-        ap.error("--queue-timeout requires --max-queue / max_queue to bound pending calls")
+    admission_policy = a.admission_policy if a.admission_policy is not None else cfg.get("admission_policy")
+    if admission_policy is not None and admission_policy not in ("wait", "refuse"):
+        ap.error("--admission-policy / admission_policy must be wait or refuse")
     if a.parallel is not None:
         if a.parallel < 1 or a.parallel > 1024:
             ap.error("--parallel must be in 1..1024; the engine may reduce it to the supported count")
@@ -8444,6 +8594,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     svc.offline = a.offline
     svc.max_queue = max_queue
     svc.queue_timeout_s = float(queue_timeout) if queue_timeout is not None else None
+    svc.admission_policy = admission_policy or "wait"
     if a.engine == "strata":                            # the model card's sampling when nothing else is said (see MODEL_CARD_SAMPLING)
         svc.model_arch = cfg.get("arch") or "qwen4exp"
         svc.set_family(svc.model_arch if svc.model_arch == "deepseek41" else None)

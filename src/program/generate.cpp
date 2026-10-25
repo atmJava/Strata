@@ -11432,6 +11432,25 @@ int main(int argc, char** argv) {
         };
         int admit_slot = -1;               ///< the slot the request being read will continue in (BGEN)
         long long admit_max_new = 0;
+        // STRATA_BATCH_STAGED_READ (default off): a prompt read that takes no slot yet.  BREAD reads into the
+        // main session like a GEN, keeps the state there and answers BRDY; BADOPT <slot> copies it into that slot
+        // and answers BADM, exactly as a BGEN admission would.  One staged read at a time (the main session holds
+        // it); the server adopts it before it reads another request.
+        bool staged_read = false;
+        struct StagedAdmit {
+            bool pending = false;
+            std::vector<int32_t> live;
+            std::vector<ImgKey> imgs;
+            strata::kernels::SamplerParams sp;
+            int64_t max_new = 0, x = 0, p = 0, turn_at = -1, moved_in = -1;
+            int lent_slot = -1;
+            bool cvec = true, cont = false;
+            double drain_ms = 0.0;
+        } staged_admit;
+        static const bool staged_read_env = [] {
+            const char* staged_v = std::getenv("STRATA_BATCH_STAGED_READ");
+            return staged_v && *staged_v && std::strcmp(staged_v, "0") != 0;   // =0 disables, unlike a bare getenv
+        }();
         auto batch_on = [&] { for (const BSlot& b : bs) if (b.active) return true; return false; };
         auto try_next_line = [&](std::string& out) -> bool {
             std::lock_guard<std::mutex> lk(in_mu);
@@ -12053,6 +12072,87 @@ int main(int argc, char** argv) {
                 return 1;
             }
             admit_slot = -1;
+            staged_read = false;
+            if (staged_read_env) {
+                if (line.rfind("BADOPT ", 0) == 0) {
+                    char* e = nullptr;
+                    const long s = std::strtol(line.c_str() + 7, &e, 10);
+                    if (!staged_admit.pending || e == line.c_str() + 7) {
+                        std::printf("ERR BADOPT: nothing staged\n");
+                        std::fflush(stdout);
+                        continue;
+                    }
+                    if (bs.empty() || s < 0 || s >= (long) bs.size() || bs[(size_t) s].active) {
+                        std::printf("ERR BADOPT: slot busy\n");
+                        std::fflush(stdout);
+                        continue;
+                    }
+                    std::string be;
+                    if (!copy_to_slot((int) s, staged_admit.live, be)) {
+                        std::fprintf(stderr, "strata serve: staged admission failed: %s\n", be.c_str());
+                        std::printf("BADM %ld 0\n", s);
+                        std::fflush(stdout);
+                        staged_admit.pending = false;
+                        continue;
+                    }
+                    ver.set_slot_sampling((int) s, staged_admit.sp);   // the request's own sampling, row by row
+                    BSlot& sl = bs[(size_t) s];
+                    if (ckpt_pool.on())
+                        for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
+                    sl = BSlot{};
+                    sl.active = true;
+                    sl.x = (int32_t) staged_admit.x;
+                    sl.p = staged_admit.p;
+                    sl.produced = 1;
+                    sl.max_new = staged_admit.max_new;
+                    sl.t0 = Clock::now();
+                    sl.ids = std::move(staged_admit.live);
+                    sl.cvec = staged_admit.cvec;
+                    sl.img = !staged_admit.imgs.empty();
+                    // no draft_first here: ver.final_R_all() holds the last batch window's rows by now, not this
+                    // request's read; draft_ready = false makes the slot's own next window draft from its state
+                    std::printf("BADM %ld 1\n", s);
+                    if (trace && piped) {
+                        rows_wait = "the staged admission";
+                        rows_wait_t = Clock::now();
+                    }
+                    std::fflush(stdout);
+                    staged_admit.pending = false;
+                    continue;
+                }
+                if (line.rfind("BCANCEL", 0) == 0) {
+                    staged_admit.pending = false;
+                    std::printf("BCANCELLED\n");
+                    std::fflush(stdout);
+                    continue;
+                }
+                if (line.rfind("BREAD ", 0) == 0) {
+                    if (staged_admit.pending) {
+                        std::printf("ERR BREAD: staged read pending\n");
+                        std::fflush(stdout);
+                        continue;
+                    }
+                    char* e1 = nullptr;
+                    const long long mn = std::strtoll(line.c_str() + 6, &e1, 10);
+                    if (mn < 1 || e1 == line.c_str() + 6) {
+                        std::printf("ERR BREAD: bad max_new\n");
+                        std::fflush(stdout);
+                        continue;
+                    }
+                    staged_read = true;
+                    admit_max_new = mn;
+                    adm_drain_ms = line_drain_ms;
+                    line = std::string("GEN 1") + e1;   // the read path of a GEN, with no slot
+                }
+                if (staged_admit.pending && !staged_read &&
+                    (line.rfind("GEN ", 0) == 0 || line.rfind("GENI ", 0) == 0 ||
+                     line.rfind("BGEN ", 0) == 0 || line.rfind("BGENI ", 0) == 0)) {
+                    // a read would overwrite the staged one in the main session: adopt or cancel it first
+                    std::printf("ERR a staged read is pending; adopt or cancel it first\n");
+                    std::fflush(stdout);
+                    continue;
+                }
+            }
             if (line.rfind("BGEN ", 0) == 0 || line.rfind("BGENI ", 0) == 0) {
                 const bool bimg = line.rfind("BGENI ", 0) == 0;
                 char* e1 = nullptr;
@@ -15574,7 +15674,30 @@ int main(int argc, char** argv) {
                         (long long) req_offload, chain_txt, (long long) req_chunk,
                         (long long) (sp.chain_experts_streamed() - streamed0));
             std::fflush(stdout);
-            if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
+            if (staged_read) {
+                // STRATA_BATCH_STAGED_READ: the read is done and lives in the main session; keep what the slot will
+                // need and wait for the server's BADOPT.  No slot is touched here.
+                const bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 &&
+                                  std::strcmp(finish, "length") == 0 && (int64_t) live.size() == p;
+                staged_admit.pending = true;
+                staged_admit.live = live;
+                staged_admit.imgs = live_imgs;
+                staged_admit.sp = req_sp;
+                staged_admit.max_new = admit_max_new;
+                staged_admit.x = x;
+                staged_admit.p = p;
+                staged_admit.turn_at = turn_at;
+                staged_admit.moved_in = moved_in;
+                staged_admit.lent_slot = lent_slot;
+                staged_admit.cvec = cvec_cached;
+                staged_admit.cont = cont;
+                staged_admit.drain_ms = adm_drain_ms;
+                std::printf("BRDY %lld %lld %d\n", (long long) staged_admit.live.size(),
+                            (long long) staged_admit.max_new, cont ? 1 : 0);
+                std::fflush(stdout);
+                staged_read = false;
+                adm_drain_ms = 0.0;
+            } else if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&
                             (int64_t) live.size() == p;
                 const auto tc0 = Clock::now();
