@@ -186,9 +186,13 @@ int8 池、真实几何、无模型，单 QSA 层每次调用 µs，3 次中位�
 1. **Turing 上每行代价的大头是"对选择集做注意力"（+18.1 µs/行），不是 block scores（+4.6）**——fork 的
    BLOCK_KV=2 直觉要落的地方是 `qsa_decode_attn_batch`（CHUNK=64 是编译期常量，无 env，需变体构建对比），
    P4 的扫描应聚焦它，`qsa_select` 只是次要项。
-2. `STRATA_QSA_ROWS=1`（`block_scores_rows`）在 Turing **不是单调赢**：scores/ids 与 multi 逐位相同（8 cases
+2. `STRATA_QSA_ROWS=1`（`block_scores_rows`）在 Turing **不是单调赢**：scores/ids 与参照逐位相同（8 cases
    0 differ），但 T=1 −1.4 µs、T=2 −2.3 µs、T=3 +0.7 µs、T=4 +7.4 µs —— T≥3 反向。所以**不默认开**；
    若要开，正确形态是"仅 NQ≤2 时走 rows kernel"（当前开关只按 env 判，不看 NQ）。收益上限 ~2 µs/层/窗（<0.5%）。
+
+注：`qsa_block_scores` 在 7.5 卡上的**默认路径是 `block_scores_halve_kernel`**（`qsa_select.cu:1723` 分支，
+逐位相同），bench 的标签写的 "(multi)" 是历史名——上表的 37.2/39.9/49.6/51.0 实际是 Turing 默认的 halve 路径，
+所以这个对比就是 rows vs 生产默认，结论可直接用。
 
 
 ### P5 · server 侧 Qwen3 parser 正确性修复 → **判定：已覆盖，不移植**（2026-10-25 核实）
