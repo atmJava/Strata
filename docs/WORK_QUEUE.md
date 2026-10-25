@@ -29,7 +29,7 @@
 | S12 | 优雅停机（已有 `--shutdown-timeout` + drain；补测试） | SIGTERM 后 ≤30s 完成或 abort，退出码 0；测试断言 | 待做 | | **已有实现，缺测试**（`serve/server.py:4031,8675`） | |
 | S13 | profile 契约（命名/键校验） | `check_preset.py` 校验命名与必填键；负例被拒；测试断言 | 待做 | | 已有部分 |
 | S14 | detokenizer stop 缓冲（已有 `StopMatcher`；补测试） | 部分 stop 串不泄漏（流式文本不含前缀）；测试断言 | 待做 | | **已有实现，缺测试**（`serve/server.py:3743`） | |
-| S0e | [发现] 引擎崩溃后的自愈：并发请求反复重启/杀引擎、恢复期 503；health 200 不反映引擎状态 | 单请求（无并发）崩溃后 ≤1 次重启恢复；有并发时恢复期错误可解释且有限；health 反映引擎在/不在 | 待做 | V2a S0c（L-058） | V2a 新发现 |
+| S0e | [发现] 引擎崩溃后的自愈：懒重启（下一个新请求触发），在途请求拿干净 503；首请求要等一次完整加载（~156 s） | 崩溃后首个新请求 ≤1 次自动重启内恢复；在途 503 可解释；health 的 loaded 几秒内转 false | 否决（按设计） | L-061 | V2a 新发现；实测 156.4 s 恢复。可选改进：崩溃即预热重启 |
 | T-probe | [工装] `probe-version-stamp.py` 固定读 0.2.2 树，V2a 读到的 server 是旧文件 | probe 报的 server hash == launcher 实际运行的那个 server 文件 | 待做 | L-058 | V2a 新发现 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀（cached_tokens=0）；测试断言 | 待做 | | |
 

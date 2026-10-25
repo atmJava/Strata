@@ -4,11 +4,11 @@
 
 - 目标：持续优化循环（`EVERGREEN_LOOP.md`；不设完成，直到用户叫停）；当前主线 = 移植代码的服务器验证战役
   V0→V3（`SELF_ITERATION_PLAN.md` §4）
-- 当前批次：**V2c 完成**（2026-10-25 14:12–14:20Z，S0b A-B：10.87 vs 10.91 s，+0.37% 无差异，S0b 未达）；下一批 **S0e（引擎崩溃不自动重启）**
-- 当前项：S0e（修引擎崩溃后的自愈 + health 反映引擎状态）
-- 下一动作：**S0e**——先静态读清"引擎死后为什么没有自动重启"（`serve/server.py` 的 `load()`/`ensure_loaded()`、
-  `_take_control` 的 503 路径、`_say_died`），再写默认关的修复 + mock 测试（杀 mock 引擎 → 下一请求成功或
-  health 报 not loaded）→ 部署 → 重跑 kill 测试。判据：崩溃后 ≤1 次自动重启恢复；health 反映引擎在/不在。
+- 当前批次：**V2c 完成**（2026-10-25 14:12–14:20Z，S0b A-B：10.87 vs 10.91 s，+0.37% 无差异，S0b 未达）；S0e 已判**否决（按设计）**；下一批 **V3（先 V3-1 容量矩阵：6×192K / 8×128K）**
+- 当前项：V3（容量与投机批；先做 V3-1 容量矩阵）
+- 下一动作：**V3-1 容量矩阵**——在现网部署上试 8 路 ×128K（`--batch 8` + server `parallel 8`，config 副本），
+  与现状 6×192K 对比：6/8 路聚合、单路 tok/s、晚到请求首 token、邻居停顿；VRAM 不够就照实写"装不下"并在
+  台账给数字。`S0e` 的"预热重启"作为可选改进留在队列。
 - 环境（V2a 装后实测，2026-10-25 13:52Z）：health 200；引擎 **0.1.49.1** / `84a0d410`；server **`b6b695a1`**
   （`/opt/ai/src/strata-port-v1/serve/server.py`）；launcher `0eeee160`；config `6c362d01`（未动）；
   W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）；
