@@ -61,15 +61,30 @@ prompt 的 GPU 16.3 s 里 gdn 全部阶段 ≈ 10%（gdn 8.6% + conv+gates 1.2% 
 恰在跨 boot 噪声门上。**专家管线才是长读大头：gemm gate/up 18.4% + gemm down 9.2% + dequant 3.4% +
 gather/grouping 1.2% ≈ 32%；hc read 9.2%、qsa attn 9.2%、embed+steps 7.7%、ple 6.2%。**
 
-### P3b · 专家管线带宽研究（新，取代 P3 的位置）
+### P3b · 专家管线定性 → **已完成（本机实测）**：MMQ 的 IQ3_XXS 是**反量化指令受限**，不是带宽受限
 
-45K prompt 的专家 GEMM 4.5 s 远超 int8 算力所需（估算 <0.1 s）→ 大概率是**权重搬运**受限
-（IQ3_XXS 专家 blob 经 PCIe/RAM 流入，`--pcie-frac 0.31` 分流）。
-- 要做：用 `mmq_expert_bench` + `prefill_phase_timing.sh` 口径在服务器微基准里分离"权重搬运 vs MMA"
-  时间；若搬运受限，移植对象就不是 Marlin 而是**搬运调度**（fork 的 prefetch/双 stage 思路、
-  `STRATA_IO_PF_*` 与 `--pcie-frac` 的实测调参、`STRATA_MMQ_TAB` 就地读驻留 slot 的 A/B——它默认 OFF
-  的理由是 37 MiB/卡显存，在 6×192K 预设下值不值要算账）。
-- 验证：微基准数字 + 同 boot A/B（`runtime_flag`）；≥5% 才动默认。
+`mmq_expert_bench`（本机 2080 Ti，sm_75 构建，2026-10-25，IQ3_XXS case 为本计划新增）：
+
+| 案例 | R=12 | R=160（生产行制） | R=626 |
+|---|---|---|---|
+| iq3_xxs gate/up 1280×2560 | 9.3 TOPS | **39.0 TOPS / 46.6 GB/s 权重** | 45.8 TOPS |
+| iq3_xxs down 2560×640 | 9.8 TOPS | 38.3 TOPS | 37.4 TOPS |
+| iq4_nl down | 8.2 TOPS | 31.1 TOPS | 30.2 TOPS |
+
+int8 TC 峰值 ≈ 456 TOPS（2080 Ti fp16 228 TFLOPS ×2）、HBM 有效 ≈ 450 GB/s。R=160 时算力 8.5%、
+权重带宽 ~10%——**两头都不到 15% ⇒ 循环内反量化（shuffle/查表）是瓶颈**，正是 Marlin 设计的靶点。
+生产 45K prompt 的 gemm gate/up 3005 ms 与 bench 速率一致（按 16 专家组 × R≈160 推算 ≈3.2 s ✓），
+排除"PCIe 搬运主导"假设（`--pcie-frac` 调参与 `STRATA_MMQ_TAB` 留作 P4 一并扫）。
+
+### P3c · fused_iq 扩展到 Turing 的 IQ3_XXS/IQ4_NL（旗舰移植项，进行中）
+
+Strata 已有 Marlin 形制的 fused kernel（`moe_fused_iq.cu`：codebook→shared→int8→s8-MMA，
+Turing 分支 `__ldg` 拷贝 + `m8n8k16` + ASTAGES_DEV=2 都在），IQ3_XXS 主体在 sm_120/HIP 已实例化；
+Turing 只放行 Q2_0/Q2_0 的理由是注释"codebook 格式在 4 warps/row 下装不进 64 KB shared"——
+**smem 估算 WW=2 路径 ~47 KB 可装**（`smem_bytes` 公式 :110），即扩展面可能只是 setup/覆盖判定 +
+pick_ww 尊重 WW=2。收益上限：gate/up 18.4% + down 9.2% 相位 × fused 对 MMQ 的倍数。
+- 验证：`prefill_fused_iq_test` 在服务器 sm_75 构建上跑 IQ3_XXS/IQ4_NL parity；bench 对比 MMQ（R=160 ≥1.5× 才默认化）。
+- 状态：实现进行中，基线树 `strata-port-20261025/build75`。
 
 ### P4 · Turing tile 调参扫描（decode 注意力/选块，测量驱动）
 
@@ -126,7 +141,8 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 | P1 DFlash2 轨道 | 待做（设计分析中） | 引擎侧 `--draft dflash2` 现仅 CLI spec loop（`generate.cpp:5448`），`ENGINE_SERVES_DFLASH2=False`（`strata_control/drafting.py:147`）；serve/batch/层切分集成是真实工作量 |
 | P2 accounting 审计 | 进行中 | 子代理审计 MTP/DFlash2/KV/expert 池预留 |
 | P3 GDN recurrent 移植 | 降级为研究项 | L030 实测 gdn 全部阶段 ≈10%（45K prompt），2× 上限省 ~5% |
-| P3b 专家管线带宽研究 | 待做（新，优先） | L030：专家 GEMM+dequant+gather ≈32%，GEMM 4.5 s ≫ int8 算力需求 → 疑搬运受限 |
+| P3b 专家管线定性 | 已完成 | bench：IQ3_XXS gate/up R=160 = 39.0 TOPS（8.5% 峰值 / 10% HBM）⇒ 反量化受限 |
+| P3c fused_iq Turing IQ3_XXS | 进行中 | 子代理 8b81b340；验收 = parity + fused/MMQ ≥1.5× @R=160 |
 | P4 tile 扫描 | 待做 | |
 | P5 parser 修复 | 已覆盖·不移植 | `server.py:5988-6001,6044`、`serve/dsml.py:172,211` + 各自测试（2026-10-25 核实） |
 | P6 barrier 对照分析 | 待做 | |
