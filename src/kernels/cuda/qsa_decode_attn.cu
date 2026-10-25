@@ -17,9 +17,13 @@
 #include <cstdlib>
 #include <cstring>
 
-// P4 (docs/VLLM_PORT_PLAN.md): the decode attention's work item is one CHUNK of cells over THREADS threads.  The
-// defaults are the measured shape; these two macros exist so tests/cuda can build the same kernel at another tile in
-// a sweep (no env switch: a card serving a model does not pick them at run time).
+// P4 (docs/VLLM_PORT_PLAN.md): the decode attention's work item is one CHUNK of cells over THREADS threads.  The two
+// names below are the measured shape and are NOT a tuning knob yet: the exp/max phase of both kernels covers exactly
+// 64 cells (the two `lane` / `lane + 32` halves at ~:262 and ~:424), so a CHUNK above 64 leaves the extra cells with a
+// raw scaled score as their probability and a part_m / part_l that counted only the first 64, and a CHUNK below 64
+// writes past the 64-cell shared buffer - measured on the 2080 Ti: 128/256 and 256/256 wrong (rel RMS 13-35x, max
+// |out| 36.6 vs 1.28) and 32/128 an illegal memory access.  A real tile sweep first needs that phase rewritten as a
+// CHUNK/64 sub-tile loop with a running max (and its own parity gate); until then only the default builds.
 #ifndef STRATA_QSA_ATTN_CHUNK
 #define STRATA_QSA_ATTN_CHUNK 64
 #endif
@@ -36,10 +40,10 @@ static_assert(HD == strata::core::kCompiledGeometry.head_dim && G == strata::cor
 constexpr int CHUNK = STRATA_QSA_ATTN_CHUNK;        // cells per block
 constexpr int THREADS = STRATA_QSA_ATTN_THREADS;
 constexpr int WARPS = THREADS / 32;
-// G * CHUNK / THREADS heads per thread: only the shapes that divide evenly are meaningful (64/256 -> 3, 128/256 -> 6,
-// 32/128 -> 3).  The defaults are the measured ones; the macros are for the tile sweep (tests/cuda, P4), not a knob.
-static_assert(G * CHUNK % THREADS == 0 && THREADS >= CHUNK && THREADS % 32 == 0,
-              "qsa_decode_attn: G*CHUNK must divide THREADS, THREADS >= CHUNK, THREADS a multiple of 32");
+// G * CHUNK / THREADS heads per thread (64/256 -> 3).  The 64-cell phase bounds both numbers: see the note above.
+static_assert(CHUNK == 64 && THREADS == 256,
+              "qsa_decode_attn: only the measured 64-cell / 256-thread shape is valid - the exp/max phase covers 64 cells "
+              "(docs/VLLM_PORT_PLAN.md P4: other tiles produced wrong output or faulted)");
 
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
