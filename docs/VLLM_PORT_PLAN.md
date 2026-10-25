@@ -40,6 +40,9 @@ Strata 有 DFlash2 实现（`dflash2.cpp/.cu`，7 drafts + selector）但生产�
   ring + 每槽 draft 的显存从哪让（对照 P2 的 accounting 审计）；③server 侧 `drafting.apply()` 的
   dflash2 路线在 6×192K 预设下的配置预设 + 回滚演练脚本；④K=7 窗口与 `kVerifyMaxT=8` 的布局核对（G7 复活）。
 - 验证：本地 `dflash2_parity` + `dflash2_*_bench` 编译过；服务器微基准；**吞吐数字只在用户批准的部署窗口产生**。
+  接线的验收钩子已就位：`tools/server/tap_parity.py`（`869c1224`，14 例单测）可以 `compare` 同层两份 dump
+  （CLI 窗 vs serve 窗 vs 批窗）或 `merge` 各 stage 的 dump（`STRATA_TAP_FILE=/tmp/t%d.stap`，`%d`=layer_lo）
+  再与单 stage 整窗比——这是 A2/B1 之后"taps 接线对不对"的机器判据，不需要权重。
 - 风险：IQ3_XXS 生产包上的 draft 接受率未知（fork 数字是 NVFP4/FP8 dense 路线）——先在日志里
   跑被动统计（`passive_windows.py` 类）再切默认。
 
@@ -51,11 +54,14 @@ Strata 有 DFlash2 实现（`dflash2.cpp/.cu`，7 drafts + selector）但生产�
   `Dflash2Drafter` 加共享权重参数（`load(..., shared)`，照 `mtp.hpp:47-48`）与异步 launch/collect
   （现在 `draft()` 同步，`dflash2.cpp:538`）；否则 6 槽 = 6×0.76 GiB 不成立。
 - 层切分：drafter 驻**最后 stage**（照 MTP `:5467/:5521-5524`）；taps 过卡最省的做法是**扩 hand-off 布局**
-  （`handoff_floats` 加 stage0 的 tap 行，`verify.hpp:194`；解除 `verify.cpp:788` 的单 stage 限制，各 stage
-  记 `requested ∩ [lb,le)` 子集），与 flag 发布同路、零额外同步。字节量：24/24 切分下过卡仅 stage0 的 2 个
+  （`handoff_floats` 加 stage0 的 tap 行，`verify.hpp:194`），与 flag 发布同路、零额外同步。**多 stage 的 taps 已经
+  打通**（`0ab5bdd1`）：每 stage 记 `requested ∩ [lb,le)` 子集，`tap_layers_local()` 给槽序、`tap_layers()` 给全局
+  并集；`STRATA_TAP_FILE=/tmp/t%d.stap` 的 `%d` = 该 stage 的 `layer_lo`（整模型 0），各 stage 各写一份、可与单
+  stage 整窗 dump 逐窗比（`tools/server/tap_parity.py merge|compare`）。字节量：24/24 切分下过卡仅 stage0 的 2 个
   tap = 20 KiB/行、≤160 KiB/窗，47 GB/s 口径 ~3.5 µs——不是瓶颈。
-- 分阶段：**A1 serve solo**（去掉 gate 的 `o.serve`，bind/prepare 挪到引擎级 `:9160-9190`，解码环换
-  df2.draft，prompt 走 `prefill.set_taps/on_taps`）→ **A2 serve+batch**（去掉 `verify.cpp:2203` 的
+- 分阶段：**A1 serve solo ✅（`40125aa4`）**（gate 去掉 `o.serve`，bind/prepare 在引擎级 `:9167-9211`，解码环换
+  df2.draft，prompt 走 `prefill.set_taps/on_taps`，温度>0/penalty/logit_bias/resume 落窗内的请求各自退 MTP）→
+  **A2 serve+batch**（去掉 `verify.cpp:2203` 的
   `!batch_rec_`，每槽 taps staging + `prepare`，`batch_step` 参数化 rows_per_slot）→ **B1 层切分 serial**
   （memcpyPeer 搬 taps）→ **B2 pipelined groups**（df2 只读 tap_dev_ + 自己 ring、与 commit 无依赖，draft
   可完全藏在管道下——MTP 做不到）。A1 改动 ~150 行 generate.cpp；A2 ~600 行 + dflash2 ~200 行重构。
@@ -63,9 +69,10 @@ Strata 有 DFlash2 实现（`dflash2.cpp/.cu`，7 drafts + selector）但生产�
   需实测），MTP 是每窗必重发（`:5532`）。
 - 必须实测才能定：sm_75 的 draft_cap（`draft_cap.hpp:12-19` 对 Ampere 类返回 0）、draft_conf 每槽截多长、
   rows_per_slot×groups、提案复用命中率、draft 轮 GPU ms、IQ3_XXS 包接受率、温度>0 请求退 MTP 的比例。
-- 生产配置（`--serve`/`--batch`/多卡）下 df2 **本就不启用**（`generate.cpp:5476-5480`），所以这条移植的收益
-  全部来自"打开它"，不是修 bug；VRAM 账：共享权重设计 ≈ 0.76 + 0.2 + 6×0.25 ≈ **2.5 GiB**（全压最后 stage），
-  顶替 batch_mtp 时回收 slot_mtp 私有 K/V。
+- 生产配置（`--serve --batch`/多卡）下 df2 **仍不启用**（`generate.cpp:5476-5480` 仍拒 `o.batch>0`/multi_gpu），
+  `--serve` 单卡现在可用（A1）；这条移植的收益全部来自"打开它"，不是修 bug。VRAM 账：共享设计实测口径
+  ＝ owner（pack 0.76 GiB + head 0.27 GiB + dvocab 0.4 MiB）+ 每实例 ≈87.6 MiB（ring 80.6 + 其它 4.1 + logits 3.2），
+  6 槽合计 ≈ **1.5 GiB**（计划里 2.5 GiB 是保守估计），全压最后 stage；顶替 batch_mtp 时回收 slot_mtp 私有 K/V。
 - **验证前置（已核实，2026-10-25）**：`dflash2_parity <pack> <case.bin>` 需要 DFlash2 drafter 的
   safetensors+config（`tools/dflash2/mk_parity_case.py` 用 torch 参考生成 case）。服务器上**没有**这份权重
   （`/opt/ai` 下只有 fork 自己的 `quality-smoke-dflash2-*.json` 日志，那是 vLLM 侧的），所以 df2 的 kernel 级
@@ -82,18 +89,23 @@ fork 教训：共享池 accounting 曾把 DFlash2 限到约 1/6 容量；修复 
 **审计结果（只读代码，2026-10-25，数字由代码公式推出，MiB=1024²）**：
 
 - 结论：Strata **没有统一显存预算器**。session（KV 池）、MTP drafter、DFlash2、expert cache、verify arena、
-  CUDA graph 各自独立 `cudaMalloc`，互不记账。**真重复计费只有 3 处**（双 head 85 MiB×2、每 slot RoPE 表
-  重复 48 MiB×6、`--mtp-q4` 反向增），其余是**记账空洞**（预留公式漏项），不是双扣。
-- 生产 6×192K：每卡 1 主 + 6 slot 的 session ≈ **10,126 MiB（9.89 GiB）**（KV int8 8,316 + fp32 indexer
-  1,008 + GDN 131 + RoPE 336），22 GB 卡剩 ~7 GiB 给 expert cache/graph。8×128K = **8,873 MiB/卡**（省 1.2 GiB），
-  7×160K = 9,730，6×128K = 6,901；`serve/server.py` 的 `PARALLEL_MAX=8` 不挡 `--batch 8`。
-- MTP drafter ≈ **839 MiB**（dense 111 + 512 专家 Q2_0 675 + draft KV 33.1 + arena 17-20 + logits 7.6 + head 85.2），
-  在 expert cache 定容**之前**分配 → 真实挤压 cache（顺序性，非双扣）；`--mtp-q4` 不省显存（新增 `dense4_`）。
+  CUDA graph 各自独立 `cudaMalloc`，互不记账。**真重复计费只有 2 处**（双 head 85 MiB×2、每 slot RoPE 表
+  重复 48 MiB×6），其余是**记账空洞**（预留公式漏项），不是双扣；`--mtp-q4` 也不是双扣，它是**反向增**
+  （多一份 `dense4_`，省不了显存）。
+- 生产 6×192K：每卡 1 主 + 6 slot 的 session ≈ **10,126 MiB（9.89 GiB）**＝ KV int8 8,316 + fp32 indexer
+  1,008 + GDN 131 + RoPE 336 + 其它缓冲（qsa/moe/block/ple 等）335。22 GB（22,528 MiB）卡扣掉 session 后
+  理论剩 12.1 GiB，再扣权重/图/expert cache 自身开销，生产上 cache 实际只剩 ~7 GiB。8×128K =
+  **8,873 MiB/卡**（省 1.2 GiB），7×160K = 9,730，6×128K = 6,901；`serve/server.py` 的 `PARALLEL_MAX=8`
+  不挡 `--batch 8`。
+- MTP drafter ≈ **839 MiB**（dense 111 + 512 专家 Q2_0 675 + draft KV 33.1 + arena 17-20），**另有** draft head
+  85.2 与每 slot 的 logits 7.6（单列，别把这 92.8 加进 839）；它在 expert cache 定容**之前**分配 → 真实挤压
+  cache（顺序性，非双扣）。`head_logits_` 已按子词表宽度改（省 30.34 MiB/7 个 drafter，见下）。
 - 记账空洞（会让预测偏乐观）：split 搜索每 stage 只按 **1 个 session** 定价（`generate.cpp:4578-4581`）→ 生产
   要 7 个 → **每卡预测偏大约 8.7 GiB**，搜索给出的 cache/覆盖率预测不可直接用于 C1 决策；`kDrafterMib` 等只活
   在搜索里（`:4508-4515`），真实末 stage 定容（`:6543`）不记 draft head 与 slot logits。
-- 可回收（按性价比）：①**跨 slot 共享 RoPE 表 ~288 MiB/卡**（`session.cpp:69,108-119`）；②`--mtp-window 8192`
-  ~240 MiB（末 stage，接受率需 A/B）；③`head_logits_` 按子词表宽度 ~30 MiB；④`--draft-vocab en` ~53 MiB（接受率
+- 可回收（按性价比）：①**跨 slot 共享 RoPE 表 ~288 MiB/卡**（`session.cpp:69,108-119`）——**已实现**
+  （`session_bytes(...,borrow_rope)`/`session_init(...,share_rope_from)`，`ca4d6e85`）；②`--mtp-window 8192`
+  ~240 MiB（末 stage，接受率需 A/B）；③`head_logits_` 按子词表宽度 ~30 MiB——**已实现**（`ab7b682a`，实测 30.34 MiB/7 drafter）；④`--draft-vocab en` ~53 MiB（接受率
   变化）；⑤verify `staging_` blob 上限 ~34 MiB（max_blob 需实测）；⑥CUDA graph LRU 上限（每对 20-30 MiB，需实测）。
 - 另两条对 C1 直接有用的现状：`--batch-mtp` 在 2 张 N 卡上**默认被 drop**（`batch_groups.hpp` `resolve()`，
   `nv_serial_faster` 默认 true，`generate.cpp:5295`）——别假设 6 个 slot drafter 在跑；多卡下 `--kv-grow`
@@ -136,13 +148,16 @@ Turing 只放行 Q2_0/Q2_0 的理由是注释"codebook 格式在 4 warps/row 下
 **smem 估算 WW=2 路径 ~47 KB 可装**（`smem_bytes` 公式 :110），即扩展面可能只是 setup/覆盖判定 +
 pick_ww 尊重 WW=2。收益上限：gate/up 18.4% + down 9.2% 相位 × fused 对 MMQ 的倍数。
 
-**结果（本机 2080 Ti，sm_75 构建 `strata-port-20261025/build75`，2026-10-25，未 commit）**：假设证实——
+**结果（本机 2080 Ti，sm_75 构建 `strata-port-20261025/build75`，2026-10-25；代码已提交 `d8ba8593`）**：假设证实——
 IQ3_XXS 主体在 Turing 直接可编译可跑，改动只在 setup/覆盖判定：`dev_info` Turing 分支加 IQ3_XXS gate/up +
 IQ4_NL down 的 setup（smem 按卡逐 kernel 实测：WW=2 46,592 B 与 WW=4 60,672 B **都装得下**，
 fallback 到 WW=2-only 的通路在，本卡未触发）；`native_supported` 放行该对；`experts_native` 只 clamp
 未装下的形状。数值（`prefill_fused_iq_test --only="IQ3_XXS / IQ4_NL"`，R64_E=16）：fused vs 自身 int8
 模型 rel RMS 1.22e-4（worst 3.64e-3），fused vs MMQ rel RMS 1.21e-4（worst 3.64e-3；MMQ vs FP32 1.43e-2），
-timing 段 fused vs MMQ 1.8-2.4e-4——全绿；Q2_0/Q2_0 与其余对在 Turing 上行为不变。
+timing 段 fused vs MMQ 1.8-2.4e-4——全绿。注意 Q2_0/Q2_0：**不设 `STRATA_PF_FUSED` 时仍是 MMQ**（默认 token 路径
+逐位不变），但 7.5 卡上设了 `STRATA_PF_FUSED=1` 时它现在也走 fused —— 改动前 7.5 卡要显式
+`STRATA_PF_FUSED_SM75=1` 才可能，这次随 W6 的 series 一起默认打开（那 1.31×/1.17× 的 Q2_0 数字就是这条路），
+所以对"已开 `STRATA_PF_FUSED=1` 的 7.5 用户"这是一处真实的路径变化，写在这里而不是藏在代码里。
 速度（同进程交替中位数，16 专家组，`S20_E=16 --chunks=20,256,1002` ⇒ R≈12/160/626；当日对照
 `mmq_expert_bench`：iq3_xxs gate/up R=160 = 31.9 TOPS、iq4_nl down 25.9）：
 
@@ -159,8 +174,10 @@ timing 段 fused vs MMQ 1.8-2.4e-4——全绿；Q2_0/Q2_0 与其余对在 Turin
 Q2_0/Q2_0 同形制 fused 对 MMQ 为 1.31×/1.17×仅积）。对照 fused 在他卡的优势：R9700（gfx12）同对 1 层
 2048 tok MMQ 24.5 vs fused 4.4 ms（5.6×）、8192 tok 31.7 vs 13.2（2.4×），引擎 prompt 4K +16.7%/20K +19.0%
 （AMD_HIP.md）；RTX PRO 5000（sm_120）prompt +7.0%/+5.2%/+3.4%（moe_fused_iq.cu 注释）。
-默认态（已拍板，2026-10-25）：**保持 opt-in**——`native_supported` 在 7.5 卡上默认仍只给 Q2_0/Q2_0 的既有行为，
-IQ3_XXS/IQ4_NL 需 `STRATA_PF_FUSED=1`；`STRATA_PF_FUSED_SM75=0` 在任何情况下回 MMQ。理由：实测 1.13×（生产行制）
+默认态（已拍板，2026-10-25）：**保持 opt-in**——`native_supported` 的 env<0（未设 `STRATA_PF_FUSED`）路径在 7.5 卡上
+返回 false，token 仍走 MMQ；IQ3_XXS/IQ4_NL 需 `STRATA_PF_FUSED=1`；`STRATA_PF_FUSED_SM75=0` 在任何情况下回 MMQ。
+7.5 卡上即使不开 `STRATA_PF_FUSED`，`dev_info` 也会做一次 Q2_0+IQ 的 setup 并打一行 stderr banner（W6 series 的
+默认化）——这是**启动日志/驱动调用**层面的变化，数字路径没变。理由：实测 1.13×（生产行制）
 ≈ 3-4% prompt 时间、低于本计划 1.5× 默认化门槛，且输出数值与 MMQ 有 2e-4 级差异、端到端未在现网测，按仓库
 "默认路径字节不变"规则不翻默认。服务器探针实测（2080 Ti/build75）：unset → IQ3_XXS/IQ4_NL=0；`STRATA_PF_FUSED=1`
 → =1；`STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=0` → available=0。opt-in 下 parity PASS（fused vs MMQ rel RMS 1.2e-4）。
@@ -174,22 +191,32 @@ fork 在 Triton TQ decode 上发现 BLOCK_KV=2 对 Turing 寄存器/shared 平�
 - 验证：`qsa_rows_bench`/`qsa_select_bench` 扩展 + parity 全绿。
 
 **实测（2026-10-25，服务器卡 1，`qsa_rows_bench --ctx 131072 --max-context 131072 --iters 30 --rows`，
-int8 池、真实几何、无模型，单 QSA 层每次调用 µs，3 次中位数）**：
+int8 池、真实几何、无模型，单 QSA 层每次调用 µs）**。口径先说清：这张图的分数随**时钟态**变化很大，冷启动
+首跑与预热后能差 30-40%（T=3/4 尤甚），所以下面分成两组，比较只认预热组。
+
+(a) 同一进程冷启动首跑的**分量**（只用来定位开销在哪，不用来算收益）：
 
 | 阶段 | T=1 | T=2 | T=3 | T=4 | 每行增量 |
 |---|---:|---:|---:|---:|---:|
-| scores `qsa_block_scores` (multi) | 37.2 | 39.9 | 49.6 | 51.0 | +4.6 µs |
+| scores `qsa_block_scores` | 37.2 | 39.9 | 49.6 | 51.0 | +4.6 µs |
 | topk `qsa_block_topk` | 39.2 | 40.0 | 40.4 | 40.5 | +0.4 µs |
-| **attn over selection (cap 2051)** | 41.2 | 49.5 | 81.4 | 95.4 | **+18.1 µs** |
 | append indexer | 2.7 | 2.7 | 2.6 | 2.5 | ±0 |
-| 层合计 | 133.9 | 143.3 | 185.6 | 170.9 | +12.3 µs |
+| **attn over selection (cap 2051)** | 41.2 | 49.5 | 81.4 | 95.4 | **+18.1 µs** |
 
-换算：每行 12.3 µs/QSA 层 → 4 层 stage0 0.05 ms、8 层 stage1 0.10 ms（该 bench 口径）。
+(b) 预热到 1920/6800 MHz 后 **7 次交错运行取中位**（可信的绝对数，含 P4 tile 扫描的基线列）：
+
+| 阶段 | T=1 | T=2 | T=3 | T=4 | 每行增量 |
+|---|---:|---:|---:|---:|---:|
+| attn（CHUNK=64） | 29.5 | 36.6 | 62.9 | 77.3 | **+15.9 µs** |
+| 层合计（append+scores+topk+attn） | 109.2 | 115.2 | 148.9 | 160.7 | +17.2 µs |
+
+换算：每行 15.9-17.2 µs/QSA 层 → 4 层 stage0 0.06-0.07 ms、8 层 stage1 0.13 ms（该 bench 口径）。
 
 **两条结论**：
-1. **Turing 上每行代价的大头是"对选择集做注意力"（+18.1 µs/行），不是 block scores（+4.6）**——fork 的
-   BLOCK_KV=2 直觉要落的地方是 `qsa_decode_attn_batch`（CHUNK=64 是编译期常量，无 env，需变体构建对比），
-   P4 的扫描应聚焦它，`qsa_select` 只是次要项。
+1. **Turing 上每行代价的大头是"对选择集做注意力"**（预热态 +15.9 µs/行，冷启动口径 +18.1；scores 只有
+   +4.6），且 attn 约占层合计每行增量的 90%——fork 的 BLOCK_KV=2 直觉要落的地方是
+   `qsa_decode_attn_batch`。P4 的扫描确实聚焦了它，但结论是**这条路的默认 64 cell 不能动**（见本节末的
+   正确性发现），`qsa_select` 只是次要项。
 2. `STRATA_QSA_ROWS=1`（`block_scores_rows`）在 Turing **不是单调赢**：scores/ids 与参照逐位相同（8 cases
    0 differ），但 T=1 −1.4 µs、T=2 −2.3 µs、T=3 +0.7 µs、T=4 +7.4 µs —— T≥3 反向。所以**不默认开**；
    若要开，正确形态是"仅 NQ≤2 时走 rows kernel"（当前开关只按 env 判，不看 NQ）。收益上限 ~2 µs/层/窗（<0.5%）。
@@ -205,8 +232,9 @@ int8 池、真实几何、无模型，单 QSA 层每次调用 µs，3 次中位�
 
 **结论：128/256 在 T=3/4 的“赢”是假的，不能默认。** 正确性用 /tmp 的 bench 副本 dump 输出、与 pristine
 `libstrata_kernels.a` 逐位比：stock ≡ (64,256) 且重跑确定；**128/256 rel RMS 13-16×、max abs 36.6（输出范围
-±36 vs 基线 ±1.28），256/256 30-35×，32/128 直接崩**。根因：两个 kernel 的 exp/max 相位只覆盖
-`lane` 与 `lane+32`（`qsa_decode_attn.cu:~262` 默认、`:~424` v3）——CHUNK>64 时 64+ cell 把原始 scaled score
+±36 vs 基线 ±1.28），256/256 30-35×，32/128 直接崩**。根因：三个 kernel 的 exp/max 相位都只覆盖
+`lane` 与 `lane+32`（`qsa_decode_attn.cu:~262` 默认、`:~424` v3、`:~669` pre75——改 tile 时三处都要动，
+漏一处就是今天这个 bug）——CHUNK>64 时 64+ cell 把原始 scaled score
 当概率、`part_m/part_l` 只统计前 64；CHUNK=32 时读越界。原来那条“G*CHUNK 整除 THREADS”的 static_assert 只查
 了整除，放过了非法 tile。
 
@@ -226,7 +254,8 @@ int8 池、真实几何、无模型，单 QSA 层每次调用 µs，3 次中位�
 所以这个对比就是 rows vs 生产默认，结论可直接用。
 
 
-### P5 · server 侧 Qwen3 parser 正确性修复 → **判定：已覆盖，不移植**（2026-10-25 核实）
+### P5 · server 侧 Qwen3 parser 正确性修复 → **判定：已覆盖，不移植**（2026-10-25 核实；本节的 `server.py` 行号是
+**工作区**（W3 staged-read 已打）的基准，HEAD 上会偏移）
 
 fork 修复的三件事 Strata 都有等价实现且各有测试：①函数名只在 `tool_start` 发一次
 （`serve/server.py:5988-5991`，后续 delta 只带 arguments）；②输出截断在参数流中间时
@@ -249,7 +278,9 @@ S0c 在队列里。本项产出即本页。**
 
 ### P6b · S0c（staged read 失败/取消清理）用例与一个真实缺陷（2026-10-25）
 
-用例 `serve/test_staged_wedge.py`（本地假引擎说 batch+staged 协议，3 例，`pytest` 2.2 s 全绿）：
+用例 `serve/test_staged_wedge.py`（已提交 `bfe515ca`；本地假引擎说 batch+staged 协议，3 例）。**它在 HEAD 上按设计
+skip 3 例**（HEAD 的 `serve/server.py` 没有 staged 代码，用例用 `f"BREAD ` 是否出现在 `generate_batched` 里来判），
+只有把未提交的 staged-read（W3）放进工作区才真跑——那种状态下 `pytest` 2.0 s 3 passed：
 
 1. 引擎在 BREAD 期间死 → 请求报 `EngineDied`、`mp_staged` 必须清空、重启后下一请求正常准入（S0c 判据）；
 2. 引擎在任何请求前就死 → 下一请求重启引擎并照常准入（不卡死）；
@@ -258,8 +289,14 @@ S0c 在队列里。本项产出即本页。**
 **用例抓到一个真缺陷（同批 staged-read 代码里，未提交）**：`serve/server.py` 的 staged 等待分支
 `yield "ping", None` —— `generate_batched` 的消费者是 `_run` 的 token 循环（只认 `None` 心跳），元组会被当
 token 送进 detokenizer，`TypeError: '>=' not supported between tuple and int`，即"读到一半等槽"的请求必崩
-（BRDY 之后 100% 复现）。改为 `yield None` 后三例全绿。该行与 `serve/test_staged_wedge.py` 都留在工作区，
-随 staged-read（W3/S0c）代码一起提交更合适，本页只记录判据与结论。
+（BRDY 之后 100% 复现）。改为 `yield None` 后三例全绿。用例已提交（`bfe515ca`），**那一行 `yield None` 仍在工作区**
+——它属别人未提交的 W3 staged-read 改动，随 W3 一起提交更合适，本页只记录判据与结论。
+
+另外两处**代码读出来的缺口**（未实测，属 W3 未提交代码，交回 W3 作者）：
+- 假引擎不校验 `STRATA_BATCH_STAGED_READ`（真实引擎要它，`generate.cpp:11395`），用例只设
+  `STRATA_MP_STAGED_READ`，所以 env 不配对的情况抓不到（用例已顺手把两个 env 都设上，仍无法证明生产一致）；
+- 真实引擎在槽忙时回 `ERR BADOPT: slot busy`，而 `serve/server.py` 是在读 BADM **之前**清 `mp_staged`、失败时
+  不发 BCANCEL → 引擎侧 `staged_admit.pending` 残留，后续准入可能被拒（按代码推断，未复现）。
 
 失败路径的清理（`finally` 里 `mp_staged = None` + BCANCEL/BCANCELLED）经用例 1 验证有效；用例 3 验证
 采用路径不遗留。这也把 fork 的"失败即出队"判据在 Strata 上落成了可回归的用例。
@@ -294,12 +331,12 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| P1 DFlash2 轨道 | 待做（设计已定，A1 起） | 引擎侧 `--draft dflash2` 现仅 CLI spec loop（`generate.cpp:5448`），`ENGINE_SERVES_DFLASH2=False`（`strata_control/drafting.py:147`）；A1 serve solo →A2 batch（每槽实例+共享权重+异步）→B1 层切分→B2 管道隐藏；验证前置=drafter 权重（服务器没有） |
+| P1 DFlash2 轨道 | **A1 已实现（opt-in）·A2/B1 待做** | 库层已就位：`load(shared)` 共享 pack/blob/head、`draft_launch/collect` 异步、`set_lazy_capture`（`dflash2.hpp:52,72,75,83`）；taps 支持批窗+多 stage+`%d` per-stage dump（`verify.hpp:326`）；`--draft dflash2` 已接 serve solo 解码环、gate 去掉 `o.serve`（`generate.cpp:5478,9167-9211,15396-15418`）。`ENGINE_SERVES_DFLASH2=False`（`strata_control/drafting.py:146`）。A2 batch（每槽实例+共享权重+异步）→B1 层切分→B2 管道隐藏；验证前置=drafter 权重（服务器没有） |
 | P2 accounting 审计 | 已完成（只读） | 无统一预算器、真双扣 3 处；6×192K session 10,126 MiB/卡、8×128K 8,873；MTP 839 MiB 在 cache 定容前扣；split 搜索按 1 session 定价 → 预测偏大 ~8.7 GiB/卡；回收清单见 §P2 |
 | P3 GDN recurrent 移植 | 降级为研究项 | L030 实测 gdn 全部阶段 ≈10%（45K prompt），2× 上限省 ~5% |
 | P3b 专家管线定性 | 已完成 | bench：IQ3_XXS gate/up R=160 = 39.0 TOPS（8.5% 峰值 / 10% HBM）⇒ 反量化受限 |
 | P3c fused_iq Turing IQ3_XXS | 已实现·opt-in（未达 1.5× 门槛，不翻默认） | parity PASS（fused vs MMQ rel RMS 1.2e-4，2080 Ti/build75）；速度 1.16/1.13/1.01× @R=12/160/626 全路；探针 unset=0 / PF_FUSED=1 → 1 / SM75=0 → 0；`STRATA_PF_FUSED=1` 才启用（§P3c） |
-| P4 tile 扫描 | 首轮完成·扫描中 | 层内每行大头=attn over selection（+18.1 µs/行 vs scores +4.6）；QSAROWS 在 Turing T≥3 反向不默认开；CHUNK/THREADS 已参数化（默认 64/256 行为不变），变体扫描在跑 |
+| P4 tile 扫描 | 完成·**默认不动** | 每行大头=attn over selection（预热 15.9 / 冷启 18.1 µs/行 vs scores +4.6）；QSAROWS 在 Turing T≥3 反向，不默认开；tile 扫描证明 128/256 与 256/256 **数值是错的**、32/128 崩溃，`static_assert(CHUNK==64 && THREADS==256)` 已锁死（要扫先重写 64-cell 相位）；decode attn 是纯标量 FMA（0 HMMA） |
 | P5 parser 修复 | 已覆盖·不移植 | `server.py:5988-6001,6044`、`serve/dsml.py:172,211` + 各自测试（2026-10-25 核实） |
-| P6 barrier 对照分析 | 已完成·不移植 | 三洞察两条已有等价机制、第三条=S0c；S0c 用例 `serve/test_staged_wedge.py` 3 例全绿并抓到 `yield ("ping", None)` 真缺陷（§P6b） |
+| P6 barrier 对照分析 | 已完成·不移植 | 三洞察两条已有等价机制、第三条=S0c；S0c 用例 `serve/test_staged_wedge.py`（已提交 `bfe515ca`）在**含未提交 staged 代码的工作区** 3 passed（HEAD 上按设计 skip），并抓到 `yield ("ping", None)` 真缺陷（§P6b） |
 | 不移植清单的逐条证据复核 | 已完成 | 本文档 §1（2026-10-25 源码核实） |

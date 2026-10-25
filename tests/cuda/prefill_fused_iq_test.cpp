@@ -310,7 +310,8 @@ void reference_part(const Pair& p, cudaStream_t s) {
     constexpr int T = 256, ZERO = 77;
     // R64_E=N (N > 4): fewer experts - the 64 blobs plus the 16-expert group buffers are ~1 GB, more than a card
     // with a service resident can spare.  The default 64 keeps the shapes this part was written for (experts with 0
-    // rows, one row, several tiles); with a smaller E the many-tile experts still occur, the single-row ones may not.
+    // rows, one row, several tiles); with a smaller E the many-tile experts still occur, the single-row ones may not,
+    // and the "one tile per expert at 20 experts" boundary moves to E/4.
     static const int E = [] { const char* v = std::getenv("R64_E"); return v != nullptr && std::atoi(v) > 4 ? std::atoi(v) : 64; }();
     const Geo geo(p);
     std::mt19937 rng(136 + (unsigned) p.gu * 7 + (unsigned) p.d);
@@ -345,7 +346,8 @@ void reference_part(const Pair& p, cudaStream_t s) {
     ck(cudaMemcpy(fb.ids.p, ids.data(), ids.size() * 4, cudaMemcpyHostToDevice), "ids");
     ck(cudaMemset(fb.dm.p, 0xff, (size_t) rows * N * 4), "sentinel");   // an unwritten row is NaN
     ck(cudaDeviceSynchronize(), "uploads");
-    run_fused(p, geo, fb, x_dev.as<float>(), T, E, {0, 1, std::min(20, E / 4), E}, blob, s);
+    // the default E keeps the boundary this part was written for; a smaller E scales it (an expert still gets one tile)
+    run_fused(p, geo, fb, x_dev.as<float>(), T, E, {0, 1, E >= 64 ? 20 : std::min(20, E / 4), E}, blob, s);
     ck(cudaStreamSynchronize(s), "sync");
     const std::vector<float> y_mmq = mq ? download(mbp->dm, (size_t) rows * N) : std::vector<float>((size_t) rows * N, 0.0f),
                              y_f = download(fb.dm, (size_t) rows * N);
@@ -695,9 +697,9 @@ int main(int argc, char** argv) {
         for (const Pair& p : pairs) {
             if (only ? std::string(p.name).find(only) == std::string::npos : p.gu == GGML_TYPE_Q4_K || p.gu == GGML_TYPE_Q5_K) continue;
             if (!fused::native_supported((int) p.gu, (int) p.d)) {
-                // on a 7.5 card only the pairs dev_info set up there run (the Q2_0 pair with STRATA_PF_FUSED=1, the
-                // production pack's IQ3_XXS / IQ4_NL by default unless STRATA_PF_FUSED_SM75=0): skip what this device
-                // does not take (--only=NAME still insists)
+                // this test always sets STRATA_PF_FUSED=1, so a 7.5 card runs the pairs dev_info set up there (Q2_0/Q2_0
+                // and the production pack's IQ3_XXS / IQ4_NL, both opt-in); skip what this device does not take
+                // (--only=NAME still insists)
                 const bool turing_pair = p.gu == GGML_TYPE_Q2_0 && p.d == GGML_TYPE_Q2_0;
                 int major = 0;
                 cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, 0);
