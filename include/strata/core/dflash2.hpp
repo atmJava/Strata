@@ -20,9 +20,11 @@
 
 #include <cuda_runtime.h>
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -42,7 +44,12 @@ public:
     Dflash2Drafter& operator=(const Dflash2Drafter&) = delete;
 
     /// Reads the pack (tools/dflash2_pack.py) to the GPU `device` and allocates the ring and the buffers (about 0.8 GB).
-    bool load(const std::string& pack_path, int device, std::string& err);
+    /// `shared` (a batch's slots): the pack's weights blob and, at bind(), the draft head are that instance's - the ring, the buffers,
+    /// logits_, the pinned staging and the graphs stay this instance's.  It must have loaded the same pack on the same device, and it
+    /// must have been bound before this instance's bind(); it may be destroyed before this instance afterwards (the shared
+    /// allocations then live until the last instance holding them is gone).  If the shapes, the layer table or the head's row width
+    /// differ, load()/bind() return false with `err`.
+    bool load(const std::string& pack_path, int device, std::string& err, const Dflash2Drafter* shared = nullptr);
     /// The target's embedding and head (and the draft vocabulary file, "" or missing: the whole head).
     bool bind(const WeightTable& wt, const NativeHead* head, const std::string& vocab_file, std::string& err);
     /// Tests: an embedding callback and a head given as raw rows of `head_type` (a native_mmvq type).
@@ -56,10 +63,25 @@ public:
     /// One round: the new context rows (n_new in 1..8: the committed window rows, taps device [n_new][5 * n_embd], positions pos0 ...),
     /// then the block for `anchor` (the last committed token, at pos0 + n_new).  `drafts` / `probs` get kDrafts entries (the
     /// selector's pick and its probability).  The taps pointer must be the same device buffer on every call (graphs are captured on it).
+    /// This is draft_launch() + draft_collect(): it waits for the stream.
     bool draft(const float* taps_dev, int n_new, int64_t pos0, int32_t anchor, int32_t* drafts, float* probs, std::string& err);
+
+    /// The same round, enqueued only: no synchronization, and the drafts are not available until draft_collect() returns.  `taps_dev`
+    /// must not change (and no other call may touch this instance's staging) until then.  One round in flight per instance: a second
+    /// launch before the collect fails.
+    bool draft_launch(const float* taps_dev, int n_new, int64_t pos0, int32_t anchor, std::string& err);
+    /// Waits for this instance's stream and copies the 7 picks (and, when `probs` is not null, their probabilities) out of the pinned
+    /// staging.  `drafts` is required; `probs` may be null.
+    bool draft_collect(int32_t* drafts, float* probs, std::string& err);
 
     /// Captures the eight round graphs (n_new = 1..8) on `taps` now, so no round pays for a capture.
     bool prepare(const float* taps_dev, std::string& err);
+
+    /// true (the default): a round whose graph for n_new is not captured yet captures it on that call, as before.  false: that round
+    /// fails instead, so a capture can only happen inside prepare() - what a batch's admission needs, since a capture must not run
+    /// while another window is in flight.  Set before prepare()/the first draft.
+    void set_lazy_capture(bool on) { lazy_capture_ = on; }
+    bool lazy_capture() const { return lazy_capture_; }
 
     uint64_t vram_bytes() const { return vram_; }
     int64_t n_draft_vocab() const { return n_dvocab_; }
@@ -79,6 +101,7 @@ private:
     const float* f32(const std::string& name) const { return reinterpret_cast<const float*>(blob_ + find(name).off); }
     /// planar Q8 matrices (1..3 of them, same input width) times the planar activations in xqp_ / xdp_ (ncols columns)
     void gemm(std::initializer_list<const char*> names, std::initializer_list<float*> outs, int ncols, cudaStream_t cs, const uint8_t* xq, const float* xd);
+    bool alloc_logits(std::string& err);
     bool record_context(const float* taps, int n, cudaStream_t cs, std::string& err);
     bool record_block(cudaStream_t cs, std::string& err);
     bool capture(int n, const float* taps, std::string& err);
@@ -94,6 +117,8 @@ private:
     cudaStream_t cs_ = nullptr;
     std::vector<Tensor> tensors_;
     uint8_t* blob_ = nullptr;
+    std::shared_ptr<void> blob_owner_;   ///< the pack blob: the last instance holding it frees it (a shared slot's weights outlive the loader)
+    uint64_t pack_bytes_ = 0;            ///< the pack's data size, for the shared compatibility check
     uint64_t vram_ = 0;
     int N_ = 2560, L_ = 5, NH_ = 32, NKV_ = 8, HD_ = 128, I_ = 7680, window_ = 2048, group_ = 16, rank_ = 256, mask_token_ = 0;
     float theta_ = 10000.0f, eps_ = 1e-6f;
@@ -107,6 +132,11 @@ private:
     int64_t n_dvocab_ = 0;
     int32_t* dvocab_ = nullptr;
     uint8_t* dhead_ = nullptr;      ///< the draft vocabulary's head rows (owned), or null with head_w_ the whole head
+    std::shared_ptr<void> dvocab_owner_, dhead_owner_;   ///< the same lifetime rule as blob_owner_
+    int64_t head_row_bytes_ = 0;    ///< the draft head's row width, for the shared compatibility check
+    const NativeHead* head_src_ = nullptr;   ///< the head bind() was given
+    std::vector<int32_t> dvocab_host_;       ///< host copy of the draft vocabulary (a few hundred KiB), for the check
+    const Dflash2Drafter* shared_ = nullptr; ///< the instance the pack and the draft head came from (its bind() must have run)
     bool bound_ = false;
 
     // device buffers
@@ -133,6 +163,11 @@ private:
     uint32_t* topscratch_ = nullptr;
     cudaGraphExec_t exec_[kRows + 1] = {};
     const float* graph_taps_ = nullptr;
+    bool lazy_capture_ = true;               ///< capture a missing graph inside the round (true) or only in prepare() (false)
+    bool pending_ = false;                   ///< a draft_launch() this instance has not waited for yet
+    int64_t pending_pos1_ = 0;               ///< pos0 + n_new of that round, for have_ctx_
+    bool pending_timing_ = false;
+    std::chrono::steady_clock::time_point pending_t0_;
     int64_t have_ctx_ = 0;
     cudaEvent_t ev_a_ = nullptr, ev_b_ = nullptr;
     bool timing_ = false;

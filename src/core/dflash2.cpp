@@ -34,6 +34,16 @@ bool mapped(size_t bytes, void** h, void** d) {
 
 constexpr int GGML_Q8_0 = 8;
 
+// The pack blob, the draft vocabulary and the draft head rows are shared between a batch's slots: a shared_ptr holds each one
+// so it lives until the last instance that loaded or shared it is gone.  Every release happens inside a destructor body while
+// OnDevice(device_) is in scope, so the cudaFree below runs on the allocating device.
+struct CudaFree {
+    void operator()(void* p) const {
+        if (p != nullptr) cudaFree(p);
+    }
+};
+using CudaPtr = std::shared_ptr<void>;
+
 }  // namespace
 
 Dflash2Drafter::~Dflash2Drafter() {
@@ -45,11 +55,14 @@ Dflash2Drafter::~Dflash2Drafter() {
     for (cudaGraphExec_t& e : exec_)
         if (e) cudaGraphExecDestroy(e);
     auto fr = [](void* p) { if (p) cudaFree(p); };
-    fr(blob_); fr(d_meta_); fr(xq_); fr(xqp_); fr(xdp_); fr(xqc_); fr(xdc_); fr(rt_ctx_); fr(rt_blk_);
+    fr(d_meta_); fr(xq_); fr(xqp_); fr(xdp_); fr(xqc_); fr(xdc_); fr(rt_ctx_); fr(rt_blk_);
     for (int l = 0; l < 8; ++l) { fr(kring_[l]); fr(vring_[l]); }
     fr(fcy_); fr(hctx_); fr(kc_); fr(vc_); fr(h_); fr(xn_); fr(xc_); fr(dyn_); fr(q_); fr(qn_); fr(k_); fr(v_); fr(kblk_); fr(ao_); fr(o_);
     fr(gate_); fr(up_); fr(mlp_); fr(part_); fr(fn_); fr(logits_); fr(topval_); fr(hsel_); fr(toptok_); fr(topscratch_);
-    fr(dvocab_); fr(dhead_);
+    // the shared allocations go when the last instance holding them does (a slot may be destroyed before the instance it shares with)
+    blob_owner_.reset();
+    dvocab_owner_.reset();
+    dhead_owner_.reset();
     if (h_meta_) cudaFreeHost(h_meta_);
     if (h_out_) cudaFreeHost(h_out_);
     if (cs_) cudaStreamDestroy(cs_);
@@ -119,7 +132,8 @@ const Dflash2Drafter::Tensor& Dflash2Drafter::find(const std::string& name) cons
     throw std::runtime_error("dflash2: tensor " + name + " is missing from the pack");
 }
 
-bool Dflash2Drafter::load(const std::string& path, int device, std::string& err) {
+bool Dflash2Drafter::load(const std::string& path, int device, std::string& err, const Dflash2Drafter* shared) {
+    if (shared == this) { err = "dflash2: an instance cannot share its own pack"; return false; }
     device_ = device;
     const OnDevice on_device(device_);
     std::FILE* f = std::fopen(path.c_str(), "rb");
@@ -168,28 +182,49 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err)
         err = "dflash2: the pack's shape is not the Flash-Next drafter this engine was written for";
         return false;
     }
-    if (cudaMalloc((void**) &blob_, total) != cudaSuccess) { err = "dflash2: the pack does not fit in VRAM (" + std::to_string(total >> 20) + " MiB)"; return false; }
-    vram_ += total;
-    uint64_t max_bytes = 0;
-    for (const Tensor& t : tensors_) max_bytes = std::max(max_bytes, t.bytes);
-    std::vector<uint8_t> stage(max_bytes);
-    uint8_t* tmp = nullptr;
-    if (cudaMalloc((void**) &tmp, max_bytes) != cudaSuccess) { err = "dflash2: upload scratch"; return false; }
-    struct TmpFree { uint8_t* p; ~TmpFree() { cudaFree(p); } } tmp_free{tmp};
-    for (const Tensor& t : tensors_) {
+    pack_bytes_ = total;
+    if (shared != nullptr) {
+        // Both sides parsed the same index: the tensor table and the layer/config rows decide that it is the same pack (a copied file
+        // is fine; a re-packed or re-shaped one is not).  The head's row width is checked in bind(), where the head is known.
+        bool same = shared->device_ == device_ && shared->blob_ != nullptr && shared->blob_owner_ != nullptr &&
+                    shared->pack_bytes_ == total && shared->tensors_.size() == tensors_.size() && shared->N_ == N_ && shared->L_ == L_ &&
+                    shared->NH_ == NH_ && shared->NKV_ == NKV_ && shared->HD_ == HD_ && shared->I_ == I_ && shared->window_ == window_ &&
+                    shared->group_ == group_ && shared->rank_ == rank_ && shared->mask_token_ == mask_token_ && shared->taps_ == taps_ &&
+                    shared->vocab_ == vocab_ && shared->theta_ == theta_ && shared->eps_ == eps_;
+        for (size_t i = 0; same && i < tensors_.size(); ++i) {
+            const Tensor& a = tensors_[i];
+            const Tensor& b = shared->tensors_[i];
+            same = a.name == b.name && a.dtype == b.dtype && a.rows == b.rows && a.cols == b.cols && a.off == b.off && a.bytes == b.bytes;
+        }
+        if (!same) { err = "dflash2: incompatible shared weights (a different device, pack size or layer table)"; return false; }
+        blob_ = shared->blob_;
+        blob_owner_ = shared->blob_owner_;
+        shared_ = shared;
+    } else {
+        if (cudaMalloc((void**) &blob_, total) != cudaSuccess) { err = "dflash2: the pack does not fit in VRAM (" + std::to_string(total >> 20) + " MiB)"; return false; }
+        vram_ += total;
+        blob_owner_ = CudaPtr(blob_, CudaFree{});
+        uint64_t max_bytes = 0;
+        for (const Tensor& t : tensors_) max_bytes = std::max(max_bytes, t.bytes);
+        std::vector<uint8_t> stage(max_bytes);
+        uint8_t* tmp = nullptr;
+        if (cudaMalloc((void**) &tmp, max_bytes) != cudaSuccess) { err = "dflash2: upload scratch"; return false; }
+        struct TmpFree { uint8_t* p; ~TmpFree() { cudaFree(p); } } tmp_free{tmp};
+        for (const Tensor& t : tensors_) {
 #if defined(_WIN32)
-        _fseeki64(f, data_off + (long long) t.off, SEEK_SET);
+            _fseeki64(f, data_off + (long long) t.off, SEEK_SET);
 #else
-        fseeko(f, data_off + (off_t) t.off, SEEK_SET);
+            fseeko(f, data_off + (off_t) t.off, SEEK_SET);
 #endif
-        if (std::fread(stage.data(), 1, t.bytes, f) != t.bytes) { err = "dflash2: the pack is shorter than its index"; return false; }
-        if (t.dtype == "q8_0") {   // GGUF blocks -> the tiled qs plane at the tensor's offset, then the d plane (same total bytes)
-            if (cudaMemcpy(tmp, stage.data(), t.bytes, cudaMemcpyHostToDevice) != cudaSuccess) { err = "dflash2: weight upload failed"; return false; }
-            kernels::df2_q8_tile(tmp, blob_ + t.off, blob_ + t.off + (uint64_t) t.rows * (uint64_t) t.cols, (int) t.cols, t.rows * t.cols / 32, nullptr);
-            if (cudaDeviceSynchronize() != cudaSuccess) { err = "dflash2: weight conversion failed"; return false; }
-        } else if (cudaMemcpy(blob_ + t.off, stage.data(), t.bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-            err = "dflash2: weight upload failed";
-            return false;
+            if (std::fread(stage.data(), 1, t.bytes, f) != t.bytes) { err = "dflash2: the pack is shorter than its index"; return false; }
+            if (t.dtype == "q8_0") {   // GGUF blocks -> the tiled qs plane at the tensor's offset, then the d plane (same total bytes)
+                if (cudaMemcpy(tmp, stage.data(), t.bytes, cudaMemcpyHostToDevice) != cudaSuccess) { err = "dflash2: weight upload failed"; return false; }
+                kernels::df2_q8_tile(tmp, blob_ + t.off, blob_ + t.off + (uint64_t) t.rows * (uint64_t) t.cols, (int) t.cols, t.rows * t.cols / 32, nullptr);
+                if (cudaDeviceSynchronize() != cudaSuccess) { err = "dflash2: weight conversion failed"; return false; }
+            } else if (cudaMemcpy(blob_ + t.off, stage.data(), t.bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+                err = "dflash2: weight upload failed";
+                return false;
+            }
         }
     }
     // the draft round runs while the verifier's async commit still has work on the card: a high-priority stream keeps it from queueing behind that
@@ -221,7 +256,11 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err)
         cudaEventCreate(&ev_a_);
         cudaEventCreate(&ev_b_);
     }
-    return alloc(err);
+    if (!alloc(err)) return false;
+    if (shared != nullptr)
+        std::fprintf(stderr, "strata dflash2: shared pack weights, %.0f MiB of private buffers (ring, logits and graphs stay this slot's)\n",
+                     (double) vram_ / 1048576.0);
+    return true;
 }
 
 bool Dflash2Drafter::alloc(std::string& err) {
@@ -266,14 +305,23 @@ bool Dflash2Drafter::bind_raw(EmbedFn embed, const void* head_w, int head_type, 
     n_dvocab_ = head_rows;
     if (!vocab.empty()) {
         n_dvocab_ = (int64_t) vocab.size();
-        if (cudaMalloc((void**) &dvocab_, vocab.size() * 4) != cudaSuccess) { err = "dflash2: draft vocabulary"; return false; }
+        int32_t* dv = nullptr;
+        if (cudaMalloc((void**) &dv, vocab.size() * 4) != cudaSuccess) { err = "dflash2: draft vocabulary"; return false; }
+        dvocab_owner_ = CudaPtr(dv, CudaFree{});
+        dvocab_ = dv;
         vram_ += vocab.size() * 4;
         cudaMemcpy(dvocab_, vocab.data(), vocab.size() * 4, cudaMemcpyHostToDevice);
+        dvocab_host_ = vocab;
     }
     if ((n_dvocab_ + kernels::kDf2TopBlocks - 1) / kernels::kDf2TopBlocks > 4096) { err = "dflash2: the head has too many rows for the top-k"; return false; }
+    if (!alloc_logits(err)) return false;
+    bound_ = true;
+    return true;
+}
+
+bool Dflash2Drafter::alloc_logits(std::string& err) {
     if (!logits_ && cudaMalloc((void**) &logits_, (size_t) kDrafts * (size_t) n_dvocab_ * 4) != cudaSuccess) { err = "dflash2: the draft logits do not fit"; return false; }
     vram_ += (uint64_t) kDrafts * (uint64_t) n_dvocab_ * 4;
-    bound_ = true;
     return true;
 }
 
@@ -309,13 +357,41 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
     const void* hw = head->weights();
     const int64_t row_bytes = (int64_t) head->row_bytes();
     int64_t head_rows = row_bytes > 0 ? (int64_t) (head->weight_bytes() / (uint64_t) row_bytes) : 0;
+    head_src_ = head;
+    head_row_bytes_ = row_bytes;
+    if (shared_ != nullptr) {
+        // same head object and row width; when the pack's draft vocabulary was bound, the same token subset (the mapping has to match:
+        // rows gathered for a different list would be silently wrong); otherwise the same whole-head row count.
+        bool same = shared_->bound_ && shared_->device_ == device_ && shared_->head_src_ == head && shared_->head_type_ == head->type() &&
+                    shared_->head_row_bytes_ == row_bytes;
+        if (same) same = shared_->dvocab_ != nullptr ? (vocab == shared_->dvocab_host_) : (vocab.empty() && shared_->n_dvocab_ == head_rows);
+        if (!same) { err = "dflash2: incompatible shared draft head (a different head, row width or draft vocabulary)"; return false; }
+        embed_ = std::move(embed);
+        head_w_ = shared_->head_w_;
+        head_type_ = head->type();
+        n_dvocab_ = shared_->n_dvocab_;
+        dvocab_ = shared_->dvocab_;
+        dvocab_owner_ = shared_->dvocab_owner_;
+        dvocab_host_ = shared_->dvocab_host_;
+        dhead_ = shared_->dhead_;
+        dhead_owner_ = shared_->dhead_owner_;
+        if (!alloc_logits(err)) return false;
+        bound_ = true;
+        std::fprintf(stderr, "strata dflash2: shared %lld-token draft head, %.0f MiB of private buffers\n", (long long) n_dvocab_,
+                     (double) vram_ / 1048576.0);
+        return true;
+    }
     if (!vocab.empty()) {
         int32_t* dv = nullptr;
-        if (cudaMalloc((void**) &dv, vocab.size() * 4) != cudaSuccess || cudaMalloc((void**) &dhead_, (size_t) ((int64_t) vocab.size() * row_bytes)) != cudaSuccess) {
+        uint8_t* dh = nullptr;
+        if (cudaMalloc((void**) &dv, vocab.size() * 4) != cudaSuccess || cudaMalloc((void**) &dh, (size_t) ((int64_t) vocab.size() * row_bytes)) != cudaSuccess) {
             if (dv) cudaFree(dv);
+            if (dh) cudaFree(dh);
             err = "dflash2: the draft vocabulary's head rows do not fit";
             return false;
         }
+        dhead_owner_ = CudaPtr(dh, CudaFree{});
+        dhead_ = dh;
         cudaMemcpy(dv, vocab.data(), vocab.size() * 4, cudaMemcpyHostToDevice);
         kernels::gather_rows((const uint8_t*) hw, row_bytes, dv, (int64_t) vocab.size(), dhead_, nullptr);
         cudaDeviceSynchronize();
@@ -502,12 +578,23 @@ bool Dflash2Drafter::context(const float* taps, int64_t n, int64_t pos0, std::st
 }
 
 bool Dflash2Drafter::draft(const float* taps, int n_new, int64_t pos0, int32_t anchor, int32_t* drafts, float* probs, std::string& err) {
+    if (drafts == nullptr) { err = "dflash2: draft needs the drafts buffer"; return false; }
+    if (!draft_launch(taps, n_new, pos0, anchor, err)) return false;
+    return draft_collect(drafts, probs, err);
+}
+
+bool Dflash2Drafter::draft_launch(const float* taps, int n_new, int64_t pos0, int32_t anchor, std::string& err) {
     if (!bound_) { err = "dflash2: not bound"; return false; }
     if (n_new < 1 || n_new > kRows) { err = "dflash2: draft rows out of range"; return false; }
+    if (pending_) { err = "dflash2: draft_launch while a draft is in flight (draft_collect first)"; return false; }
     const OnDevice on_device(device_);
     const Clock::time_point t0 = Clock::now();
     if (graph_taps_ != nullptr && graph_taps_ != taps) { err = "dflash2: the taps buffer moved after capture"; return false; }
     if (!prof_ && !exec_[n_new]) {
+        if (!lazy_capture_) {
+            err = "dflash2: no round graph for " + std::to_string(n_new) + " rows and lazy capture is off (prepare(taps_dev) first)";
+            return false;
+        }
         // the staging must hold valid positions while the capture runs the (empty) kernels' parameter checks
         for (int i = 0; i < 8; ++i) h_meta_[i] = (int32_t) (pos0 + i);
         if (!capture(n_new, taps, err)) return false;
@@ -522,7 +609,7 @@ bool Dflash2Drafter::draft(const float* taps, int n_new, int64_t pos0, int32_t a
     for (int i = 0; i < kDrafts; ++i) { ((volatile int32_t*) h_out_)[i] = -1; }
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (timing_) cudaEventRecord(ev_a_, cs_);
-    if (prof_) {   // the same round without its graph, an event after every stage
+    if (prof_) {   // the same round without its graph, an event after every stage; this mode synchronizes here
         cudaStreamSynchronize(cs_);
         for (cudaEvent_t e : prof_->ev) cudaEventDestroy(e);   // the stamps of context() calls are not a round
         prof_->ev.clear();
@@ -535,18 +622,34 @@ bool Dflash2Drafter::draft(const float* taps, int n_new, int64_t pos0, int32_t a
     if (cudaGraphLaunch(exec_[n_new], cs_) != cudaSuccess) { err = std::string("dflash2 draft: ") + cudaGetErrorString(cudaGetLastError()); return false; }
     if (timing_) cudaEventRecord(ev_b_, cs_);
     (void) cudaStreamQuery(cs_);
-    if (cudaStreamSynchronize(cs_) != cudaSuccess) { err = std::string("dflash2 draft: ") + cudaGetErrorString(cudaGetLastError()); return false; }
+    pending_ = true;
+    pending_pos1_ = s;
+    pending_timing_ = timing_;
+    pending_t0_ = t0;
+    return true;
+}
+
+bool Dflash2Drafter::draft_collect(int32_t* drafts, float* probs, std::string& err) {
+    if (!pending_) { err = "dflash2: draft_collect without a draft_launch"; return false; }
+    if (drafts == nullptr) { err = "dflash2: draft_collect needs the drafts buffer"; return false; }
+    const OnDevice on_device(device_);
+    if (cudaStreamSynchronize(cs_) != cudaSuccess) {
+        pending_ = false;
+        err = std::string("dflash2 draft: ") + cudaGetErrorString(cudaGetLastError());
+        return false;
+    }
     for (int i = 0; i < kDrafts; ++i) {
         drafts[i] = ((volatile int32_t*) h_out_)[i];
         if (probs) probs[i] = ((volatile float*) h_out_)[16 + i];
     }
-    if (timing_) {
+    if (pending_timing_) {
         float ms = 0;
         if (cudaEventElapsedTime(&ms, ev_a_, ev_b_) == cudaSuccess) ms_gpu += ms;
     }
-    have_ctx_ = std::max<int64_t>(have_ctx_, s);
-    ms_draft += ms_since(t0);
+    have_ctx_ = std::max<int64_t>(have_ctx_, pending_pos1_);
+    ms_draft += ms_since(pending_t0_);
     ++rounds;
+    pending_ = false;
     return true;
 }
 
