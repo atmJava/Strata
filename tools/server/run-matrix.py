@@ -79,11 +79,12 @@ BATCHES: dict[str, list[dict]] = {
              criterion="both GPUs and the engine's own arena/expert-cache numbers reported; free reserve printed",
              where="local", timeout=180, judge="exit0",
              cmd=["python3", "tools/server/exp-v2-vram.py", "{base_url}"]),
-        dict(id="V2-1", what="staged read runs and a cancelled reader leaves nothing behind (S0c/S0d live)",
-             criterion="reader got a token; after the close neighbours still decode (gap < 2 s); health 200; "
+        dict(id="V2-1", what="staged read runs and a cancelled reader leaves the neighbours alone (S0d live; "
+                             "S0c's engine kill is a separate, budgeted step)",
+             criterion="after the close the six neighbours still decode (gap < 2 s, tokens > 0); health 200; "
                        "a long read then a short one are both served",
              where="local", timeout=1800, judge="exit0",
-             cmd=["python3", "tools/server/exp-v2-staged-drill.py", "{base_url}", "4"]),
+             cmd=["python3", "tools/server/exp-v2-staged-drill.py", "{base_url}", "6"]),
     ],
     "V3": [],
 }

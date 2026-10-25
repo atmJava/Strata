@@ -3,15 +3,17 @@
 
 Two checks, both against the running server:
 
-1. `probe_cancel_staged.py` (S0d's live scenario): four long decodes fill the slots, a cold ~22K-token
-   read joins and is cancelled while it waits for a slot.  Its JSON is judged here, not by eye:
-   the reader got its first token (the staged read ran), the neighbours kept decoding after the close
-   (gap < 2 s, tokens > 0), and the server is still healthy.
+1. `probe_cancel_staged.py` (S0d's live scenario): six long decodes fill the six slots (parallel=6 in
+   this config; four used to be enough when parallel was 4), a cold ~22K-token read joins - that is when
+   the server stages it instead of taking a slot - and the client goes away.  Its JSON is judged here, not
+   by eye: the neighbours kept decoding after the close (gap < 2 s, tokens > 0) and the server is still
+   healthy.  Whether the reader itself got a token first is printed, not required: in the waiting-for-a-slot
+   case it is closed before one arrives, and that is the case this drill is about.
 2. a plain ~22K-token read with a short answer completes (the staged path's happy case), and a short
    request right after it is served inside 30 s (no wedged slot).
 
 Exit 0 only when every check passes.  Prints one JSON object.
-Usage: exp-v2-staged-drill.py [base_url] [neighbours]
+Usage: exp-v2-staged-drill.py [base_url] [neighbours]      (neighbours = parallel slots to fill, default 6)
 """
 import json
 import os
@@ -24,7 +26,7 @@ BASE = sys.argv[1] if len(sys.argv) > 1 else "http://192.168.3.14:8080"
 if not BASE.startswith("http"):
     print(__doc__, file=sys.stderr)
     sys.exit(2)
-N = sys.argv[2] if len(sys.argv) > 2 else "4"
+N = sys.argv[2] if len(sys.argv) > 2 else "6"
 KEY = "111"
 MODEL = "qwen3.8-flash-next-iq3_xxs"
 PROBE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "probe_cancel_staged.py")
@@ -67,11 +69,11 @@ def main():
     else:
         gap = probe.get("neighbour_gap_after_close_s")
         after = probe.get("neighbour_tokens_after_close")
-        passed = (probe.get("reader_got_first_token") is True
-                  and probe.get("health_after") == 200
+        passed = (probe.get("health_after") == 200
                   and isinstance(gap, (int, float)) and gap < 2.0
                   and isinstance(after, int) and after > 0)
         out["checks"]["cancel_drill"] = {"pass": passed, "seconds": round(time.time() - started, 1),
+                                         "reader_got_first_token": probe.get("reader_got_first_token"),
                                          "probe": probe}
         ok = ok and passed
 
