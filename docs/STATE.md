@@ -14,8 +14,9 @@
   W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）；
   `ARGS : MATCH`、`ENV : DIFFERENT` 只有 launcher 的 `STRATA_MP_STAGED_READ_MIN_TOKENS`。
 - **V3-1 结果（部分）**：8×128K 装得下（`batch_slots 8`、`expert_slots 17437`、`vram_free 1011`）；
-  6 路聚合 138.7 / 单路 75.2 vs 8 路聚合 150.6 / 单路 70.8（路数不同，聚合差 +8.6% 不等于 M1 更好；单路 −5.8%）；
-  **4 路 M1 对比没测成**（BENCH_N=4 跑 9 min 0 rep 后被杀）；生产保持 6×192K。证据 `bench-results.jsonl`。
+  6 路聚合 138.7 / 单路 75.2 vs 8 路聚合 150.6 / 单路 70.8（路数不同，聚合差 +8.6% 不等于 M1 更好；单路 −5.8%）。
+  **4 路 M1**：6×192K 拿到（单路 74.1、聚合 115.8、墙钟 13.8 s）；8×128K 两次都没跑完（7–9 min 0 rep，被杀，
+  原因未查）。→ 两档 M1 对比仍缺 8 槽那半；生产保持 6×192K。证据 `bench-results.jsonl`。
 - **V2c 结果**：~22K 读期间邻居停顿 A（piped 1）中位 10.87 s / B（0）10.91 s，**+0.37% 无差异**；
   停顿≈读时长本身（11.5 s 读）；同 prompt 第二次读 0.6 s 是**前缀缓存命中**。**S0b 未达**，PIPED_CONCURRENT
   不是杠杆。证据 `/opt/ai/logs/V2c-piped-20261025T1412Z/`。

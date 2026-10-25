@@ -2108,3 +2108,9 @@ prompt 形状、一种 max_tokens；没有 B-A-A 反向复测；没有第二次�
 
 **原始日志**：`/opt/ai/logs/bench-results.jsonl`（`V3-cap6`、`V3-cap8` 两组 label）、`/tmp/v3-cap8.log`、
 `/tmp/v3-restore.log`；脚本 `tools/server/bench-strata.py`（`BENCH_N` 环境变量选路数）。
+
+**补测（同一晚，安静窗口）**：6×192K 的 4 路（M1）拿到了——单请求 74.1 tok/s、**4 路聚合 115.8 tok/s**
+（115.8/134.4/100.9，离散大）、墙钟 13.8 s、接受率 77.85%。8×128K 的 4 路**两次都没跑完**：有流量时一次
+（9 min 0 rep）、安静窗口一次（~7 min 0 rep），都靠 `timeout` 杀掉；服务日志里请求在正常 `answering`
+（34.5 tok/s），**原因未查**（疑似某条流卡住/组调度）。→ 两档 4 路口径仍缺 8×128K 那半；**8 槽对 M1 形状
+至少没有表现出可用性优势**，生产保持 6×192K。
