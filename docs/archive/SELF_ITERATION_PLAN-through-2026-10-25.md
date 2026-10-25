@@ -1,0 +1,323 @@
+# 自我迭代执行计划（批次化 · 服务器验证优先）· v1 · 2026-10-25
+
+> **归档（2026-10-25）**：规则与路线已分别迁到 `docs/RULES.md` 和 `docs/ROADMAP.md`；本文件只保留当时的规划过程。
+
+> **这份文档管什么**：把用户 2026-10-25 晚的要求（自我决策 / 自我更新目标 / 自我执行 / 不"改一下测一下" /
+> 准备先行）落成可执行的迭代方式，并给出**第一阶段的主线：移植代码在服务器上的验证战役**。
+>
+> **不管什么**：单轮 DoD 与 Gate 在 `PORTING_RULES.md`；选什么、何时停在 `EVERGREEN_LOOP.md`；硬件/重启记录/脚本名在
+> `MULTIPATH_RULES.md`；backlog 在 `WORK_QUEUE.md`；断点在 `STATE.md`；移植项的判定与数字在 `VLLM_PORT_PLAN.md`。
+> 一处一事：本文件只写"怎么自我迭代 + 这一摊怎么验"，不重复结论与数字。
+>
+> 本轮（2026-10-25 20:30）**只写这份文档，不提交、不改代码、不跑新测量**。
+
+## 1. 用户这次立下的要求（原话 → 可核对的规则）
+
+| # | 用户原话 | 落成规则（可核对的做法） |
+|---|---|---|
+| U1 | "需要 ai 自己做决策，我什么都不会管" | 不问用户、不等批准。执行顺序、方法、批次划分、采纳/回滚、失败归因、是否重来，全部我自己定；遇取舍按 `RULES.md` §1 选**最安全、质量最好、最可回滚**的那条 |
+| U2 | "真正意义上的自我更新目标" | 目标 = `EVERGREEN_LOOP.md` §1 的北向指标 M1–M9，**只由测量更新**；backlog 由我按 §3 六个来源自增（标 `[发现]`）；**永不宣布"完成"**（`PORTING_RULES.md` §4.2 禁止自行宣布完成，且用户不在，所以连"等确认"都不等） |
+| U3 | "自我执行" | 队列驱动（`WORK_QUEUE.md`）+ 每批自己跑完：准备 → 装 → 测 → 归因 → 判决 → 落账 → 定下一批。阻塞时按 `PORTING_RULES.md` §8 降级成"能给出事实的最小实验"，不空等 |
+| U4 | "要考虑时间成本，不要改一下测试一下，全部做完一并测试" | **批次化**：一批 = 改动全部做完 + 工装/探针就位 → **一次构建** → **一次窗口** → **一次跑完整测试矩阵** → 逐条归因。禁止中间穿插"装一次测一项" |
+| U5 | "做好准备，探针、日志等等，方便调试" | 动手前探针、日志、版本戳、基线、回滚包必须就位（§5 的清单，缺一项就不许开批）；探针默认关、先量仪器自己的代价（`RULES.md` §4/§5） |
+
+**一句话：你要的是"没人盯着、但每一步都能自查"的自我迭代**——不是"快"，是"一次做完、一次验清、错了能定位、
+随时能接手"。现有规则里 `PORTING_RULES.md` §12（24/7 无人值守）与 `EVERGREEN_LOOP.md` 已经是这个方向，
+本文件补的是**批次化**与**准备先行**这两块，以及它们与旧条文的冲突怎么裁。
+
+## 2. 与现有规则的四处冲突，和裁决
+
+| # | 冲突 | 现有条文 | 裁决（本计划采用） | 代价与补偿 |
+|---|---|---|---|---|
+| C1 | 批次化 vs 一次一个变量 | `RULES.md` §2.3、`PORTING_RULES.md` §4.8「一轮改多个代码项 = 该轮作废」、`MULTIPATH_RULES.md` §3「≤1 个代码项」 | **允许一批多项**，但**归因单元仍是单项**：批内每个改动必须落在自己的默认关开关/flag 文件后面，可独立关；测试矩阵必须包含"全开"与"逐项关"两种臂 | 归因不靠重跑整批，靠**开关二分**。代价：写代码时必须多花功夫把改动切干净（`RULES.md` §9.5 的 flag 文件优先正是为此） |
+| C2 | 批次化 vs 45 min 时间盒 | `PORTING_RULES.md` §12.2「每轮 ≤45 min，到点 checkpoint」 | 时间盒从"轮"改成"**批**"：一批 ≤ 1 次构建 + 1 个完整矩阵；重启按换臂、部署和恢复需要执行并记录。checkpoint 仍在批边界，**不许把半成品留在生产上过夜**（原条文这条保留） | 一批可能 2–4 h；盒内不许改判据、不许加"顺手再改一个" |
+| C3 | 收口等用户 vs 用户不管 | `RULES.md` §1、`PORTING_RULES.md` §9、§12.9「队列清空 → 交验收清单，等用户确认」 | 队列清空**不是停机理由**：按 `EVERGREEN_LOOP.md` §3/§4 自增 backlog 并继续。里程碑汇报（§12.10、`EVERGREEN_LOOP.md` §6 每 5 轮一页）是**通知**，发完继续下一批，不等回复 | 只有三种情况真停：用户叫停 / 熔断 / 连续 3 个发现轮没有 ≥3% 的候选（`EVERGREEN_LOOP.md` §5） |
+| C4 | 判据要用户同意 vs 不问用户 | `EVERGREEN_LOOP.md` §6「改判据需用户同意」、`PORTING_RULES.md` §4.5/§4.6 | **判据一律不动**（不降阈值、不拆项、不改口径）。要改就在里程碑报告里写"建议改 + 理由"，**在用户回复之前按旧判据执行** | 判据达不到就照实写"未达"，不许用改判据变绿 |
+
+> 这四条是对 `RULES.md` / `PORTING_RULES.md` / `MULTIPATH_RULES.md` 的**加严或改写**（不是放松）。
+> 按 `RULES.md` 开头"章程本身可以改，但要在文末写版本行"，下一批要把 C1/C2 写进这三份文件的版本行；
+> 本轮不改它们（用户：先梳理需求，不做其他的）。
+
+## 3. 批次化为什么不丢归因（技术前提，缺一条就不许开批）
+
+1. **每个改动一个开关，默认关**：`RULES.md` §3「默认路径逐位不变，新行为一律放在默认关的 env/flag 后面」。
+2. **开关做成运行时 flag 文件**（`include/strata/core/runtime_flag.hpp`），不用函数内 `static` 读 env：
+   env 开关 = 每臂一次冷装载（~190 s），flag 文件 = 同 boot 交替（`RULES.md` §9.5）。**这一条直接决定批次能省多少时间。**
+3. **版本戳**：批号 + 产物 md5 打进日志第一行；部署后 `md5sum` + `strings | grep <新字符串>` 双核（`RULES.md` §9.1）。
+   注意：**版本戳必须实测取，不能抄文档**——现在两份文档给的现网 hash 就不一致（`docs/STATE.md` 写
+   引擎 `383b426a`/server `52b84d54`，`docs/MULTIPATH_RULES.md` §1 写 `4f6f635f`/`e8edc558`）。
+4. **失败二分**：批内任一项判据 FAIL → 只关这一项的开关重跑那一条测试（同 boot，不重启），仍 FAIL 再回滚整批。
+5. **一轮（批）只跑一次矩阵**：矩阵里每条测试都带自己的名字、判据、超时与原始日志路径，跑完一次性归因。
+6. **不自污染**：测量期间不并行干重活、不派子代理（`PORTING_RULES.md` §6、`MULTIPATH_RULES.md` §4）；
+   只读子代理的独立复核（`PORTING_RULES.md` §12.4）放在**批后**做。
+
+## 4. 第一阶段主线：移植代码的服务器验证战役
+
+### 4.1 现在到底验过什么（2026-10-25 20:16 核实）
+
+| 层面 | 状态 | 出处 |
+|---|---|---|
+| `-arch=75` 全量构建 | **过**（EXIT=0，0 错） | `SM75_PORT_PLAN.md` §6 |
+| kernel/parity 级 | **过**（5 个 parity 全 0；build75 上 fused vs MMQ rel RMS 1.2e-4） | `SM75_PORT_PLAN.md` §6、`VLLM_PORT_PLAN.md` §P3c |
+| 服务器全量 CTest | 150 passed / 6 skipped / 1 修好后通过；8 个失败逐条归因为环境或既有 | `PORT_AUDIT_MEASUREMENTS.md` §6 |
+| 微基准 | **过**（qsa/mmq 本机 GPU1，受显存余量限制，口径见 `VLLM_PORT_PLAN.md` §P3b/§P4） | 同上 |
+| 本地单测 | `tools/server/tests` 55 passed / 10 skipped / **2 failed**（红的是 harness 基准假设，不是移植代码） | 本仓 2026-10-25 20:14 实测 |
+| **端到端（生产配置、真模型、真并发）** | **没做过** | `VLLM_PORT_PLAN.md` §3 末条、§6 第 5 条 |
+| **现网跑的是哪份代码** | 现网 = 0.1.47/0.2.2 + 两份补丁；补丁比仓库**少 `46d12fa9` 两处**，且 R12/R13 只在补丁的工作区副本里 | `tools/server/patches/README.md` |
+
+**结论**：移植代码到今天为止是"编译过 + kernel 级对 + 微基准 + 本地单测"，**没有一条在服务器生产配置下端到端跑过**；
+而且现网跑的还是更旧的一份。这就是第一阶段唯一主线。
+
+### 4.2 待验清单（每项：判据 / 探针 / 代价）
+
+代价列写三种标记：**W** = 要窗口（停机/重启）、**G** = 要权重（模型或 drafter）、**F** = 免停机（flag 文件同 boot 交替）。
+
+| # | 待验项 | 服务器判据（PASS 才算） | 探针 / 证据 | 代价 |
+|---|---|---|---|---|
+| V1-1 | 现网跑的是哪份代码（版本戳基线） | 引擎/server/launcher/config 四件 hash 全部实测记录，且与文档不一致处更正 | 版本戳脚本 + `md5sum` + `strings` 双核 | F |
+| V1-2 | 本地 55 条 mock 测试在生产配置口径下不红（至少不新增红） | 同一套测试在服务器源码树跑，红条数 ≤ 现有 2 条且原因逐条归因 | 测试矩阵 runner + `/opt/ai/logs/<批>-*` | F |
+| V1-3 | `isa_guard_check` 修好后在服务器过（已同步，需复跑确认） | PASS | 测试输出 + 路径 | F |
+| V1-4 | `static_assert(CHUNK==64 && THREADS==256)` 锁死在服务器构建里生效 | `-D...CHUNK=128` 编译被拒（exit≠0），默认构建通过 | 构建日志 | F |
+| V1-5 | P2① RoPE 借用 + ③ logits 宽度的**显存账**在生产形状下真省（48 MiB/session、30.34 MiB/7 drafter） | INFO 行里的实测字节与代码公式差在噪声内 | `expert_cache_mib/slots`、session 定容打印、`vram-perf.csv` | W（1 次重启） |
+| V2-1 | staged read 在现网跑通且不遗留（S0c/S0d 的服务器判据） | 断开不吞别人的 `T`/`DONE`（S0c 原判据不成立，改写为 S0e） | 结构化日志（请求 id + 阶段 + 槽号）+ `test_mp_staged_*` | W |
+| V2-2 | P3c fused（`STRATA_PF_FUSED=1`）在现网 IQ3_XXS 上的**端到端**行为与速度 | 同 boot A-B：fused 开/关，prompt 时间中位差 ≥3% 才下结论；输出 parity 过（**V2b 实测 +0.61%，否决；文本 sha 相同**） | `exp-v2-prefill-ab.py`、`exp-v2-ab-summary.py` | W |
+| V2-3 | 冷读邻居停顿（S0b，M4 3.43 s → ≤1 s） | 同 boot A-B：`STRATA_PIPED_CONCURRENT=1/0` 邻居停顿 ≤1 s，或给出可接受上界（**V2c 实测 10.87 vs 10.91 s，+0.37% 无差异；停顿≈读时长 → 需换机制**） | `exp-v2-warmup.py`、`exp-v2-ab-summary.py` | W |
+| V2-4 | warmup.py 自己的断言（第一次长读 ~10 s、第二次 0.6 s） | 实测两次冷读的邻居停顿，写进台账；**先量仪器代价**（V2a 实测：29.37 s / 0.73 s，邻居 28.48 / 0.15 s） | warmup 前后 /metrics 快照 | W |
+| V3-1 | C1 容量矩阵（6×192K / 8×128K） | 6/8 路聚合 ≥ 基线−3%、单路 ≥15 tok/s、晚到首 token ≤ 读时间+2 s、邻居 ≤1 s（**容量预设已收口：4 路中位 6×192K 120.6、8×128K 133.9、8×192K 122.8；默认保持 6×192K。晚到首 token 与 8 槽邻居停顿仍未测，C1 全项验收未关闭**） | `bench-strata.py`（`BENCH_N=4/6/8`）+ `warmup.py` | W |
+| V3-2 | DFlash2 A1 在现网 solo 下不崩、失败退回 MTP | `--draft dflash2` 起服务：无权重时明确拒绝并退回 MTP，不产生半开状态 | 启动日志 + `ENGINE_SERVES_DFLASH2` 状态 | G（drafter 权重） |
+| V3-3 | P1 的吞吐数字（220.84 vs 116.04 是 fork 的，我们侧还没有） | 同 boot A-B-A ≥3 臂，中位+离散度 | 与 `VLLM_PORT_PLAN.md` §4 同口径 | W + G |
+
+> 表里没有的项（P2 记账空洞、图预热、"装进每个池"、验窗读原始 K/V）在 `PORT_AUDIT_COVERAGE.md` §2，
+> 等 V1–V3 有了结论再按收益÷难度插队。**判据不许为了变绿而改**（§2 C4）。
+
+**进度（每批更新）**：
+
+- **V1-1…V1-5 全 PASS**（2026-10-25 13:06Z；`/opt/ai/logs/V1-matrix-20261025T2115Z/`）：构建 7m01s / 0 错，
+  产物 0.1.49.1 `84a0d410`；单测 61 passed / 10 skipped / 0 failed；`isa_guard_check` 2.36 s；64/256 锁死；
+  staged wedge 3 passed。**仍不是端到端**——那要 V2 窗口。
+- **V2a 完成**（2026-10-25 13:40–13:55Z；`/opt/ai/logs/V2a-matrix-20261025T1345Z/`）：0.1.49.1（`84a0d410`）
+  + 0.2.3 自包含树（server `b6b695a1`，launcher `0eeee160`，config 未动）上生产；矩阵 4/4 PASS
+  （V2-0 装后核对、V2-4 warmup、V1-5 显存账、V2-1 S0d）。V2-4 首读 29.37 s / 邻居 28.48 s（冷启动，不结论）。
+  **S0c 未达（前提不成立）**：kill 引擎后 server 不退出、health 仍报 true，且**没有自动重启**，请求 503
+  直到手动重启（~183 s）。第一次装失败（0.2.3 serve 覆盖 0.2.2 树缺 `strata_control.tls`）已恢复；见 L-058。
+- **V2b 完成**（2026-10-25 14:00–14:07Z；`/opt/ai/logs/V2b-fused-20261025T1359Z/`）：fused A-B `prompt_ms` 中位
+  A 10968.9 / B 11035.6 = **+0.61%**（去首跑 +0.46%）<3% → **否决**；两臂文本 sha 相同（parity 过）；臂已恢复默认
+  （config 与快照逐字节一致）。只测了 22K 冷读一条形状，不作一般结论。
+- **V2c 完成**（2026-10-25 14:12–14:20Z；`/opt/ai/logs/V2c-piped-20261025T1412Z/`）：邻居停顿 A（piped 1）中位
+  10.87 s / B（0）10.91 s = **+0.37%**（<3%，无差异）→ **S0b 未达**；停顿≈读时长本身（11.5 s 读）；同 prompt
+  第二次读 0.6 s 是前缀缓存命中。`STRATA_PIPED_CONCURRENT` 不是杠杆，需换机制。
+- **V3-1 容量预设已收口**（2026-10-25；L-064）：4 路各 3 跑，中位 6×192K 单路 77.1 / 聚合 120.6，
+  8×128K 77.4 / **133.9（+11.0%，但上下文 192K→128K）**，8×192K 78.3 / 122.8（+1.8%，噪声内）。
+  三档都起得来，生产恢复并保持 **6×192K**。C1 的晚到首 token 与 8 槽邻居停顿仍未测，因此 C1 全项未关闭。
+- **V3-4 已完成**（L-063）：MTP 草稿深度 2/4/6 的差异都在噪声内，保持 4。
+- V3-2/V3-3：**等 drafter 权重**，不阻塞其它项。
+- 下一批：**S2**（每请求时延指标）；之后做 S0b 的机制性改进（长读分块让出）。
+
+### 4.3 批的划分（一次做完一批，一次测完一批）
+
+| 批 | 内容 | 构建 | 窗口/重启 | 测试 | 产出 |
+|---|---|---|---|---|---|
+| **V0 准备批** | 版本戳脚本、测试矩阵 runner、探针与日志规范、回滚包与**回滚演练**、基线快照（四问 + `/metrics` 累计 + `vram-perf.csv`） | 0 | 0 | 不测生产（只跑本地） | 一份"开批就绪"检查表，全绿才开 V1 |
+| **V1 免停机批** | V1-1…V1-4（纯构建期/纯 host，不动生产）+ harness 基准修好 + 补丁追不追平仓库的决定 | 1（实验目录） | 0 | 一次矩阵 | 版本戳基线 + 测试矩阵第一版结果 |
+| **V2a 部署窗口** | V2-1 staged 跑通/不遗留 + V2-4 warmup + 显存账：装一次、跑一次 | 1 | 重启按部署与回滚需要执行并记录 | 一次矩阵 | 每项判决 + 台账条目；生产落在新代码上或干净回滚 |
+| **V2b fused A-B** | V2-2 `STRATA_PF_FUSED=1/0`（两臂各 3 跑，中位+离散度；末跑做漂移探） | 0（用 V2a 的构建） | 1 个窗口，重启 2（每臂 1；`requested()` 是进程级 static） | 每臂 3 跑 | 采纳/否决（≥3% 才下结论） |
+| **V2c S0b A-B** | V2-3 `STRATA_PIPED_CONCURRENT=1/0`（两臂各 3 跑） | 0 | 1 个窗口，重启 2（`pr_conc` 是进程级 static） | 每臂 3 跑 | 采纳/否决 |
+| **V3 容量与投机批** | V3-1…V3-3 | 1 | 重启按换档、换臂与恢复需要执行并记录 | 一次矩阵（`BENCH_N=4/6/8`） | 容量点选定 + 吞吐数字（带口径） |
+
+**批内不许加东西**：开批后新发现的项写进 `WORK_QUEUE.md` 标 `[发现]`，进下一批。这条是 C2 的硬边界。
+
+## 5. 准备先行的清单（缺一项就不许开批）
+
+**基线与快照**
+- 现网四件（引擎/server/launcher/config）实测 hash；`cp -p` 快照 + 备份路径写进 `STATE.md`
+- 开工四问（`MULTIPATH_RULES.md` §6）：cron/timer、残留进程、`vram-perf.csv` 漂移、方向
+- `/metrics` 的累计计数快照（做差用），以及当轮并发/冷热条件
+- 回滚**演练一次**（不是"有备份"就算，`PORTING_RULES.md` §7「装前快照、装后核对、测后恢复比对」）
+
+**探针（默认关，先量自己的代价）**
+- 版本戳：批号 + md5 进日志首行；`verify-running-config.sh` 核配置内容而不是只看脚本返回
+- 相位计时：优先复用 `--stage-timing` / `STRATA_*_TIMING`，不新写（`RULES.md` §3「有就不写新的」）
+- taps：`STRATA_TAP_FILE=/tmp/t%d.stap` + `tools/server/tap_parity.py compare|merge`（接线对不对的机器判据）
+- 每请求时延：新 `done["metrics"]`（queue_ms ≤ ttft_ms ≤ wall_ms）——这是 S2，也正好是 S0b 的探针
+- 仪器代价：同一臂开/关探针各 ≥3 次，差 ≥3% 就把探针开销写进结论（`RULES.md` §5、L-030）
+
+**日志**
+- 一行说清一件事，带数字与单位；不刷屏；默认路径不多打（`RULES.md` §4）
+- 每批日志统一前缀 `[<批号>]` + 请求 id + 阶段名（BREAD/BRDY/BADOPT/BCANCEL/GEN…），便于批后 grep 归因
+- 原始日志一律落 `/opt/ai/logs/<批>-*`，文档与台账只写路径（`PORTING_RULES.md` §12.7）
+
+**工装**
+- 一键矩阵 runner：按顺序跑全部测试项，每项输出 `名字 / 判据 / 结果 / 耗时 / 日志路径`，汇总成一张表 + JSON
+- `bench-strata.py` 的 `BENCH_N`（已改成 1–8）+ `warmup.py`（重启后先花掉那次冷读）
+- 覆盖运行中二进制只用 `cp … .new && mv -f`；后台构建看到 exit code 与产物时间戳才算完（`RULES.md` §9.2/§9.3）
+- 动手前 `pgrep -af "[u]se-config|[r]estore-prod|[f]lag-ab|[e]xp-env-ab"` 必须为空（§9.4）
+
+### 5.1 探针与日志的具体约定（V0 定，批内照此）
+
+- **批号前缀**：每批日志落 `/opt/ai/logs/<批号>-*`（V0、V1…）；矩阵每项另有一份
+  `<out>/<项号>.log` 与 `summary.json`（`tools/server/run-matrix.py`）。文档只写路径。
+- **请求 id**：server 的 `request_id`（12 hex）随 `STRATA_BATCH_TRACE=1` 打到 `[batch-trace]`
+  行（`serve/server.py:846`）。默认关；开它要重启（env 在 import 时读）。
+- **相位名**：staged 路径 `BREAD` / `BRDY` / `BADOPT` / `BCANCEL`，正常解码 `T` / `DONE`；
+  "请求 id + 阶段"要能 grep 到一条请求的一生。
+- **每请求时延**：`done["metrics"]` 的 `queue_ms / ttft_ms / itl_ms_mean / wall_ms / tokens`
+  （S2；现网已带，无需开关）。**仪器代价**（V0 本机实测，5×200k 次）：中位 **1.36–1.40 µs/请求**（3 次独立运行，各 5×200k，离散度 3.0–8.9%；
+  `tools/server/probe-instrument-cost.py`，日志 `/opt/ai/logs/V0-probe-cost-20261025T1258Z.log`）——对 1 s 请求 0.00014%、对 30 tok/s 的
+  一个 token 0.004%，可当免费；**没量**引擎侧 `STRATA_*_TIMING` 与 btrace 写盘（要窗口）。
+- **相位计时**：优先复用 `--stage-timing` / `STRATA_*_TIMING`，不新写（`RULES.md` §3）。
+- **taps**：`STRATA_TAP_FILE=/tmp/t%d.stap` + `tools/server/tap_parity.py compare|merge`。
+- **版本戳**：每批第一行 `tools/server/probe-version-stamp.py` 的四件 hash + markers；部署后再跑一次，
+  两次不一致就是"跑的不是新代码"。
+
+## 6. 一批的标准形状（八步，不许跳）
+
+1. **preflight**：`tools/server/preflight.py`（队列/STATE 一致）+ 四问 + 磁盘 + 残留进程。
+2. **冻结改动清单**：写死本批做哪几项、每项的开关、每项的判据与"结果为 0 怎么办"。
+3. **准备**：§5 清单全绿；回滚命令写在计划里。
+4. **一次构建**：实验目录（不动 `build/`），产物 md5。
+5. **一次部署**：快照 → `cp .new && mv -f` → `use-config.sh` → `verify-running-config.sh` → 双核 md5/strings。
+6. **一次矩阵**：runner 跑完全部项（含"全开"与"逐项关"），中途不加改动、不并行干重活。
+7. **逐条归因与判决**：每项 PASS/FAIL + 证据路径；FAIL 走开关二分（§3.4），不留半开。
+8. **落账**：台账一条/批、`STATE.md` 断点、`MULTIPATH_LOG.md` 的 Gate（字段照 `MULTIPATH_RULES.md` §3，
+   "项"一栏写批号 + 逐项列）、`WORK_QUEUE.md` 状态、然后写"下一批第一件事"。
+
+## 7. 时间与重启记录（每批的账）
+
+| 项 | 数字 | 出处 |
+|---|---|---|
+| 一次引擎构建 | ≈10.6 min | `MULTIPATH_RULES.md` §2 |
+| 一次冷装载（env 开关换臂） | ≈190 s | `RULES.md` §9.5 |
+| 重启 | 不设每轮或每日上限；记录次数、原因、停机时长和结果 | `PORTING_RULES.md` §7/§12.6 |
+| 噪声地板 | 同会话 <3% 不下结论；4 路聚合跨 boot ≤9%；小读/首字跨 boot ~7% | `MULTIPATH_RULES.md` §2、L-040/L-031 |
+| 每臂重复 | ≥3 次，报中位与离散度 | `PORTING_RULES.md` §6 |
+
+**省时间的三条**（都是规则里已有的，写在这里是因为批次化的收益全靠它们）：
+① 开关做成 flag 文件 → 免重启做 A-B；② 免停机项（V1 整批）与要窗口的项（V2/V3）**分批**，别混；
+③ 一次矩阵 + 一键 runner，把"跑测试"从 N 次人工往返压成 1 次。
+
+## 8. 自我更新的边界（照 `PORTING_RULES.md` §12.5，加严）
+
+- **允许我自己改**：批次划分、执行顺序、方法、探针与工装、加 `[发现]` 项、失败后换方案、批内某项判据达不到就照实写"未达"。
+- **不允许**：改判据/阈值/口径、删未完成项、把没跑的测试说成通过、把 xfail/skip 当通过、半开状态过夜、
+  为了收口缩小范围。
+- 每次自更新在日志写一行"为什么改"（`PORTING_RULES.md` §12.5）。
+- **独立复核**：每项标"已完成"前，派只读子代理按判据复核证据（不看结论看证据）；不过 = 未完成。
+
+## 9. 什么时候停、怎么汇报
+
+- 只有三种停机（`EVERGREEN_LOOP.md` §5）：**用户叫停**；**熔断**（生产 health 连续 2 次失败 → 立即恢复并停轮；
+  同一假设连续 3 轮失败）；**连续 3 个发现轮没有 ≥3% 的候选**（写报告请求换方向，仍不叫完成）。
+  重启次数只记录，不参与停机判断。
+- 汇报是**通知**：每完成 3 项或每 10 轮一页（M1–M9 对比 + 保留/否决 + 下一批），发完继续跑，不等回复。
+- 生产不可用时的恢复顺序照 `docs/SERVER_RECOVERY.md`；恢复优先于一切实验。
+
+## 10. 仍需外部输入（我不能自己造出来的三件事）
+
+1. **DFlash2 drafter 的 checkpoint**：服务器上只有主模型（`VLLM_PORT_PLAN.md` §P1 末），拿不到就只能验"退回 MTP"，
+   拿不到 P1 的吞吐数字。缺它**不停摆**：V1/V2 照跑，V3-2/V3-3 标"等权重"。
+2. **物理窗口**：按用户现有授权，服务与服务器可随时重启，不设次数上限，也不等待特定时段；
+   每次仍须遵守快照、单一安装器、装后核对和失败恢复。
+3. **用户叫停**：唯一正常的结束。
+
+## 11. 下一批的具体动作
+
+### V0 准备批（2026-10-25 已做，见 `MULTIPATH_LOG.md` 的 V0 与台账 L-056）
+
+版本戳基线（四件实测：引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）、
+harness 改用 0.2.2 基准（两条红转绿）、补丁追平 `46d12fa9`、矩阵 runner、探针代价、回滚包与演练、
+四问与 `/metrics` 基线、C1/C2 版本行。**0 构建、0 重启、0 生产改动。**
+
+### V1 免停机批（2026-10-25 已做，见 `MULTIPATH_LOG.md` 的 V1 与台账 L-057）
+
+HEAD `2294d4de` 的 `git archive` 落到 `/opt/ai/src/strata-port-v1`，实验目录一次全量构建（7m01s、0.1.49.1、
+md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑一致、源码树单测 61/10/0、
+`isa_guard_check` 2.36 s、64/256 锁死、staged wedge 3 passed。**0 生产改动、0 重启。** 首跑 12 failed 的
+唯一原因是测试 venv 缺 `jinja2`/`regex`（已写进 `tools/server/tests/README.md`）。
+
+### V2a 部署窗口（**已完成 2026-10-25 13:40–13:55Z**；结果见 L-058 / MULTIPATH_LOG · V2a）
+
+0. **准备（已做，不碰生产）**：`tools/server/ops-v2-window.sh`（默认 dry-run；`snapshot --go` 已在 21:10
+   取好 `/opt/ai/tmp/pre-V2-20261025T131022Z/` 并 `md5sum -c` 全过）；0.1.49.1 的 `--help` 不列全 54 个 args
+   （`--mtc`/`--pcie-frac`/`--vram-reserve-mib` 只在 `strings` 里），所以 args 兼容性只能靠**启动**验证——
+   这就是本批的第一个门。
+1. **装前静态核**（已做，2026-10-25 21:18–21:20）：0.2.3 server 用生产 config 起 mock 引擎（端口 8097）
+   → health 200（日志 `/opt/ai/logs/V2-prep-mock-config-20261025T1320Z.log`）；0.1.49.1 引擎拿生产 54 个
+   args（模型路径换成 /nonexistent）→ 只报 `cannot open`，**没有 unknown argument**
+   （`/opt/ai/logs/V2-prep-argcheck-20261025T1320Z.log`）；`serve/` 的 ROOT 资产、`tools/strata_tokenizer.py`
+   依赖、`/opt/ai/strata-data/mtp/rt` 都在。另做了一次**静态阅读（未测）**：引擎侧
+   `BRDY <live> <max_new> <0|1>` 四字段与 server 的严格解析（`len>=4`、两个 digit、第三个 0/1）对齐；
+   `BCANCEL` → `BCANCELLED`，两侧 drain 都是 10 s。
+   **在线 API 面的定向比对（静态阅读，未测）**：路由表 15 条两侧完全相同；server 的 CLI 参数只多一个
+   `--admission-policy`（launcher 不传，无默认行为变化）；`serve/chat_template.jinja` 与 `serve/images.py`
+   逐字节相同；`serve/frontend.py` 有约 100 行差异（工具调用解析的 alias/declared-only、DeepSeek effort 表），
+   属于 0.2.3 的解析改进，不影响模板。原派出的只读差异审计子代理跑了 35 min 未回报，已中断；以这组定向比对为准。
+1. **一次装**（实际形状，第一次的整树覆盖已否）：引擎 `cp .new && mv` 进 `0.2.2/build/strata`；launcher
+   改成 exec 自包含 port 树的 `serve/server.py`；**config 不写**（exe/cwd 保持生产值）→ `use-config.sh`
+   （唯一入口）→ md5 + health + `verify-running-config.sh`（**ARGS MATCH**）。起不来：`restore --go` 立刻回滚并停轮。
+   **第一次失败（21:34Z）**：0.2.3 的 `serve/` 覆盖到 0.2.2 树 → `ImportError: strata_control.tls` 重启循环；
+   `restore --go` 恢复后改自包含树。教训：0.2.3 的 server 依赖 0.2.3 的 `strata_control`/`strata_cli`，
+   不能只覆盖 `serve/`。
+   **装后认进程用 `pgrep -f 'build/strata --serve'` + `/proc/<pid>/cmdline`，不看 engine 日志的最后一行**：
+   `strata-022.log` 里还混着 12:07/12:08 两次手工实验从 `strata-port-20261025/build75` 起的引擎。
+2. **一次矩阵**：V2-1 staged 跑通/不遗留、V2-4 warmup、V1-5 显存账。跑前记
+   `grep -c "staged read" /opt/ai/logs/strata-service.log`，跑后再记一次——**计数有增量**才证明走的是
+   staged 路径（`staged read sent` / `adopted` / `cancelled while waiting` 三种行），不是普通长读；
+   2 s 的邻居 gap 门槛是"取消场景不停"的界（S0b 的 1 s 门槛属于 V2c）。V2-2/V2-3 拆到 V2b/V2c（各需一次重启/臂）。
+3. **回滚**：矩阵后**不回滚**（生产落在新代码上）；若 health 连续 2 次失败 → `restore --go` 并停轮。
+4. **S0c 的 kill 场景（实跑，判据不成立）**：6 个邻居占满槽 + 22K 冷读（staged）→ `kill -9` 引擎。
+   实测：server **不退出**（journal 无 systemd 事件）、`loaded`/health 仍报 true；在途的 7 个请求各打印一次
+   `engine stopped unexpectedly (-9)`（同一个 kill 的 7 次报告，不是 7 次重启）；此后**没有自动重启**（无新
+   `engine started:`），后续请求 503（`...it was not sent`）直到 `use-config.sh` 重启（~183 s）。
+   → **S0c 否决（前提不成立）**，真实失败模式改写为 S0e（进队列）：崩溃后不自动重启、health 不反映引擎状态。
+   服务没回来就 `use-config.sh` 恢复（**恢复优先于预算**，这一条不受 ≤2 约束）。V2-1 只判 S0d；
+   S0c 没做就照实写"未达（S0c 未测）"，不拿它冒充通过。
+5. **重启记录**：用户已授权随时重启服务与服务器，不设次数上限；原 ≤2/批、≤6/日不再是规则。
+   仍保留：cp -p 快照、use-config.sh 唯一入口、装后核对、测后 cmp -s。
+
+### V2b fused A-B（V2a 之后，独立窗口）
+
+```
+sh tools/server/ops-v2-arm.sh set STRATA_PF_FUSED 1 --go        # 重启 1（臂 A）
+python3 tools/server/exp-v2-prefill-ab.py http://192.168.3.14:8080 3 --tag parity     > /opt/ai/logs/V2b-fused-on-<ts>.json
+sh tools/server/ops-v2-arm.sh set STRATA_PF_FUSED off --go      # 重启 2（臂 B，回到现网默认）
+python3 tools/server/exp-v2-prefill-ab.py ... --tag parity      > /opt/ai/logs/V2b-fused-off-<ts>.json
+python3 tools/server/exp-v2-ab-summary.py on.json off.json --field prompt_ms
+```
+判据：`prompt_ms` 中位差 ≥3% 才下结论；两臂的 `text_sha256` 必须相同（fused 路径不许改输出）。
+若 A 胜、要把生产留在 fused=1，按需要再重启一次并记录原因与结果，不受次数限制。
+
+### V2c S0b A-B（V2b 之后，独立窗口）
+
+同一套 `ops-v2-arm.sh` 换 `STRATA_PIPED_CONCURRENT`，探针用 `exp-v2-warmup.py`（两次 ~22K 冷读期间
+邻居的最大 token 间隔），两臂各 3 跑，`exp-v2-ab-summary.py --field neighbour_gap_s`；判据 ≤1 s 或给出
+可接受上界。
+
+## 12. 本文件怎么自我更新
+
+- 每批结束只改三处：**§4.2 的状态列**（每项加"实测结果 + 证据路径"）、**§11 下一批**、**§12 末版本行**。
+- §1（用户要求）与 §2（冲突裁决）**不自行改**：只有用户新指示、或某条规则文件改了版本行，才跟着改并记版本行。
+- 数字一律带口径（机型/版本/并发/冷热），并能在台账里追到原始日志；读代码得到的标"静态阅读，未测"。
+
+---
+
+**版本行**
+- v10 · 2026-10-25 23:25 · 现状整理与取消重启次数限制：V3-1 容量预设收口（L-064）、V3-4 完成，
+  下一批改为 S2；从规则、计划、队列和预检中移除每轮/每日重启次数闸门，保留快照、核对、恢复与健康熔断。
+- v9 · 2026-10-25 23:05 · V3-4 收尾：MTP 草稿深度 2/4/6 三档都在噪声内（保持 4）、bench 残留进程的坑、
+  更正 V3-1 的"8 槽 4 路卡住"（很可能是残留 bench，未复测）；判据与阈值未动。
+- v8 · 2026-10-25 22:35 · V3-1 部分收尾：§4.2 进度（8×128K 容量/吞吐数、4 路没测、生产保持 6×192K）、下一步安静窗口补 4 路；判据与阈值未动。
+- v7 · 2026-10-25 22:22 · V2c 收尾：§4.2 进度（S0b 未达：两臂无差异、停顿≈读时长）、V2-3 判据行补实测、下一批 S0e；判据与阈值未动。
+- v6 · 2026-10-25 22:10 · V2b 收尾：§4.2 进度（fused +0.61% 否决/parity 过/臂已恢复）、V2-2 判据行补实测、下一步 V2c；判据与阈值未动。
+- v5 · 2026-10-25 22:05 · V2a 收尾：§4.2 进度（部署 PASS / 矩阵 4/4 / S0c 否决-前提不成立）、§11 的 V2a
+  改成实际部署形状与失败教训（自包含树，不能只覆盖 serve/）、下一步 V2b；判据与阈值未动。
+- v4 · 2026-10-25 21:12 · V2 拆批：`STRATA_PF_FUSED` 与 `STRATA_PIPED_CONCURRENT` 都是进程级 static
+  （每个 A/B 臂一次重启），V2 一批 ≤2 重启装不下，拆 V2a（部署+staged+warmup+显存）/V2b（fused A-B）/
+  V2c（S0b A-B）；判据未动。
+- v3 · 2026-10-25 21:10 · V1 收尾：§4.2 进度（V1 五项全 PASS + 证据路径）、§11 改为 V2 窗口批
+  （准备/一次装/一次矩阵/回滚/预算，S0b 拆 V2b）；判据与阈值未动。
+- v2 · 2026-10-25 20:51 · V0 收尾：§5.1 探针/日志约定与实测仪器代价、§11 改为 V1 的具体动作、
+  §4.2 进度（V1-1 基线已在 V0 测出）；判据与阈值未动。
+- v1 · 2026-10-25 20:30 · 初版。依据用户当日要求（自我决策/自我更新目标/自我执行/批次化验证/准备先行）
+  与 `RULES.md` v3、`PORTING_RULES.md` v1.1（§12 无人值守）、`EVERGREEN_LOOP.md` v1、`MULTIPATH_RULES.md` v0.3
+  梳理而成；新增批次化（C1/C2）与准备先行清单，并给出第一阶段（服务器验证战役 V0–V3）。
+  本轮未提交、未改代码、未跑新测量。

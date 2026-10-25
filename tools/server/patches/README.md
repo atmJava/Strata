@@ -1,4 +1,67 @@
-# W3 staged-read patches (engine 0.1.47 / server 0.2.2)
+# Server patches
+
+## Request slot-wait metrics (server 0.2.2)
+
+`s2-slot-wait-0.2.2.patch` adds `metrics.slot_wait_ms` for a request
+that received a batch slot. `queue_ms` keeps its existing meaning: time
+before `generate()` starts. A request can then spend additional seconds
+waiting for a slot, which was invisible in the original S2 schema and
+showed as `queue_ms=0` while its TTFT was about 12 seconds.
+
+The deployed `serve/server.py` before this patch has md5
+`b6b695a11a7715a270749a1808496cb2` and sha256
+`98a8f64e5a350a23c3f7cf59b7945e77c1254abcab2b073f865a78b201a61948`.
+The first C1 validation, before deploying this patch, measured the wait
+externally with `/metrics` `running` and `outside_slots`. The patched
+build must pass `tools/server/tests/test_mp_timings.py` before deployment.
+Applying the patch to the pre-patch file produces md5
+`de09cffdac39ff150a689bd3a44cc242` and sha256
+`fc3a7e7e4d852252c0eb96be9e02d733deb47eac05b56decfd9ab1a94c5208f4`;
+the patched file compiles with `python3 -m py_compile`. The patch itself
+has sha256 `16b560453e80104dadd3a77f3738862db1925a82195946ee20bd2f03da647c32`.
+
+## Batch-slot RoPE sharing (engine 0.1.49.1)
+
+`rope-share-0.1.49.1.patch` is the deployed source change behind engine md5
+`cbed3c31cfbdf40aec0ff743f6faf5c5`. It is a production-tree patch, not a patch
+against the newer text on `hw/server-adapt-0.2.3`: that tree already contains
+the full `share_rope_from` integration at the newer line numbers.
+
+The patch makes every batch slot on a stage borrow the stage session's
+read-only RoPE tables. The stage session outlives every borrower. The switch is
+opt-in: unset, empty, or `0` keeps the previous allocation path; any other
+value enables sharing. Token arithmetic is unchanged.
+
+Provenance:
+
+| Item | md5 | sha256 |
+|---|---|---|
+| Unpatched `generate.cpp` | `76960b9c8d14da067494779ceb1721aa` | `f9592d9162ead449fe2d4a85933d0b89ef278444fdc1ad2255dabe9662d9037c` |
+| Patched `generate.cpp` | `6727fd87f7fe6df40faf705fedae8910` | `245e9a126119b4b70e77e0bbdb96433f66f690c9ef45c55f01d5561f4c5d7b75` |
+| Unpatched engine binary | `84a0d410367abfb3a8bcb9422a3b10ee` | `36b2dd22172deae267254abeffaf760aa91dcbdc70fb6dfe7baca04cf2fee6e2` |
+| Patched engine binary | `cbed3c31cfbdf40aec0ff743f6faf5c5` | `c5b3b877bc0aa2dc58be19e5155eaa75a988631c66f03dbf3bc2c7c059adada6` |
+
+The unpatched source, binary, and patched binary were snapshotted on production
+in `/opt/ai/tmp/pre-rope-share-20261025T164500Z/`. The source and binary
+snapshot hashes above were rechecked on 2026-10-26. The patched binary hash is
+the T-probe running-path measurement; the binary itself was not preserved
+there.
+
+Round-trip check on 2026-10-26: applying this patch to the preserved unpatched
+source produced md5 `6727fd87f7fe6df40faf705fedae8910` and sha256
+`245e9a126119b4b70e77e0bbdb96433f66f690c9ef45c55f01d5561f4c5d7b75`,
+byte-identical to the deployed source. The patch itself has sha256
+`8c3bd61d8c9cb9317b71e24936f557115394f4a236d926792021226449d14700`.
+
+Apply to a copy of an engine 0.1.49.1 tree:
+
+```sh
+patch -p1 < tools/server/patches/rope-share-0.1.49.1.patch
+cmake --build build75 --target strata -j6
+md5sum build75/strata  # expected cbed3c31cfbdf40aec0ff743f6faf5c5
+```
+
+## W3 staged-read patches (engine 0.1.47 / server 0.2.2)
 
 Two patches implement "read without a slot, adopt when one frees" (W3). They are the **production
 artifact**: production is engine 0.1.47 / server 0.2.2, and they are applied to a copy of that tree.

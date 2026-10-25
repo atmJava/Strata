@@ -2009,6 +2009,8 @@ class StrataEngine:
                     live = {"slot": slot, "request_id": getattr(cancel, "_strata_request_id", None),
                             "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0, "generated": 0,
                             "started": time.time(), "first_token": None}
+                    if getattr(cancel, "_strata_slot_admitted_at", None) is None:
+                        cancel._strata_slot_admitted_at = time.time()
                     deadline = getattr(cancel, "_strata_queue_deadline", None)
                     if deadline is not None and time.monotonic() >= deadline:
                         raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
@@ -5750,6 +5752,11 @@ class Service:
             "wall_ms": int(round((now - request_started) * 1000)),
             "tokens": n,
         }
+        slot_at = getattr(cancel, "_strata_slot_admitted_at", None)
+        if slot_at is not None:
+            # queue_ms covers the server-side wait before generate(); a parallel request can then wait
+            # longer for a batch slot. Keep queue_ms compatible and expose that second interval here.
+            done["metrics"]["slot_wait_ms"] = max(0, int(round((slot_at - request_started) * 1000)))
         if stops is not None and stops.hit is not None:
             done["stop_sequence"] = stops.hit
         yield "done", done

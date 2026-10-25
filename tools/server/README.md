@@ -49,6 +49,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `turn-ttft.py` | DSH-shaped multi-turn conversation: real re-read per turn, first token, decode, draft acceptance | `/opt/ai/logs/turn-ttft.jsonl` |
 | `passive_windows.py` | what real traffic did, per engine session (acceptance, hit rate, truncation, read sizes) | stdout |
 | `bench-strata.py` | single stream + 4 concurrent, fixed corpus | `/opt/ai/logs/bench-results.jsonl` |
+| `mixed-soak.py` | 2/3/4-way short JSON, code, agent-tool and 32K/64K/96K needle soak; `--profile fairness --waves 5` repeats the 96K-neighbor case; samples metrics/RAM/GPU | `/opt/ai/logs/P2-mixed-soak-*.jsonl` + summary |
 | `piped_scenario.py` | one stream decoding while another reads a cold prompt: stalls, char rates | stdout |
 | `concurrent_reads.py` | what the concurrent read is worth, from the engine's own lines | stdout |
 | `cold-prefill.py` | a never-seen prompt, so every token is fresh | `/opt/ai/logs/cold-prefill.jsonl` |
@@ -65,7 +66,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `soak-analyze.py` | soak log summary: errors, RSS and MemAvailable drift | stdout |
 | `run-arm.sh`, `t2-run.sh`, `t2check.py`, `prepare-t2.py` | same-boot arm bookkeeping and the T2 bitwise arm | `/opt/ai/logs/arm-*` |
 | `hitrate_before_after.py` | **legacy**, superseded by `passive_windows.py` | kept for the older ledger entries |
-| `probe-version-stamp.py` | what the box is *running*: md5/sha256/mtime of the four deployed files, the running engine/server, its `STRATA_*` env, feature markers, `/health` | stdout + the JSON named by `--out` |
+| `probe-version-stamp.py` | what the box is *running*: md5/sha256/mtime of the four deployed files, the running engine/server, its `STRATA_*` env, feature markers, `/health`; `--expect-env-file production-env-2080ti.json` turns required switches into a deployment gate | stdout + the JSON named by `--out` |
 | `probe-instrument-cost.py` | what the S2 per-request timing probe itself costs (local micro-benchmark) | stdout |
 
 ### exp — costs restarts, always ends restored
@@ -116,7 +117,7 @@ any experiment, and never edit a script on the box without bringing it back here
 ## Usage signatures (the ones that take arguments)
 
 ```
-probe-version-stamp.py [--host H | --local] [--out FILE]   # the four hashes measured, not quoted
+probe-version-stamp.py [--host H | --local] [--out FILE] [--expect-env-file FILE]   # measured hashes + required env
 run-matrix.py --batch V1 [--src DIR] [--only ID] [--skip ID] # one batch, one matrix run
 check_assert_lock.py <source-tree> <build-dir>   # the 64/256 shape is locked by static_assert
 use-config.sh <config.json>                      # the only install/restore entry, ~156 s

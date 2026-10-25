@@ -43,7 +43,11 @@ MODEL = "qwen3.8-flash-next-iq3_xxs-abliterated"
 LOG = "/opt/ai/src/strata-0.2.2/strata-022.log"
 CORPUS = os.environ.get("MP_CORPUS") or "/opt/ai/docs/archive/strata-parameters-0.2.2-20261022.md"
 
-PROMPT_A = "用中文详细解释混合专家模型的路由与负载均衡，尽量写长。"
+PROMPT_A = os.environ.get(
+    "PEER_PROMPT",
+    "请写一篇约 2000 个汉字的技术说明，主题是混合专家模型的路由、容量因子、负载均衡与尾延迟。"
+    "要求分为 10 节，每节至少 8 句，连续写满，不要提前结束。",
+)
 PROMPT_B_TOKENS = 127_000
 
 READ_LINE = re.compile(
@@ -67,10 +71,11 @@ def decode_stream(stop: threading.Event, out: dict) -> None:
     like it produced nothing while it was in fact the very thing the slots were decoding - the run
     printed "A 0 tok" for every rep.  Reasoning text is counted too, since it also arrives per token.
     """
-    # PEER_MAX_TOKENS stretches the decode stream: at 400 tokens a four-stream rep can end its decode
-    # before the cold read even starts, which makes "the slots decoded N rows meanwhile" read as if the
-    # read starved the slots when it only outlasted them.
-    max_tokens = int(os.environ.get("PEER_MAX_TOKENS", "400"))
+    # PEER_MAX_TOKENS stretches the decode stream.  The old 400-token default often ended in about a
+    # second, before a 22K-token read began; then "the slots decoded N rows meanwhile" measured an empty
+    # peer rather than starvation.  The prompt asks for roughly 2000 Chinese characters and the default
+    # cap is 1200 tokens so the peer covers the whole read window.  Both remain overridable.
+    max_tokens = int(os.environ.get("PEER_MAX_TOKENS", "1200"))
     body = {"model": MODEL, "temperature": 0, "top_p": 1, "max_tokens": max_tokens, "stream": True,
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "user", "content": PROMPT_A}]}
@@ -110,6 +115,27 @@ def log_lines_from(index: int) -> list[str]:
     return lines[index:]
 
 
+def max_gap_overlapping(times: list[float], lo: float, hi: float) -> float:
+    """The longest inter-chunk gap that overlaps [lo, hi].
+
+    Filtering chunks to the window before computing gaps misses the stall this scenario exists to
+    measure: when A sends one chunk before B starts and the next one after B ends, the long gap
+    crosses the window but neither endpoint is inside it.  Keep both endpoints and require the
+    interval between them to overlap the window.
+    """
+    return max((b - a for a, b in zip(times, times[1:]) if a <= hi and b >= lo), default=0.0)
+
+
+def max_silence_in_window(times: list[float], lo: float, hi: float) -> float:
+    """The longest part of [lo, hi] with no streamed chunk.
+
+    A stalled stream often sends nothing at all while B reads, so there is no pair of chunks to
+    subtract.  Treat the window ends as pseudo-events and measure the empty interval between them.
+    """
+    points = [lo] + [t for t in times if lo < t < hi] + [hi]
+    return max((b - a for a, b in zip(points, points[1:])), default=0.0)
+
+
 def main(argv: list[str]) -> int:
     reps = int(argv[1]) if len(argv) > 1 else 2
     chars = int(argv[2]) if len(argv) > 2 else PROMPT_B_TOKENS
@@ -118,7 +144,7 @@ def main(argv: list[str]) -> int:
     med = lambda xs: statistics.median(xs)                        # noqa: E731
     corpus = open(CORPUS, encoding="utf-8", errors="replace").read() if mode != "solo" else ""
 
-    print(f"  {reps} reps, mode={mode}, {peers} 条解码流（每条 400 token）"
+    print(f"  {reps} reps, mode={mode}, {peers} 条解码流（每条最多 {os.environ.get('PEER_MAX_TOKENS', '1200')} token）"
           + (f" 同时 B 读一条全新冷提示词 ~{chars} 字符" if mode != "solo" else "，旁边没人读"))
     print("  注：A 那一侧数的是流式里收到的**字符**数（本提示词约 2 字符/token），不是 token 数；"
           "流里带 usage 时会另报 completion_tokens。跨臂比较请用同一单位，别把字符/s 当 tok/s。")
@@ -165,6 +191,7 @@ def main(argv: list[str]) -> int:
         per_stream = []
         for stream in outs:
             st = stream.get("stamps", [])
+            stamps = [t for t, _ in st]
             tot = sum(n for _, n in st)
             sp = (st[-1][0] - st[0][0]) if len(st) > 1 else 0.0
             ins = [(t, n) for (t, n) in st if t0 <= t <= t0 + b_wall] if b_wall else st
@@ -173,15 +200,17 @@ def main(argv: list[str]) -> int:
                 "span_s": round(sp, 1),
                 "chars_s_alone": round(tot / sp, 1) if sp else 0.0,
                 "chars_s_during_b": round(sum(n for _, n in ins) / b_wall, 1) if (b_wall and tot) else 0.0,
-                "worst_gap_during_b_s": round(max([ins[i][0] - ins[i - 1][0] for i in range(1, len(ins))], default=0.0), 2),
-                "worst_gap_overall_s": round(max([st[i][0] - st[i - 1][0] for i in range(1, len(st))], default=0.0), 2),
+                "chunks_during_b": len(ins),
+                "longest_gap_overlapping_b_s": round(max_gap_overlapping(stamps, t0, t0 + b_wall), 2) if b_wall else 0.0,
+                "longest_silence_in_b_s": round(max_silence_in_window(stamps, t0, t0 + b_wall), 2) if b_wall else 0.0,
+                "worst_gap_overall_s": round(max([stamps[i] - stamps[i - 1] for i in range(1, len(stamps))], default=0.0), 2),
             })
 
         a_total = sum(s["chars"] for s in per_stream)
         span = med([s["span_s"] for s in per_stream])
         a_rate_alone = med([s["chars_s_alone"] for s in per_stream])
         a_rate = med([s["chars_s_during_b"] for s in per_stream])
-        worst_gap = med([s["worst_gap_during_b_s"] for s in per_stream])
+        worst_gap = med([s["longest_silence_in_b_s"] for s in per_stream])
         all_gaps = [s["worst_gap_overall_s"] for s in per_stream]
         a_tok = sum(int(s["chars_s_during_b"] * s["span_s"]) for s in per_stream)
 
@@ -189,7 +218,7 @@ def main(argv: list[str]) -> int:
                "b_client_wall_s": round(b_wall, 1),
                "a_tokens_seen": a_total, "a_tok_s_alone": round(a_rate_alone, 1),
                "a_tok_s_during_b": round(a_rate, 1),
-               "a_worst_gap_during_b_s": round(worst_gap, 2),
+               "a_longest_silence_in_b_s": round(worst_gap, 2),
                "a_worst_gap_overall_s": round(max(all_gaps), 2) if all_gaps else 0.0,
                "gate_refused_this_rep": refused,
                "streams": per_stream,
@@ -212,6 +241,11 @@ def main(argv: list[str]) -> int:
             print("      gate refused this rep (the read stayed exclusive) - expected on the closed arm")
         time.sleep(2)
 
+    if path := os.environ.get("PIPED_JSON"):
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(rows, handle, ensure_ascii=False, indent=1)
+        print(f"  json: {path}")
+
     med = lambda xs: statistics.median(xs)                        # noqa: E731
     if mode == "solo":
         live = [r for r in rows if r["a_tok_s_alone"]]
@@ -228,7 +262,7 @@ def main(argv: list[str]) -> int:
                   % (med([r["b_client_wall_s"] for r in rows]),
                      med([r["a_tok_s_during_b"] for r in live]),
                      med([r["a_tok_s_alone"] for r in live]),
-                     med([r["a_worst_gap_during_b_s"] for r in live]),
+                     med([r["a_longest_silence_in_b_s"] for r in live]),
                      sum(1 for r in rows if r["gate_refused_this_rep"]), len(rows)))
     return 0
 

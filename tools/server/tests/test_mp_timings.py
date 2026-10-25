@@ -67,6 +67,9 @@ def _check(metrics: dict, tokens: int) -> None:
     assert metrics["tokens"] == tokens, metrics
     assert tokens > 1 and metrics["itl_ms_mean"] is not None, metrics
     assert metrics["itl_ms_mean"] > 0, metrics
+    if metrics.get("slot_wait_ms") is not None:
+        assert isinstance(metrics["slot_wait_ms"], int), metrics
+        assert metrics["queue_ms"] <= metrics["slot_wait_ms"] <= metrics["ttft_ms"], metrics
 
 
 def test_streamed_final_chunk_carries_metrics():

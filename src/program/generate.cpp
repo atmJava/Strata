@@ -5343,6 +5343,14 @@ int main(int argc, char** argv) {
         return n;
     };
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
+    // OPT-IN: every layer of a device has the same read-only RoPE table.  The main session for each stage owns
+    // one; its batch slots borrow that table instead of allocating another max_cells x 32 x 2-float copy.  At
+    // 192K and six slots this removes six 46.875 MiB copies per card.  The default remains byte-identical while
+    // the integration is measured end to end.
+    const bool share_slot_rope = [] {
+        const char* v = std::getenv("STRATA_SHARED_SLOT_ROPE");
+        return v != nullptr && v[0] != '\0' && std::strcmp(v, "0") != 0;
+    }();
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
@@ -5397,12 +5405,19 @@ int main(int argc, char** argv) {
             const int64_t lo = k == 0 ? 0 : stages[k - 1]->lb;
             const int64_t hi = k == 0 ? (multi_gpu ? split_at[0] : -1) : stages[k - 1]->le;
             const strata::core::OnDevice on_k(dev);
-            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
+            const strata::core::SessionState* rope_donor = share_slot_rope
+                ? (k == 0 ? &ss : &stages[k - 1]->ss)
+                : nullptr;
+            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi, share_slot_rope);
+            const uint64_t rope_saved = share_slot_rope
+                ? strata::core::session_bytes(g, o.max_context, K, lo, hi, false) - bytes
+                : 0;
             if (k == 0) bytes0 = bytes;
             for (int b = 0; b < fit; ++b) {
                 auto u = std::make_unique<strata::core::SessionState>();
                 void* buf = nullptr;
-                if (cudaMalloc(&buf, bytes) != cudaSuccess || strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi) == 0) {
+                if (cudaMalloc(&buf, bytes) != cudaSuccess ||
+                    strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi, rope_donor) == 0) {
                     cudaGetLastError();
                     if (buf != nullptr) cudaFree(buf);
                     size_t fb = 0, tb = 0;
@@ -5419,8 +5434,16 @@ int main(int argc, char** argv) {
             cudaDeviceSynchronize();
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each); %.2f GiB free\n",
-                         (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0, (double) fb / 1073741824.0);
+            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each%s); "
+                                 "%.2f GiB free\n",
+                         (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0,
+                         share_slot_rope ? ", RoPE borrowed from the stage session" : "",
+                         (double) fb / 1073741824.0);
+            if (rope_saved != 0)
+                std::fprintf(stderr, "strata generate: shared slot RoPE on CUDA%d saves %.1f MiB total "
+                                     "(%.3f MiB per slot)\n",
+                             dev, (double) rope_saved * (double) bslot_ss[k].size() / 1048576.0,
+                             (double) rope_saved / 1048576.0);
         }
         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
         if (fit < 2) {
@@ -13693,6 +13716,7 @@ int main(int argc, char** argv) {
             double il_ms = 0;
             int64_t yielded_at = -1;   // BYIELD: the read stopped here and its slot holds it
             int yielded_slot = -1;
+            bool piped_concurrent_leadin_done = false;
             // `BYIELD <slot>` (the server: a shorter request is waiting): at the next chunk boundary the part read so
             // far is copied into <slot> (this admission's own, or a free one the server reserved for a solo request),
             // the request ends with `YIELDED <slot> <tokens>` + DONE cancel, and the server sends it again later: it
@@ -13795,6 +13819,81 @@ int main(int argc, char** argv) {
                                  (long long) n, ye.empty() ? "" : ": ", ye.c_str());
                     return false;
                 };
+                // Opt-in (#1906): on the pipelined slot groups a read goes in pieces of STRATA_PIPED_READ_PIECE tokens
+                // (whole chunks).  A piece's end has the pipeline drained, so a waiting shorter request can take
+                // over there (BYIELD); with slots decoding, the groups then decode through the pipeline (pump) for
+                // STRATA_BATCH_DECODE_SHARE x the piece's time, capped / floored by STRATA_PIPED_DECODE_MAX_MS /
+                // _MIN_MS, and are drained (pipe_drain) before the next piece, as before any read.  Unset: one run.
+                static const int64_t pr_piece = [] {
+                    const char* v = std::getenv("STRATA_PIPED_READ_PIECE");
+                    return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 0;
+                }();
+                static const double pr_cap = [] {
+                    const char* v = std::getenv("STRATA_PIPED_DECODE_MAX_MS");
+                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
+                }();
+                static const double pr_floor = [] {
+                    const char* v = std::getenv("STRATA_PIPED_DECODE_MIN_MS");
+                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
+                }();
+                // A finite decode before a concurrent read starts.  Unlike a read piece this adds no drain inside
+                // the prompt: it only gives requests already decoding one bounded chance to finish before the long
+                // prompt can take over the pipeline.  Off by default; a piecewise read has its own lead-in below.
+                static const double pr_concurrent_leadin = [] {
+                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_MS");
+                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
+                }();
+                static const double pr_concurrent_leadin_wait = [] {
+                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_WAIT_MS");
+                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
+                }();
+                static const int64_t pr_concurrent_leadin_min_tokens = [] {
+                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS");
+                    return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 4096;
+                }();
+                const bool pr_on = piped && pr_piece > 0;
+                // the slots decode through the pipeline for budget_ms, drained before the next read
+                auto piped_decode = [&](double budget_ms, std::string& err) -> bool {
+                    const auto td = Clock::now();
+                    in_prompt_read = true;
+                    do {
+                        if (!pump(true)) {
+                            in_prompt_read = false; batch_fatal = true; err = "a pipelined batch window failed";
+                            return false;
+                        }
+                    } while (batch_on() &&
+                             std::chrono::duration<double, std::milli>(Clock::now() - td).count() < budget_ms);
+                    if (!pipe_drain()) {
+                        in_prompt_read = false; batch_fatal = true; err = "a pipelined batch window failed";
+                        return false;
+                    }
+                    in_prompt_read = false;
+                    ++il_parts;
+                    il_ms += std::chrono::duration<double, std::milli>(Clock::now() - td).count();
+                    return true;
+                };
+                if (!piped_concurrent_leadin_done && piped && pr_concurrent_leadin > 0.0 && !pr_on &&
+                    b0 - a0 >= pr_concurrent_leadin_min_tokens) {
+                    piped_concurrent_leadin_done = true;
+                    const auto tw = Clock::now();
+                    while (!batch_on() &&
+                           std::chrono::duration<double, std::milli>(Clock::now() - tw).count() <
+                               pr_concurrent_leadin_wait)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    const double waited =
+                        std::chrono::duration<double, std::milli>(Clock::now() - tw).count();
+                    if (batch_on()) {
+                        const int64_t rows0 = pipe_rows;
+                        const auto tl = Clock::now();
+                        if (!piped_decode(pr_concurrent_leadin, e)) return false;
+                        std::fprintf(stderr, "strata batch: concurrent read lead-in waited %.0f ms; the slots decoded "
+                                             "%lld rows in %.0f ms first\n", waited, (long long) (pipe_rows - rows0),
+                                     std::chrono::duration<double, std::milli>(Clock::now() - tl).count());
+                    } else {
+                        std::fprintf(stderr, "strata batch: concurrent read lead-in skipped: no slot decoded within "
+                                             "%.0f ms\n", waited);
+                    }
+                }
                 // Opt-in, experimental: STRATA_PIPED_CONCURRENT=1 reads the prompt on a thread of its own while
                 // this thread keeps the slot groups decoding through the pipeline (pump), so they never stop for it
                 // and the read has no drain inside it.  The prompt and the windows use their own streams and memory
@@ -14057,48 +14156,10 @@ int main(int argc, char** argv) {
                     }
                     return true;
                 }
-                // Opt-in (#1906): on the pipelined slot groups a read goes in pieces of STRATA_PIPED_READ_PIECE tokens
-                // (whole chunks).  A piece's end has the pipeline drained, so a waiting shorter request can take
-                // over there (BYIELD); with slots decoding, the groups then decode through the pipeline (pump) for
-                // STRATA_BATCH_DECODE_SHARE x the piece's time, capped / floored by STRATA_PIPED_DECODE_MAX_MS /
-                // _MIN_MS, and are drained (pipe_drain) before the next piece, as before any read.  Unset: one run.
-                static const int64_t pr_piece = [] {
-                    const char* v = std::getenv("STRATA_PIPED_READ_PIECE");
-                    return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 0;
-                }();
-                static const double pr_cap = [] {
-                    const char* v = std::getenv("STRATA_PIPED_DECODE_MAX_MS");
-                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
-                }();
-                static const double pr_floor = [] {
-                    const char* v = std::getenv("STRATA_PIPED_DECODE_MIN_MS");
-                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
-                }();
-                const bool pr_on = piped && pr_piece > 0;
                 auto piece_now = [&]() -> int64_t {
                     return pr_on ? strata::program::piped_read_piece(pr_piece, C)
                                  : strata::program::batch_read_piece(o.batch > 0, piped, !stages.empty(), batch_on(), C,
                                                                      yield_chunks);
-                };
-                // the slots decode through the pipeline for budget_ms, drained before the next read
-                auto piped_decode = [&](double budget_ms, std::string& err) -> bool {
-                    const auto td = Clock::now();
-                    in_prompt_read = true;
-                    do {
-                        if (!pump(true)) {
-                            in_prompt_read = false; batch_fatal = true; err = "a pipelined batch window failed";
-                            return false;
-                        }
-                    } while (batch_on() &&
-                             std::chrono::duration<double, std::milli>(Clock::now() - td).count() < budget_ms);
-                    if (!pipe_drain()) {
-                        in_prompt_read = false; batch_fatal = true; err = "a pipelined batch window failed";
-                        return false;
-                    }
-                    in_prompt_read = false;
-                    ++il_parts;
-                    il_ms += std::chrono::duration<double, std::milli>(Clock::now() - td).count();
-                    return true;
                 };
                 // prompts arriving back to back: one decode budget before a read that follows a piecewise read
                 static Clock::time_point pr_prev_end{};

@@ -5,7 +5,7 @@
 
 ---
 
-## 台账索引（65 条：L-000…L-064，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
+## 台账索引（78 条：L-000…L-077，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
 
 | 编号 | 日期 | 一句话结论 | 判决 |
 |---|---|---|---|
@@ -71,6 +71,19 @@
 | L-062 | 10-25 14:2xZ | V3-1 容量矩阵（部分）：8×128K 装得下（8 slots、17437 experts、vram_free 1011）；8 路聚合 150.6 vs 6 路 138.7（+8.6%），单路 70.8 vs 75.2（−5.8%）；4 路 M1 对比没测成；生产保持 6×192K | **结论** |
 | L-063 | 10-25 14:5xZ | MTP 草稿深度 2/4/6 A/B：单请求 71.4/75.5/74.0、4 路聚合 114.9/113.9/111.6（±2% 内，噪声）；接受率 6 时降到 71–79% → 保持 4。坑：残留 bench 进程会伪造"卡住" | **否决** |
 | L-064 | 10-25 15:0xZ | V3-1 收口：三档 M1（4 路）——6×192K 聚合 120.6、8×128K 133.9（+11% 但上下文 −33%）、8×192K 122.8（+1.8% 噪声）；都起得来；默认保持 6×192K | **结论** |
+| L-065 | 10-26 00:0x | S2 验证：流式最终 chunk 与非流式 body 都带 per-request metrics；mock regression 2/2，时间单调断言通过 | **采纳** |
+| L-066 | 10-26 00:0x | S0b 静态+运行日志审计：生产 `STRATA_PIPED_CONCURRENT=1` 被 `staged_source` gate 关闭；L-060 的 A 臂并非并发读 | **结论** |
+| L-067 | 10-26 00:1x | T-probe 改为 hash `/proc` 中的实际 engine/server；现网 server 从误读的 `a3c7df58` 修正为运行中的 `b6b695a1` | **采纳** |
+| L-068 | 10-26 00:5x | S0b gate 修复后并发读 3/3 触发，但邻居静默中位 ON 7.09/7.59 s、OFF 7.41 s，无用户收益；0.1.51 候选单路和聚合同时回退 | **否决** |
+| L-069 | 10-26 00:5x | batch slot 共享 RoPE：双卡 6×192K 省 562.4 MiB，expert slots +1.8%；吞吐差在噪声内，输出 parity 通过，采纳为 opt-in | **采纳** |
+| L-070 | 10-26 01:3x | C1 满槽：6 槽第 7 请求 TTFT 中位 11.84 s，8 槽第 9 请求 14.38 s；邻居静默 <0.56 s；默认保持 6 槽 | **结论** |
+| L-071 | 10-26 01:2x | S2 新增 `slot_wait_ms`：原 `queue_ms=0` 漏掉 11.4 s slot 等待；补丁部署后 14.766 s 与外部 14.787 s 对齐 | **采纳** |
+| L-072 | 10-26 01:4x | P1 batch-groups A-B-A：groups=2 聚合 127.2/120.4，groups=1 110.9；groups=1 并发慢 11.6%，否决 | **否决** |
+| L-073 | 10-26 01:5x | groups=1 + batch-MTP 聚合 91.3，比纯串行再慢 17.7%、比流水线慢 25%；接受率 80.7%，否决 | **否决** |
+| L-074 | 10-26 02:2x | 现役双卡 profile：stage 2 为 13.2–15.4 ms/window，stage 1 为 11.4–13.4；split 25 仅 +2.5%、26 为 −4.5%，保持 24/24 | **结论** |
+| L-075 | 10-26 02:5x | 合并后生产丢失 `STRATA_HC_Q8=1`；恢复后 4 路中位 130.6 对 A 组 115.25（+13.3%），两轮质量 11/11，采纳 | **采纳** |
+| L-076 | 10-26 03:0x | 已采纳 env 进入运行态部署门禁：缺键或值不符即失败；现网 7 个关键开关精确匹配、0 problems | **采纳** |
+| L-077 | 10-26 04:0x | 1 小时 HC_Q8/RoPE 混合 soak：622 请求、0 错误、0 意外 length；26 次 98K prompt 中位 40.96 s，4 路后置合成中位 129.7 | **结论** |
 | L-056 | 10-25 20:4x | V0 准备批：现网四件实测（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）；现网 server 是 hybrid 且 `52b84d54` 是 patch 树 hash；harness 2 红转绿、补丁追平 `46d12fa9`；S2 探针代价 1.36–1.40 µs/请求；回滚包字节核对（停机级未演练）；0 构建 0 重启 | **参考** |
 | L-055 | 10-25 02:2x | R11 开关修复部署（引擎 `383b426a`）：短读 40.68 s 不暂存、长读首 17.89 s；**邻居窗口停顿 3.43 s**（>1 s，新发现）；S0 完成 | **参考** |
 | L-054 | 10-25 01:3x | A-B-A 闭环：回滚 A 实测（短 42.3 s / 长 36.3 s，G4 ✓）→ 再启用 B（短 35.9 s / 长 **17.7 s**）；3 流冷读首 token 8.0 s（唯一提示词，修正缓存假象） | **参考** |
@@ -2161,3 +2174,581 @@ draft 深度加大 → 接受率下降（6 时 71–79%），没有换来吞吐�
 
 **原始日志**：`/opt/ai/logs/bench-results.jsonl`（`V3-m1-6slot-c1..3`、`V3-m1-8slot-c1..3`、`V3-m1-8x192-c1..3`）、
 `/tmp/v3-cap8c.log`、`/tmp/v3-cap8x192.log`、`/tmp/v3-restore4.log`；脚本 `tools/server/bench-strata.py`。
+
+## L-065 S2 验证：每请求时延 metrics 在流式与非流式响应中都可回归
+
+**判定**：**采纳**。S2 的验收项已完成，不再占用工作队列。
+
+**改动与命令**：`python3 -m pytest tools/server/tests/test_mp_timings.py -q`。测试启动离线 mock 引擎，
+分别请求流式 `stream=true` 和非流式 `stream=false`，从最终 usage chunk / response body 读取 `metrics`。
+
+**断言**：`queue_ms / ttft_ms / wall_ms` 是可解析的非负整数；`queue_ms <= ttft_ms <= wall_ms`；
+`tokens` 等于 usage 的 completion tokens；token 数大于 1 时 `itl_ms_mean` 存在且为正。
+
+**结果**：`2 passed in 1.66s`。同批 `test_mp_staged_cancel.py` 为 `1 passed`，合并后
+`tools/server/tests` 全量为 `62 passed, 10 skipped`。
+
+**没测什么**：没有用真实 GPU 请求验证字段值；staged 等待与 queue timeout 的客户端时钟偏差未单独做端到端
+一致性测试。它们不影响“字段存在、可解析、单调、有回归”这一 S2 验收项。
+
+**原始日志**：本次测试命令输出；实现见 `serve/server.py` 的 S2 block，测试见
+`tools/server/tests/test_mp_timings.py`。
+
+## L-066 S0b gate 审计：L-060 的 `STRATA_PIPED_CONCURRENT=1` 臂实际没有开启并发读
+
+**判定**：**结论**（静态代码 + 生产运行日志相符）；L-060 不能用于否决并发读机制。
+
+**生产事实**：当前引擎环境有 `STRATA_PIPED_CONCURRENT=1`，但
+`/opt/ai/src/strata-0.2.2/strata-022.log` 多次记录
+`strata batch: STRATA_PIPED_CONCURRENT is off beside an expert source that stages its blobs (the GGUF in place, unbuffered, STRATA_IO_PREFETCH)`。
+因此 L-060 的 A/B 两臂都没有进入 `pr_conc` 分支。
+
+**代码原因**：`src/program/generate.cpp` 原来用 `src.stages_blobs()` 设置 `staged_source`；该函数对
+`io_prefetch()` 也为真。生产使用 `experts.bin` 的页缓存映射 + I/O 预读，prompt 路径的 transient expert 经
+`copy_blobs` 写入独立 stager buffer；`blob_stable()` 返回稳定的映射指针，不占用会回收的 `staged_blob` 池。
+
+**改动**：将 source-shape 判定提炼为 `concurrent_read_source_staged()`；只让 source 明确报告的
+`stable_mapped_io_prefetch()` 通过（`experts.bin` 页缓存 fill 模式）。`STRATA_IO_PF_STAGE=1`、
+GGUF-in-place 与 unbuffered 仍保持关闭。新增 4 个组合断言。
+
+**验证到目前为止**：本地 `g++ -std=c++20 ... tests/program/batch_read_test.cpp` → `batch_read_test: ok`；
+`sm_75` 完整引擎构建正在独立树 `/opt/ai/src/strata-port-s0b-20261026/build75` 进行，日志
+`/tmp/s0b-build-20261026.log`。尚未部署、尚未产生性能数字。
+
+**没测什么**：新引擎上并发日志是否出现、邻居停顿是否下降、读墙钟损失、输出 parity、长时间稳定性。
+这些必须由同 boot A-B-A 和真实 GPU 请求回答。
+
+## L-067 T-probe：版本戳改读实际运行文件
+
+**判定**：**采纳**。T-probe 的验收条件已满足。
+
+**问题**：旧探针固定 hash `/opt/ai/src/strata-0.2.2/serve/server.py`，但 launcher 实际运行
+`/opt/ai/src/strata-port-v1/serve/server.py`。旧输出把生产目录的 `a3c7df58` 当成运行 server，markers
+也来自错误对象。
+
+**改动**：探针先读 server / engine 的 `/proc/<pid>/cmdline`，解析实际 engine binary 与
+`serve/server.py` 路径，再对它们做 md5/sha256、size、mtime 和 markers；`check()` 要求 running path 与
+hashed path 一致。新增 `test_probe_version_stamp.py` 的 3 个正负例。
+
+**实测（2026-10-26，现网只读）**：
+
+- running engine：`/opt/ai/src/strata-0.2.2/build/strata`，md5 `84a0d410…`；
+- running server：`/opt/ai/src/strata-port-v1/serve/server.py`，md5 `b6b695a1…`；
+- launcher `0eeee160...`、config `6c362d01...`；
+- server markers：`STRATA_MP_STAGED_READ=6`、`BCANCEL_DRAIN_S = 10.0=1`、
+  `malformed staged-read reply=1`、`request_started = time.time()=1`；
+- `/health` loaded=true；退出码 0。
+
+**没测什么**：只证明 hash 与运行 argv 一致，不证明进程加载后文件未被原地改写；原地运行文件的 attestation
+仍是更大范围的部署问题。
+
+**原始日志**：`/opt/ai/logs/T-probe-after-20261026T0010Z.json`
+（sha256 `cdab9d6684926cbc7ca89cea5f2d2f706ba0c69cb7df000ae1c747e84ea6888a`）。
+
+## L-068 S0b 负结果：并发读真实触发，但没有改善邻居停顿；0.1.51 整体回退
+
+**判定**：**否决 S0b 的现实现与 0.1.51 候选**。不再为“让并发日志出现”投入构建；若要解决长读，
+需要换调度机制。
+
+**实验条件**：引擎 0.1.51 + gate 修复，`sm_75`，双 RTX 2080 Ti，6×192K，INT8 KV。邻居流持续生成，
+读流提示词约 11.5–12.1K tokens。每臂 3 次，记录读窗口内最长无 token 时间和读墙钟，不只看窗口内 chunk
+间隔。
+
+**路径触发证据**：
+
+- A1 ON：3/3 次 `concurrent_reads` 非空，`gate_refused_this_rep=false`；
+- A3 ON2：3/3 次非空，`gate_refused_this_rep=false`；
+- A2 OFF：0/3 次非空。
+
+所以这不是又一次“开关没进路径”的假 A/B。
+
+**结果**：
+
+| 臂 | 邻居最长静默中位 | 读客户端墙钟 |
+|---|---:|---:|
+| A1 ON | 7.09 s | 7.2–8.1 s |
+| A2 OFF | 7.41 s | 7.4–13.7 s |
+| A3 ON2 | 7.59 s | 7.7–19.5 s |
+| 旧引擎（机制前） | 7.08 s | 7.4–8.6 s |
+
+OFF 首跑和 ON2 首跑各有一次离群长尾，不能把单次最大值当成机制差异；三个中位臂都在 7.1–7.6 s，
+与旧引擎相同。ON 的长读窗口里邻居通常只推进 1 行，读墙钟约 7 s。并发机制执行了，用户等待没有下降。
+
+**整体吞吐**：0.1.51 候选 `STRATA_PIPED_CONCURRENT=0`、n=6 为单路中位 68.0 tok/s、4 路聚合
+113.1 tok/s、接受率 79.75%；旧 0.1.49.1 合并两组同条件 n=3 后为单路 74.7 tok/s、聚合 115.55 tok/s、
+接受率约 81.2%。候选不能替换现役引擎，已回滚。
+
+**没测什么**：没有做跨小时、真实混合流量下的 0.1.51 稳定性；没有继续分解它的具体回退提交。由于单路
+已下降约 9%，继续整包部署没有价值；后续若追查，只能做离线 bisect，不能先上生产。
+
+**原始日志**：
+
+- `/opt/ai/logs/S0b-A1-ON-silence-20261025T161640Z.json`
+  （sha256 `f95f4b73e5b331f63fb011f14b3ebadf44668c05f88d3e20996c39ae5cee32e6`）；
+- `/opt/ai/logs/S0b-A2-OFF-20261025T162000Z.json`
+  （sha256 `961994b6840e36b831b74f4469adef27a18f66a995d43ade6f35d1872121ad63`）；
+- `/opt/ai/logs/S0b-A3-ON2-20261025T162320Z.json`
+  （sha256 `4d79f25fbcd354aae9beb36aa620ca87371d4bcbcf246a2c68216d909319174c`）；
+- `/opt/ai/logs/S0b-old-coexist-20261025T162917Z.json`
+  （sha256 `b101035751b004c727cde938bb4ab7758830684efecfa69a4a9dec0189ccfdbf`）；
+- `/opt/ai/logs/S0b-bench-old-20261025T162803Z.log` 与
+  `/opt/ai/logs/S0b-bench-old-extra3-20261025T162957Z.log`；
+- `/opt/ai/logs/S0b-bench-candidate-off-n6-20261025T163358Z.log`
+  （sha256 `ca2790a85e52cf272e996cbbe1ad2042e4cef88cf33116e78e976288c2d32192`）。
+
+## L-069 batch slot 共享 RoPE：少复制只读表，吞吐不退化
+
+**判定**：**采纳为 opt-in，并已部署到现役 0.1.49.1**。收益是显存和 expert cache 容量，不是可宣称的
+tok/s 提升。
+
+**机制**：每张卡的每个 stage 主 session 独占一份 RoPE 表；同 stage 的 batch slots 通过
+`share_rope_from` 借用，主 session 生命周期覆盖全部 borrower。token 算术和采样路径不变。
+`STRATA_SHARED_SLOT_ROPE` 未设置、空或 `0` 时保留旧分配路径。
+
+**生产生效**：
+
+- engine md5 `cbed3c31cfbdf40aec0ff743f6faf5c5`，sha256
+  `c5b3b877bc0aa2dc58be19e5155eaa75a988631c66f03dbf3bc2c7c059adada6`；
+- T-probe 从 `/proc` 确认实际运行该文件，PID 115662；`/health` loaded=true；
+- 6×192K 启动日志：每 slot 46.875 MiB；CUDA0/CUDA1 各省 281.2 MiB，合计 562.4 MiB；
+- expert slots 从 17872 升到 18194，增加 322（+1.8%）；
+- 8×192K 各卡省 375.0 MiB，expert slots 17190；只保留为高并发容量预设。
+
+**性能**（同模型、6×192K、INT8 KV）：
+
+| 条件 | 单路中位 | 并发聚合中位 | 样本 |
+|---|---:|---:|---:|
+| 旧分配，4 路 | 74.7 tok/s | 115.55 tok/s | 2×3 |
+| 共享 RoPE，4 路 | 75.1 tok/s | 113.6 tok/s | 1×6 |
+| 共享 RoPE，6 路 | 76.1 tok/s | 143.3 tok/s | 1×3 |
+| 共享 RoPE，8 槽/4 路 | 76.3 tok/s | 111.4 tok/s | 1×6 |
+
+4 路单路 +0.5%、聚合 −1.7%，都在跨 boot 噪声内；不能宣称 tok/s 提升，也不能说确切回退。
+8 槽 4 路比 6 槽低 1.9%，因此不替换默认 6×192K。8 槽在 6/8 路 n=3 时为 148.0/149.8 tok/s，
+离散度大，只能说明容量预设可用。
+
+**正确性与冷读**：固定 200 行推理题的 `text_sha=b17bc92de6ba8a97`，输出
+`61.1 degrees / Node 203 / 51%`；13K 冷 prefill 三次中位 2397 tok/s。
+
+**可回退性**：生产源码补丁已固化在
+`tools/server/patches/rope-share-0.1.49.1.patch`。从原始源码应用后得到 md5
+`6727fd87f7fe6df40faf705fedae8910`、sha256
+`245e9a126119b4b70e77e0bbdb96433f66f690c9ef45c55f01d5561f4c5d7b75`，与现役源码逐字节一致。
+原始源码、原始二进制和 patched 二进制快照在
+`/opt/ai/tmp/pre-rope-share-20261025T164500Z/`；原始 engine md5 为 `84a0d410...`。
+
+**没测什么**：没有跨小时的 expert hit rate、RAM exchange 和 KV 长上下文稳定性；没有真实用户混合流量。
+因此当前采纳的是“不牺牲短测性能且明确省显存”的 opt-in，而不是无条件默认优化。
+
+**原始日志**：
+
+- `/opt/ai/logs/T-probe-rope-share-20261025T170108Z.json`
+  （sha256 `bec4f56c593c913c7e74f09b580e03d804e54ace0c95068215d55c892731ff45`）；
+- `/opt/ai/logs/rope-share-bench-n6-20261025T164507Z.log`
+  （sha256 `0f377e3632e621ad68c213b3e43c2d8c6e66996618f54dff1a3763fe9f23eedf`）；
+- `/opt/ai/logs/rope-share-6slot-N6-20261025T164846Z.log`
+  （sha256 `8bf91839adf59fd4ac87c1fcc1053f35f2c8e38b5a101e6af0a1d23ddc43d225`）；
+- `/opt/ai/logs/rope-share-8slot-N4-n6-20261025T165545Z.log`
+  （sha256 `2c3ab08c850612f00db208f3a317d7c86d02947745eddea52bde27ac1e07e03a`）；
+- `/opt/ai/logs/rope-share-parity-20261025T164739Z.log` 与
+  `/opt/ai/logs/rope-share-cold-20261025T164739Z.log`。
+
+## L-070 C1 满槽准入：6 槽第 7 请求 TTFT 11.84 s，8 槽第 9 请求 14.38 s
+
+**判定**：**结论**。6×192K 与 8×192K 的晚到请求边界已测；默认保持 6×192K。短请求满槽时
+邻居没有长静默，主要损失是新请求自己的 slot 等待。
+
+**条件与方法**：每个 slot 先由一条长解码占用，等 `/metrics live.slots` 全部非 idle、`running` 等于
+slot 数后，再发一条唯一冷短请求。读者最多 24 tokens，系统提示关闭 thinking。每臂 3 次；满槽条件
+3/3 成立。`probe_slot_admission.py` 同时记录服务端 metrics、客户端首/第二 token 和邻居长时间戳。
+
+**6×192K / 第 7 请求**：
+
+| 样本 | slot 等待 | TTFT | wall | 第二 token 间隔 |
+|---|---:|---:|---:|---:|
+| 1 | 11.329 s | 11.759 s | 12.298 s | 0.056 s |
+| 2 | 11.488 s | 11.935 s | 12.436 s | 0.056 s |
+| 3 | 11.422 s | 11.839 s | 12.324 s | 0.056 s |
+| 中位 | **11.422 s** | **11.839 s** | **12.324 s** | **0.056 s** |
+
+读者生命周期内邻居最长静默 0.481 s；到读者 TTFT 为止 0.439 s。`concurrent_reads=6` 与
+`outside_slots=1` 证明读者确实在等一个已满的引擎。
+
+**8×192K / 第 9 请求**：
+
+| 样本 | slot 等待 | TTFT | wall | 第二 token 间隔 |
+|---|---:|---:|---:|---:|
+| 1 | 18.129 s | 18.676 s | 19.403 s | 0.078 s |
+| 2 | 13.885 s | 14.379 s | 15.078 s | 0.067 s |
+| 3 | 13.452 s | 13.955 s | 14.630 s | 0.066 s |
+| 中位 | **13.885 s** | **14.375 s** | **15.074 s** | **0.067 s** |
+
+邻居最长静默中位 0.552 s，最差样本 0.601 s。8 槽容量更高，但在同样每条邻居 400-token 的满槽
+条件下，第 9 个请求比 6 槽第 7 个请求的 TTFT 慢约 21.4%，因此不替换默认。
+
+**没测什么**：没有覆盖不同邻居生成长度、真实混合流量、优先级或取消风暴；这里给的是该受控填充
+条件下的上界，不是所有负载下的服务级 SLO。服务端尚未配置准入超时，满槽请求会继续等待而不是
+按固定时限返回 429。
+
+**原始日志**：
+
+- `/opt/ai/logs/C1-6slot-late-n3-20261025T1750Z.json`
+  （sha256 `b4740c9f34979c34e80bfe92bc62b95d45f9be49e6956e2d7813d4f69e8b18d6`）；
+- `/opt/ai/logs/C1-8slot-late-n3-20261025T1735Z.json`
+  （sha256 `fec5ee6423287603cd4b68688dd7e39e5f3897c90053d9dc5726c284ccacac76`）；
+- `/opt/ai/logs/T-probe-C1-8slot.json`
+  （sha256 `7c9460cc22ec673ca86774cb0830725b1ff1df97b802e66e426d65602dd38214`）；
+- `/opt/ai/logs/T-probe-C1-final-6slot.json`
+  （sha256 `68b364e666143e2c9a5712f4fbdb7f54520bcda7ca254664292a30b5586d2813`）。
+
+## L-071 S2 补齐 `slot_wait_ms`：从 0 ms 的假 queue 到可见的 11–15 s 等待
+
+**判定**：**采纳并部署**。原 schema 的 `queue_ms` 只覆盖 `generate()` 前的 server 等待；batch
+请求进入 `generate()` 后还要排队等 slot，这部分此前只能从 `/metrics running/outside_slots` 人工推断。
+
+**实现**：batch 首次取得 slot 时在 request-local cancel 对象记录时间；最终 metrics 在保持
+`queue_ms` 语义不变的前提下增加 `slot_wait_ms`。无 slot 的 solo 请求不带该字段。
+
+**验证**：
+
+- 远端旧源码 dry-run 零 fuzz；补丁后 `py_compile` 通过；
+- 本地 `test_mp_timings.py` 2/2、slot probe 4/4、T-probe 3/3 通过；
+- 现网 server 从 `b6b695a1` 更新为 `de09cffd`，sha256
+  `fc3a7e7e4d852252c0eb96be9e02d733deb47eac05b56decfd9ab1a94c5208f4`；
+- T-probe 从运行路径读到 `slot_wait_ms` marker，health 200；
+- 实测一条为 `queue_ms=0`、`slot_wait_ms=14766`、`ttft_ms=15327`，与外部
+  `running 6→7 / outside_slots 1→0` 测得的 14.787 s 相差 21 ms。
+
+**回滚**：`tools/server/patches/s2-slot-wait-0.2.2.patch`；部署前 server/config 快照在
+`/opt/ai/tmp/pre-S2-slot-wait-20261025T171753Z/`。现网 server 已通过重启加载新文件。
+
+**没测什么**：没有覆盖多个 slot hand-off、solo→batch 二次切换和取消时该字段的边界；这些不影响
+C1 的直接结论，但应作为后续回归项。
+
+**原始日志**：`/opt/ai/logs/C1-s2-slot-wait-verify-20261025T1725Z.json`
+（sha256 `7905e8993c05c419fdc66b3f699259653ff5261ece6f820dbb1f96a7f659d857`）。
+
+## L-072 P1 `--batch-groups` A-B-A：两卡流水线胜出，groups=1 否决
+
+**判定**：**否决 groups=1**。当前 6×192K、双卡、4 路负载继续使用 `--batch-groups 2`；生产配置已恢复。
+
+**方法**：同一生产引擎/server、同一 400-token 负载和提示词，生产 A1 → groups=1 B →
+生产 A2。每臂 n=6；每轮先跑单请求，再跑 4 路并发。T-probe 分别确认 engine `cbed3c31`、
+server `de09cffd`、6 slots 和实际 `batch_groups=2/1/2`；远端 T-probe 发现运行目录里的 server 是旧副本，
+因此以 `/proc/<pid>/cmdline` 实际路径为证据。三臂窗口内均为 30 个本基准请求、0 个外来请求。
+
+| 指标 | A1 groups=2 | B groups=1 | A2 groups=2 | A-B-A 判决 |
+|---|---:|---:|---:|---|
+| 单路 tok/s | 76.8 | 79.7 | 76.0 | groups=1 单路约 +4.4% |
+| 4 路聚合 tok/s | 127.2 | 110.9 | 120.4 | groups=1 比 A 中位 122.1 低 **11.6%** |
+| 并发 prompt_ms | 513.0 | 686.6 | 510.1 | groups=1 慢约 34% |
+| 并发 decode tok/s/路 | 33.8 | 30.4 | 32.8 | groups=1 慢约 7–10% |
+| TTFT_ms | 610.0 | 340.5 | 643.5 | groups=1 准入更快 |
+| slot_wait_ms | 448.5 | 168.0 | 312.5 | groups=1 准入等待更短 |
+| wall_s | 12.6 | 14.4 | 13.3 | groups=1 用户总等待更长 |
+
+两臂 A 的聚合中位分别为 127.2/120.4，合并 12 个样本的中位为 122.1；B 的 6 个样本全部集中在
+110.6–114.0，除最慢首轮 94.8。方向从准入等待、prompt、decode 到 wall 一致，超过同窗口噪声，
+不是跨 boot 漂移。
+
+**机制解释**：groups=2 把 6 个 slot 分成两组 3 个，交替流过两块卡；日志确认
+`pipelined, 2 groups of 3`，单轮约 110.6–135.1 rows/s。groups=1 保留串行窗口，单请求可以略快，
+但 4 路时不能重叠两卡阶段，prompt 和 decode 同时变慢。降低 TTFT 不能抵消总吞吐和任务墙钟退化。
+
+**生产恢复**：groups=1 候选保留为
+`/opt/ai/src/strata-0.2.2/strata-022.p1-groups1.json`；A 配置与运行文件快照在
+`/opt/ai/tmp/pre-P1-groups1-20261025T173608Z/`。恢复后 T-probe 通过，health 200，engine
+`cbed3c31`、server `de09cffd`、`batch_groups=2`、6 slots、RoPE 共享仍生效。
+
+**没测什么**：只覆盖两个 2080 Ti、6 slots、400-token 输出、4 路并发；没有覆盖 1–2 路长请求、
+不同输出长度、`--batch-mtp` 串行窗口或多卡 `batch-groups auto`。单路 +4.4% 小于目标收益，
+也不能据此对“一次只服务一个请求”的部署改变默认。
+
+**原始证据**：
+
+- `/opt/ai/logs/bench-results.jsonl`，labels `P1-groups2-A1-n6`、`P1-groups1-B1-n6`、
+  `P1-groups2-A2-n6`；
+- `/opt/ai/logs/T-probe-P1-groups1.json`
+  （sha256 `d2b3f9da8eb066181e3163e698b80ce9a1ce19d704d20eb67a1fad4e7d5524ef`）；
+- `/opt/ai/logs/T-probe-P1-groups2-A2.json`
+  （sha256 `e0bc48e960cf6c931b27c048dce02cdd8ab79e95ba83d7ba8cda956a595d40ac`）。
+
+## L-073 groups=1 + batch-MTP：草稿接受正常，串行双行窗口仍显著回退
+
+**判定**：**否决**。生产仍使用 groups=2；groups=1 + `--batch-mtp` 没有补回串行损失，反而更慢。
+
+**方法**：从 groups=1 已验证配置只增加 `--batch-mtp`，仍为 6 slots、192K、INT8 KV、4 路 n=6。
+T-probe 确认实际 engine `cbed3c31`、server `de09cffd`、`batch_groups=1`；引擎启动日志确认
+6 个 slot drafter 在 CUDA1，每槽 51 MiB，并共享 solo drafter 权重。30 个窗口请求全部来自本基准。
+
+| 指标 | groups=2 A 中位 | groups=1 | groups=1 + batch-MTP |
+|---|---:|---:|---:|
+| 单路 tok/s | 76.4 | 79.7 | 78.3 |
+| 4 路聚合 tok/s | 122.1 | 110.9 | **91.3** |
+| 并发 prompt_ms | 511.6 | 686.6 | 851.5 |
+| 并发 decode tok/s/路 | 33.3 | 30.4 | 24.8 |
+| TTFT_ms | 626.8 | 340.5 | 392.0 |
+| wall_s | 13.0 | 14.4 | 17.5 |
+| draft 接受率 | 80.7% | 不适用 | 80.71% |
+
+草稿接受率与 solo MTP 基线相当，说明 proposal 质量不是瓶颈；每个 slot 两行验证、双行提交和串行阶段
+让窗口变长。experts slots 从 18194 降到 18027（−0.9%），6×192K 仍可启动，但性能收益不成立。
+
+**恢复**：A 配置从快照恢复；恢复后 T-probe 确认 `batch_groups=2`、6 slots、engine/server hash 不变、
+health 200。候选配置保留在 `/opt/ai/src/strata-0.2.2/strata-022.p1-groups1-batchmtp.json`。
+
+**没测什么**：没有测 1–2 路并发、较短输出或 `STRATA_BATCH_MTP_SERIAL` 的其它组合；这些不能推翻
+4 路生产负载下的明确回退。`--batch-groups 2` 与 `--batch-mtp` 在代码中不兼容，流水线路径会关闭槽 draft。
+
+**原始证据**：
+
+- `/opt/ai/logs/bench-results.jsonl`，label `P1-groups1-batchmtp-B2-n6`；
+- `/opt/ai/logs/T-probe-P1-groups1-batchmtp.json`
+  （sha256 `76d9cd38b185c8864bd68b5cc2fc34a10721be87c93a0d3ccea7368022534d01`）；
+- `/opt/ai/logs/T-probe-P1-groups2-restored.json`
+  （sha256 `866705df6745b6665ef21dc7349fec91ce0fd1c10ad77a23830b446371d6d5f1`）。
+
+## L-074 现役双卡窗口 profile：stage 2 是长杆，层切分 24 已在最优点
+
+**判定**：**结论**。`STRATA_VERIFY_PROFILE=1` 把解码窗口拆成每阶段 event 时间；stage 2 明显更重。
+`layer_split` 25/26 均不产生可采纳的聚合收益，保持 24/24。profile 只用于诊断，不留在生产。
+
+**profile 代价与条件**：同 engine/server、6×192K、groups=2、4 路 n=6。开启 profile 的聚合
+116.8、单路 68.5；未 profile 的相邻 A3/A4 聚合 114.5/116.0、单路 74.3/72.8。聚合未显示额外损失，
+但单路低约 6–8%，因此只采信阶段占比，不只凭 profile 的绝对值调参。
+
+**每窗口阶段时间**：
+
+| 臂 | stage 1 | stage 2 | 主要成本（stage 2，ms/window） |
+|---|---:|---:|---|
+| B1 | 11.44 | 13.29 | VRAM experts 1.69、waitA 1.37、head 0.99、out-proj 0.83、q8+qkv 0.82 |
+| B2 | 11.45 | 13.19 | VRAM experts 1.71、waitA 1.28、head 0.99、out-proj 0.83、q8+qkv 0.82 |
+| B3 | 11.59 | 13.22 | VRAM experts 1.74、waitA 1.21、head 1.00、out-proj 0.83、q8+qkv 0.82 |
+| B4 | 12.66 | 14.58 | VRAM experts 2.01、waitA 1.22、head 0.99、out-proj 0.85、q8+qkv 0.83 |
+
+**层切分复测**：当前 split24 的 A3/A4 聚合 114.5/116.0（中位 115.25）；split25 为 118.1
+（+2.5%，低于 3%），split26 为 110.1（−4.5%）。这与 L-037/L-040 的结论一致：24 已是最优附近；
+stage 2 的 waitA 主要是流水线交接重叠，不是简单搬一层就能回收的损失。
+
+**没测什么**：没有用 nsys 区分 kernel occupancy 与主机调度；图中 VRAM experts、out-proj、head
+仍是后续代码优化的候选。profile 输出中的窗口可能混入 solo/spec 窗口，因此只按阶段相对占比使用。
+
+**原始证据**：
+
+- `/opt/ai/logs/bench-results.jsonl`，labels `P1-groups2-verifyprofile-n6`、
+  `P1-split24-A3-n6`、`P1-split25-B1-n6`、`P1-split24-A4-n6`、`P1-split26-B2-n6`；
+- `/opt/ai/logs/P1-verifyprofile-20261025T1808Z.log`
+  （sha256 `2265596824b0a1aaf76d2886b1c654b4af2aeae1f8f98165566dba29d33d6da5`）；
+- `/opt/ai/logs/T-probe-P1-verifyprofile.json`
+  （sha256 `1eb8ee1807822908e85de1cb1d02294c15a96f8c9436178f313250657d405814`）。
+
+## L-075 恢复 `STRATA_HC_Q8=1`：合并后丢失的生产优化，4 路 +13.3% 且质量门通过
+
+**判定**：**采纳并部署**。这不是新实验开关：L-036 已在 2026-10-24 以两对独立 A-B 采纳过
+`STRATA_HC_Q8=1`，本轮发现上游合并后的所有生产 JSON 都丢失了它。恢复后确认它在本版双卡引擎真实生效。
+
+**实际运行证据**：最终 T-probe 中 engine `cbed3c31`、server `de09cffd`，运行 env 含
+`STRATA_HC_Q8=1`；启动日志每卡打印 `0.31 GiB of Q8_0 hyper-connection projections`。
+expert slots 从 18194 降到 17728（−2.6%），6×192K、INT8 KV、groups=2 和 RoPE 共享均保留。
+
+**交错性能**：A = 无 HC_Q8，B = 有 HC_Q8，均为 6×192K、4 路 n=6。
+
+| 顺序 | 臂 | 单路 tok/s | 4 路聚合 tok/s | 并发 decode tok/s/路 | wall s |
+|---|---|---:|---:|---:|---:|
+| 1 | A4 | 72.8 | 116.0 | 27.5 | 13.8 |
+| 2 | B1 | 73.3 | **132.5** | 35.4 | 11.8 |
+| 3 | A5 | 73.2 | 128.5 | 33.5 | 12.5 |
+| 4 | B2 | 71.1 | **128.7** | 34.3 | 12.4 |
+| 5 | A6 | 73.0 | 111.7 | 28.9 | 14.3 |
+
+四个 A 的聚合中位 115.25；两个 B 为 132.5/128.7，中位 **130.6（+13.3%）**。每段相邻比较
+均未显示 B 更差：A4→B1 +14.2%，B1→A5 −3.0%，A5→B2 +0.2%，B2→A6 +15.2%。单路四臂
+A3/A4/A5/A6 为 74.3/72.8/73.2/73.0，中位 73.1；两臂 B 为 73.3/71.1，中位 72.2（−1.2%），
+与旧结果的 −0.5% 同向且不影响聚合目标。
+
+**质量门**：同一 13 项自动评分集，两臂均 **11/11 correct**、13 项全部 `finish=stop`、JSON 两项相等、
+抽取和 off-by-one 题正确、中文 prose 无重复循环。近并列 token 导致的文本差异存在，但不是正确性退化。
+
+**回滚**：无 HC_Q8 配置快照在 `/opt/ai/tmp/pre-P1-groups1-20261025T173608Z/`；
+`/opt/ai/bin/use-config.sh` 指向该快照即可恢复。
+
+**没测什么**：还没有真实混合流量、长时间 expert hit/RAM exchange 和 192K 长上下文 soak；受控 4 路
+中位刚刚越过 130，其中 B2 为 128.7，因此不能把“所有负载都 ≥130”写成结论。
+
+**原始证据**：
+
+- `/opt/ai/logs/bench-results.jsonl`，labels `P1-hcq8-A5-n6`、`P1-hcq8-B1-n6`、
+  `P1-hcq8-B2-n6`、`P1-hcq8-A6-n6`；
+- `/opt/ai/logs/qeval-hcq8-A/responses.json`
+  （sha256 `7f307ecfaf727ddd122f3be4b82118833b6ddb8d294ddcce72bedffe82836987`）；
+- `/opt/ai/logs/qeval-hcq8-B/responses.json`
+  （sha256 `807de740e5e58b964d33f4d4447a161ab6e96986e2d5017539869fe07d646559`）；
+- `/opt/ai/logs/T-probe-P1-hcq8-final.json`
+  （sha256 `3e9215b287575d22c4934e608fdaa394015bc519907d584f61f05d504a0442d0`）。
+
+## L-076 配置漂移门禁：已采纳的运行态 env 缺失或值不符会直接失败
+
+**判定**：**采纳**。门禁只读，不改变服务；它补的是部署与证据入口，不是性能改动。
+
+**问题**：P1 发现上游合并后的生产 JSON 丢失了已采纳的 `STRATA_HC_Q8=1`，而 health 200 和旧版
+T-probe 都不会报错。只核对文件 hash 也不够：launcher 可以从不同路径启动，真正影响执行的是运行进程
+的环境。
+
+**改动**：
+
+- `tools/server/production-env-2080ti.json` 固化 7 个关键生产开关：HC_Q8、W3 batch/server staged read、
+  EXP_MODE、PIPED_CONCURRENT、共享 slot RoPE 和 SM75 perf；
+- `probe-version-stamp.py --expect-env-file` 从 `/proc/<engine-pid>/environ` 读取实际运行的 `STRATA_*`，
+  每项按键和值精确匹配；缺失或不同值都进入 `problems` 并以退出码 1 失败；
+- 回归覆盖正确、缺键、错值三类，另保留实际 engine/server 路径与 health 检查。
+
+**验证**：
+
+- `python3 tools/server/preflight.py --offline`：`PREFLIGHT PASS`；
+- T-probe 专项测试 6 passed；相关 server 测试合计 32 passed；`git diff --check` 通过；
+- 现网命令带 `--expect-engine-md5 cbed3c31cfbdf40aec0ff743f6faf5c5` 和 env profile 后退出码 0，
+  engine hash、7 个运行态 env、6×192K、17728 expert slots、health 200 均一致，`problems=[]`。
+
+**没测什么**：该门禁证明当前进程的实际 env，不证明 JSON 模板本身一直包含这些键，也不阻止没有重启的
+配置文件漂移。它不能替代 engine/server/config 的预期 hash 或构建产物 attestation；后续部署仍须同时
+核对运行文件。
+
+**原始证据**：`/opt/ai/logs/T-probe-P1-env-gate-final.json`
+（sha256 `3413a47b9669c1905c799986c691a384f746b209af0fa1636251ae7928d75cf1`）。
+
+## L-077 HC_Q8 + 共享 RoPE 一小时混合 soak：稳定性通过，长 prefill 下的短请求仍被严重挤压
+
+**判定**：**P2 稳定性验收通过；HC_Q8 + 共享 RoPE 继续保留生产**。这不是新的性能开关，
+而是对已采纳组合在真实混合形状、长上下文和资源平台期上的验证。
+
+**负载**：同一生产 boot，6×192K、INT8 KV、groups=2、split24；2/3/4 路交替运行 3600 秒。
+包含 259 个短 JSON、155 个约 1.85K prompt 代码请求、104 个带工具结果/工具 schema 的 agent 回合，
+以及 52/26/26 个约 32K/64K/96K token 的冷 needle 请求。每个 prompt 有唯一前缀，因此长档不是缓存回放。
+
+**正确性与稳定性**：共 **622 请求 / 207 waves**，HTTP 或执行错误 **0**；524 个 `stop`、98 个正常
+`tool_calls`、**0 个 `length`**；52 个 32K + 26 个 64K + 26 个 96K needle 全部答对。
+engine/server hash、运行 env、health 与槽数前后一致，无 panic、nonfinite、segmentation 或重启。
+
+**长上下文时延**：
+
+| 档位 | 请求 | prompt 中位 | 整个 wave 墙钟中位 | 最大 | TTFT 中位 |
+|---|---:|---:|---:|---:|---:|
+| 32K | 52 | 32,862 | 19.221 s | 22.594 s | 15.862 s |
+| 64K | 26 | 65,638 | 27.438 s | 27.767 s | 26.612 s |
+| 96K | 26 | 98,397 | **41.613 s** | **41.980 s** | 40.383 s |
+
+26 次 96K 的墙钟极差只有 0.653 s；没有随运行时间增加的热衰减。96K 只覆盖到约一半上下文，
+没有直接打满 192K。
+
+**资源**：engine RSS 49.6 → 53.3 GiB（采样最大 53.54），MemAvailable 11.02 → 7.31 GiB
+（最小 7.04），**SwapFree 全程 4096 MiB，即没有使用 swap**。resident experts 固定 18.75 GiB，
+expert cache hit 采样最小 96.3%、中位 100%；file-tier blob reads 仍为 0。GPU0/1 温度 68–77 / 54–61°C，
+功耗中位 253.3 / 245.8 W、峰值 320.2 / 315.1 W；VRAM 没有出现下降趋势。
+
+**吞吐回归**：同 boot 固定 4 路 n=6 前置为 **123.4 tok/s**；soak 后两块 n=6 分别为
+125.2 / 134.2，两块中位合成 **129.7**。相对 L-075 的 130.6 只低 **0.7%**，相对同 boot 前置高
+5.1%，满足“不恶化 >3%”。两块后置共 12 个单路样本合成中位 74.9 tok/s；前置 76.8（−2.5%），
+仍高于 M2 的 73。接受率两块为 80.08% / 81.4%，两窗口都只有本基准 30/30 请求。
+
+**新发现的用户代价**：96K 冷 prefill 与短请求同 wave 时，短 JSON 的 TTFT 中位只有 633.5 ms、
+slot wait 429.5 ms，但整体 wall 中位 **40.829 s**（最大 41.06）。同 wave 的 medium code wall
+中位 41.61 s。32K 邻居下短请求 wall 中位 18.84 s。可见主要损失不是准入，而是长 prefill 窗口
+把已开始短的 decode 压到接近停滞。P2 不把“短请求快”写成已解决，这直接成为 P3。
+
+**没测什么**：一个 1 小时窗口、一个模型和 2×2080 Ti；没有真实外部多租户、192K 满上下文、
+取消风暴或优先级。混合 wave 的 completion tok/s 被冷 prefill 主导，因此不能替代固定 4 路指标。
+
+**生产状态**：未重启、未改部署；engine `cbed3c31`、server `de09cffd`、launcher `0eeee160`、
+config `6630c920`，health 200。
+
+**原始证据**：
+
+- `/opt/ai/logs/P2-mixed-soak-20261025T1912Z.jsonl`
+  （sha256 `0d781154efc7fbbc98414fa4aadf201b64e9c993c1facec0555f764fa50e8351`）；
+- `/opt/ai/logs/P2-mixed-soak-20261025T1912Z.summary.json`
+  （sha256 `1a8d2900b38847a62f0c91ea676c044bcb9685725226ba13cacafd02ce1ef4ff`）；
+- `/opt/ai/logs/P2-mixed-soak-20261025T1912Z.summary.txt`
+  （sha256 `4e862ca946ba3953ce3219f32f97cc5bf565a07931fc72587d0fe2203a106e98`）；
+- `/opt/ai/logs/T-probe-P2-post.json`
+  （sha256 `31db94df38f1a55e3dd0cf66704d1853e148e1578951d4823a4b38ffb503a094`）；
+- `/opt/ai/logs/bench-results.jsonl`，labels `P2-pre-soak-n6`、`P2-post-soak-n6`、
+  `P2-post2-soak-n6`；
+- `tools/server/mixed-soak.py`
+  （sha256 `855a2c220cf76175282da89a10078fe88cb4ff0432ad79d651b42fe15d5fcf6f`）。
+
+## L-078 P3 A-B-A：400 ms lead-in 把短 JSON 从 40.2 s 降到 3.4 s，长档只慢 2.2%
+
+**判定**：**采纳** `STRATA_PIPED_DECODE_LEADIN_MS=400`、
+`STRATA_PIPED_DECODE_LEADIN_WAIT_MS=750`、`STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS=4096`。
+固定 `STRATA_PIPED_READ_PIECE` 32768/65536 与固定 1200 ms lead-in **否决**。
+
+**问题与机制**：96K 冷 prefill 与已经准入的短 decode 同 wave 时，TTFT 只有约 0.74 s，但长读
+独占流水线使 14-token JSON 的 wall 接近整次读。新改动不切碎 prompt，而是在并发冷读拿走流水线前，
+最多等待 750 ms 让槽进入可解码状态，再做一次 400 ms 有界 piped decode。默认不设置 env 时路径不变。
+
+**实验形状**：同 boot、生产 6×192K、INT8 KV、groups=2、split24。每个 fairness arm 跑 5 个
+4 路 wave，每波两条 73-token JSON、一条 1,850-token Python 请求和一条约 98.4K-token
+冷 needle；每波完成后再发下一波。A-B-A 为无 lead-in A3 → E2；此前已有 A1/A2 与 E1。
+T-probe 确认 running engine md5 `8d680c69`、server `de09cffd`、config `f82d1cfd`、
+launcher `0eeee160` 和 11 个关键 env。
+
+**A-B-A 结果**：
+
+| 指标 | A1 | A2 | A3 | A 合并中位 | E1 | E2 | E 合并中位 | 变化 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 短 JSON wall | 40.707 | 40.206 | 40.154 | **40.206 s** | 3.404 | 3.400 | **3.402 s** | **−91.5%** |
+| 96K wall | 40.868 | 40.381 | 40.275 | **40.381 s** | 41.333 | 41.236 | **41.285 s** | **+2.2%** |
+| 代码 wall | 41.756 | 41.218 | 41.143 | **41.218 s** | 41.460 | 41.561 | **41.511 s** | +0.7% |
+
+E1/E2 共 40 个请求，HTTP/执行错误 0、意外 `length` 0、needle 10/10；日志 10/10 出现
+`concurrent read lead-in ... the slots decoded ... rows`。E 每次实际 decode 窗口约 404–437 ms、
+推进 29–32 个槽行。短 JSON 的 TTFT 中位仍约 0.74 s，改善来自总 wall，而不是首 token。
+
+**被否决的替代臂**：
+
+| 臂 | 设置 | 短 JSON wall | 代码 wall | 96K wall | 判定 |
+|---|---|---:|---:|---:|---|
+| B | read piece 32768，decode max 400 / min 100 | 1.176 s | 49.134 s | 46.679 s | 96K +15.6%，否决 |
+| C | read piece 65536，decode max 1000 / min 100 | 1.336 s | 45.852 s | 43.324 s | 96K +7.3%，否决 |
+| D | lead-in 400 ms，无 750 ms 等待 | 39.882 s | 40.913 s | 39.949 s | 0 次触发，否决 |
+| E | lead-in 400 ms + 750 ms 等待 | 3.402 s | 41.511 s | 41.285 s | **采纳** |
+| F | lead-in 1200 ms + 750 ms 等待 | 3.423 s | 41.932 s | 42.126 s | 代码未改善、96K +4.3% vs A，否决 |
+
+F 的日志显示窗口从约 29 行增到约 51 行，但 41-token 代码请求仍未完成；这说明继续加长固定等待
+不能解决问题，只会线性增加长请求成本。P4 应改为按在途请求剩余 token 或可完成性选择 yield 点。
+
+**生产与回滚**：健康 200；engine `8d680c69`、server `de09cffd`、config `f82d1cfd`。
+切换前连同 engine/server/launcher/config 的快照在
+`/opt/ai/tmp/pre-P3-ABA-20261025T213040Z/`，最终 T-probe 为
+`/opt/ai/logs/T-probe-P3-adopted-final.json`。
+
+**没测什么**：只覆盖 2×2080 Ti、6 槽、96K 冷读、14/41-token 输出和 5-wave 段；没有覆盖 32K/64K、
+多长读、优先级、取消、真实外部流量或 192K 满上下文。代码请求没有变快，不能把整个公平性问题
+写成解决。
+
+**原始证据**：
+
+- `/opt/ai/logs/P3-A1-prefill-piece-20261025T2022Z.summary.json`
+  （sha256 `045d45432d2da3c52618caa064977c3fb8adad7a0eedcd5bc03a27dcce444828`）；
+- `/opt/ai/logs/P3-A2-prefill-piece-20261025T2027Z.summary.json`
+  （sha256 `ebc87a17a5b453ca1b0adc7ce555f1eb5c9e085d3f0b51b1c0f0bce215ae9f61`）；
+- `/opt/ai/logs/P3-B-prefill-piece-20261025T2020Z.summary.json`
+  （sha256 `6b58b6dce7b6209a41f1528d8127e4a4eebc3d923f287baaad6ec2d835dd5b8f`）；
+- `/opt/ai/logs/P3-C-prefill-piece64k-20261025T2035Z.summary.json`
+  （sha256 `791a5c272acedda04bc524c85c2e4a0008dd113238e4c0c06ce3fd2697eb874b`）；
+- `/opt/ai/logs/P3-D-concurrent-leadin400-20261025T2115Z.summary.json`
+  （sha256 `5e0d1a4dae25e39c1d9d56a36c6db985e3174c1fb09896fe115ff7f35ffa18fe`）；
+- `/opt/ai/logs/P3-E-concurrent-leadin-wait750-20261025T2126Z.summary.json`
+  （sha256 `a9d86eff6133cd4f0ffc47747cf6a2026fe127fe1326143919784b73f91f7eaf`）；
+- `/opt/ai/logs/P3-ABA-A3-20261025T213324Z.jsonl`
+  （sha256 `b41046bb9fb3b249f0aef30fd2217b40815263969613fd8e77336efbd7f958c1`）；
+- `/opt/ai/logs/P3-ABA-B2-20261025T213956Z.jsonl`
+  （sha256 `8a3d936878ee277f07b279cd314cab956317da04d7b1aec041346f55da1503bd`）；
+- `/opt/ai/logs/P3-F-leadin1200-20261025T214652Z.jsonl`
+  （sha256 `2d9ada9f1dda10673db88fc0b143ecfb4f5e70b1dc2ff79810fc940e00a87dd4`）；
+- `/opt/ai/logs/T-probe-P3-adopted-final.json`
+  （sha256 `e8a71ec12b54f02c26ae5735e297466b68e9fc459cb0f375e7bc4d663553b23a`）；
+- `tools/server/patches/p3-concurrent-leadin-0.1.49.1.patch`
+  （sha256 `3caaafb2c01a8e6b19bfe67f5697ad6b72b2ad82de16f59579459640516abefd`）；
+- `tools/server/mixed-soak.py`
+  （sha256 `cca24e564507353afdf7ecf3be1947556fcff3ae690d22e4b1744bacff8f0861`）。

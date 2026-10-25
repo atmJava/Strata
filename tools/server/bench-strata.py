@@ -66,6 +66,10 @@ def call(prompt: str) -> dict:
         "wall_s": time.time() - started,
         "tokens": payload["usage"]["completion_tokens"],
         "prompt_tokens": payload["usage"]["prompt_tokens"],
+        "cached_tokens": (payload["usage"].get("prompt_tokens_details") or {}).get("cached_tokens"),
+        "metrics": payload.get("metrics"),
+        "timings": payload.get("timings"),
+        "finish": payload.get("choices", [{}])[0].get("finish_reason") if payload.get("choices") else None,
     }
 
 
@@ -158,11 +162,14 @@ def main(argv: list[str]) -> int:
     aggregates: list[float] = []
     walls: list[float] = []
     slowest: list[float] = []
+    single_runs: list[dict] = []
+    concurrent_runs: list[list[dict]] = []
     for rep in range(1, reps + 1):
         print(f"  --- 第 {rep}/{reps} 轮 ---", flush=True)
         one = call(SINGLE_PROMPT)
         single_tok_s = one["tokens"] / one["wall_s"]
         singles.append(single_tok_s)
+        single_runs.append(one)
         print(f"        单请求 {one['tokens']} tokens / {one['wall_s']:.1f}s = {single_tok_s:.1f} tok/s")
 
         started = time.time()
@@ -175,6 +182,7 @@ def main(argv: list[str]) -> int:
         aggregates.append(agg)
         walls.append(wall)
         slowest.append(max(r["wall_s"] for r in runs))
+        concurrent_runs.append(runs)
         print(f"        {N} 并发 {total_tokens} tokens / 墙钟 {wall:.1f}s = {agg:.1f} tok/s 聚合"
               f"  (最慢单个 {max(r['wall_s'] for r in runs):.1f}s)")
         time.sleep(2)
@@ -188,14 +196,39 @@ def main(argv: list[str]) -> int:
     result["concurrent_agg_tok_s_each"] = [round(v, 1) for v in aggregates]
     result["concurrent_wall_s_each"] = [round(v, 1) for v in walls]
     result["concurrent_slowest_s_each"] = [round(v, 1) for v in slowest]
+    result["single_runs"] = single_runs
+    result["concurrent_runs"] = concurrent_runs
     result["single_tok_s_median"] = round(median(singles), 1)
     result["concurrent_agg_tok_s_median"] = round(median(aggregates), 1)
     result["concurrent_wall_s_median"] = round(median(walls), 1)
     result["concurrent_slowest_s_median"] = round(median(slowest), 1)
+    parallel_metrics = [run.get("metrics") or {} for rep in concurrent_runs for run in rep]
+    parallel_timings = [run.get("timings") or {} for rep in concurrent_runs for run in rep]
+
+    def metric_median(key: str) -> float | None:
+        values = [row[key] for row in parallel_metrics if row.get(key) is not None]
+        return round(median(values), 1) if values else None
+
+    def timing_median(key: str) -> float | None:
+        values = [row[key] for row in parallel_timings if row.get(key) is not None]
+        return round(median(values), 1) if values else None
+
+    result["parallel_metrics_median"] = {
+        "ttft_ms": metric_median("ttft_ms"),
+        "slot_wait_ms": metric_median("slot_wait_ms"),
+        "wall_ms": metric_median("wall_ms"),
+        "itl_ms_mean": metric_median("itl_ms_mean"),
+        "prompt_ms": timing_median("prompt_ms"),
+        "decode_ms": timing_median("predicted_ms"),
+        "decode_tok_s": timing_median("predicted_per_second"),
+    }
     print()
     print(f"  中位数：单请求 {result['single_tok_s_median']} tok/s | "
           f"{N} 并发聚合 {result['concurrent_agg_tok_s_median']} tok/s | "
           f"墙钟 {result['concurrent_wall_s_median']}s | 最慢单个 {result['concurrent_slowest_s_median']}s")
+    pm = result["parallel_metrics_median"]
+    print(f"  并发每请求中位：TTFT {pm['ttft_ms']} ms | slot wait {pm['slot_wait_ms']} ms | "
+          f"prompt {pm['prompt_ms']} ms | decode {pm['decode_ms']} ms | {pm['decode_tok_s']} tok/s")
 
     t1 = metrics_totals()
     acc = acceptance_between(t0, t1, (1 + N) * reps)

@@ -1,0 +1,58 @@
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -5383,6 +5383,14 @@
+                              "one group\n", o.batch_groups, o.batch);
+         o.batch_groups = 1;
+     }
++    // OPT-IN: every layer of a device has the same read-only RoPE table.  The main session for each stage owns
++    // one; its batch slots borrow that table instead of allocating another max_cells x 32 x 2-float copy.  At
++    // 192K and six slots this removes six 46.875 MiB copies per card.  The default remains byte-identical while
++    // the integration is measured end to end.
++    const bool share_slot_rope = [] {
++        const char* v = std::getenv("STRATA_SHARED_SLOT_ROPE");
++        return v != nullptr && v[0] != '\0' && std::strcmp(v, "0") != 0;
++    }();
+     if (o.batch > 0) {
+         bslot_ss.resize(1 + stages.size());
+         int fit = o.batch;   // the slots every stage could carve
+@@ -5392,12 +5400,19 @@
+             const int64_t lo = k == 0 ? 0 : stages[k - 1]->lb;
+             const int64_t hi = k == 0 ? (multi_gpu ? split_at[0] : -1) : stages[k - 1]->le;
+             const strata::core::OnDevice on_k(dev);
+-            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
++            const strata::core::SessionState* rope_donor = share_slot_rope
++                ? (k == 0 ? &ss : &stages[k - 1]->ss)
++                : nullptr;
++            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi, share_slot_rope);
++            const uint64_t rope_saved = share_slot_rope
++                ? strata::core::session_bytes(g, o.max_context, K, lo, hi, false) - bytes
++                : 0;
+             if (k == 0) bytes0 = bytes;
+             for (int b = 0; b < fit; ++b) {
+                 auto u = std::make_unique<strata::core::SessionState>();
+                 void* buf = nullptr;
+-                if (cudaMalloc(&buf, bytes) != cudaSuccess || strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi) == 0) {
++                if (cudaMalloc(&buf, bytes) != cudaSuccess ||
++                    strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi, rope_donor) == 0) {
+                     cudaGetLastError();
+                     if (buf != nullptr) cudaFree(buf);
+                     size_t fb = 0, tb = 0;
+@@ -5414,8 +5429,16 @@
+             cudaDeviceSynchronize();
+             size_t fb = 0, tb = 0;
+             cudaMemGetInfo(&fb, &tb);
+-            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each); %.2f GiB free\n",
+-                         (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0, (double) fb / 1073741824.0);
++            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each%s); "
++                                 "%.2f GiB free\n",
++                         (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0,
++                         share_slot_rope ? ", RoPE borrowed from the stage session" : "",
++                         (double) fb / 1073741824.0);
++            if (rope_saved != 0)
++                std::fprintf(stderr, "strata generate: shared slot RoPE on CUDA%d saves %.1f MiB total "
++                                     "(%.3f MiB per slot)\n",
++                             dev, (double) rope_saved * (double) bslot_ss[k].size() / 1048576.0,
++                             (double) rope_saved / 1048576.0);
+         }
+         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
+         if (fit < 2) {

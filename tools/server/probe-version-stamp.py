@@ -34,7 +34,7 @@ import hashlib, json, os, subprocess, sys, time, urllib.request
 S = "/opt/ai/src/strata-0.2.2"
 BASE_URL = sys.argv[1]
 API_KEY = sys.argv[2]
-FILES = {
+DEFAULT_FILES = {
     "engine": S + "/build/strata",
     "server": S + "/serve/server.py",
     "launcher": S + "/run-022.sh",
@@ -47,6 +47,7 @@ SERVER_MARKERS = [
     "malformed staged-read reply",
     'yield "ping", None',
     "request_started = time.time()",
+    "slot_wait_ms",
 ]
 ENGINE_MARKERS = ["STRATA_BATCH_STAGED_READ", "BREAD", "BRDY", "BADOPT", "BCANCEL"]
 
@@ -66,39 +67,58 @@ def digest(path):
 out = {"collected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
        "files": {}, "running": {}, "markers": {}, "health": None, "engine": None, "errors": []}
 
-for name, path in FILES.items():
-    try:
-        out["files"][name] = digest(path)
-    except OSError as exc:
-        out["errors"].append("cannot read %s: %s" % (path, exc))
-
 # the engine is a child of the python server; match the binary, not the systemd MainPID
 engine_pid = subprocess.run(["pgrep", "-f", "build/strata --serve"], capture_output=True, text=True).stdout.split()
 server_pid = subprocess.run(["pgrep", "-f", "serve/server.py --engine"], capture_output=True, text=True).stdout.split()
+agent_script = None
 if server_pid:
     pid = server_pid[0]
     try:
+        argv = [part for part in open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0") if part]
+        for part in argv:
+            text = part.decode("utf-8", "replace")
+            if text.endswith("/serve/server.py") or text.endswith("serve/server.py"):
+                agent_script = text
+                break
         out["running"]["server"] = {
             "pid": int(pid),
-            "cmdline": open("/proc/%s/cmdline" % pid, "rb").read().replace(b"\0", b" ").decode("utf-8", "replace").strip(),
+            "cmdline": b" ".join(argv).decode("utf-8", "replace").strip(),
+            "script": agent_script,
             "started": subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True, text=True).stdout.strip(),
         }
     except OSError as exc:
         out["errors"].append("server pid %s: %s" % (pid, exc))
+engine_binary = None
 if engine_pid:
     pid = engine_pid[0]
     try:
-        argv = open("/proc/%s/cmdline" % pid, "rb").read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        raw_argv = [part for part in open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0") if part]
+        argv = b" ".join(raw_argv).decode("utf-8", "replace").strip()
+        engine_binary = raw_argv[0].decode("utf-8", "replace") if raw_argv else None
         env = open("/proc/%s/environ" % pid, "rb").read().replace(b"\0", b"\n").decode("utf-8", "replace")
         out["running"]["engine"] = {
             "pid": int(pid),
             "cmdline": argv,
-            "binary": argv.split()[0] if argv else None,
+            "binary": engine_binary,
             "started": subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True, text=True).stdout.strip(),
             "env": sorted(line for line in env.splitlines() if line.startswith("STRATA_")),
         }
     except OSError as exc:
         out["errors"].append("engine pid %s: %s" % (pid, exc))
+
+# Hash the files the processes actually run.  The production directory has kept stale copies while the
+# launcher ran serve/server.py from an experiment tree; hashing that directory's path reports the wrong code.
+FILES = dict(DEFAULT_FILES)
+if engine_binary:
+    FILES["engine"] = engine_binary
+if agent_script:
+    FILES["server"] = agent_script
+out["default_paths"] = dict(DEFAULT_FILES)
+for name, path in FILES.items():
+    try:
+        out["files"][name] = digest(path)
+    except OSError as exc:
+        out["errors"].append("cannot read %s: %s" % (path, exc))
 
 # markers: strings in the 79 MB binary (grep -a, no `strings` dependency), source lines in server.py
 binary = FILES["engine"]
@@ -153,8 +173,14 @@ def check(stamp: dict) -> list[str]:
         problems.append("running engine: not found")
     elif engine_file and running.get("binary") != engine_file["path"]:
         problems.append(f"running engine binary {running.get('binary')} is not the hashed {engine_file['path']}")
-    if not stamp.get("running", {}).get("server"):
+    running_server = stamp.get("running", {}).get("server")
+    server_file = stamp.get("files", {}).get("server")
+    if not running_server:
         problems.append("running server: not found")
+    elif not running_server.get("script"):
+        problems.append("running server: cannot identify its serve/server.py")
+    elif server_file and running_server.get("script") != server_file["path"]:
+        problems.append(f"running server script {running_server.get('script')} is not the hashed {server_file['path']}")
     health = stamp.get("health")
     if not isinstance(health, dict):
         problems.append("health: no JSON")
@@ -162,6 +188,28 @@ def check(stamp: dict) -> list[str]:
         problems.append("health: loaded=false")
     if stamp.get("errors"):
         problems.extend(stamp["errors"])
+    return problems
+
+
+def check_expected_env(stamp: dict, expected: dict[str, str]) -> list[str]:
+    """Fail when the running engine lacks a required deployment switch or has another value."""
+    problems = []
+    running = stamp.get("running", {}).get("engine")
+    if not expected:
+        return problems
+    if not running:
+        problems.append("running engine: cannot check expected environment")
+        return problems
+    actual: dict[str, str] = {}
+    for item in running.get("env") or []:
+        key, separator, value = item.partition("=")
+        if separator:
+            actual[key] = value
+    for key, value in expected.items():
+        if key not in actual:
+            problems.append(f"running engine env: missing {key}={value}")
+        elif actual[key] != value:
+            problems.append(f"running engine env: {key}={actual[key]} != expected {value}")
     return problems
 
 
@@ -174,8 +222,23 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--out", default=None)
     parser.add_argument("--expect-engine-md5", default=None,
                         help="fail unless the engine file's md5 is this (the V2 window's install check)")
+    parser.add_argument("--expect-env-file", default=None,
+                        help="JSON file with {\"env\": {KEY: VALUE}} required in the running engine")
     parser.add_argument("--quiet", action="store_true")
     options = parser.parse_args(argv)
+
+    expected_env: dict[str, str] = {}
+    if options.expect_env_file:
+        try:
+            profile = json.load(open(options.expect_env_file, encoding="utf-8"))
+            expected_env = profile.get("env")
+            if (not isinstance(expected_env, dict) or not expected_env or
+                    not all(isinstance(key, str) and isinstance(value, str)
+                            for key, value in expected_env.items())):
+                raise ValueError('"env" must be a non-empty object of string values')
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"version-stamp: cannot read expected env file: {exc}", file=sys.stderr)
+            return 2
 
     try:
         if options.local:
@@ -191,6 +254,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     problems = check(stamp)
+    problems.extend(check_expected_env(stamp, expected_env))
     if options.expect_engine_md5:
         got = stamp.get("files", {}).get("engine", {}).get("md5")
         if got != options.expect_engine_md5:

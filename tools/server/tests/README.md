@@ -81,6 +81,8 @@ path in the `ITERATION_LOG.md` retrospective.
 | `test_mp_patch_parity.py` | the shipped patch has `46d12fa9`'s strict BRDY parse and the 10 s cancel drain |
 | `test_mp_preflight.py` | `preflight.py` checks the queue/state pair, not the server |
 | `test_mp_round_gate.py` | legacy `round_gate.py`: old 11-field logs, wording and queue counts |
+| `test_probe_version_stamp.py` | T-probe hashes and checks the engine/server paths actually running |
 | `test_tap_parity.py` | `tap_parity.py compare/merge` on synthetic dumps |
 | `probe_long_read.py` | not a test: the staged-read neighbour-stall probe (R11/L-055) |
+| `probe_slot_admission.py` | not a test: fill every slot, then report the late reader's queue/TTFT/wall and neighbour silence |
 | `probe_cancel_staged.py`, `probe_cancel_wait.py` | not tests: S0c/S0d probes against a live server |
