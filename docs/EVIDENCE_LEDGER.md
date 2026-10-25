@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（58 条：L-000…L-057，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
+## 台账索引（59 条：L-000…L-058，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
 
 | 编号 | 日期 | 一句话结论 | 判决 |
 |---|---|---|---|
@@ -67,6 +67,7 @@
 | L-052 | 10-24 17:1x | 预设门负例 **6/6**（错配置必拒）；`check_preset.py` 对生产配置 OK；清单 11 项全部有判决 | **参考** |
 | L-053 | 10-25 01:2x | W3 **生产启用**（阈值 4096）：长读首 token **47.3 → 17.1 s**、短读保持 40.9 s 不假开始；bench 聚合 **130.2 tok/s**（+8%）、接受率 79.8%；G2 0.97 s、G3 ✓；2 次重启 | **采纳（启用）** |
 | L-057 | 10-25 13:0xZ | V1 免停机批：HEAD `2294d4de` 在实验树构建 7m01s / 0 错（引擎 0.1.49.1、md5 `84a0d410`）；矩阵 5 项全 PASS（单测 61 passed / 10 skipped、isa_guard 2.36 s、64/256 锁死、staged wedge 3 passed）；首跑 12 failed 全是 venv 缺 `jinja2`/`regex` | **结论** |
+| L-058 | 10-25 13:4xZ | V2a 窗口：0.1.49.1 + 0.2.3 自包含树上线（引擎 `84a0d410`、server `b6b695a1`、launcher `0eeee160`，config 未动）；V2 矩阵 4 项全 PASS；S0c 未达（前提不成立：引擎被杀 server 不退出，并发请求把重启中的引擎反复杀掉、恢复期 503，health 仍 200） | **结论** |
 | L-056 | 10-25 20:4x | V0 准备批：现网四件实测（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）；现网 server 是 hybrid 且 `52b84d54` 是 patch 树 hash；harness 2 红转绿、补丁追平 `46d12fa9`；S2 探针代价 1.36–1.40 µs/请求；回滚包字节核对（停机级未演练）；0 构建 0 重启 | **参考** |
 | L-055 | 10-25 02:2x | R11 开关修复部署（引擎 `383b426a`）：短读 40.68 s 不暂存、长读首 17.89 s；**邻居窗口停顿 3.43 s**（>1 s，新发现）；S0 完成 | **参考** |
 | L-054 | 10-25 01:3x | A-B-A 闭环：回滚 A 实测（短 42.3 s / 长 36.3 s，G4 ✓）→ 再启用 B（短 35.9 s / 长 **17.7 s**）；3 流冷读首 token 8.0 s（唯一提示词，修正缓存假象） | **参考** |
@@ -1958,3 +1959,42 @@ md5 `b6b695a1` = 本机 HEAD），实验目录一次全量构建（Release / sm_
 **原始日志**：`/opt/ai/logs/V1-matrix-20261025T2115Z/`（`summary.json` + `V1-1…V1-5.log`；目录名 2115Z
 是手写笔误，`summary.started` 13:05:15Z）、`/opt/ai/logs/V1-firstrun-20261025T2100Z/`、服务器
 `/tmp/v1-build.log`；脚本 `tools/server/run-matrix.py`。
+
+## L-058 V2a 窗口：0.1.49.1 + 0.2.3 自包含树上生产；V2 矩阵 4 项 PASS；S0c 前提不成立
+
+**判定**：V2a 部署 **PASS**（矩阵 4 项：V2-0、V2-4、V1-5、V2-1 全 PASS）；V2-1 只判 **S0d**（PASS）；
+**S0c 未达（前提不成立）**——引擎被 `kill -9` 后 server **不退出**、health 仍 200；在途请求报错，随后每个
+请求都会触发一次引擎重启，而重启中的引擎被并发请求反复杀掉（日志 4 轮 `engine stopped unexpectedly (-9)`
++ `done: N tokens in 10 s (error, cancel=False)`），我们的短请求收到干净的 503
+（`the engine stopped while this request waited; it was not sent`）。恢复路径：`use-config.sh` 重启，约 165 s。
+
+**部署形状（与第一次失败相比改了）**：第一次把 0.2.3 的 `serve/` 覆盖到 0.2.2 树上 → `ImportError: cannot
+import name 'tls' from 'strata_control'`（0.2.2 的 `strata_control` 没有 `tls`），服务重启循环、生产不可用；
+`ops-v2-window.sh restore --go` 恢复（引擎 `383b426a`、server `a3c7df58`、health 200）。最终形状：**引擎**
+放 `/opt/ai/src/strata-0.2.2/build/strata`（`84a0d410`），**launcher** 指向自包含的
+`/opt/ai/src/strata-port-v1/serve/server.py`（`b6b695a1`），**config 不动**（`6c362d01`，54 args / 17 env）
+——这样 `use-config.sh` 的重启检测（`pgrep 'build/strata --serve'`）与 `verify-running-config.sh` 都照旧可用。
+launcher 新 md5 `0eeee160`。`ARGS : MATCH`（54 条 config args 全在，5 条由 server 注入）；
+`ENV : DIFFERENT` 只有 launcher 导出的 `STRATA_MP_STAGED_READ_MIN_TOKENS`。
+
+**数字**（矩阵，`/tmp/V2-matrix-20261025T1345Z/`）：
+- V2-0：engine 0.1.49.1、`batch_slots 6`、`expert_slots 17872`（0.1.47 是 17755）、`max_context 192000`、`kv int8`。
+- V2-4：第一次 ~22K 冷读 **29.37 s**，邻居最大间隔 **28.48 s**（邻居 29 tokens）；第二次读 **0.73 s**，
+  邻居间隔 **0.15 s**。判据只要求两次都答完并打印数字 → PASS；与文档里 S0b 的 3.43 s 不是同一条件
+  （这里是重启后首读，页缓存/专家缓存都冷），**不作结论**。
+- V1-5：`expert_cache_mib 29227`、`arena_mib 18987`、`vram_free_mib 1009`、`kv_resident 32768`、
+  两张 2080 Ti 都报（22.7/22.6 GB used、54/47 °C、214/223 W）、RAM 45.6 GB；脚本里 `nvidia-smi` 那次调用
+  `FileNotFoundError`（PATH 问题），GPU 数据来自 `/metrics`。
+- V2-1：取消暂存读者后 6 邻居继续解码（`gap_after_close 0.13 s`、`tokens_after_close 5562`），health 200；
+  长读 6.04 s、短请求 0.64 s。服务日志 staged sent/done/adopted = 511/510/509、cancelled 1，重启后 0 traceback。
+
+**新发现（进队列）**：① 引擎崩溃后的自愈在并发下反复重启/杀引擎，恢复期请求 503，而 health 200 不反映
+引擎状态（M8 风险）；② `probe-version-stamp.py` 固定读 `/opt/ai/src/strata-0.2.2/serve/server.py`，而这次
+运行的是 port 树的 server——本条目里的 server hash 以 `b6b695a1` 为准，工具要改成按 launcher 定位。
+
+**没测什么**：S0c 的"新进程可服务"没测（前提不成立，见上）；没有 3 次重复（窗口只跑一轮）；没有 V2b/V2c 的
+臂；first-read 29.4 s 没有第二次冷启动复现；没有测 engine 崩溃后"单请求（无并发）"的自愈是否干净。
+
+**原始日志**：`/opt/ai/logs/V2a-matrix-20261025T1345Z/`（`summary.json` + `V2-0.log`、`V2-4.log`、`V1-5.log`、
+`V2-1.log`、`V2-0-version-stamp.json`、`S0c-kill-v1.log`、`s0c2.log`、`recover.log`）、
+`/opt/ai/logs/V2a-install-20261025T1342Z.log`；脚本 `tools/server/run-matrix.py`、`tools/server/ops-v2-window.sh`。

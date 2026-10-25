@@ -4,15 +4,22 @@
 
 - 目标：持续优化循环（`EVERGREEN_LOOP.md`；不设完成，直到用户叫停）；当前主线 = 移植代码的服务器验证战役
   V0→V3（`SELF_ITERATION_PLAN.md` §4）
-- 当前批次：**V1 完成**（2026-10-25 21:06，矩阵 5/5 PASS）；下一批 **V2（窗口批，排 00:00 后）**
-- 当前项：V2（窗口批：V2-1…V2-4；V2 准备先做）
-- 装前静态核（已完成）：0.2.3 server + 生产 config 的 mock 起服务 health 200；0.1.49.1 引擎解析 54 个
-  args 无 unknown argument（只报假路径 cannot open）——证据 `/opt/ai/logs/V2-prep-*-20261025T1320Z.log`。
-- 下一动作：**V2a 窗口 00:05**（`ops-v2-window.sh install --go`；快照 `/opt/ai/tmp/pre-V2-20261025T131022Z/`
-  已 md5sum -c 全过；起不来 `restore --go`；预算 ≤2 重启）；矩阵 `run-matrix.py --batch V2`（V2-0 装后核对 →
-  V2-4 warmup → V1-5 显存账 → V2-1 staged 演练）；矩阵后可选 `ops-v2-s0c-kill.sh --go`（S0c 崩溃测试，用第 2 次重启）
-- 环境：health 200（2026-10-25 20:46 复核）；引擎 0.1.47 / `383b426a`；server `a3c7df58`；launcher `9b6bf792`；
-  config `6c362d01`；W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）
+- 当前批次：**V2a 完成**（2026-10-25 21:40–21:55，部署 PASS，矩阵 4/4 PASS，S0c 未达）；下一批 **V2b fused A-B**
+- 当前项：V2b（fused 两臂，各 1 次重启）
+- 下一动作：**V2b fused 两臂**（`STRATA_PF_FUSED` 0→1，各 1 次重启；`run-matrix.py` 的 V2 批已含 V2-0 装后核对，
+  V2b 的臂要用 `ops-v2-arm.sh set STRATA_PF_FUSED 1 --go` 换臂）；之后 V2c（`STRATA_P0_ENABLE` 0→1）。
+- 环境（V2a 装后实测，2026-10-25 21:52Z）：health 200；引擎 **0.1.49.1** / `84a0d410`；server **`b6b695a1`**
+  （`/opt/ai/src/strata-port-v1/serve/server.py`）；launcher `0eeee160`；config `6c362d01`（未动）；
+  W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）；
+  `ARGS : MATCH`、`ENV : DIFFERENT` 只有 launcher 的 `STRATA_MP_STAGED_READ_MIN_TOKENS`。
+- **V2a 结果**：矩阵 4/4 PASS（V2-0 装后核对、V2-4 warmup、V1-5 显存账、V2-1 S0d+长读+短请求）；
+  **S0c 未达（前提不成立）**：引擎被 kill 后 server 不退出、health 仍 200，并发请求把重启中的引擎反复杀掉、
+  恢复期 503；`use-config.sh` 重启恢复。证据 `/opt/ai/logs/V2a-matrix-20261025T1345Z/`。
+- **新发现（进队列）**：① 引擎崩溃自愈在并发下反复重启/杀引擎 + health 不反映引擎状态（M8）；
+  ② `probe-version-stamp.py` 固定读 0.2.2 树，要按 launcher 定位（V2a 读到的是旧文件）。
+- **第一次装失败的教训（已恢复）**：0.2.3 `serve/` 覆盖 0.2.2 树 → `ImportError: strata_control.tls`，
+  服务重启循环；`restore --go` 恢复。最终部署形状 = 引擎进 0.2.2/build、launcher 指向自包含 port 树、
+  **config 不动**（这样 use-config.sh 与 verify-running-config.sh 都照旧）。
 
 ## V1 结果（2026-10-25 12:52–13:06Z，0 重启）
 
@@ -23,16 +30,15 @@
   static_assert 拒；V1-5 staged wedge 3 passed。
 - 首跑 12 failed 的原因是测试 venv 缺 `jinja2`（补后 8 failed）与 `regex`（补后 0）；不是代码缺陷。
 
-## V2a 窗口检查表（00:05，按序）
+## V2b 窗口检查表（按序）
 
-1. `python3 tools/server/four-questions.py`（有残留进程就停）+ `python3 tools/server/preflight.py`。
-2. `sh /opt/ai/tmp/ops-v2-window.sh snapshot --go`（窗口时的新快照，`md5sum -c` 过）——
-   再 `install --go`（它用最新快照；起不来 `restore --go`）。
-3. 装后核对：`probe-version-stamp.py --expect-engine-md5 84a0d410…` + `verify-running-config.sh` 的 ARGS MATCH
-   + 服务日志 `staged read` 计数基线；认进程用 `pgrep -f 'build/strata --serve'`，不看日志最后一行。
-4. `python3 tools/server/run-matrix.py --batch V2`（V2-0 → V2-4 → V1-5 → V2-1，6 邻居）。
-5. 可选 `sh tools/server/ops-v2-s0c-kill.sh --go`（第 2 次重启；先看到 `staged read sent` 增量才杀）。
-6. 落账 L-058、STATE、Gate、§4.2、§11、队列；提交。
+1. `python3 tools/server/four-questions.py`（有残留进程就停）+ `preflight.py`。
+2. 臂 A（默认 `STRATA_PF_FUSED=0`）：`ops-v2-arm.sh show` 确认当前臂 → `ops-v2-preflight.py` 应称 "fused (B) is present"；
+   `python3 tools/server/run-matrix.py --batch V2` 的 V2-2 会跑 `exp-v2-prefill-ab.py`。
+3. 臂 B：`ops-v2-arm.sh set STRATA_PF_FUSED 1 --go`（1 次重启）→ `exp-v2-prefill-ab.py` 3 次
+   → `exp-v2-prefill-ab.py --tag parity` 对比同 prompt 文本。
+4. `exp-v2-ab-summary.py A.json B.json` 出中位/离散/±3%；`/metrics` 的 `prefill_ms` 交叉。
+5. 结论落账 L-059、STATE、Gate、§4.2；臂关回去（默认 0）——**无论判决如何都恢复默认臂**。
 
 ## 版本戳基线（V0 实测：`tools/server/probe-version-stamp.py`，2026-10-25 20:46）
 
