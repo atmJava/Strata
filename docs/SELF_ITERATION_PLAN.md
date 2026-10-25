@@ -230,6 +230,8 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
 1. **一次装**：`ops-v2-window.sh install --go`（引擎 `cp .new && mv`；`serve/` 整树换；`tokenizer` 换；
    launcher/config 不动）→ `use-config.sh`（唯一入口）→ md5 + `grep` 标记 + health +
    `verify-running-config.sh`（要 ARGS MATCH）。起不来：`restore --go` 立刻回滚并停轮。
+   **装后认进程用 `pgrep -f 'build/strata --serve'` + `/proc/<pid>/cmdline`，不看 engine 日志的最后一行**：
+   `strata-022.log` 里还混着 12:07/12:08 两次手工实验从 `strata-port-20261025/build75` 起的引擎。
 2. **一次矩阵**：V2-1 staged 跑通/不遗留、V2-4 warmup、V1-5 显存账。跑前记
    `grep -c "staged read" /opt/ai/logs/strata-service.log`，跑后再记一次——**计数有增量**才证明走的是
    staged 路径（`staged read sent` / `adopted` / `cancelled while waiting` 三种行），不是普通长读；
