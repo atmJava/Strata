@@ -14,7 +14,8 @@
 | [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md) | **草案**（2026-10-24） | 多路并发推理融合计划：W1–W4、验收门、风险回滚、轮次排期 | 推进"多路"这件事之前 |
 | [`MULTIPATH_W3.md`](MULTIPATH_W3.md) | **设计稿**（2026-10-24） | W3 无槽冷读 + 暂存 + 收养：协议、引擎/服务端改动点、v1 限制、门 | R3–R4 动引擎之前 |
 | [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md) | **草案**（2026-10-24） | 多路服务标准：术语、"多路就绪"四条、定容式、命名与台账模板 | 定容/验收/命名任何一条多路预设之前 |
-| [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) | **草案**（2026-10-24） | 多路执行规则：每轮六步、必做复盘、重启/构建预算、测量卫生、子代理规则 | 开始任何一轮多路实验之前 |
+| [`PORTING_RULES.md`](PORTING_RULES.md) | **通用规则 v1**（2026-10-25） | DoD、每轮 Gate 11 字段、禁止清单、测量证据、阻塞、收口需用户确认 | 任何一轮移植/集成/测量之前 |
+| [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) | **项目适配 v0.3**（2026-10-25） | 本项目的硬件/部署事实、重启与构建预算、真实脚本名、文档落点、四问 | 开始本项目任一轮之前 |
 | [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md) | **现行**（每轮追加） | 多路每轮复盘记录（最新在上，R0 起） | 每轮结束时写；接手时先看 |
 | [`FEATURE_PARITY.md`](FEATURE_PARITY.md) | **草案**（2026-10-24） | 功能清单 F1–F11、验收标准 G0–G4、测试用例 T1–T7、与 fork 测试的对照 | 决定"移植什么、怎么验收"之前 |
 | [`SERVER_HW.md`](SERVER_HW.md) | 背景，**部分过期** | 这台机器与这个 fork 的由来 | 只作背景；现状以 HANDOVER §4/§6 为准 |
