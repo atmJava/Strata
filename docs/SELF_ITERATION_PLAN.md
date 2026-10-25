@@ -220,6 +220,11 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
    取好 `/opt/ai/tmp/pre-V2-20261025T131022Z/` 并 `md5sum -c` 全过）；0.1.49.1 的 `--help` 不列全 54 个 args
    （`--mtc`/`--pcie-frac`/`--vram-reserve-mib` 只在 `strings` 里），所以 args 兼容性只能靠**启动**验证——
    这就是本批的第一个门。
+1. **装前静态核**（已做，2026-10-25 21:18–21:20）：0.2.3 server 用生产 config 起 mock 引擎（端口 8097）
+   → health 200（日志 `/opt/ai/logs/V2-prep-mock-config-20261025T1320Z.log`）；0.1.49.1 引擎拿生产 54 个
+   args（模型路径换成 /nonexistent）→ 只报 `cannot open`，**没有 unknown argument**
+   （`/opt/ai/logs/V2-prep-argcheck-20261025T1320Z.log`）；`serve/` 的 ROOT 资产、`tools/strata_tokenizer.py`
+   依赖、`/opt/ai/strata-data/mtp/rt` 都在。
 1. **一次装**：`ops-v2-window.sh install --go`（引擎 `cp .new && mv`；`serve/` 整树换；`tokenizer` 换；
    launcher/config 不动）→ `use-config.sh`（唯一入口）→ md5 + `grep` 标记 + health +
    `verify-running-config.sh`（要 ARGS MATCH）。起不来：`restore --go` 立刻回滚并停轮。

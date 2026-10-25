@@ -6,6 +6,8 @@
   V0→V3（`SELF_ITERATION_PLAN.md` §4）
 - 当前批次：**V1 完成**（2026-10-25 21:06，矩阵 5/5 PASS）；下一批 **V2（窗口批，排 00:00 后）**
 - 当前项：V2（窗口批：V2-1…V2-4；V2 准备先做）
+- 装前静态核（已完成）：0.2.3 server + 生产 config 的 mock 起服务 health 200；0.1.49.1 引擎解析 54 个
+  args 无 unknown argument（只报假路径 cannot open）——证据 `/opt/ai/logs/V2-prep-*-20261025T1320Z.log`。
 - 下一动作：**V2a 窗口 00:05**（`ops-v2-window.sh install --go`；快照 `/opt/ai/tmp/pre-V2-20261025T131022Z/`
   已 md5sum -c 全过；起不来 `restore --go`；预算 ≤2 重启）；矩阵 `run-matrix.py --batch V2`（V2-0 装后核对 →
   V2-4 warmup → V1-5 显存账 → V2-1 staged 演练）
