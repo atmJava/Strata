@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -47,6 +48,16 @@ def check_state(state: dict[str, str], queue_text: str) -> list[str]:
         errors.append("STATE.md has no '当前项：<id>' line")
     elif item not in ids:
         errors.append(f"STATE.md current item '{item}' is not in the work queue")
+
+    restart = state.get("日重启", "")
+    match = re.match(r"(\d{4}-\d{2}-\d{2})\s+(\d+)/(\d+)", restart)
+    if not match:
+        errors.append("STATE.md has no '日重启：YYYY-MM-DD n/6' line")
+    else:
+        if match.group(1) != time.strftime("%Y-%m-%d"):
+            errors.append(f"restart counter is stale ({match.group(1)}); reset it before the round")
+        if int(match.group(2)) > int(match.group(3)):
+            errors.append(f"restart budget exhausted ({restart}); stop for the day")
     return errors
 
 
