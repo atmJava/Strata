@@ -1,8 +1,10 @@
 # 多路融合轮次日志（MULTIPATH_LOG）
 
-> **每轮一条，最新在上。** 格式 = [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) §2 的复盘模板（七项缺一不可）。
-> 数字的原始证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)，状态与决策在 [`HANDOVER.md`](HANDOVER.md)，
-> 计划在 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)。**复盘没写 = 本轮按未发生处理。**
+> **每轮一条，最新在上。** 复盘格式见 [`PORTING_RULES.md`](PORTING_RULES.md) §11；**从 R11 起**每条必须带
+> `### Gate（本轮）` 的 11 个字段，并过 `python3 tools/server/round_gate.py --round R<n>`；
+> xfail/skip/FAIL 记 FAIL。数字的原始证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)，状态在
+> [`HANDOVER.md`](HANDOVER.md)，计划在 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)。
+> **Gate 不 PASS = 本轮按未发生处理。**
 
 ---
 
