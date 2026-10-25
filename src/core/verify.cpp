@@ -785,6 +785,20 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // DFlash2 taps: set_taps (the drafter) or STRATA_TAP_FILE (the research dump); off, and nothing is allocated or captured, otherwise
     const char* tap_path = std::getenv("STRATA_TAP_FILE");
     if (tap_path != nullptr && tap_path[0] == '\0') tap_path = nullptr;
+    // STRATA_TAP_FILE's "%d" is this verifier's layer_lo: there is no stage index on a Verifier, and layer_lo is its own
+    // state (0 for a whole-model verifier), so "/tmp/t%d.stap" gives a layer split one file per stage, t0/t24/...  A
+    // string without "%d" is used as given - the same path, "wb", as before.
+    std::string tap_file_path;
+    if (tap_path != nullptr) {
+        tap_file_path = tap_path;
+        tap_path_per_stage_ = tap_file_path.find("%d") != std::string::npos;
+        if (tap_path_per_stage_) {
+            const std::string stage = std::to_string(lb_);
+            for (size_t at = tap_file_path.find("%d"); at != std::string::npos;
+                 at = tap_file_path.find("%d", at + stage.size()))
+                tap_file_path.replace(at, 2, stage);
+        }
+    }
     if (tap_path != nullptr || !tap_req_.empty()) {
         // The whole model's taps first (ascending, each layer once; the last layer is never one: its completed output is the
         // head's R).  A layer split's stage keeps the ones its range [lb_, le_) holds: its tap_dev() is [max_t][that many]
@@ -818,21 +832,22 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                 return false;
             }
             if (tap_path != nullptr) {
-                tap_file_ = std::fopen(tap_path, "wb");
-                if (tap_file_ == nullptr) { err = std::string("verify: cannot write STRATA_TAP_FILE ") + tap_path; return false; }
+                tap_file_ = std::fopen(tap_file_path.c_str(), "wb");
+                if (tap_file_ == nullptr) { err = std::string("verify: cannot write STRATA_TAP_FILE ") + tap_file_path; return false; }
                 const int32_t hdr[4] = {0x50415453 /* 'STAP' */, 1, (int32_t) N, (int32_t) nt};
                 std::fwrite(hdr, sizeof hdr, 1, tap_file_);
                 // global layer ids (a split stage's records keep the model's numbering; give each stage its own file)
                 for (int l : tap_layers_) { const int32_t v = l; std::fwrite(&v, sizeof v, 1, tap_file_); }
-                std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: %zu taps of %lld floats per row\n", tap_path, nt, (long long) N);
+                std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: %zu taps of %lld floats per row\n", tap_file_path.c_str(), nt,
+                             (long long) N);
                 if (lb_ != 0 || le_ != g.n_layers)
                     std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: stage layers [%lld, %lld), tap layers %d..%d (global)\n",
-                                 tap_path, (long long) lb_, (long long) le_, tap_layers_.front(), tap_layers_.back());
+                                 tap_file_path.c_str(), (long long) lb_, (long long) le_, tap_layers_.front(), tap_layers_.back());
             }
             tap_on_ = true;
         } else if (tap_path != nullptr) {
             std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: no tap in this stage's layers [%lld, %lld); nothing is dumped\n",
-                         tap_path, (long long) lb_, (long long) le_);
+                         tap_file_path.c_str(), (long long) lb_, (long long) le_);
         }
     }
     if (bal_ != nullptr) {   // set_pcie_balance: four stamp words per (layer, group)
@@ -2253,6 +2268,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         }
     if (le_ < g.n_layers) {   // a layer split's earlier stage: hand the residual on, no head
         float* hout = hand_out_ + (size_t) hrow0 * HB;
+        // a stage-private STRATA_TAP_FILE ("%d"): this stage appends its own records in run(), so its taps must reach the
+        // mapped copy inside this graph too (the head stage's copy is at the end of this function)
+        if (tap_on_ && tap_file_ != nullptr && tap_path_per_stage_)
+            copy_from_mapped(m_tap_, tap_dev_, (int64_t) T * (int64_t) tap_layers_.size() * N, cs);
         if (hflag_out_d_ != nullptr && !batch_rec_) {   // the overlapped split: payload + the next stage's flag
             handoff_publish(hout, R_, (int64_t) T * HC * N, bo_, (int64_t) T * N, inj2_, (int64_t) T * HC, hcount_d_,
                             hflag_out_d_, cs, g_test_drop > 0 ? hdrop_d_ : nullptr);   // the test word only with the hook on
@@ -3179,6 +3198,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     // the drafts were. Exact: a rejected row's draw is discarded, and no kept decision depends on a reused draw.
     if (le_ < g.n_layers) {   // a layer split's earlier stage: the hand-off is written (synced above)
         ++windows;
+        // a stage-private STRATA_TAP_FILE ("%d"): this stage appends its own records before forwarding.  Without "%d" the
+        // stages share one file and, as before, only the stage that reaches the head appends (the others would interleave).
+        if (tap_on_ && tap_file_ != nullptr && tap_path_per_stage_) tap_write(T, tokens, pos0);
         return next_ == nullptr || next_->run(T, tokens, pos0, pool, next_user_, out, err);
     }
     const bool sampled = !sampling_.greedy && sampling_.temperature > 0.0f;

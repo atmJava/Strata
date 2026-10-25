@@ -328,7 +328,9 @@ public:
     /// A layer split's stage records only requested ∩ [layer_begin, layer_end) (the last layer is never a tap): its slots
     /// follow tap_layers_local(), global ids ascending, so the caller assembles the stages' buffers by global slot.  One
     /// stage records every requested layer, so there tap_layers_local() == tap_layers().  STRATA_TAP_FILE (research dump)
-    /// turns the same buffer on without this call; each stage writes the file it is given, with global layer ids.
+    /// turns the same buffer on without this call; each stage writes the file it is given, with global layer ids (a "%d"
+    /// in the path is replaced by the stage's layer_lo - 0 for a whole model - so "/tmp/t%d.stap" gives one file a stage,
+    /// each stage appending its own windows' records).
     void set_taps(const std::vector<int>& layers) { tap_req_ = layers; }
     const float* tap_dev() const { return tap_dev_; }
     /// The whole model's tap layers, ascending: the global slots a caller assembles the stages' tap_dev() buffers into.
@@ -574,8 +576,11 @@ private:
     // STRATA_TAP_FILE (off by default; nothing is allocated or captured without it): the DFlash2 experiment's hook.
     // After each layer in STRATA_TAP_LAYERS (default 5,15,25,35,45) the window copies the layer's completed output
     // (the residual with its pending FFN write applied, the mean of the hc streams) per row; run() appends
-    // (pos, token, taps) records to the file.
+    // (pos, token, taps) records to the file.  A "%d" in the path is replaced by the stage's layer_lo (0: whole model),
+    // so a layer split writes one file per stage and every stage appends its own records; no "%d": the path as given,
+    // as before (only the stage that reaches the head appends).
     bool tap_on_ = false;
+    bool tap_path_per_stage_ = false;             ///< STRATA_TAP_FILE held "%d": each stage's own file, so every stage appends
     std::vector<int> tap_req_;                    ///< set_taps
     std::vector<int> tap_layers_all_;             ///< every tap layer of the model (validated, ascending)
     std::vector<int> tap_layers_;                 ///< this stage's taps: global ids, ascending (tap_dev_'s slots)
