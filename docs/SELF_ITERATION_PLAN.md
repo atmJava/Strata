@@ -230,8 +230,10 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
 1. **一次装**：`ops-v2-window.sh install --go`（引擎 `cp .new && mv`；`serve/` 整树换；`tokenizer` 换；
    launcher/config 不动）→ `use-config.sh`（唯一入口）→ md5 + `grep` 标记 + health +
    `verify-running-config.sh`（要 ARGS MATCH）。起不来：`restore --go` 立刻回滚并停轮。
-2. **一次矩阵**：V2-1 staged 跑通/不遗留（长读 >4096 tokens + 取消后下一请求正常 + `/metrics` 计数）、
-   V2-4 warmup、显存账（6×192K/8×128K 静态账）。V2-2/V2-3 拆到 V2b/V2c（各需一次重启/臂）。
+2. **一次矩阵**：V2-1 staged 跑通/不遗留、V2-4 warmup、V1-5 显存账。跑前记
+   `grep -c "staged read" /opt/ai/logs/strata-service.log`，跑后再记一次——**计数有增量**才证明走的是
+   staged 路径（`staged read sent` / `adopted` / `cancelled while waiting` 三种行），不是普通长读；
+   2 s 的邻居 gap 门槛是"取消场景不停"的界（S0b 的 1 s 门槛属于 V2c）。V2-2/V2-3 拆到 V2b/V2c（各需一次重启/臂）。
 3. **回滚**：矩阵后**不回滚**（生产落在新代码上）；若 health 连续 2 次失败 → `restore --go` 并停轮。
 4. **预算**：本批 ≤2 重启；V2b/V2c 各 ≤2；三批合计 5–6，仍在日预算 6 内。
 
