@@ -1706,6 +1706,16 @@ bool scores_halve_on() {
     return ok[dev] == 1;
 }
 
+// Which block scorer the last calls actually took: the two Turing paths are bit-identical on purpose, so comparing
+// their output cannot tell them apart.  tests/cuda/qsa_select_rows_parity_test.cpp asserts these instead (host-side
+// counters; one increment per launch, nothing on the device).
+static std::atomic<long long> g_rows_launches{0};
+static std::atomic<long long> g_halve_launches{0};
+static std::atomic<long long> g_multi_launches{0};
+long long qsa_rows_launches() { return g_rows_launches.load(std::memory_order_relaxed); }
+long long qsa_halve_launches() { return g_halve_launches.load(std::memory_order_relaxed); }
+long long qsa_multi_launches() { return g_multi_launches.load(std::memory_order_relaxed); }
+
 void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                       int64_t max_blocks, const QsaShapes& s, float* scores, void* stream, int64_t active_blocks) {
     if (nq <= 0) return;
@@ -1735,12 +1745,14 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
             }
             const cudaError_t e = cudaGetLastError();
             if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores halve: %s\n", cudaGetErrorString(e)); std::exit(1); }
+            g_halve_launches.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
                                                                                      max_blocks, scores, scores_early_exit());
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores multi: %s\n", cudaGetErrorString(e)); std::exit(1); }
+        g_multi_launches.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
@@ -1804,6 +1816,7 @@ bool qsa_block_scores_rows(const float* pooled, const float* dead, const float* 
     else block_scores_rows_kernel<4><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores rows: %s\n", cudaGetErrorString(e)); std::exit(1); }
+    g_rows_launches.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 

@@ -438,7 +438,26 @@ int run_child(bool rows_path, const std::string& out_path, int device) {
             ck(cudaEventCreate(&ev0), "event create");
             ck(cudaEventCreate(&ev1), "event create");
             ck(cudaEventRecord(ev0), "event record");
+            // which scorer actually launched: the three are bit-identical by design, so comparing their output
+            // cannot tell them apart - a dispatch that silently fell back to the default kernel would still match.
+            const long long rows0 = k::qsa_rows_launches(), halve0 = k::qsa_halve_launches();
             k::qsa_block_scores(d_pooled, d_dead, d_q, d_steps, nq, mb, s, d_scores, nullptr);
+            const long long rows1 = k::qsa_rows_launches(), halve1 = k::qsa_halve_launches();
+            if (rows_path) {
+                if (rows1 != rows0 + 1 || halve1 != halve0) {
+                    std::fprintf(stderr, "FAIL: STRATA_QSA_ROWS=1 case %lld took %lld rows launch(es) and %lld halve "
+                                         "launch(es); expected exactly one rows launch\n", (long long) case_index,
+                                 rows1 - rows0, halve1 - halve0);
+                    return 1;
+                }
+            } else {
+                if (halve1 != halve0 + 1 || rows1 != rows0) {
+                    std::fprintf(stderr, "FAIL: default dispatch case %lld took %lld rows launch(es) and %lld halve "
+                                         "launch(es); expected exactly one halve launch\n", (long long) case_index,
+                                 rows1 - rows0, halve1 - halve0);
+                    return 1;
+                }
+            }
             k::qsa_block_topk(d_scores, d_steps, nq, mb, cap_width, s, d_ids, nullptr);
             ck(cudaEventRecord(ev1), "event record");
             ck(cudaEventSynchronize(ev1), "event sync");

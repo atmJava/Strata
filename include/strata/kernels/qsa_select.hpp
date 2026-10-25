@@ -51,6 +51,12 @@ bool qsa_block_scores_slots(const float* const* pooled, const float* const* dead
 /// For qsa_rows_bench's parity and timing it is callable on its own.
 bool qsa_block_scores_rows(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                            int64_t max_blocks, const QsaShapes& s, float* scores, void* stream);
+/// How many times each scorer of `qsa_block_scores` has launched in this process (rows kernel, Turing's halve kernel,
+/// the multi kernel).  The three are bit-identical by design, so output comparison cannot tell which ran; a regression
+/// test asserts these counters instead.  Monotonic, host-side, safe to read at any time.
+long long qsa_rows_launches();
+long long qsa_halve_launches();
+long long qsa_multi_launches();
 
 /// The same scores on tensor cores (3xTF32, FP32-level accuracy but another summation order: not bitwise; the tail
 /// block n_bid is the warp kernel's arithmetic). For the prompt path; false (nothing launched) on another geometry.
