@@ -76,15 +76,43 @@ int8 TC 峰值 ≈ 456 TOPS（2080 Ti fp16 228 TFLOPS ×2）、HBM 有效 ≈ 45
 生产 45K prompt 的 gemm gate/up 3005 ms 与 bench 速率一致（按 16 专家组 × R≈160 推算 ≈3.2 s ✓），
 排除"PCIe 搬运主导"假设（`--pcie-frac` 调参与 `STRATA_MMQ_TAB` 留作 P4 一并扫）。
 
-### P3c · fused_iq 扩展到 Turing 的 IQ3_XXS/IQ4_NL（旗舰移植项，进行中）
+### P3c · fused_iq 扩展到 Turing 的 IQ3_XXS/IQ4_NL（旗舰移植项，已实现·提速低于 1.5× 门槛）
 
 Strata 已有 Marlin 形制的 fused kernel（`moe_fused_iq.cu`：codebook→shared→int8→s8-MMA，
 Turing 分支 `__ldg` 拷贝 + `m8n8k16` + ASTAGES_DEV=2 都在），IQ3_XXS 主体在 sm_120/HIP 已实例化；
 Turing 只放行 Q2_0/Q2_0 的理由是注释"codebook 格式在 4 warps/row 下装不进 64 KB shared"——
 **smem 估算 WW=2 路径 ~47 KB 可装**（`smem_bytes` 公式 :110），即扩展面可能只是 setup/覆盖判定 +
 pick_ww 尊重 WW=2。收益上限：gate/up 18.4% + down 9.2% 相位 × fused 对 MMQ 的倍数。
-- 验证：`prefill_fused_iq_test` 在服务器 sm_75 构建上跑 IQ3_XXS/IQ4_NL parity；bench 对比 MMQ（R=160 ≥1.5× 才默认化）。
-- 状态：实现进行中，基线树 `strata-port-20261025/build75`。
+
+**结果（本机 2080 Ti，sm_75 构建 `strata-port-20261025/build75`，2026-10-25，未 commit）**：假设证实——
+IQ3_XXS 主体在 Turing 直接可编译可跑，改动只在 setup/覆盖判定：`dev_info` Turing 分支加 IQ3_XXS gate/up +
+IQ4_NL down 的 setup（smem 按卡逐 kernel 实测：WW=2 46,592 B 与 WW=4 60,672 B **都装得下**，
+fallback 到 WW=2-only 的通路在，本卡未触发）；`native_supported` 放行该对；`experts_native` 只 clamp
+未装下的形状。数值（`prefill_fused_iq_test --only="IQ3_XXS / IQ4_NL"`，R64_E=16）：fused vs 自身 int8
+模型 rel RMS 1.22e-4（worst 3.64e-3），fused vs MMQ rel RMS 1.21e-4（worst 3.64e-3；MMQ vs FP32 1.43e-2），
+timing 段 fused vs MMQ 1.8-2.4e-4——全绿；Q2_0/Q2_0 与其余对在 Turing 上行为不变。
+速度（同进程交替中位数，16 专家组，`S20_E=16 --chunks=20,256,1002` ⇒ R≈12/160/626；当日对照
+`mmq_expert_bench`：iq3_xxs gate/up R=160 = 31.9 TOPS、iq4_nl down 25.9）：
+
+| R | MMQ 全路（含 gather） | fused | fused/MMQ | MMQ 仅积（无 gather） |
+|---|---|---|---|---|
+| ≈12  | 0.400 ms | 0.344 ms | **1.16×** | 0.246 ms（fused 0.72×） |
+| 160  | 1.111 ms | 0.986 ms | **1.13×** | 0.958 ms（fused 0.97×） |
+| ≈626 | 3.269 ms | 3.228 ms | **1.01×** | 3.131 ms（fused 0.97×） |
+
+**未达 1.5×**：Turing 版 fused 的 kernel 本身只到 MMQ 积的水平（fused ≈25 TOPS vs MMQ 积 ≈30），收益全部
+来自省掉 gather/swiglu/quantize 步骤。原因（读码+`cuobjdump -res-usage` 佐证，未逐项测）：无 cp.async
+（2 阶段裸拷贝 + 全块 barrier）、m16n8k32 用 4 条 m8n8k16 拼、60 KB smem ⇒ 1 block/SM（16 warps）、
+128 寄存器贴顶个别 kernel 有 16 B spill；IQ3_XXS 解码段比 Q2_0 fused 多 ~0.24 ms/层（0.986 vs 0.745 ms，
+Q2_0/Q2_0 同形制 fused 对 MMQ 为 1.31×/1.17×仅积）。对照 fused 在他卡的优势：R9700（gfx12）同对 1 层
+2048 tok MMQ 24.5 vs fused 4.4 ms（5.6×）、8192 tok 31.7 vs 13.2（2.4×），引擎 prompt 4K +16.7%/20K +19.0%
+（AMD_HIP.md）；RTX PRO 5000（sm_120）prompt +7.0%/+5.2%/+3.4%（moe_fused_iq.cu 注释）。
+默认态（已拍板，2026-10-25）：**保持 opt-in**——`native_supported` 在 7.5 卡上默认仍只给 Q2_0/Q2_0 的既有行为，
+IQ3_XXS/IQ4_NL 需 `STRATA_PF_FUSED=1`；`STRATA_PF_FUSED_SM75=0` 在任何情况下回 MMQ。理由：实测 1.13×（生产行制）
+≈ 3-4% prompt 时间、低于本计划 1.5× 默认化门槛，且输出数值与 MMQ 有 2e-4 级差异、端到端未在现网测，按仓库
+"默认路径字节不变"规则不翻默认。服务器探针实测（2080 Ti/build75）：unset → IQ3_XXS/IQ4_NL=0；`STRATA_PF_FUSED=1`
+→ =1；`STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=0` → available=0。opt-in 下 parity PASS（fused vs MMQ rel RMS 1.2e-4）。
+后续若要真提速：Turing 侧解码段重调（反量化指令是双方共同瓶颈，P3b 定性仍成立）。
 
 ### P4 · Turing tile 调参扫描（decode 注意力/选块，测量驱动）
 
@@ -113,6 +141,23 @@ fork 的 barrier 三条语义与 Strata 的对应面（两侧源码核实）：
 
 **结论：barrier 本身不移植（调度架构不同）；它的三个洞察里两个 Strata 已有等价机制，第三个已作为
 S0c 在队列里。本项产出即本页。**
+
+### P6b · S0c（staged read 失败/取消清理）用例与一个真实缺陷（2026-10-25）
+
+用例 `serve/test_staged_wedge.py`（本地假引擎说 batch+staged 协议，3 例，`pytest` 2.2 s 全绿）：
+
+1. 引擎在 BREAD 期间死 → 请求报 `EngineDied`、`mp_staged` 必须清空、重启后下一请求正常准入（S0c 判据）；
+2. 引擎在任何请求前就死 → 下一请求重启引擎并照常准入（不卡死）；
+3. 全槽占满 → 长请求 BREAD→BRDY 后等槽；释放槽后必须 BADOPT 采用并跑完、`mp_staged` 清空。
+
+**用例抓到一个真缺陷（同批 staged-read 代码里，未提交）**：`serve/server.py` 的 staged 等待分支
+`yield "ping", None` —— `generate_batched` 的消费者是 `_run` 的 token 循环（只认 `None` 心跳），元组会被当
+token 送进 detokenizer，`TypeError: '>=' not supported between tuple and int`，即"读到一半等槽"的请求必崩
+（BRDY 之后 100% 复现）。改为 `yield None` 后三例全绿。该行与 `serve/test_staged_wedge.py` 都留在工作区，
+随 staged-read（W3/S0c）代码一起提交更合适，本页只记录判据与结论。
+
+失败路径的清理（`finally` 里 `mp_staged = None` + BCANCEL/BCANCELLED）经用例 1 验证有效；用例 3 验证
+采用路径不遗留。这也把 fork 的"失败即出队"判据在 Strata 上落成了可回归的用例。
 
 ## 3. 验证基线（本机已跑通，2026-10-25）
 
@@ -148,7 +193,7 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 | P2 accounting 审计 | 进行中 | 子代理审计 MTP/DFlash2/KV/expert 池预留 |
 | P3 GDN recurrent 移植 | 降级为研究项 | L030 实测 gdn 全部阶段 ≈10%（45K prompt），2× 上限省 ~5% |
 | P3b 专家管线定性 | 已完成 | bench：IQ3_XXS gate/up R=160 = 39.0 TOPS（8.5% 峰值 / 10% HBM）⇒ 反量化受限 |
-| P3c fused_iq Turing IQ3_XXS | 进行中 | 子代理 8b81b340；验收 = parity + fused/MMQ ≥1.5× @R=160 |
+| P3c fused_iq Turing IQ3_XXS | 已实现·opt-in（未达 1.5× 门槛，不翻默认） | parity PASS（fused vs MMQ rel RMS 1.2e-4，2080 Ti/build75）；速度 1.16/1.13/1.01× @R=12/160/626 全路；探针 unset=0 / PF_FUSED=1 → 1 / SM75=0 → 0；`STRATA_PF_FUSED=1` 才启用（§P3c） |
 | P4 tile 扫描 | 待做 | |
 | P5 parser 修复 | 已覆盖·不移植 | `server.py:5988-6001,6044`、`serve/dsml.py:172,211` + 各自测试（2026-10-25 核实） |
 | P6 barrier 对照分析 | 待做 | |
