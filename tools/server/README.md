@@ -65,6 +65,8 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `soak-analyze.py` | soak log summary: errors, RSS and MemAvailable drift | stdout |
 | `run-arm.sh`, `t2-run.sh`, `t2check.py`, `prepare-t2.py` | same-boot arm bookkeeping and the T2 bitwise arm | `/opt/ai/logs/arm-*` |
 | `hitrate_before_after.py` | **legacy**, superseded by `passive_windows.py` | kept for the older ledger entries |
+| `probe-version-stamp.py` | what the box is *running*: md5/sha256/mtime of the four deployed files, the running engine/server, its `STRATA_*` env, feature markers, `/health` | stdout + the JSON named by `--out` |
+| `probe-instrument-cost.py` | what the S2 per-request timing probe itself costs (local micro-benchmark) | stdout |
 
 ### exp — costs restarts, always ends restored
 | file | arms | ledger |
@@ -79,6 +81,12 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `prefill_phase_timing.sh` | `STRATA_PREFILL_TIMING=1`: the read as 21 GPU phases | L-030 |
 | `mmq_direct_ab.sh` | MMQ pointer-table build, `STRATA_MMQ_DIRECT=1` on/off | L-031 |
 | `park_gain_ab.sh` | `--conversation-cache-park-gain`, is parking on the hot path | L-032 |
+
+### batch — one batch, one matrix run
+| file | what it does | notes |
+|---|---|---|
+| `run-matrix.py` | runs the whole batch matrix once: each item has its criterion, timeout and log; writes `summary.json` and one log per item | `--batch V1 --list` / `--dry-run` / `--only` / `--skip`; never restarts anything |
+| `check_assert_lock.py` | V1-4: compiles the one decode-attention object with the default shape, then with `STRATA_QSA_ATTN_CHUNK=128` and requires the static_assert to reject it | uses the build dir's `make -n`; writes only `/tmp` |
 
 ### tests — black-box acceptance (pytest)
 | file | test | notes |
@@ -99,6 +107,9 @@ any experiment, and never edit a script on the box without bringing it back here
 ## Usage signatures (the ones that take arguments)
 
 ```
+probe-version-stamp.py [--host H | --local] [--out FILE]   # the four hashes measured, not quoted
+run-matrix.py --batch V1 [--src DIR] [--only ID] [--skip ID] # one batch, one matrix run
+check_assert_lock.py <source-tree> <build-dir>   # the 64/256 shape is locked by static_assert
 use-config.sh <config.json>                      # the only install/restore entry, ~156 s
 run-arm.sh <label> [context-lines]               # bench×3 + parity×2 + cold prefill×3 -> /opt/ai/logs/arm-<label>
 parity_window.py [label] [lines] [max-tokens]    # bitwise gate

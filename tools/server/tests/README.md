@@ -24,19 +24,25 @@ MP_BASE_URL=http://192.168.3.14:8080 MP_API_KEY=111 python3 -m pytest tools/serv
 Environment: `MP_BASE_URL` (default `http://127.0.0.1:8080`), `MP_API_KEY` (default `111`, never hardcoded in a
 test), `MP_MODEL` (default `qwen3.8-flash-next-iq3_xxs`).
 
-## Expected status (2026-10-24, before W3)
+## Expected status (2026-10-25, V0)
+
+Local, no server: `python3 -m pytest tools/server/tests -q` = **61 passed / 10 skipped / 0 failed**
+(measured 2026-10-25 20:55).  The 10 skips are the live-server files below (T1/T2/T3/T4/T5): from this
+workstation there is no server on `127.0.0.1:8080`, so the fixture skips them with the reason — **a skip
+is not a pass**.  With `MP_BASE_URL` pointing at the box they run for real, one run at a time.
 
 | test | expected | why |
 |---|---|---|
-| `test_mp_api.py` (T1) | **pass** | the server's API contract is in production |
-| `test_mp_batch.py` (T2) | pass or **skip/xfail** | exactness settings (`STRATA_IQ_MT_MIN=1` etc.) are not production; mismatch is reported |
-| `test_mp_admission.py` (T3) | **xfail** | waits until /metrics reports 4 busy slots, then first AND second token ≤2 s; production stages only prompts ≥4096 tokens (`STRATA_MP_STAGED_READ_MIN_TOKENS`), so a 452-token reader stays un-staged (L-053) |
-| `test_mp_prefix.py` (T4) | **pass** | prompt cache is on in production; `cached_tokens` is reported |
-| `test_mp_spec.py` (T5) | **pass** | offer≥20 and acceptance≥50% from `/metrics` totals; the window may include other traffic |
-| `test_mp_preset.py` (T7) | **pass** | negative cases for `check_preset.py`; no server needed |
-
-When W3 lands, T3's `pytest.xfail` turns into an assertion (delete the xfail branch); an xfail that stays after the
-feature ships is a failed acceptance, not a pass.
+| `test_mp_api.py` (T1) | pass with a live server | the server's API contract |
+| `test_mp_batch.py` (T2) | pass or **skip/xfail** | exactness settings (`STRATA_IQ_MT_MIN=1` etc.) are not production |
+| `test_mp_admission.py` (T3) | **xfail** | waits for busy slots; production stages only prompts ≥4096 tokens, so a 452-token reader stays un-staged (L-053) |
+| `test_mp_prefix.py` (T4) | pass | prompt cache is on in production |
+| `test_mp_spec.py` (T5) | pass | offer≥20 and acceptance≥50% from `/metrics` totals |
+| `test_mp_preflight.py`, `test_mp_round_gate.py` | pass | queue/Gate logic; batch V-rows are known ids but not backlog |
+| `test_mp_staged_switch.py` | pass | `STRATA_*STAGED_READ=0` really turns it off (source-level) |
+| `test_mp_staged_patch.py`, `test_mp_staged_cancel.py`, `test_mp_patch_parity.py` | pass | the 0.2.2 patch is patched into a temp copy and driven (S0c, S0d, `46d12fa9` parity) |
+| `test_mp_timings.py`, `test_mp_admission_limit.py`, `test_mp_admission_wait.py`, `test_mp_disconnect_keepalive.py` | pass | mock-engine protocol cases; no server needed |
+| `test_tap_parity.py` | pass | tap dump compare/merge |
 
 ## Hygiene
 
@@ -50,9 +56,23 @@ path in the round's `MULTIPATH_LOG` entry.
 |---|---|
 | `mp_client.py` | shared HTTP helpers (stdlib only) |
 | `conftest.py` | `server` fixture: skips with a clear reason when the server is unreachable |
+| `staged_patch_harness.py` | applies `patches/mp-w3-server-0.2.2.patch` to the `base-0.2.2` fixture in a temp copy |
 | `test_mp_api.py` | T1: health, models, non-stream/stream usage, 400, 401 |
 | `test_mp_batch.py` | T2: greedy solo vs batch |
 | `test_mp_admission.py` | T3: 4 streams + cold reader; 4-busy-slot gate, first + second token ≤2 s, neighbour stall ≤1 s |
+| `test_mp_admission_limit.py` | admission limit: 429 `admission_full` and its error body (S1) |
+| `test_mp_admission_wait.py` | a request that waits for a slot, and the keep-alive it sees (S8/F1F2) |
+| `test_mp_disconnect_keepalive.py` | a client that leaves frees the slot (S7) |
 | `test_mp_prefix.py` | T4: second read hits the prefix cache |
 | `test_mp_spec.py` | T5: draft acceptance floor (spec must be on) |
 | `test_mp_preset.py` | T7: `check_preset.py` refuses wrong presets (unit, no server) |
+| `test_mp_timings.py` | per-request `done["metrics"]`: keys, monotonic queue ≤ ttft ≤ wall (S2) |
+| `test_mp_staged_switch.py` | the staged-read switches' exact semantics (S0) |
+| `test_mp_staged_patch.py` | S0c: an engine dying on `BREAD` clears `mp_staged` |
+| `test_mp_staged_cancel.py` | S0d: a staged cancel holds the control lines |
+| `test_mp_patch_parity.py` | the shipped patch has `46d12fa9`'s strict BRDY parse and the 10 s cancel drain |
+| `test_mp_preflight.py` | `preflight.py` checks the queue/state pair, not the server |
+| `test_mp_round_gate.py` | `round_gate.py`: 11 fields, wording, counts (incl. batch V-rows) |
+| `test_tap_parity.py` | `tap_parity.py compare/merge` on synthetic dumps |
+| `probe_long_read.py` | not a test: the staged-read neighbour-stall probe (R11/L-055) |
+| `probe_cancel_staged.py`, `probe_cancel_wait.py` | not tests: S0c/S0d probes against a live server |
