@@ -61,7 +61,29 @@ BATCHES: dict[str, list[dict]] = {
              criterion="pytest exit 0, 0 failed", where="ssh", timeout=600, judge="pytest",
              cmd=["{py}", "-m", "pytest", "{src}/serve/test_staged_wedge.py", "-q"]),
     ],
-    "V2": [],   # filled in when the V2 drivers exist; an empty batch is NOTRUN, not a pass
+    # The V2a window: deploy (the ops script, outside the matrix) -> this run.  Order matters: the
+    # warmup series is only "the first requests after a restart" while the engine is still cold, so it
+    # runs first; the staged drill is the heavy one and runs last.
+    "V2": [
+        dict(id="V2-0", what="the install is live (window gate: engine md5 + running process), not just copied",
+             criterion="exit 0; engine md5 is the V1 build's 84a0d410 and the running engine is that file",
+             where="local", timeout=180, judge="exit0",
+             cmd=["python3", "tools/server/probe-version-stamp.py", "--expect-engine-md5", "84a0d410367abfb3a8bcb9422a3b10ee",
+                  "--out", "{out}/V2-0-version-stamp.json"]),
+        dict(id="V2-4", what="warmup: the first five requests after the restart (cold/warm series)",
+             criterion="5/5 answered; per-request TTFT printed (a measurement, not a threshold)",
+             where="local", timeout=900, judge="exit0",
+             cmd=["python3", "tools/server/exp-v2-warmup.py", "{base_url}", "5"]),
+        dict(id="V1-5", what="the VRAM account under the production shape (six slots, 192K, int8)",
+             criterion="both GPUs and the engine's own arena/expert-cache numbers reported; free reserve printed",
+             where="local", timeout=180, judge="exit0",
+             cmd=["python3", "tools/server/exp-v2-vram.py", "{base_url}"]),
+        dict(id="V2-1", what="staged read runs and a cancelled reader leaves nothing behind (S0c/S0d live)",
+             criterion="reader got a token; after the close neighbours still decode (gap < 2 s); health 200; "
+                       "a long read then a short one are both served",
+             where="local", timeout=1800, judge="exit0",
+             cmd=["python3", "tools/server/exp-v2-staged-drill.py", "{base_url}", "4"]),
+    ],
     "V3": [],
 }
 

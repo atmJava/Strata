@@ -172,6 +172,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--base-url", default=os.environ.get("MP_BASE_URL", "http://127.0.0.1:8080"))
     parser.add_argument("--api-key", default=os.environ.get("MP_API_KEY", "111"))
     parser.add_argument("--out", default=None)
+    parser.add_argument("--expect-engine-md5", default=None,
+                        help="fail unless the engine file's md5 is this (the V2 window's install check)")
     parser.add_argument("--quiet", action="store_true")
     options = parser.parse_args(argv)
 
@@ -189,6 +191,10 @@ def main(argv: list[str]) -> int:
         return 2
 
     problems = check(stamp)
+    if options.expect_engine_md5:
+        got = stamp.get("files", {}).get("engine", {}).get("md5")
+        if got != options.expect_engine_md5:
+            problems.append(f"engine md5 {got} != expected {options.expect_engine_md5}")
     stamp["problems"] = problems
     out = options.out or time.strftime("/tmp/version-stamp-%Y%m%dT%H%M%SZ.json", time.gmtime())
     with open(out, "w", encoding="utf-8") as fh:
