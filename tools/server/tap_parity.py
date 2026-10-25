@@ -1,7 +1,8 @@
 """Compare (or merge) the engine's DFlash2 tap dumps, so the tap wiring can be checked without a model run.
 
-The engine writes one file per verifier process when `STRATA_TAP_FILE` is set (src/core/verify.cpp, tap_write):
-a 16-byte header `int32 magic 'STAP', int32 version 1, int32 n_embd, int32 n_taps`, then `n_taps` int32 layer
+The engine writes one file per verifier when `STRATA_TAP_FILE` is set (src/core/verify.cpp, tap_write; a process
+that runs two Verifiers - the pipeline parity pair - would share one path, so give a layer-split run the `%d` spelling
+below, and compare a merge of those files with a single-stage run): a 16-byte header `int32 magic 'STAP', int32 version 1, int32 n_embd, int32 n_taps`, then `n_taps` int32 layer
 numbers, then one record per row of every window: `int32 position, int32 input token`, then `n_taps * n_embd`
 float32 values (the taps in header order).
 
@@ -102,12 +103,14 @@ def merge(dumps: list[Dump], paths: list[str]) -> Dump:
             if layer in seen:
                 raise FormatError(f"{p}: layer {layer} is also in the file before (merge wants disjoint layers)")
             seen[layer] = len(seen)
-    order = sorted(seen)
-    if order != list(range(len(seen))):
-        # the taps are not contiguous layers; that is fine, the merged header keeps the sorted numbers
-        pass
+    order = sorted(seen)   # the taps need not be contiguous layers; the merged header keeps the sorted numbers
     rows: dict[tuple[int, int], list[float]] = {}
     keys = set().union(*(d.rows.keys() for d in dumps))
+    for key in sorted(keys):
+        for d, p in zip(dumps, paths):
+            if key not in d.rows:
+                raise FormatError(f"{p}: position {key[0]} token {key[1]} is in another file but not this one - "
+                                  "the stages must cover the same rows")
     for key in keys:
         merged: list[float] = []
         for layer in order:
@@ -119,8 +122,14 @@ def merge(dumps: list[Dump], paths: list[str]) -> Dump:
     return Dump(n_embd=n_embd, layers=order, rows=rows)
 
 
-def compare(a: Dump, b: Dump, tol: float, limit: int = 5) -> tuple[int, int, float, list[str]]:
-    """(compared rows, differing rows, worst absolute difference, the first `limit` notes)."""
+def compare(a: Dump, b: Dump, tol: float, allow_missing: bool = False,
+            limit: int = 5) -> tuple[int, int, float, list[str]]:
+    """(compared rows, differing/missing rows, worst absolute difference, the first `limit` notes).
+
+    Two files of different widths cannot be the same measurement, and a row in one file only is not a pass either
+    (a truncated or partly written dump must not compare equal): both are failures unless `allow_missing`."""
+    if a.n_embd != b.n_embd:
+        raise FormatError(f"n_embd differs: {a.n_embd} vs {b.n_embd} - not the same measurement")
     common = sorted(set(a.layers) & set(b.layers))
     if not common:
         return 0, 0, 0.0, ["no common tap layers: compare a single-stage file with a merge, or check --tap-layers"]
@@ -138,8 +147,11 @@ def compare(a: Dump, b: Dump, tol: float, limit: int = 5) -> tuple[int, int, flo
     missing = len(a.rows) + len(b.rows) - 2 * len(keys)
     if missing:
         notes.append(f"{missing} rows are in one file only (not compared)")
-    compared = differing = 0
+    if missing and not allow_missing:
+        notes.append("one-sided rows are a failure here: pass --allow-missing to compare only the common rows")
+    compared = differing = 1 if (missing and not allow_missing) else 0
     worst = 0.0
+    detail: list[str] = []
     for pos, tok in keys:
         ra, rb = a.rows[(pos, tok)], b.rows[(pos, tok)]
         bad = False
@@ -151,12 +163,12 @@ def compare(a: Dump, b: Dump, tol: float, limit: int = 5) -> tuple[int, int, flo
                     worst = d
                 if d > tol:
                     bad = True
-                    if len(notes) < limit + 3:
-                        notes.append(f"position {pos} token {tok}: layer {common[ia.index(la)]} element {j}: "
-                                     f"{x!r} vs {y!r} (|d| {d:.3e})")
+                    if len(detail) < limit:
+                        detail.append(f"position {pos} token {tok}: layer {common[ia.index(la)]} element {j}: "
+                                  f"{x!r} vs {y!r} (|d| {d:.3e})")
         compared += 1
         differing += int(bad)
-    return compared, differing, worst, notes
+    return compared, differing, worst, notes + detail
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -167,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("second")
     c.add_argument("--tol", type=float, default=1e-6, help="largest absolute difference allowed (default 1e-6)")
     c.add_argument("--limit", type=int, default=5, help="how many differing rows to name (default 5)")
+    c.add_argument("--allow-missing", action="store_true",
+                   help="compare only the rows both files have (a partial dump then passes)")
     m = sub.add_parser("merge", help="files of disjoint layers into one")
     m.add_argument("files", nargs="+")
     m.add_argument("-o", "--out", required=True)
@@ -188,12 +202,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"merged {len(args.files)} files -> {args.out}: layers {merged.layers}, {len(merged.rows)} rows")
             return 0
         a, b = read_dump(args.first), read_dump(args.second)
-        compared, differing, worst, notes = compare(a, b, args.tol, args.limit)
+        compared, differing, worst, notes = compare(a, b, args.tol, args.allow_missing, args.limit)
         for note in notes:
             print(note)
         print(f"{compared} rows compared, {differing} differ (tolerance {args.tol:g}), worst |diff| {worst:.3e}")
         return 0 if compared and not differing else (1 if compared else 2)
-    except (FormatError, OSError) as err:
+    except (FormatError, OSError, KeyError, IndexError) as err:
         print(f"tap_parity: {err}", file=sys.stderr)
         return 2
 

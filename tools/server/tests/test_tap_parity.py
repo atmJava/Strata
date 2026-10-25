@@ -69,12 +69,35 @@ def test_a_changed_float_is_reported_with_its_layer_and_position(tmp_path):
     assert any("layer 15" in n and "position 0" in n for n in notes)
 
 
-def test_a_row_only_in_one_file_is_named_not_compared(tmp_path):
+def test_a_row_only_in_one_file_fails_by_default_and_can_be_allowed(tmp_path):
     a = make(tmp_path / "a.stap", [5], {(0, 7): {5: (1.0, 2.0)}, (1, 8): {5: (1.0, 2.0)}})
     b = make(tmp_path / "b.stap", [5], {(0, 7): {5: (1.0, 2.0)}})
     compared, differing, _, notes = tp.compare(tp.read_dump(a), tp.read_dump(b), 1e-6)
-    assert (compared, differing) == (1, 0)
+    assert differing == 1, "a partly written dump must not compare equal"
     assert any("in one file only" in n for n in notes)
+    compared, differing, worst, _ = tp.compare(tp.read_dump(a), tp.read_dump(b), 1e-6, allow_missing=True)
+    assert (compared, differing, worst) == (1, 0, 0.0)
+
+
+def test_two_files_of_different_width_are_not_comparable(tmp_path):
+    a = make(tmp_path / "a.stap", [5], {(0, 7): {5: (1.0, 2.0)}}, n_embd=2)
+    b = make(tmp_path / "b.stap", [5], {(0, 7): {5: (1.0, 2.0, 3.0)}}, n_embd=3)
+    with pytest.raises(tp.FormatError):
+        tp.compare(tp.read_dump(a), tp.read_dump(b), 1e-6)
+
+
+def test_a_stage_missing_a_row_is_a_clean_format_error_on_merge(tmp_path):
+    a = make(tmp_path / "a.stap", [5], {(0, 7): {5: (1.0, 2.0)}, (1, 8): {5: (1.0, 2.0)}})
+    b = make(tmp_path / "b.stap", [15], {(0, 7): {15: (1.0, 2.0)}})
+    with pytest.raises(tp.FormatError):
+        tp.merge([tp.read_dump(a), tp.read_dump(b)], [str(a), str(b)])
+
+
+def test_info_prints_the_layers_and_rows(tmp_path, capsys):
+    p = make(tmp_path / "a.stap", [5, 15], {(0, 7): {5: (1.0, 2.0), 15: (3.0, 4.0)}})
+    assert tp.main(["info", str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "2 taps" in out and "[5, 15]" in out and "1 rows" in out
 
 
 def test_disjoint_stage_files_merge_into_the_whole_window(tmp_path):
