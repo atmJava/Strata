@@ -77,8 +77,9 @@ public:
     /// KV streaming: refill the ring of the drafter's window from its host copy for a sequence that continues at
     /// `upto` (a conversation-cache resume). No-op unless the drafter's K/V is a ring.
     void kv_restore(int64_t upto);
-    /// The VRAM bind() will allocate for a native head of `head_row_bytes` per vocabulary row: the draft logits and
-    /// the draft head over rt/draft_vocab.bin's subset.  The expert cache is sized before bind(), so it reserves this.
+    /// The VRAM bind() will allocate for a native head of `head_row_bytes` per vocabulary row: the draft logits
+    /// (`max_t * n_dvocab * 4`, n_dvocab = the draft head's token subset, or `n_vocab` without one) and the draft head
+    /// over rt/draft_vocab.bin's subset.  The expert cache is sized before bind(), so it reserves this.
     uint64_t bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const;
     /// The main model's embedding and head, and the verify window's final residuals (T rows, hc*n_embd each).
     bool bind(const WeightTable& wt, const NativeHead* head, const float* window_R, std::string& err,
@@ -268,7 +269,7 @@ private:
     // the draft head: the main head's rows for a token subset (rt/draft_vocab.bin), or the whole head
     uint8_t* dhead_ = nullptr;
     int32_t* dvocab_ = nullptr;
-    int64_t n_dvocab_ = 0;
+    int64_t n_dvocab_ = 0;   ///< rows of the draft head (and width of head_logits_); n_vocab_ when there is no subset
     std::string rt_dir_;
     int64_t window_ = 0;        // attention over the last window_ cells (0 = every cell)
     int64_t prompt_len_ = 0;
@@ -298,7 +299,12 @@ private:
     void* hit_scratch_ = nullptr;
     float* sh_scratch_ = nullptr;
     uint16_t* x_bf16_ = nullptr;
+    /// The draft steps' logits, this drafter's own even when it shares weights and draft-head rows: `[max_t_][n_dvocab_]`
+    /// float, row-major, no padding - n_dvocab_ is the draft head's token subset (rt/draft_vocab.bin or --draft-vocab)
+    /// and equals n_vocab_ when the draft head is the whole vocabulary.  A subset's ids are mapped to full token ids after
+    /// the pick (map_ids), so every reader strides/indexes by n_dvocab_, never by n_vocab_.
     float* head_logits_ = nullptr;
+    int64_t head_logits_cap_ = 0;   ///< floats in head_logits_ (grow-only; bind() reallocates when a re-bind needs more)
     float* dummy_inj_ = nullptr;
     int64_t cap_ = 0, attn_scratch_floats_ = 0;
 };

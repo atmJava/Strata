@@ -158,7 +158,7 @@ MtpDrafter::~MtpDrafter() {
     if (owns_weights_ && experts_) cudaFree(experts_);
     if (state_arena_) cudaFree(state_arena_);
     if (arena_) cudaFree(arena_);
-    if (head_logits_) cudaFree(head_logits_);
+    if (head_logits_) cudaFree(head_logits_);   // [max_t_][n_dvocab_]: always this drafter's own, never a shared one's
     if (owns_draft_head_ && dhead_) { strata::kernels::native_q6_k_unpack(dhead_); cudaFree(dhead_); }
     if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
     if (ev_chain_) cudaEventDestroy(ev_chain_);
@@ -275,6 +275,10 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         tensors_ = shared->tensors_;
         owns_weights_ = false;
         owns_draft_head_ = false;
+        // bind() will take the shared drafter's subset (its width is the draft logits' width).  Record what the shared
+        // drafter has now - it may bind after this load - so bind_bytes()/bind() see the same vocabulary file.
+        n_dvocab_ = shared->n_dvocab_;
+        if (dvocab_path_.empty()) dvocab_path_ = shared->dvocab_path_;
     }
     // Loader fix (0.1.15+loaderfix.2): the two reads below are the whole “drafter files” cost; reporting
     // them apart from the rest of the stage is what makes the next regression visible.
@@ -539,15 +543,24 @@ void MtpDrafter::record_top2(int j) {
 }
 
 uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const {
-    uint64_t bytes = head_logits_ ? 0 : (uint64_t) max_t_ * (uint64_t) n_vocab * sizeof(float);
-    if (dhead_ == nullptr && owns_draft_head_ && !full_head_env()) {
+    // The draft logits are [max_t_][n_dvocab_]: the draft head's token subset when one applies, the whole vocabulary
+    // otherwise.  Before bind() the width comes from the file that bind() would read (this drafter's own, or the one a
+    // shared drafter handed over in load()).
+    int64_t n_subset = 0;   // the subset's token count, 0 when the draft head is the whole vocabulary
+    if (dhead_ != nullptr) {
+        n_subset = n_dvocab_ > 0 && n_dvocab_ < n_vocab ? n_dvocab_ : 0;
+    } else if (!full_head_env()) {
         if (FILE* f = std::fopen(vocab_file().c_str(), "rb")) {
             std::fseek(f, 0, SEEK_END);
             const long size = std::ftell(f);
             std::fclose(f);
-            if (size >= 4 && size % 4 == 0) bytes += (uint64_t) (size / 4) * head_row_bytes + (uint64_t) size;
+            if (size >= 4 && size % 4 == 0) n_subset = size / 4;
         }
     }
+    const int64_t n_logits = n_subset > 0 ? n_subset : n_vocab;
+    uint64_t bytes = head_logits_ ? 0 : (uint64_t) max_t_ * (uint64_t) n_logits * sizeof(float);
+    if (n_subset > 0 && dhead_ == nullptr && owns_draft_head_)
+        bytes += (uint64_t) n_subset * head_row_bytes + (uint64_t) n_subset * 4;
     // coupled draft sampling (STRATA_SPEC_COUPLED=1 only): an upper bound - the id -> subset map, the penalty ring,
     // the split scratch (64 lists of 64 entries at most) and the parameters
     if (coupled_draft_env() && cparams_ == nullptr)
@@ -672,11 +685,6 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
     if (!wo) { err = "mtp: output.weight is missing"; return false; }
     n_vocab_ = wo->ne1;
     if (head == nullptr || !head->loaded()) { err = "mtp: the draft layer needs the native head (--native)"; return false; }
-    if (head_logits_ == nullptr &&
-        cudaMalloc((void**) &head_logits_, (size_t) max_t_ * (size_t) n_vocab_ * sizeof(float)) != cudaSuccess) {
-        err = "mtp: the draft logits do not fit";
-        return false;
-    }
     if (shared != nullptr) {
         if (shared->head_ != head || shared->device_ != device_ ||
             shared->n_vocab_ != n_vocab_) {
@@ -742,6 +750,24 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                 strata::kernels::native_q6_k_pack(dhead_, (int) (row_bytes / 210) * 256, (int) n_dvocab_,
                                                   "MTP draft head");
         }
+    }
+    // No subset: the draft head is the main head, so its width is the whole vocabulary (and today's allocation).
+    if (dhead_ == nullptr) n_dvocab_ = n_vocab_;
+    // The draft logits: [max_t_][n_dvocab_] - one row per draft step over the draft head's tokens (the subset when there
+    // is one, the whole vocabulary otherwise).  They are allocated here, once the subset's width is known, and they are
+    // always this drafter's own: a shared instance lends weights and draft-head rows, never its logits, so each batched
+    // slot keeps its own rows.  Growing (a re-bind with a wider head or subset) replaces the buffer; bind() runs before
+    // the graphs are captured.
+    const int64_t logits_floats = (int64_t) max_t_ * n_dvocab_;
+    if (head_logits_cap_ < logits_floats) {
+        if (head_logits_ != nullptr) cudaFree(head_logits_);
+        head_logits_ = nullptr;
+        head_logits_cap_ = 0;
+        if (cudaMalloc((void**) &head_logits_, (size_t) logits_floats * sizeof(float)) != cudaSuccess) {
+            err = "mtp: the draft logits do not fit";
+            return false;
+        }
+        head_logits_cap_ = logits_floats;
     }
     if (coupled_draft_env() && cparams_ == nullptr && !setup_coupled(err)) return false;
     return true;
