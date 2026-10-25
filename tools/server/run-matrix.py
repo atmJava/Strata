@@ -74,7 +74,7 @@ BATCHES: dict[str, list[dict]] = {
              criterion="both ~22K reads answered; per-read wall_s and the neighbour's largest gap printed "
                        "(a measurement, not a threshold)",
              where="local", timeout=900, judge="exit0",
-             cmd=["python3", "tools/server/exp-v2-warmup.py", "{base_url}", "5"]),
+             cmd=["python3", "tools/server/exp-v2-warmup.py", "{base_url}"]),
         dict(id="V1-5", what="the VRAM account under the production shape (six slots, 192K, int8)",
              criterion="both GPUs and the engine's own arena/expert-cache numbers reported; free reserve printed",
              where="local", timeout=180, judge="exit0",
