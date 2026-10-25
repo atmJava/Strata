@@ -227,6 +227,10 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
    依赖、`/opt/ai/strata-data/mtp/rt` 都在。另做了一次**静态阅读（未测）**：引擎侧
    `BRDY <live> <max_new> <0|1>` 四字段与 server 的严格解析（`len>=4`、两个 digit、第三个 0/1）对齐；
    `BCANCEL` → `BCANCELLED`，两侧 drain 都是 10 s。
+   **在线 API 面的定向比对（静态阅读，未测）**：路由表 15 条两侧完全相同；server 的 CLI 参数只多一个
+   `--admission-policy`（launcher 不传，无默认行为变化）；`serve/chat_template.jinja` 与 `serve/images.py`
+   逐字节相同；`serve/frontend.py` 有约 100 行差异（工具调用解析的 alias/declared-only、DeepSeek effort 表），
+   属于 0.2.3 的解析改进，不影响模板。原派出的只读差异审计子代理跑了 35 min 未回报，已中断；以这组定向比对为准。
 1. **一次装**：`ops-v2-window.sh install --go`（引擎 `cp .new && mv`；`serve/` 整树换；`tokenizer` 换；
    launcher/config 不动）→ `use-config.sh`（唯一入口）→ md5 + `grep` 标记 + health +
    `verify-running-config.sh`（要 ARGS MATCH）。起不来：`restore --go` 立刻回滚并停轮。
