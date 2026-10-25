@@ -85,6 +85,9 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 ### batch — one batch, one matrix run
 | file | what it does | notes |
 |---|---|---|
+| `ops-v2-arm.sh` | A/B 臂切换：改 config 的 `env` 键（引擎环境来自 config，不是 launcher）→ `use-config.sh` 重启 → 从 `/proc/<pid>/environ` 读回；默认 dry-run |
+| `exp-v2-prefill-ab.py` | V2b：一次 ~22K 读的 `prompt_ms`/wall + 贪心输出文本与 sha256（`--tag parity` 时两臂同 prompt，可做 parity） |
+| `exp-v2-ab-summary.py` | 两臂 JSON → 中位/离散度/差值；≥3% 才下结论 |
 | `exp-v2-staged-drill.py` | V2-1：跑 `probe_cancel_staged.py` 的场景并按阈值判（读者拿到首 token、关闭后邻居 gap < 2 s 且仍有 token、health 200），再补"长读完成 + 紧跟短请求" |
 | `exp-v2-warmup.py` | V2-4：重启后头 N 个请求的 TTFT/总时长序列（冷/暖，测量不是阈值） |
 | `exp-v2-vram.py` | V1-5：`/metrics` + `nvidia-smi` 的显存账单（两块卡、engine arena/expert-cache、free reserve） |

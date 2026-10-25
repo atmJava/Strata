@@ -228,6 +228,24 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
 3. **回滚**：矩阵后**不回滚**（生产落在新代码上）；若 health 连续 2 次失败 → `restore --go` 并停轮。
 4. **预算**：本批 ≤2 重启；V2b/V2c 各 ≤2；三批合计 5–6，仍在日预算 6 内。
 
+### V2b fused A-B（V2a 之后，独立窗口）
+
+```
+sh tools/server/ops-v2-arm.sh set STRATA_PF_FUSED 1 --go        # 重启 1（臂 A）
+python3 tools/server/exp-v2-prefill-ab.py http://192.168.3.14:8080 3 --tag parity     > /opt/ai/logs/V2b-fused-on-<ts>.json
+sh tools/server/ops-v2-arm.sh set STRATA_PF_FUSED off --go      # 重启 2（臂 B，回到现网默认）
+python3 tools/server/exp-v2-prefill-ab.py ... --tag parity      > /opt/ai/logs/V2b-fused-off-<ts>.json
+python3 tools/server/exp-v2-ab-summary.py on.json off.json --field prompt_ms
+```
+判据：`prompt_ms` 中位差 ≥3% 才下结论；两臂的 `text_sha256` 必须相同（fused 路径不许改输出）。
+若 A 胜、要把生产留在 fused=1，需要第 3 次重启——超过本批 2 次，留给 V2d 或次日。
+
+### V2c S0b A-B（V2b 之后，独立窗口）
+
+同一套 `ops-v2-arm.sh` 换 `STRATA_PIPED_CONCURRENT`，探针用 `exp-v2-warmup.py`（两次 ~22K 冷读期间
+邻居的最大 token 间隔），两臂各 3 跑，`exp-v2-ab-summary.py --field neighbour_gap_s`；判据 ≤1 s 或给出
+可接受上界。
+
 ## 12. 本文件怎么自我更新
 
 - 每批结束只改三处：**§4.2 的状态列**（每项加"实测结果 + 证据路径"）、**§11 下一批**、**§12 末版本行**。
