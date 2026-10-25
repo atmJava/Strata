@@ -7,7 +7,8 @@
 - 当前批次：**V1 完成**（2026-10-25 21:06，矩阵 5/5 PASS）；下一批 **V2（窗口批，排 00:00 后）**
 - 当前项：V2（窗口批：V2-1…V2-4；V2 准备先做）
 - 下一动作：**V2a 窗口 00:05**（`ops-v2-window.sh install --go`；快照 `/opt/ai/tmp/pre-V2-20261025T131022Z/`
-  已 md5sum -c 全过；起不来 `restore --go`；预算 ≤2 重启）
+  已 md5sum -c 全过；起不来 `restore --go`；预算 ≤2 重启）；矩阵 `run-matrix.py --batch V2`（V2-0 装后核对 →
+  V2-4 warmup → V1-5 显存账 → V2-1 staged 演练）
 - 环境：health 200（2026-10-25 20:46 复核）；引擎 0.1.47 / `383b426a`；server `a3c7df58`；launcher `9b6bf792`；
   config `6c362d01`；W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）
 
