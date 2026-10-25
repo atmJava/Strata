@@ -134,7 +134,7 @@ do_verify() {
   say "running engine pid ${pid:-none}: $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-140)"
   say "health: $(health | cut -c1-160)"
   say "== verify-running-config"
-  /opt/ai/bin/verify-running-config.sh 2>&1 | grep -E 'ARGS MATCH|ENV DIFFERENT|MISSING|EXTRA|DIFFERENT|engine pid' | sed 's/^/  /'
+  /opt/ai/bin/verify-running-config.sh 2>&1 | grep -E 'ARGS *:|ENV *:|MISSING|EXTRA|engine pid' | sed 's/^/  /'
 }
 
 do_restore() {

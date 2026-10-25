@@ -4,18 +4,19 @@
 
 - 目标：持续优化循环（`EVERGREEN_LOOP.md`；不设完成，直到用户叫停）；当前主线 = 移植代码的服务器验证战役
   V0→V3（`SELF_ITERATION_PLAN.md` §4）
-- 当前批次：**V2a 完成**（2026-10-25 21:40–21:55，部署 PASS，矩阵 4/4 PASS，S0c 未达）；下一批 **V2b fused A-B**
-- 当前项：V2b（fused 两臂，各 1 次重启）
-- 下一动作：**V2b fused 两臂**（`STRATA_PF_FUSED` 0→1，各 1 次重启；`run-matrix.py` 的 V2 批已含 V2-0 装后核对，
-  V2b 的臂要用 `ops-v2-arm.sh set STRATA_PF_FUSED 1 --go` 换臂）；之后 V2c（`STRATA_P0_ENABLE` 0→1）。
-- 环境（V2a 装后实测，2026-10-25 21:52Z）：health 200；引擎 **0.1.49.1** / `84a0d410`；server **`b6b695a1`**
+- 当前批次：**V2b 完成**（2026-10-25 14:00–14:07Z，fused A-B：+0.61% <3% → 否决，parity 过，臂已恢复默认）；下一批 **V2c S0b A-B**
+- 当前项：V2c（`STRATA_PIPED_CONCURRENT` 两臂）
+- 下一动作：**V2c S0b A-B**（`STRATA_PIPED_CONCURRENT` 1→0，各 3 跑邻居停顿；`ops-v2-arm.sh set
+  STRATA_PIPED_CONCURRENT 0 --go` 换臂，测完恢复 1 并 `cmp -s` 快照）；S0b 的判据是邻居停顿 ≤1 s 或给出上界。
+- 环境（V2a 装后实测，2026-10-25 13:52Z）：health 200；引擎 **0.1.49.1** / `84a0d410`；server **`b6b695a1`**
   （`/opt/ai/src/strata-port-v1/serve/server.py`）；launcher `0eeee160`；config `6c362d01`（未动）；
   W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）；
   `ARGS : MATCH`、`ENV : DIFFERENT` 只有 launcher 的 `STRATA_MP_STAGED_READ_MIN_TOKENS`。
 - **V2a 结果**：矩阵 4/4 PASS（V2-0 装后核对、V2-4 warmup、V1-5 显存账、V2-1 S0d+长读+短请求）；
-  **S0c 未达（前提不成立）**：引擎被 kill 后 server 不退出、health 仍 200，并发请求把重启中的引擎反复杀掉、
-  恢复期 503；`use-config.sh` 重启恢复。证据 `/opt/ai/logs/V2a-matrix-20261025T1345Z/`。
-- **新发现（进队列）**：① 引擎崩溃自愈在并发下反复重启/杀引擎 + health 不反映引擎状态（M8）；
+  **S0c 未达（前提不成立）**：引擎被 kill 后 server 不退出（journal 无 systemd 事件）、`loaded`/health 仍报 true；
+  在途 7 请求各报一次 `engine stopped unexpectedly (-9)`（同一个 kill 的 7 次报告）；此后**没有自动重启**，
+  后续请求 503 直到 `use-config.sh` 重启（~183 s）。证据 `/opt/ai/logs/V2a-matrix-20261025T1345Z/`。
+- **新发现（进队列）**：① 引擎崩溃后**不自动重启**、health/loaded 仍报 true、请求 503 到手动重启（M8）；
   ② `probe-version-stamp.py` 固定读 0.2.2 树，要按 launcher 定位（V2a 读到的是旧文件）。
 - **第一次装失败的教训（已恢复）**：0.2.3 `serve/` 覆盖 0.2.2 树 → `ImportError: strata_control.tls`，
   服务重启循环；`restore --go` 恢复。最终部署形状 = 引擎进 0.2.2/build、launcher 指向自包含 port 树、

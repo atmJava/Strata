@@ -78,7 +78,7 @@
 | V1-4 | `static_assert(CHUNK==64 && THREADS==256)` 锁死在服务器构建里生效 | `-D...CHUNK=128` 编译被拒（exit≠0），默认构建通过 | 构建日志 | F |
 | V1-5 | P2① RoPE 借用 + ③ logits 宽度的**显存账**在生产形状下真省（48 MiB/session、30.34 MiB/7 drafter） | INFO 行里的实测字节与代码公式差在噪声内 | `expert_cache_mib/slots`、session 定容打印、`vram-perf.csv` | W（1 次重启） |
 | V2-1 | staged read 在现网跑通且不遗留（S0c/S0d 的服务器判据） | 断开不吞别人的 `T`/`DONE`（S0c 原判据不成立，改写为 S0e） | 结构化日志（请求 id + 阶段 + 槽号）+ `test_mp_staged_*` | W |
-| V2-2 | P3c fused（`STRATA_PF_FUSED=1`）在现网 IQ3_XXS 上的**端到端**行为与速度 | 同 boot A-B-A：fused 开/关，prompt 时间中位差 ≥3% 才下结论；输出逐窗 parity 过 | `--stage-timing`/`STRATA_*_TIMING` 相位、`parity_window.py` | W + G |
+| V2-2 | P3c fused（`STRATA_PF_FUSED=1`）在现网 IQ3_XXS 上的**端到端**行为与速度 | 同 boot A-B：fused 开/关，prompt 时间中位差 ≥3% 才下结论；输出 parity 过（**V2b 实测 +0.61%，否决；文本 sha 相同**） | `exp-v2-prefill-ab.py`、`exp-v2-ab-summary.py` | W |
 | V2-3 | 冷读邻居停顿（S0b，M4 3.43 s → ≤1 s） | 同 boot A-B：`STRATA_PIPED_CONCURRENT=1/0` 邻居停顿 ≤1 s，或给出可接受上界 | 每请求 TTFT/queue/ITL（新 `metrics`）+ `warmup.py` | W |
 | V2-4 | warmup.py 自己的断言（第一次长读 ~10 s、第二次 0.6 s） | 实测两次冷读的邻居停顿，写进台账；**先量仪器代价**（V2a 实测：29.37 s / 0.73 s，邻居 28.48 / 0.15 s） | warmup 前后 /metrics 快照 | W |
 | V3-1 | C1 容量矩阵（6×192K / 8×128K） | 6/8 路聚合 ≥ 基线−3%、单路 ≥15 tok/s、晚到首 token ≤ 读时间+2 s、邻居 ≤1 s | `bench-strata.py`（`BENCH_N=6/8`）+ `warmup.py` | W + G |
@@ -93,12 +93,15 @@
 - **V1-1…V1-5 全 PASS**（2026-10-25 13:06Z；`/opt/ai/logs/V1-matrix-20261025T2115Z/`）：构建 7m01s / 0 错，
   产物 0.1.49.1 `84a0d410`；单测 61 passed / 10 skipped / 0 failed；`isa_guard_check` 2.36 s；64/256 锁死；
   staged wedge 3 passed。**仍不是端到端**——那要 V2 窗口。
-- **V2a 完成**（2026-10-25 21:40–21:55Z；`/opt/ai/logs/V2a-matrix-20261025T1345Z/`）：0.1.49.1（`84a0d410`）
+- **V2a 完成**（2026-10-25 13:40–13:55Z；`/opt/ai/logs/V2a-matrix-20261025T1345Z/`）：0.1.49.1（`84a0d410`）
   + 0.2.3 自包含树（server `b6b695a1`，launcher `0eeee160`，config 未动）上生产；矩阵 4/4 PASS
   （V2-0 装后核对、V2-4 warmup、V1-5 显存账、V2-1 S0d）。V2-4 首读 29.37 s / 邻居 28.48 s（冷启动，不结论）。
-  **S0c 未达（前提不成立）**：kill 引擎后 server 不退出、health 200，并发请求反复重启/杀引擎、恢复期 503。
-  第一次装失败（0.2.3 serve 覆盖 0.2.2 树缺 `strata_control.tls`）已恢复；见 L-058。
-- V2b（fused A-B）、V2c（S0b A-B）、V3-1…V3-3：**未开始**（V2b/V2c 各需 2 次重启；V3-2/V3-3 等 drafter 权重）。
+  **S0c 未达（前提不成立）**：kill 引擎后 server 不退出、health 仍报 true，且**没有自动重启**，请求 503
+  直到手动重启（~183 s）。第一次装失败（0.2.3 serve 覆盖 0.2.2 树缺 `strata_control.tls`）已恢复；见 L-058。
+- **V2b 完成**（2026-10-25 14:00–14:07Z；`/opt/ai/logs/V2b-fused-20261025T1359Z/`）：fused A-B `prompt_ms` 中位
+  A 10968.9 / B 11035.6 = **+0.61%**（去首跑 +0.46%）<3% → **否决**；两臂文本 sha 相同（parity 过）；臂已恢复默认
+  （config 与快照逐字节一致）。只测了 22K 冷读一条形状，不作一般结论。
+- V2c（S0b A-B）、V3-1…V3-3：**未开始**（V2c 需 2 次重启；V3-2/V3-3 等 drafter 权重）。
 
 ### 4.3 批的划分（一次做完一批，一次测完一批）
 
@@ -219,7 +222,7 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
 `isa_guard_check` 2.36 s、64/256 锁死、staged wedge 3 passed。**0 生产改动、0 重启。** 首跑 12 failed 的
 唯一原因是测试 venv 缺 `jinja2`/`regex`（已写进 `tools/server/tests/README.md`）。
 
-### V2a 部署窗口（**已完成 2026-10-25 21:40–21:55Z**；结果见 L-058 / MULTIPATH_LOG · V2a）
+### V2a 部署窗口（**已完成 2026-10-25 13:40–13:55Z**；结果见 L-058 / MULTIPATH_LOG · V2a）
 
 0. **准备（已做，不碰生产）**：`tools/server/ops-v2-window.sh`（默认 dry-run；`snapshot --go` 已在 21:10
    取好 `/opt/ai/tmp/pre-V2-20261025T131022Z/` 并 `md5sum -c` 全过）；0.1.49.1 的 `--help` 不列全 54 个 args
@@ -250,9 +253,10 @@ md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑�
    2 s 的邻居 gap 门槛是"取消场景不停"的界（S0b 的 1 s 门槛属于 V2c）。V2-2/V2-3 拆到 V2b/V2c（各需一次重启/臂）。
 3. **回滚**：矩阵后**不回滚**（生产落在新代码上）；若 health 连续 2 次失败 → `restore --go` 并停轮。
 4. **S0c 的 kill 场景（实跑，判据不成立）**：6 个邻居占满槽 + 22K 冷读（staged）→ `kill -9` 引擎。
-   实测：server **不退出**（health 一直 200），在途请求报错；随后每个请求触发一次引擎重启，重启中的引擎被
-   并发请求反复杀掉（4 轮 `engine stopped unexpectedly (-9)` + `done: N tokens in 10 s (error)`），我们的短请求
-   收到干净的 503。→ **S0c 否决（前提不成立）**，真实失败模式改写为 S0e（进队列）。
+   实测：server **不退出**（journal 无 systemd 事件）、`loaded`/health 仍报 true；在途的 7 个请求各打印一次
+   `engine stopped unexpectedly (-9)`（同一个 kill 的 7 次报告，不是 7 次重启）；此后**没有自动重启**（无新
+   `engine started:`），后续请求 503（`...it was not sent`）直到 `use-config.sh` 重启（~183 s）。
+   → **S0c 否决（前提不成立）**，真实失败模式改写为 S0e（进队列）：崩溃后不自动重启、health 不反映引擎状态。
    服务没回来就 `use-config.sh` 恢复（**恢复优先于预算**，这一条不受 ≤2 约束）。V2-1 只判 S0d；
    S0c 没做就照实写"未达（S0c 未测）"，不拿它冒充通过。
 5. **预算**：**用户 2026-10-25 21:33 取消重启限制**（"可以随时重启服务，重启服务器"），原 ≤2/批、≤6/日
@@ -285,6 +289,7 @@ python3 tools/server/exp-v2-ab-summary.py on.json off.json --field prompt_ms
 ---
 
 **版本行**
+- v6 · 2026-10-25 22:10 · V2b 收尾：§4.2 进度（fused +0.61% 否决/parity 过/臂已恢复）、V2-2 判据行补实测、下一步 V2c；判据与阈值未动。
 - v5 · 2026-10-25 22:05 · V2a 收尾：§4.2 进度（部署 PASS / 矩阵 4/4 / S0c 否决-前提不成立）、§11 的 V2a
   改成实际部署形状与失败教训（自包含树，不能只覆盖 serve/）、下一步 V2b；判据与阈值未动。
 - v4 · 2026-10-25 21:12 · V2 拆批：`STRATA_PF_FUSED` 与 `STRATA_PIPED_CONCURRENT` 都是进程级 static

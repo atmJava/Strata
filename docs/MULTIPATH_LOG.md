@@ -8,6 +8,89 @@
 
 ---
 
+## V2b · 2026-10-25 · fused A-B：22K 读的 prompt 时间 +0.61%（<3%，否决），输出文本一致
+
+- **改了什么**：只换臂，不改代码。臂 A = `STRATA_PF_FUSED` 不设（默认关，V2a 的部署）；臂 B = `ops-v2-arm.sh
+  set STRATA_PF_FUSED 1 --go`（改 config env + `use-config.sh` 重启，1 次）；测完从快照恢复 config 并重启（1 次）。
+- **数字**（`prompt_ms` 中位；每臂 3 跑；`exp-v2-prefill-ab.py`）：
+  - A：24597.2（冷）/ 10956.2 / 10968.9 → 中位 **10968.9**，去首跑中位 10962.6。
+  - B：20188.3（冷）/ 10990.3 / 11035.6 → 中位 **11035.6**，去首跑中位 11013.0。
+  - **B−A = +0.61%**（去首跑 +0.46%）→ **<3%，不下结论**；两臂文本 sha256 相同 `64140bc330e9…` → **parity 过**。
+- **确认两臂不同**：fused 臂的启动日志有 `strata: prompt fused experts (sm_75): … IQ3_XXS / IQ4_NL set up at both
+  shapes (WW=2 46592 B, WW=4 60672 B fits)`（仅 1 条，属于 13:59:03 的启动）；关的臂没有。
+- **恢复**：臂后 config 从快照恢复并 `cmp -s` **逐字节一致**（`6c362d01`）；引擎环境已无 `STRATA_PF_FUSED`；
+  health 200、engine 0.1.49.1。
+- **预期**：没有预设 fused 一定快；<3% 就按规则不下结论。离散度大（A 124%、B 83%）来自两臂首跑都是冷启动。
+- **自检**：health 200；`cmp -s` 恢复验证；四问绿（无残留、cron/timer 正常）；queue/STATE 一致（18）。
+- **四问**：① cron/timer 正常；② 无残留；③ vram-perf 稳定；④ 方向：V2c（S0b 1/0 两臂）。
+- **预算**：重启 3（臂 B 1、恢复 1、加上臂 A 本就用 V2a 的部署；用户已取消重启限制）。
+- **没测什么**：decode/MTP 路径；只一条 prompt 形状与 max_tokens；无 B-A-A 反向复测；无第二次重复（首跑冷启动污染中位）。
+- **下一批第一件事**：V2c——`STRATA_PIPED_CONCURRENT` 1→0 两臂，各 3 跑邻居停顿，判据 ≤1 s 或给出上界。
+
+### Gate（本轮）
+- 轮次：V2b
+- 项：V2b
+- 验收判据：同 boot A-B 的 `prompt_ms` 中位差 ≥3% 才下结论；输出文本 parity 过
+- 实现：只换臂（`ops-v2-arm.sh`），无代码改动
+- 测试：`python3 tools/server/exp-v2-prefill-ab.py http://192.168.3.14:8080 3` 两臂 + `exp-v2-ab-summary.py` → PASS（两臂各 3 跑，无失败）
+- 生产：health 200；engine 0.1.49.1 / `84a0d410`；server `b6b695a1`；launcher `0eeee160`；config 恢复 `6c362d01`；无 `STRATA_PF_FUSED`
+- 证据：`/opt/ai/logs/V2b-fused-20261025T1359Z/`（armA.json、armB.json）、`strata-022.log` 的 fused 标记、`/tmp/v2b-armB.log`、`/tmp/v2-restore-default.log`；脚本 `exp-v2-prefill-ab.py`、`exp-v2-ab-summary.py`
+- 回滚：快照 `pre-V2-20261025T133346Z/strata-022.json`（`cmp -s` 一致）
+- 台账：L-059
+- 剩余未完成项：18
+- 没测什么：decode/MTP 路径、其他 prompt 形状、反向复测、第二次重复
+
+---
+
+## V2a · 2026-10-25 · 窗口批：0.1.49.1 + 0.2.3 自包含树上生产（矩阵 4/4 PASS；S0c 前提不成立）
+
+- **改了什么**：生产部署。引擎 `84a0d410`（0.1.49.1）进 `/opt/ai/src/strata-0.2.2/build/strata`；launcher
+  `0eeee160` 改为跑自包含 port 树 `/opt/ai/src/strata-port-v1/serve/server.py`（`b6b695a1`）；**config 未动**
+  （`6c362d01`，54 args / 17 env），这样 `use-config.sh` 的重启检测与 `verify-running-config.sh` 照旧可用。
+- **第一次失败（已恢复）**：先把 0.2.3 的 `serve/` 覆盖到 0.2.2 树 → `ImportError: cannot import name 'tls'
+  from 'strata_control'`，服务重启循环；`ops-v2-window.sh restore --go` 恢复（引擎 `383b426a`、server
+  `a3c7df58`、health 200），随后改用自包含树。
+- **数字**：
+  - V2-0：engine **0.1.49.1**、`batch_slots 6`、`expert_slots 17872`（0.1.47：17755）、`max_context 192000`、`kv int8`；
+    `ARGS : MATCH`（54 条全在 + 5 条 server 注入）、`ENV : DIFFERENT` 只有 launcher 的
+    `STRATA_MP_STAGED_READ_MIN_TOKENS`。
+  - V2-4：~22K 冷读 **29.37 s**，邻居最大间隔 **28.48 s**（邻居 29 tokens）；第二次读 **0.73 s**，邻居间隔 **0.15 s**。
+    （与文档 S0b 的 3.43 s 不是同一条件：这里是重启后首读；**不作结论**。）
+  - V1-5：`expert_cache_mib 29227`、`arena_mib 18987`、`vram_free_mib 1009`、`kv_resident 32768`；两张 2080 Ti
+    都报（22.7/22.6 GB、54/47 °C）；RAM 45.6 GB。
+  - V2-1（只判 **S0d**）：取消暂存读者后 6 邻居继续（`gap_after_close 0.13 s`、`tokens_after_close 5562`），
+    health 200；长读 6.04 s、短请求 0.64 s。**同一演练的 `neighbour_gap_max_s` 是 10.83 s**（暂存读等待期间），
+    判据说的是"取消之后不停"。日志 staged sent/done/adopted 511/510/509、cancelled 1、重启后 0 traceback。
+  - **S0c 未达（前提不成立）**：`kill -9` 引擎后 server **不退出**（journal 无 systemd 事件）、`loaded`/health
+    仍报 true；在途的 7 个请求各打印一次 `engine stopped unexpectedly (-9)`（同一个 kill 的 7 次报告，不是 7 次
+    重启）；此后**没有自动重启**（无新 `engine started:`），后续请求拿到 503（`...it was not sent`），直到
+    `use-config.sh` 重启（**~183 s**，冷加载 ~165 s）。
+- **预期被推翻**：S0c 的设计假设"引擎死了 server 会退出、systemd 拉起新进程"——实际 server 是引擎的监督者，
+  不退出，也**没有自动重启**（实测 503 直到手动重启）；因此"新进程可服务"这个判据不成立，"健康检查 = 能服务"
+  也不成立。
+- **自检**：health 200；四问绿（无残留、cron/timer 正常、vram 58.6/92.2）；queue/STATE 一致；`round_gate` 待过。
+- **四问**：① cron/timer 正常；② 无残留安装/构建进程；③ vram-perf 稳定；④ 方向：V2b fused 两臂。
+- **预算**：重启：V2a 共 4 次（第一次装 1、恢复 1、正式装 1、S0c 后恢复 1；13:34–13:52Z）——**用户 21:33 已明确当前无重启限制**，
+  原 ≤2/批、≤6/日只作记录。
+- **没测什么**：S0c 的"新进程可服务"；3 次重复（单轮矩阵）；V2b/V2c 的臂；首读 29.4 s 的复现；
+  引擎崩溃后"无并发单请求"的自愈是否干净。
+- **下一批第一件事**：V2b 臂 A/B（`STRATA_PF_FUSED` 0→1，各 1 次重启），`exp-v2-prefill-ab.py` 3 次 + parity。
+
+### Gate（本轮）
+- 轮次：V2a
+- 项：V2
+- 验收判据：V2-0 装后核对一致；V2-4 两次读都答完并打印数字；V1-5 双卡与引擎账都出数；V2-1 S0d 判据通过；S0c 前提成立才判
+- 实现：引擎 `84a0d410` 部署 + launcher `0eeee160` 指向自包含 port 树；config 未动
+- 测试：`python3 tools/server/run-matrix.py --batch V2 --out-dir /tmp/V2-matrix-20261025T1345Z` → PASS（4/4）
+- 生产：health 200；engine 0.1.49.1 / `84a0d410`；server `b6b695a1`；launcher `0eeee160`；config `6c362d01`；`ARGS : MATCH`
+- 证据：`/opt/ai/logs/V2a-matrix-20261025T1345Z/`（summary.json + V2-0/V2-4/V1-5/V2-1 日志 + V2-s0c-kill/s0c2/recover）、`/opt/ai/logs/V2a-install-20261025T1342Z.log`；脚本 `run-matrix.py`、`ops-v2-window.sh`
+- 回滚：`/opt/ai/tmp/pre-V2-20261025T133346Z/`（md5sum -c 过）+ `ops-v2-window.sh restore --go`（本次实跑过一次，成功）
+- 台账：L-058
+- 剩余未完成项：18（S0c 否决，S0d 本次 PASS 待复核后从清单移出；V2b/V2c 未做）
+- 没测什么：S0c 前提、3 次重复、V2b/V2c 臂、首读 29.4 s 复现、无并发崩溃自愈
+
+---
+
 ## V1 · 2026-10-25 · 免停机批：服务器源码树全绿（构建 7m01s / 0 错；单测 61 passed / 10 skipped；isa_guard PASS；64-256 锁死；staged wedge 3 passed）
 
 - **改了什么**：**无生产改动、无仓库代码改动**。把 HEAD `2294d4de` 用 `git archive` 落到实验树
