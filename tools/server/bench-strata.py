@@ -38,8 +38,17 @@ CONCURRENT_PROMPTS = [
     "用大约 400 字解释混合专家（MoE）模型的工作原理，包括路由与负载均衡。",
     "用大约 400 字解释为什么 NVMe SSD 的随机读延迟比机械硬盘低两个数量级。",
     "用大约 400 字解释 Transformer 里 KV 缓存的作用，以及它为什么随上下文线性增长。",
-    "用大约 400 字解释 speculative decoding（投机解码）如何在不改变输出的前提下加速。",
+    "用大约 400 字解释 speculative decoding（投机解码）如何在不改变输出的前提下加速。",    "用大约 400 字解释为什么 PCIe 4.0 x16 的双向带宽要按单向标称值的一半来算。",
+    "用大约 400 字解释 NUMA 架构下跨节点访存为什么比本地访存慢。",
+    "用大约 400 字解释为什么 batch size 越大，单 token 的边际延迟越低。",
+    "用大约 400 字解释操作系统页缓存（page cache）对模型权重读取的影响。",
 ]
+
+# BENCH_N: how many streams the concurrent arm runs (default 4, the M1 shape).  The capacity matrix
+# (C1) needs 6 and 8 slots; the prompts repeat if N exceeds the topics.
+N = int(os.environ.get("BENCH_N", "4"))
+if not 1 <= N <= len(CONCURRENT_PROMPTS):
+    raise SystemExit(f"BENCH_N must be 1..{len(CONCURRENT_PROMPTS)}, got {N}")
 
 
 def call(prompt: str) -> dict:
@@ -108,7 +117,7 @@ def metrics_totals() -> dict:
 def acceptance_between(t0: dict, t1: dict, expected_requests: int) -> dict:
     """两次 /metrics 累计值之差，并把"这台机器上还有别人在跑"这件事写清楚。
 
-    期望请求数 = 每轮 1 个单流 + 4 个并发 = 5×轮数。差值里的请求数若比这个大，
+    期望请求数 = 每轮 1 个单流 + N 个并发 = (1+N)×轮数。差值里的请求数若比这个大，
     多出来的就是别人的流量（很可能是驱动这次实验的那个 agent 会话自己），
     接受率就被污染了——所以这里明写 foreign_requests，而不是假装整段都是我们的。"""
     if "error" in t0 or "error" in t1:
@@ -157,8 +166,8 @@ def main(argv: list[str]) -> int:
         print(f"        单请求 {one['tokens']} tokens / {one['wall_s']:.1f}s = {single_tok_s:.1f} tok/s")
 
         started = time.time()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(call, p) for p in CONCURRENT_PROMPTS]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=N) as pool:
+            futures = [pool.submit(call, p) for p in CONCURRENT_PROMPTS[:N]]
             runs = [f.result() for f in futures]
         wall = time.time() - started
         total_tokens = sum(r["tokens"] for r in runs)
@@ -166,7 +175,7 @@ def main(argv: list[str]) -> int:
         aggregates.append(agg)
         walls.append(wall)
         slowest.append(max(r["wall_s"] for r in runs))
-        print(f"        4 并发 {total_tokens} tokens / 墙钟 {wall:.1f}s = {agg:.1f} tok/s 聚合"
+        print(f"        {N} 并发 {total_tokens} tokens / 墙钟 {wall:.1f}s = {agg:.1f} tok/s 聚合"
               f"  (最慢单个 {max(r['wall_s'] for r in runs):.1f}s)")
         time.sleep(2)
 
@@ -185,11 +194,11 @@ def main(argv: list[str]) -> int:
     result["concurrent_slowest_s_median"] = round(median(slowest), 1)
     print()
     print(f"  中位数：单请求 {result['single_tok_s_median']} tok/s | "
-          f"4 并发聚合 {result['concurrent_agg_tok_s_median']} tok/s | "
+          f"{N} 并发聚合 {result['concurrent_agg_tok_s_median']} tok/s | "
           f"墙钟 {result['concurrent_wall_s_median']}s | 最慢单个 {result['concurrent_slowest_s_median']}s")
 
     t1 = metrics_totals()
-    acc = acceptance_between(t0, t1, 5 * reps)
+    acc = acceptance_between(t0, t1, (1 + N) * reps)
     result["draft_acceptance"] = acc
     if "error" in acc:
         print(f"  投机 draft 接受率：读不到（{acc['error']}）")
