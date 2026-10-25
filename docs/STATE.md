@@ -9,7 +9,7 @@
 - 环境：health 200 / 引擎 `383b426a` / server `52b84d54` / W3 启用（阈值 4096）
 - 备份：`/opt/ai/tmp/mp-w3-A3-*`（引擎/server/launcher/config）
 - 上轮：R10（L-054；A-B-A 闭环）
-- 未完成采纳项：15（见 `WORK_QUEUE.md`）
+- 未完成采纳项：17（见 `WORK_QUEUE.md`；R12 审计新增 S0c/S0d）
 
 ## 指标快照（每轮更新）
 
