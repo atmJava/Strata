@@ -1,0 +1,26 @@
+#!/bin/sh
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0;; esac
+. /usr/share/initramfs-tools/hook-functions
+
+KO=""
+for c in "/lib/modules/$version/updates/dkms/tu102_execute.ko" \
+         "/lib/modules/$version/extra/tu102_execute.ko" \
+         "/lib/modules/$version/updates/dkms/tu102_execute.ko.zst"; do
+    [ -f "$c" ] && KO="$c" && break
+done
+if [ -n "$KO" ]; then
+    mkdir -p "$DESTDIR/lib/modules/$version/extra"
+    case "$KO" in
+        *.zst) zstd -dc "$KO" > "$DESTDIR/lib/modules/$version/extra/tu102_execute.ko" ;;
+        *) cp "$KO" "$DESTDIR/lib/modules/$version/extra/tu102_execute.ko" ;;
+    esac
+    chmod 644 "$DESTDIR/lib/modules/$version/extra/tu102_execute.ko"
+else
+    echo "tu102-unlock: no module for $version; boot stays locked" >&2
+fi
+if [ -d /lib/firmware/tu102-lab ]; then
+    mkdir -p "$DESTDIR/lib/firmware/tu102-lab"
+    cp /lib/firmware/tu102-lab/*.bin "$DESTDIR/lib/firmware/tu102-lab/"
+fi

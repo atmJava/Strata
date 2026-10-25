@@ -1,0 +1,38 @@
+#!/bin/sh
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0;; esac
+KVER=$(uname -r)
+TARGETS="0000:03:00.0,0000:04:00.0"
+log() { echo "tu102: $*" > /dev/kmsg; }
+KO=""
+for p in "/lib/modules/$KVER/extra/tu102_execute.ko" "/usr/lib/modules/$KVER/extra/tu102_execute.ko"; do
+    [ -f "$p" ] && KO="$p" && break
+done
+log "ko=$KO kver=$KVER targets=$TARGETS"
+[ -z "$KO" ] && exit 0
+if [ -x /usr/bin/insmod ]; then
+    ERR=$(/usr/bin/insmod "$KO" target="$TARGETS" execute=1 2>&1); RC=$?
+elif [ -x /usr/sbin/insmod ]; then
+    ERR=$(/usr/sbin/insmod "$KO" target="$TARGETS" execute=1 2>&1); RC=$?
+else
+    ERR=$(/usr/bin/busybox insmod "$KO" target="$TARGETS" execute=1 2>&1); RC=$?
+fi
+log "insmod rc=$RC err=$ERR"
+for b in 03:00.0 04:00.0; do
+    OVR=/sys/bus/pci/devices/0000:$b/driver_override
+    if [ -f "$OVR" ] && [ "$(cat "$OVR" 2>/dev/null)" = "tu102-experiment-hold" ]; then
+        echo > "$OVR" 2>/dev/null
+        log "cleared stale override on $b"
+    fi
+done
+if grep -q "tu102_execute" /proc/modules 2>/dev/null; then
+    RES=$(cat /sys/module/tu102_execute/parameters/result 2>/dev/null)
+    HS=$(cat /sys/module/tu102_execute/parameters/handoff_safe 2>/dev/null)
+    log "result=$RES handoff_safe=$HS"
+    if [ "$HS" != "Y" ]; then
+        log "STOP unsafe GPU state; full power off required"
+        while :; do sleep 3600; done
+    fi
+fi
+exit 0
