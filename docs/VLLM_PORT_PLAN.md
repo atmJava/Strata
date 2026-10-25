@@ -66,6 +66,10 @@ Strata 有 DFlash2 实现（`dflash2.cpp/.cu`，7 drafts + selector）但生产�
 - 生产配置（`--serve`/`--batch`/多卡）下 df2 **本就不启用**（`generate.cpp:5476-5480`），所以这条移植的收益
   全部来自"打开它"，不是修 bug；VRAM 账：共享权重设计 ≈ 0.76 + 0.2 + 6×0.25 ≈ **2.5 GiB**（全压最后 stage），
   顶替 batch_mtp 时回收 slot_mtp 私有 K/V。
+- **验证前置（已核实，2026-10-25）**：`dflash2_parity <pack> <case.bin>` 需要 DFlash2 drafter 的
+  safetensors+config（`tools/dflash2/mk_parity_case.py` 用 torch 参考生成 case）。服务器上**没有**这份权重
+  （`/opt/ai` 下只有 fork 自己的 `quality-smoke-dflash2-*.json` 日志，那是 vLLM 侧的），所以 df2 的 kernel 级
+  验证在拿到 drafter 权重前做不了——A1 之前需要用户提供该 checkpoint 或批准在部署窗口内贴。
 
 ### P2 · draft/target 显存与容量 accounting 审计（"更强"= 更多槽，直连队列项 C1）
 
