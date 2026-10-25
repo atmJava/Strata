@@ -169,6 +169,28 @@ fork 在 Triton TQ decode 上发现 BLOCK_KV=2 对 Turing 寄存器/shared 平�
   （服务器 ≤1 GiB 内可跑）；只有胜出 ≥5%（跨 boot 噪声门，`runtime_flag` 同 boot A/B）才动默认。
 - 验证：`qsa_rows_bench`/`qsa_select_bench` 扩展 + parity 全绿。
 
+**实测（2026-10-25，服务器卡 1，`qsa_rows_bench --ctx 131072 --max-context 131072 --iters 30 --rows`，
+int8 池、真实几何、无模型，单 QSA 层每次调用 µs，3 次中位数）**：
+
+| 阶段 | T=1 | T=2 | T=3 | T=4 | 每行增量 |
+|---|---:|---:|---:|---:|---:|
+| scores `qsa_block_scores` (multi) | 37.2 | 39.9 | 49.6 | 51.0 | +4.6 µs |
+| topk `qsa_block_topk` | 39.2 | 40.0 | 40.4 | 40.5 | +0.4 µs |
+| **attn over selection (cap 2051)** | 41.2 | 49.5 | 81.4 | 95.4 | **+18.1 µs** |
+| append indexer | 2.7 | 2.7 | 2.6 | 2.5 | ±0 |
+| 层合计 | 133.9 | 143.3 | 185.6 | 170.9 | +12.3 µs |
+
+换算：每行 12.3 µs/QSA 层 → 4 层 stage0 0.05 ms、8 层 stage1 0.10 ms（该 bench 口径）。
+
+**两条结论**：
+1. **Turing 上每行代价的大头是"对选择集做注意力"（+18.1 µs/行），不是 block scores（+4.6）**——fork 的
+   BLOCK_KV=2 直觉要落的地方是 `qsa_decode_attn_batch`（CHUNK=64 是编译期常量，无 env，需变体构建对比），
+   P4 的扫描应聚焦它，`qsa_select` 只是次要项。
+2. `STRATA_QSA_ROWS=1`（`block_scores_rows`）在 Turing **不是单调赢**：scores/ids 与 multi 逐位相同（8 cases
+   0 differ），但 T=1 −1.4 µs、T=2 −2.3 µs、T=3 +0.7 µs、T=4 +7.4 µs —— T≥3 反向。所以**不默认开**；
+   若要开，正确形态是"仅 NQ≤2 时走 rows kernel"（当前开关只按 env 判，不看 NQ）。收益上限 ~2 µs/层/窗（<0.5%）。
+
+
 ### P5 · server 侧 Qwen3 parser 正确性修复 → **判定：已覆盖，不移植**（2026-10-25 核实）
 
 fork 修复的三件事 Strata 都有等价实现且各有测试：①函数名只在 `tool_start` 发一次
