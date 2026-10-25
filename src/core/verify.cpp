@@ -64,6 +64,7 @@
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <optional>
 #include <thread>
@@ -797,6 +798,21 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             for (size_t at = tap_file_path.find("%d"); at != std::string::npos;
                  at = tap_file_path.find("%d", at + stage.size()))
                 tap_file_path.replace(at, 2, stage);
+            // two verifiers of one process can sit on the same layer range (the pipeline parity pair), and both open
+            // "wb": the second would cut the first one's records away.  The second one gets its own name instead.
+            static std::mutex used_mu;
+            static std::set<std::string> used;
+            std::lock_guard<std::mutex> lk(used_mu);
+            if (!used.insert(tap_file_path).second) {
+                std::string cand;
+                for (int n = 1;; ++n) {
+                    cand = tap_file_path + ".v" + std::to_string(n);
+                    if (used.insert(cand).second) break;
+                }
+                std::fprintf(stderr, "strata verify: STRATA_TAP_FILE %s is already open in this process; this verifier writes %s\n",
+                             tap_file_path.c_str(), cand.c_str());
+                tap_file_path = cand;
+            }
         }
     }
     if (tap_path != nullptr || !tap_req_.empty()) {
@@ -3157,6 +3173,10 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             err = "verify: the all-resident plan met an expert that is not in VRAM (the residency table changed during the window)";
             return false;
         }
+        // a stage-private STRATA_TAP_FILE ("%d"): the graph copied this stage's taps into the mapped buffer already
+        // (record_window does it in the overlapped branch too), so its records go out here - the `le_ < n_layers`
+        // write below is never reached in the overlapped split
+        if (tap_on_ && tap_file_ != nullptr && tap_path_per_stage_) tap_write(T, tokens, pos0);
         commit_pending_ = false;
         if (prof_on_ && G == 1) collect_profile();
         return true;
