@@ -51,14 +51,25 @@ fork 教训：共享池 accounting 曾把 DFlash2 限到约 1/6 容量；修复 
   （6×192K / 8×128K）直接受益。产出"每池需求表"+ 若发现重复预留则改为按池独立 accounting 的 patch。
 - 验证：本地策略单测（`tests/core/` 模式）+ 构建 + 部署窗口实测容量。
 
-### P3 · GDN FlashQLA 递归 kernel 研究移植（prefill 研究项，无先验加速比）
+### P3 · GDN FlashQLA 递归 kernel 研究移植 → **降级为研究项**（2026-10-25 实测占比后）
 
 fork 独有 535 行 CUDA（`tools/flashqla_sm75_patches/gdn_forward.cu`）：warp 内 WIDTH=16/32 subgroup 持
 状态列组 + `__shfl_down_sync` 归约，varlen packed 一次 launch 多请求。**fork 无实测加速比**。
 Strata 的 GDN prefill 已是 chunked wmma FP16 TC（`src/prefill/gdn_chunk.cu`）——这是**算法替代**不是补能力。
-- 要做：移植进 `src/prefill/`，挂在 `STRATA_GDN_*` 门后（opt-in）；扩展 `gdn_chunk_bench` 做同 boot A/B
-  （chunked vs recurrent，1K–128K 长度扫描）。
-- 判决门：仅当在生产 chunk 尺寸（≤8192）与长读场景下 bench 胜出才默认化；否则否决留档。
+**降级依据（本机实测，L030 日志 `/opt/ai/logs/L030-prefill-timing-20261024T053111Z.log`）**：45K token
+prompt 的 GPU 16.3 s 里 gdn 全部阶段 ≈ 10%（gdn 8.6% + conv+gates 1.2% + recurrence）——2× 上限也只省 ~5%，
+恰在跨 boot 噪声门上。**专家管线才是长读大头：gemm gate/up 18.4% + gemm down 9.2% + dequant 3.4% +
+gather/grouping 1.2% ≈ 32%；hc read 9.2%、qsa attn 9.2%、embed+steps 7.7%、ple 6.2%。**
+
+### P3b · 专家管线带宽研究（新，取代 P3 的位置）
+
+45K prompt 的专家 GEMM 4.5 s 远超 int8 算力所需（估算 <0.1 s）→ 大概率是**权重搬运**受限
+（IQ3_XXS 专家 blob 经 PCIe/RAM 流入，`--pcie-frac 0.31` 分流）。
+- 要做：用 `mmq_expert_bench` + `prefill_phase_timing.sh` 口径在服务器微基准里分离"权重搬运 vs MMA"
+  时间；若搬运受限，移植对象就不是 Marlin 而是**搬运调度**（fork 的 prefetch/双 stage 思路、
+  `STRATA_IO_PF_*` 与 `--pcie-frac` 的实测调参、`STRATA_MMQ_TAB` 就地读驻留 slot 的 A/B——它默认 OFF
+  的理由是 37 MiB/卡显存，在 6×192K 预设下值不值要算账）。
+- 验证：微基准数字 + 同 boot A/B（`runtime_flag`）；≥5% 才动默认。
 
 ### P4 · Turing tile 调参扫描（decode 注意力/选块，测量驱动）
 
@@ -112,9 +123,10 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| P1 DFlash2 轨道 | 待做 | |
-| P2 accounting 审计 | 待做 | |
-| P3 GDN recurrent 移植 | 待做 | |
+| P1 DFlash2 轨道 | 待做（设计分析中） | 引擎侧 `--draft dflash2` 现仅 CLI spec loop（`generate.cpp:5448`），`ENGINE_SERVES_DFLASH2=False`（`strata_control/drafting.py:147`）；serve/batch/层切分集成是真实工作量 |
+| P2 accounting 审计 | 进行中 | 子代理审计 MTP/DFlash2/KV/expert 池预留 |
+| P3 GDN recurrent 移植 | 降级为研究项 | L030 实测 gdn 全部阶段 ≈10%（45K prompt），2× 上限省 ~5% |
+| P3b 专家管线带宽研究 | 待做（新，优先） | L030：专家 GEMM+dequant+gather ≈32%，GEMM 4.5 s ≫ int8 算力需求 → 疑搬运受限 |
 | P4 tile 扫描 | 待做 | |
 | P5 parser 修复 | 已覆盖·不移植 | `server.py:5988-6001,6044`、`serve/dsml.py:172,211` + 各自测试（2026-10-25 核实） |
 | P6 barrier 对照分析 | 待做 | |
