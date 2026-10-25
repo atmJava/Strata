@@ -91,6 +91,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `exp-v2-staged-drill.py` | V2-1：跑 `probe_cancel_staged.py` 的场景并按阈值判（读者拿到首 token、关闭后邻居 gap < 2 s 且仍有 token、health 200），再补"长读完成 + 紧跟短请求" |
 | `exp-v2-warmup.py` | V2-4：重启后头 N 个请求的 TTFT/总时长序列（冷/暖，测量不是阈值） |
 | `exp-v2-vram.py` | V1-5：`/metrics` + `nvidia-smi` 的显存账单（两块卡、engine arena/expert-cache、free reserve） |
+| `four-questions.py` | 窗口前四问（只读 ssh）：vram-perf cron、nvlink-crc timer、残留安装/构建进程、`vram-perf.csv` 尾行、`/metrics` 最新请求年龄与 live 状态；有残留进程 exit 1 |
 | `ops-v2-window.sh` | V2 窗口的安装/回滚驱动：`snapshot`（引擎 + serve/ + tokenizer + launcher + config，`md5sum -c` 核对）、`install --go`（`cp .new && mv` + `use-config.sh` + 核对）、`restore --go`、`check`；默认 dry-run |
 | `run-matrix.py` | runs the whole batch matrix once: each item has its criterion, timeout and log; writes `summary.json` and one log per item | `--batch V1 --list` / `--dry-run` / `--only` / `--skip`; never restarts anything |
 | `check_assert_lock.py` | V1-4: compiles the one decode-attention object with the default shape, then with `STRATA_QSA_ATTN_CHUNK=128` and requires the static_assert to reject it | uses the build dir's `make -n`; writes only `/tmp` |
