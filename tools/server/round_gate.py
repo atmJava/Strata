@@ -44,7 +44,37 @@ def _field(section: str, key: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def validate_log(text: str, round_name: str | None = None) -> list[str]:
+def parse_queue(text: str) -> tuple[list[str], int, list[str]]:
+    """Return (ids, unfinished count, problems) from a WORK_QUEUE-style markdown table."""
+    ids: list[str] = []
+    unfinished = 0
+    problems: list[str] = []
+    declared = None
+    for line in text.splitlines():
+        match = re.match(r"^\s*未完成采纳项\s*[:：]\s*(\d+)", line)
+        if match:
+            declared = int(match.group(1))
+            continue
+        row = line.strip()
+        if not row.startswith("|") or set(row) <= set("|-: "):
+            continue
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        if len(cells) < 5 or cells[0] in ("ID", ""):
+            continue
+        item_id, _, _, status = cells[0], cells[1], cells[2], cells[3]
+        if not item_id or item_id.startswith("ID"):
+            continue
+        ids.append(item_id)
+        if status not in ("已完成", "否决") and not status.startswith("搁置"):
+            unfinished += 1
+    if declared is None:
+        problems.append("queue has no '未完成采纳项：<n>' line")
+    elif declared != unfinished:
+        problems.append(f"queue says 未完成采纳项 {declared} but the table counts {unfinished}")
+    return ids, unfinished, problems
+
+
+def validate_log(text: str, round_name: str | None = None, queue_text: str | None = None) -> list[str]:
     blocks = _round_blocks(text)
     if not blocks:
         return ["no '## R<n>' round heading found in the log"]
@@ -89,6 +119,16 @@ def validate_log(text: str, round_name: str | None = None) -> list[str]:
         errors.append("Gate '剩余未完成项' must start with an integer")
     if value("实现") == "" and not value("项").startswith("测量"):
         errors.append("Gate implementation ('实现') is empty and this is not a measurement round")
+
+    if queue_text is not None:
+        ids, unfinished, problems = parse_queue(queue_text)
+        errors.extend(problems)
+        gate_count = re.match(r"^(\d+)", value("剩余未完成项"))
+        if gate_count and gate_count.group(1) != str(unfinished):
+            errors.append(f"Gate says {gate_count.group(1)} unfinished but the queue counts {unfinished}")
+        item = re.split(r"[\s（(]", value("项").replace("测量：", "").strip())[0] if value("项") else ""
+        if item and item not in ids:
+            errors.append(f"Gate item '{item}' is not in the work queue")
     return errors
 
 
@@ -96,9 +136,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("log", nargs="?", default="docs/MULTIPATH_LOG.md")
     parser.add_argument("--round", dest="round_name")
+    parser.add_argument("--queue", default="docs/WORK_QUEUE.md")
     options = parser.parse_args()
     text = open(options.log, encoding="utf-8").read()
-    errors = validate_log(text, options.round_name)
+    queue_text = None
+    try:
+        queue_text = open(options.queue, encoding="utf-8").read()
+    except OSError:
+        pass
+    errors = validate_log(text, options.round_name, queue_text)
     for error in errors:
         print(f"GATE FAIL: {error}")
     print("GATE PASS" if not errors else f"{len(errors)} problem(s)")

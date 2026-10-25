@@ -84,6 +84,46 @@ def test_no_rounds_fails():
     assert round_gate.validate_log("nothing here\n")
 
 
+QUEUE = """# queue
+
+| ID | 项 | 判据 | 状态 | 证据 | 备注 |
+|---|---|---|---|---|---|
+| S2 | 响应时延 | x | 待做 | | |
+| S3 | 接受率 | y | 待做 | | |
+
+未完成采纳项：2
+"""
+
+
+def test_queue_matches_gate():
+    # Gate says 1 but the queue counts 2 -> fail
+    assert round_gate.validate_log(GOOD, None, QUEUE) != []
+
+
+def test_queue_mismatch_in_queue_itself():
+    broken = QUEUE.replace("未完成采纳项：2", "未完成采纳项：5")
+    problems = round_gate.parse_queue(broken)[2]
+    assert problems
+
+
+def test_gate_item_must_be_in_queue():
+    other = GOOD.replace("- 项：S2", "- 项：S99").replace("- 剩余未完成项：1（S3）",
+                                                          "- 剩余未完成项：2（S2、S3）")
+    errors = round_gate.validate_log(other, None, QUEUE)
+    assert any("not in the work queue" in error for error in errors)
+
+
+def test_gate_count_must_equal_queue():
+    text = GOOD.replace("- 项：S2", "- 项：S2").replace("- 剩余未完成项：1（S3）",
+                                                       "- 剩余未完成项：1（S3）")
+    assert round_gate.validate_log(text, None, QUEUE)  # 1 vs 2
+
+
+def test_gate_passes_with_matching_queue():
+    two = GOOD.replace("- 剩余未完成项：1（S3）", "- 剩余未完成项：2（S3、S4）")
+    assert round_gate.validate_log(two, None, QUEUE) == []
+
+
 def test_specific_round_selection():
     older = GOOD.replace("R99", "R98").replace("S2", "S1").replace("L-999", "L-998")
     text = GOOD + "\n" + older
