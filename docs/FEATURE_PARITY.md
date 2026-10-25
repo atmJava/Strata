@@ -125,20 +125,20 @@ F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
 
 | ID | 项 | 判决 | 理由（一句话） |
 |---|---|---|---|
-| S1 | API 侧准入上限（`max_num_queued_*`，503） | **采纳·待实现 P1** | 纯服务端；4 槽时防止排队打爆 TTFT |
+| S1 | API 侧准入上限（`max_num_queued_*`，503） | **采纳·已有实现·缺测试** | `max_queue` + 429 `admission_full`（`serve/server.py:3963,6772`） |
 | S2 | 响应体带每请求时延（TTFT/generation/queue/ITL） | **采纳·待实现 P1** | 服务端已有全部时间戳，补字段即可 |
 | S3 | 每请求投机接受率（summary/detailed） | **采纳·待实现 P1** | 引擎已算 accepted/proposed，暴露即可调 `--spec` |
 | S4 | 思考 token 预算（sampler 强制） | **否决** | Strata 已有 `reasoning_budget_tokens`（生产 12288），重复 |
 | S5 | reasoning 感知的结构化输出 + 异步语法编译 | **搁置** | 需要语法后端 + sampler bitmask，改动面大；有需求再评 |
 | S6 | 延迟等待队列（grammar/remote-KV 等） | **搁置** | 依附 S5；Strata 无这些等待态 |
-| S7 | 断开 → 取消 → 引擎 abort | **采纳·待实现 P1** | 服务端已有 cancel，补引擎幂等 abort 即可；先核现状 |
-| S8 | SSE 保活（`--sse-keep-alive-interval`） | **采纳·待实现 P1** | 纯 Python；cloudflare/lan 隧道会用得上 |
+| S7 | 断开 → 取消 → 引擎 abort | **采纳·已有实现·缺测试** | cancel/STOP 已存在（`serve/server.py:363,373`） |
+| S8 | SSE 保活（`--sse-keep-alive-interval`） | **采纳·已有实现·缺测试** | `QUEUE_BEAT_S=10` 心跳（`serve/server.py:270,5198`） |
 | S9 | 流式输出合并（背压） | **采纳·待实现 P2** | 慢客户端不拖引擎；服务端 merge 语义 |
 | S10 | 阶段时延 + 等待原因指标 | **采纳·待实现 P2** | 引擎已有时间戳/状态，`/metrics` 暴露 |
 | S11 | 全 ISL 准入 + KV 水位 | **采纳·待实现 P2** | 256K 下防过准入；全量检查很便宜 |
-| S12 | 优雅停机（drain/abort） | **采纳·待实现 P2** | 重启窗口更安全，也给 F5 留 flush 窗口 |
+| S12 | 优雅停机（drain/abort） | **采纳·已有实现·缺测试** | `--shutdown-timeout` + drain（`serve/server.py:4031,8675`） |
 | S13 | profile schema 契约（命名/校验） | **采纳·待实现 P2** | 纯 launcher/CI，和 F6 的预设命名同源 |
-| S14 | 增量 detokenizer 的 stop 缓冲 | **采纳·待实现 P2** | 流式 stop 串泄漏的经典坑，服务端可做 |
+| S14 | 增量 detokenizer 的 stop 缓冲 | **采纳·已有实现·缺测试** | `StopMatcher`（`serve/server.py:3743`） |
 | S15 | 结构化工具调用（structural tag） | **搁置** | 依赖 S5 的语法后端 |
 | — | prefill 批屏障（fork 的 `--prefill-batch-barrier`） | **搁置** | 与 F1 的晚 prefill 策略重叠，先做实验再定 |
 | — | warmup/JIT 冷编译预热 | **搁置** | 只在运行时重编译/捕获时有用，未证实 Strata 需要（静态，未验证） |
