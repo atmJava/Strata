@@ -49,7 +49,7 @@ python3 -m py_compile serve/server.py
 cmake --build build --target strata -j6
 md5sum build/strata
 
-# 4. deploy with a snapshot + rollback (see docs/MULTIPATH_W3.md "生产启用")
+# 4. deploy with a snapshot + rollback (see docs/archive/MULTIPATH_W3-2026-10-24.md "生产启用")
 ```
 
 ## Fixes
@@ -93,7 +93,7 @@ The same protocol is covered on this tree by `serve/test_staged_wedge.py`, which
 ## Provenance
 
 - Built from the production tree copy `/opt/ai/src/strata-mp`; the deployed binary's md5 is recorded in
-  `docs/HANDOVER.md` §13 and `docs/STATE.md`.
+  `docs/archive/HANDOVER-through-2026-10-25.md` §13 and `docs/STATE.md`.
 - History: both patches applied cleanly to the repository as it stood before `681fd256` (checked
   2026-10-25 20:16 against `681fd256^`: `patch -p1 --dry-run` takes every hunk, with offsets of 208–330
   lines). `681fd256` committed the staged read into the repository, so the same check now fails for

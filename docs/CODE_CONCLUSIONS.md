@@ -1,7 +1,8 @@
 # Strata on this server: what is closed, and why
 
 One page. Every line below was measured on this machine on 2026-10-24 (night), with the production build
-unless it says otherwise. The evidence is in `docs/CODE_PLAN.md` (section numbers given) and the commits named.
+unless it says otherwise. The evidence is in `docs/archive/CODE_PLAN-2026-10-24.md` (section numbers given)
+and the commits named.
 Read this before re-testing anything: most ideas have already been tried and closed.
 
 **The box**: 2× RTX 2080 Ti 22,528 MiB (sm_75, PCIe 3.0 x16), Xeon E5-2680 v4 (AVX2, no VNNI), 62 GiB RAM.
@@ -13,7 +14,7 @@ Production: Strata 0.2.2 + engine 0.1.47, `layer_split 24`, `parallel 4`, `--bat
 **One stream: 63 tok/s. Three streams at once: ≈136 tok/s.** The same box, the same config, the same prompts.
 Single-stream decode spends 22–30 ms a window of which only 8.5–9.3 ms is the GPU actually computing; the rest
 is per-token fixed overhead. The hardware is under-used because requests arrive one at a time, not because a
-kernel is slow. **Getting more concurrency is worth more than any change listed below.** (CODE_PLAN §24)
+kernel is slow. **Getting more concurrency is worth more than any change listed below.** (archived CODE_PLAN §24)
 
 ## The decode cost curve (measured, three loads)
 
@@ -38,7 +39,7 @@ quarters of the window is paid for one token.
 | Rewrite the grouped expert kernel for bandwidth | it already runs at **≈620 GB/s = HBM peak** (1.52 ms a window, 0.063 ms a layer). Nothing to take. | §23, `541b5d0e` |
 | Chase the 1.56 ms/window `waitCPU` (GPU idle waiting for the CPU pool) | a light-load artefact: at three streams it disappears into other work | §24, `57156567` |
 
-Earlier, already closed (kept in `docs/CODE_PLAN.md` §6): `--pipeline-windows 2`, `layer_split` 23/25,
+Earlier, already closed (kept in `docs/archive/CODE_PLAN-2026-10-24.md` §6): `--pipeline-windows 2`, `layer_split` 23/25,
 `STRATA_QFUSE=1`, EXPDEC, `PF_FUSED_SM75`, HC_PERSIST, the MMQ tab port, the TP patch, 0.2.4.1 upgrade,
 park-gain, read-ahead, session parking. Adopted in this goal: only `STRATA_HC_Q8=1`.
 

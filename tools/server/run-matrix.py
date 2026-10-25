@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """run-matrix.py - one batch, one run, one attribution table.
 
-The batch rule (`docs/SELF_ITERATION_PLAN.md` §3) is: all changes done -> **one** build -> **one**
+The batch workflow (`docs/RULES.md`) is: all compatible changes ready -> **one** build -> **one**
 window -> **one** run of the whole test matrix -> attribute item by item afterwards.  This runner is
 that one run.  It never changes the box, never restarts anything, and never decides a criterion itself:
 each item carries its criterion, timeout and log path, and the summary says PASS/FAIL/NOTRUN per item

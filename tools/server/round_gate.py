@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""round_gate.py - check a round's log entry against the Gate sheet (PORTING_RULES.md §3).
+"""round_gate.py - legacy checker for pre-2026-10-25 Gate-formatted logs.
 
 Usage:
-  round_gate.py [log] [--round R11]
+  round_gate.py docs/archive/MULTIPATH_LOG-through-2026-10-25.md [--round R11]
 Exit 0 when the checked round passes; 1 otherwise (each problem printed).
 
-The gate is a format + wording check, not proof the feature works: it rejects missing fields,
-non-PASS test lines (xfail/skip/FAIL/TODO/未跑) and empty values where a value is required.
-Queue counts are compared only for the latest round (no --round): an older round records a snapshot.
+The current protocol is docs/RULES.md and writes docs/ITERATION_LOG.md; this script is not part
+of the active loop. It remains because preflight uses parse_queue() and old evidence can still be checked.
 """
 from __future__ import annotations
 
@@ -144,16 +143,17 @@ def validate_log(text: str, round_name: str | None = None, queue_text: str | Non
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("log", nargs="?", default="docs/MULTIPATH_LOG.md")
+    parser.add_argument("log", nargs="?", default="docs/archive/MULTIPATH_LOG-through-2026-10-25.md")
     parser.add_argument("--round", dest="round_name")
-    parser.add_argument("--queue", default="docs/WORK_QUEUE.md")
+    parser.add_argument("--queue", help="optional historical queue snapshot to compare")
     options = parser.parse_args()
     text = open(options.log, encoding="utf-8").read()
     queue_text = None
-    try:
-        queue_text = open(options.queue, encoding="utf-8").read()
-    except OSError:
-        pass
+    if options.queue:
+        try:
+            queue_text = open(options.queue, encoding="utf-8").read()
+        except OSError:
+            pass
     errors = validate_log(text, options.round_name, queue_text)
     for error in errors:
         print(f"GATE FAIL: {error}")

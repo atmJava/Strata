@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""preflight.py - the 3-minute check before a 24/7 round (PORTING_RULES.md §12).
+"""preflight.py - check the durable state before an autonomous optimization iteration.
 
 Checks the durable state against the queue, then the live server:
   - WORK_QUEUE.md is self-consistent and its count is what STATE.md says;
-  - STATE.md's current item exists in the queue and is not already done;
+  - STATE.md's current item exists in the queue;
   - /health is 200 and /metrics answers (engine version printed).
 
 Usage: preflight.py [--base-url URL] [--api-key KEY] [--offline]
@@ -16,7 +16,6 @@ import json
 import os
 import re
 import sys
-import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -49,15 +48,6 @@ def check_state(state: dict[str, str], queue_text: str) -> list[str]:
     elif item not in ids:
         errors.append(f"STATE.md current item '{item}' is not in the work queue")
 
-    restart = state.get("日重启", "")
-    match = re.match(r"(\d{4}-\d{2}-\d{2})\s+(\d+)/(\d+)", restart)
-    if not match:
-        errors.append("STATE.md has no '日重启：YYYY-MM-DD n/6' line")
-    else:
-        if match.group(1) != time.strftime("%Y-%m-%d"):
-            errors.append(f"restart counter is stale ({match.group(1)}); reset it before the round")
-        if int(match.group(2)) > int(match.group(3)):
-            errors.append(f"restart budget exhausted ({restart}); stop for the day")
     return errors
 
 

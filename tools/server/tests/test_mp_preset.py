@@ -1,4 +1,4 @@
-"""T7 - the preset gate refuses wrong configs (docs/FEATURE_PARITY.md F6, R8 negative cases).
+"""T7 - the preset gate refuses wrong configs (archived F6, R8 negative cases).
 
 `check_preset.py` is a pure function over a config dict, so these cases need no server.
 They prove the gate is not a rubber stamp: each broken preset must produce at least one error,

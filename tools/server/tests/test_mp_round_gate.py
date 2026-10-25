@@ -1,7 +1,6 @@
-"""The round gate must itself be tested: a gate that always passes is worse than none.
+"""The legacy round gate must itself be tested: a gate that always passes is worse than none.
 
-Cases mirror PORTING_RULES.md §3: an 11-field Gate sheet with '→ PASS' passes; missing fields,
-empty required values, non-integer counts, an xfail/skip result and a missing Gate fail.
+Cases cover the archived 11-field format. The current protocol uses docs/RULES.md and ITERATION_LOG.md.
 """
 import os
 import sys
@@ -141,14 +140,14 @@ def test_historical_round_keeps_its_snapshot_count():
 
 
 def test_batch_round_heading_is_validated():
-    # V0–V3 are batch headings (SELF_ITERATION_PLAN §4) and carry the same Gate as a round.
+    # V0–V3 were historical batch headings and carry the same old Gate as a round.
     batch = GOOD.replace("R99", "V0")
     assert round_gate.validate_log(batch, "V0") == []
     assert round_gate.validate_log(batch, None) == []          # also the default (first) block
 
 
 def test_lettered_batch_rows_are_not_backlog():
-    # V2b/V2c are split batches too (SELF_ITERATION_PLAN §4.3) and must not inflate the backlog.
+    # V2b/V2c were split batches and must not inflate the backlog.
     with_batch = QUEUE.replace("| S2 |", "| V2b | fused A-B | z | 待做 | | 批次行 |\n| S2 |")
     ids, unfinished, problems = round_gate.parse_queue(with_batch)
     assert "V2b" in ids and unfinished == 2 and problems == []

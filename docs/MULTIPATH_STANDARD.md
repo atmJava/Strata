@@ -1,8 +1,8 @@
-# 多路服务标准（MULTIPATH_STANDARD）· v0.1 草案 · 2026-10-24
+# 多路服务标准（MULTIPATH_STANDARD）· v0.2 · 2026-10-25
 
-> 配套：[`RULES.md`](RULES.md)（怎么干活）、[`HANDOVER.md`](HANDOVER.md)（状态与决策）、
+> 配套：[`RULES.md`](RULES.md)（怎么干活）、[`STATE.md`](STATE.md)（状态与决策）、
 > [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)（证据格式）、[`BATCHING.md`](BATCHING.md)（引擎的批机制）、
-> [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)（做什么、按什么顺序）。
+> [`ROADMAP.md`](ROADMAP.md)（指标、候选路线与优先级）。
 >
 > 本文回答四件事：**多路就绪怎么定义（§1）、怎么定容（§2）、怎么验收（§3–§5）、怎么记录与命名（§6–§7）**。
 > 标准本身可以改，改完在文末写版本行（`RULES.md` 的写法）。
@@ -82,7 +82,7 @@ RAM 侧：conversation-cache-mib + 专家包驻留 + 流式 KV（开 --kv-reside
 
 **判决词**只有四种，和台账一致：**采纳 / 否决 / 未定 / 参考**。
 
-- **采纳**：≥3% 且两对独立 A-B-A 同向；或满足 §1 四条硬门槛。
+- **采纳**：达到实验开始前写下的阈值，并有足够重复与正确性证据；或满足 §1 四条硬门槛。
 - **否决**：实测反向且可复现；或过不了质量门。
 - **未定**：<3%、方向不一致、样本不足、被别的流污染——**未定不许写成"接近采纳"**。
 - **参考**：只读/背景数字。
@@ -91,10 +91,10 @@ RAM 侧：conversation-cache-mib + 专家包驻留 + 流式 KV（开 --kv-reside
 
 1. **同 boot** A-B-A 或交错；每臂 ≥3 次；报中位 + sd；**<3% 不算结论**。
 2. **跨 boot** 只用于趋势；小读/首字按 ~7% 看（L-031）；4 路跨 boot 漂移曾到 9%（L-040）——**别用单次跨 boot 数下结论**。
-3. **不自污染**：测量期间本会话不生成、不派子代理；后台 job 发起后立刻 `job_output wait` 阻塞等（`HANDOVER.md` §7/§9.16）。
+3. **不自污染**：测量期间本会话不生成、不派子代理；后台任务发起后阻塞等到结束。
 4. **先量仪器**：`STRATA_*_TIMING` 有代价（L-030 是 +2.5–8%）；开计时器的臂要单列，不和不开的臂混着比。
-5. **原始日志 + 脚本名 + "没测什么"** 三件套缺一不可；没有证据的轮次按未发生处理（`RULES.md` §9.6）。
-6. **跨机型不可横比**：引用上游/别机的数字一律标"不可横比"（`SERVER_ADAPT_REQUIREMENTS.md` §6.1）。
+5. **原始日志 + 脚本名 + "没测什么"** 三件套缺一不可；没有证据的工作按未发生处理（`RULES.md` §5）。
+6. **跨机型不可横比**：引用上游或别的机器上的数字一律标“不可横比”。
 
 ## 5. 变更门
 
@@ -102,7 +102,8 @@ RAM 侧：conversation-cache-mib + 专家包驻留 + 流式 KV（开 --kv-reside
   测量 → 装回快照 → `cmp -s` 逐字节一致 → 台账。装失败先恢复再退出（`tools/server/README.md` 的形状）。
 - **代码臂**：独立 build 目录（`build-mp/` 之类），**默认关**的运行时开关，生产 `build/` 一字节不动；
   部署验**文件**不验产物（`md5sum` 两边）；覆盖用 `cp … .new && mv -f`；后台构建不算完成（`RULES.md` §9）。
-- **一次一个变量**；一次一个安装器（`pgrep -af "[u]se-config|[r]estore-prod"` 为空才动）。
+- **因果可归因**：每个假设要能靠独立开关、分组实验或清晰的实验顺序区分；一次只运行一个安装器
+  （`pgrep -af "[u]se-config|[r]estore-prod"` 为空才动）。兼容且可独立归因的改动可以同批构建。
 - 每个改动写明回滚命令，回滚命令必须能在一次重启内完成。
 
 ## 6. 记录格式（台账条目模板）
@@ -125,7 +126,7 @@ RAM 侧：conversation-cache-mib + 专家包驻留 + 流式 KV（开 --kv-reside
 
 | 类别 | 规则 | 例 |
 |---|---|---|
-| 文档 | `MULTIPATH_PLAN.md` / `MULTIPATH_STANDARD.md`；同类实验文档用 `<主题>_<用途>.md` | 本文件 |
+| 文档 | 活跃路线用 `ROADMAP.md`；测量口径用 `MULTIPATH_STANDARD.md`；历史计划放 `archive/` | 本文件 |
 | 预设 | `strata-022.mp-<N>x<CTX>.json` | `strata-022.mp-4x256K.json` |
 | 实验脚本 | `exp-` 要重启；`probe-` 只读；`ops-` 改机器（`tools/server/README.md` 的角色前缀） | `exp-mp-matrix.sh` |
 | 日志 | `/opt/ai/logs/MP-<ID>-<name>-<UTC ts>.log`（jsonl 同理） | `MP-L046-mp-baseline-...jsonl` |
@@ -140,4 +141,6 @@ RAM 侧：conversation-cache-mib + 专家包驻留 + 流式 KV（开 --kv-reside
 ---
 
 **变更记录**
+- v0.2 · 2026-10-25 · 对齐 `RULES.md` v2：采纳改为“预登记阈值 + 足够证据”，允许兼容改动同批构建，
+  但每个假设仍须可归因；更新文档入口与跨机比较口径。
 - v0.1 · 2026-10-24 · 初稿：术语与"多路就绪"四条、定容式与 4x256K 命名、G0–G3 门、测量协议、变更门、台账模板、命名规范。

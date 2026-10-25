@@ -78,7 +78,7 @@ def main():
     print(f"  按 host 11.0 GB/s : {ms(tot, 11.0):.1f} ms")
     print(f"  按 NVLink 46.8 GB/s: {ms(tot, 46.8):.1f} ms   （省 {ms(tot, 11.0) - ms(tot, 46.8):.1f} ms/轮）")
     print()
-    print("判据（CODE_PLAN §10 A1）：host < 15 MB/轮 → decode 侧 NVLink 上限 < 1 ms/窗口，只做 prefill 线。")
+    print("判据（归档 CODE_PLAN §10 A1）：host < 15 MB/轮 → decode 侧 NVLink 上限 < 1 ms/窗口，只做 prefill 线。")
 
 
 if __name__ == "__main__":

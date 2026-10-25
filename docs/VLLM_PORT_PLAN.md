@@ -11,12 +11,12 @@
 > 本轮做了什么、刻意停在哪看 §6。服务端 staged read（W3）已于今日提交进仓库（`681fd256`+`46d12fa9`），
 > 本文里"W3 未提交"的措辞按 §6.3 读。
 
-## 0. 边界（用户约定）
+## 0. 边界
 
-- **不碰生产服务**：`atm@192.168.3.14` 的 `strata.service` 不重启、不重部署、不改配置。
-- 验证路径：服务器独立源码树 `-arch=75` 构建 + parity/微基准二进制（显存余量 ~1.3 GiB/卡，
-  只够 kernel 级基准）；本地 CPU 构建 + 单测 + 策略测试。
-- 一切"上生产"动作 = 产出**可部署分支 + 验证记录**，重启窗口由用户批准。
+- 默认验证路径仍是服务器独立源码树 `-arch=75` 构建 + parity/微基准二进制；本地 CPU 构建 + 单测 + 策略测试。
+- 当生产端到端证据是当前最高价值路线时，可以在 `RULES.md` 的快照、核对和恢复约束下部署。服务与服务器可按需重启，
+  不设次数上限；不得为了快速完成绕过正确性或回滚。
+- 一切“上生产”动作 = **可部署分支 + 验证记录 + 回滚办法**。
 
 ## 1. 已被 Strata 覆盖 / 结构不适用（不移植，逐条带证据）
 
@@ -45,7 +45,7 @@ Strata 有 DFlash2 实现（`dflash2.cpp/.cu`，7 drafts + selector）但生产�
 - 要做：①`draft_cap.hpp` 按 sm_75 的 cap 与代价模型核对（`STRATA_DF2_*`）；②VRAM 预算：draft 权重 +
   ring + 每槽 draft 的显存从哪让（对照 P2 的 accounting 审计）；③server 侧 `drafting.apply()` 的
   dflash2 路线在 6×192K 预设下的配置预设 + 回滚演练脚本；④K=7 窗口与 `kVerifyMaxT=8` 的布局核对（G7 复活）。
-- 验证：本地 `dflash2_parity` + `dflash2_*_bench` 编译过；服务器微基准；**吞吐数字只在用户批准的部署窗口产生**。
+- 验证：本地 `dflash2_parity` + `dflash2_*_bench` 编译过；服务器微基准；吞吐数字在 `RULES.md` 约束的受控部署中产生。
   接线的验收钩子已就位：`tools/server/tap_parity.py`（`869c1224`，14 例单测）可以 `compare` 同层两份 dump
   （CLI 窗 vs serve 窗 vs 批窗）或 `merge` 各 stage 的 dump（`STRATA_TAP_FILE=/tmp/t%d.stap`，`%d`=layer_lo）
   再与单 stage 整窗比——这是 A2/B1 之后"taps 接线对不对"的机器判据，不需要权重。
@@ -83,7 +83,7 @@ Strata 有 DFlash2 实现（`dflash2.cpp/.cu`，7 drafts + selector）但生产�
 - **验证前置（已核实，2026-10-25）**：`dflash2_parity <pack> <case.bin>` 需要 DFlash2 drafter 的
   safetensors+config（`tools/dflash2/mk_parity_case.py` 用 torch 参考生成 case）。服务器上**没有**这份权重
   （`/opt/ai` 下只有 fork 自己的 `quality-smoke-dflash2-*.json` 日志，那是 vLLM 侧的），所以 df2 的 kernel 级
-  验证在拿到 drafter 权重前做不了——A1 之前需要用户提供该 checkpoint 或批准在部署窗口内贴。
+  验证在拿到 drafter 权重前做不了；A1 需要该 checkpoint 和对应模型配置。
 
 ### P2 · draft/target 显存与容量 accounting 审计（"更强"= 更多槽，直连队列项 C1）
 
@@ -317,7 +317,7 @@ fork 的 barrier 三条语义与 Strata 的对应面（两侧源码核实）：
 |---|---|---|
 | ①"最后一个 prefill step 也采样第一个 token，block-decode-only 太晚"→ cohort 按 frontier 对齐步长 | Strata 是固定槽 + 串行 staged read（BREAD→BRDY→BADOPT FCFS），adopt 后首 token 天然进批窗口 | **无对应物**：架构不同（连续批 vs 槽位+串行读），frontier 逻辑没有放置点 |
 | ②新 prefill 不得让已在 decode 的 batch 整步停摆 | `BYIELD`（chunk 边界让路）+ `STRATA_PIPED_CONCURRENT`（读在独立线程） | **已实现**；残余停摆向量 = `ConcurrentReadSetup` 的互斥矩阵（helper/pcie-dma/staged 任一在场即关并发）——这正是 S0b（邻居停顿 3.43 s）的战场 |
-| ③KV 准入失败的请求必须退出 frontier（防 livelock） | staged 队列的失败/取消清理不变量；现状 S0c：引擎死于 BREAD → `mp_staged` 永久遗留 → 之后所有准入卡死 | **同一类 bug**，fork 的修法（失败即出队）= S0c 的验收判据，已在用户队列 |
+| ③KV 准入失败的请求必须退出 frontier（防 livelock） | staged 队列的失败/取消清理不变量；现状 S0c：引擎死于 BREAD → `mp_staged` 永久遗留 → 之后所有准入卡死 | **同一类 bug**，fork 的修法（失败即出队）= S0c 的验收判据，已进入工作队列 |
 
 **结论：barrier 本身不移植（调度架构不同）；它的三个洞察里两个 Strata 已有等价机制，第三个已作为
 S0c 在队列里。本项产出即本页。**

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""The four questions before a window (MULTIPATH_RULES §6), answered from the box, read-only.
+"""The four questions before a production experiment, answered from the box, read-only.
 
   1. the samplers: the vram-perf cron entry and the nvlink-crc timer are installed and last ran
   2. no residual installer/builder: no nvcc, cc1plus, cmake --build, pip install, or ops script of ours
   3. the VRAM/performance sample: the last rows of vram-perf.csv and the newest /metrics request age
-  4. the direction: today's restart count (STATE) and what the next step is (STATE's 下一动作)
+  4. the direction: the next step recorded in STATE.md
 
 Prints one JSON object; exit 1 when a residual process is found (a window must not start then).
 Usage: four-questions.py [--host user@box]

@@ -1,4 +1,4 @@
-"""T1 - API contract (docs/FEATURE_PARITY.md section 4).
+"""T1 - API contract.
 
 These are the client-visible behaviours the fork's tests/entrypoints/openai suite
 covers, reduced to what can be checked over HTTP against Strata's server.

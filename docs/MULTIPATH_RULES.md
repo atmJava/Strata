@@ -1,82 +1,38 @@
-# 多路融合规则 · 项目适配层（MULTIPATH_RULES·v0.3）· 2026-10-25
+# 项目事实与运行口径
 
-> **通用规则在 [`PORTING_RULES.md`](PORTING_RULES.md)（v1）**：DoD、每轮 Gate、禁止清单、测量证据、
-> 预算、阻塞、收口确认，全部在那里，本文件不重复。
-> 本文件只补**本项目特有**的东西：硬件/部署口径、重启与构建预算、真实脚本名、文档落点、子代理规则。
-> 与 `RULES.md` 冲突时以 `RULES.md` 为准；本文件只能加严。
-> v0.2 的会话事故复盘（为什么有这套）已迁到 `PORTING_RULES.md` 的版本行与 `MULTIPATH_LOG.md` R0–R10，
-> 不再写进规则正文，避免把一次事件的上下文带进下一轮。
+> 规则在 [`RULES.md`](RULES.md)，路线在 [`ROADMAP.md`](ROADMAP.md)。本文件只记录服务器事实和项目特有大坑。
 
-## 1. 本项目的事实（写死，供每轮自检）
+## 生产环境
 
-- 生产：`atm@192.168.3.14`，`strata.service` → `/opt/ai/src/strata-0.2.2/run-022.sh`，配置 `strata-022.json`，
-  端口 8080，API key `111`；2× RTX 2080 Ti 22.5 GB，Xeon E5-2680 v4，62 GiB。
-- 当前形态（2026-10-25 起）：W3 暂存读**生产启用**，阈值 4096；**现网四件实测**（V0，2026-10-25 20:40，
-  `tools/server/probe-version-stamp.py`）：引擎 `383b426a`、server `a3c7df58`、launcher `9b6bf792`、
-  config `6c362d01`。旧文档的 `4f6f635f`/`e8edc558` 来自更早的部署，**不是现网**；`52b84d54` 是
-  patch 工作树 `/opt/ai/src/strata-mp` 的 server hash，也不是现网（详见 `STATE.md` 版本戳基线）。
-  回滚备份：当前态 `/opt/ai/tmp/rollback-V0-20261025T124629Z/`（字节核对过）；`mp-w3-A3-*` 是
-  **W3 前**的旧快照（与现网不相同）。
-- 部署唯一入口：`/opt/ai/bin/use-config.sh <json>`；装后 `verify-running-config.sh`；回滚 = 停服 → cp 回 → use-config。
-- 测试从 kali 跑：`MP_BASE_URL=http://192.168.3.14:8080 MP_API_KEY=111 python3 -m pytest tools/server/tests ...`。
+- 主机：`atm@192.168.3.14`，2× RTX 2080 Ti 22.5 GB，Xeon E5-2680 v4，62 GiB RAM。
+- 服务：`strata.service`，端口 8080，API key `111`，仅用于当前实验环境。
+- 当前形态（2026-10-25 V2a 后）：引擎 0.1.49.1（`84a0d410`）、server `b6b695a1`、
+  launcher `0eeee160`、config `6c362d01`。
+- 配置：`parallel=6`、`max_context=192000`，W3 staged read 阈值 4096。
+- 部署树：引擎在 0.2.2 的 `build/strata`，launcher 指向 `/opt/ai/src/strata-port-v1`。
+- 回滚快照：`/opt/ai/tmp/pre-V2-20261025T133346Z/`。
 
-## 2. 预算（本项目口径）
+## 操作入口
 
-- 一批 = **1 次构建 + 1 个窗口 + 1 次完整矩阵**（`SELF_ITERATION_PLAN.md` §2 C1/C2）；批内每项一个默认关的
-  独立开关，矩阵含"全开"与"逐项关"两臂。每批重启 ≤2 次；第 3 次在复盘写理由。
-- 一次引擎构建 ≈10.6 min（`tools/server/README.md`）；构建单独计。
-- 4 路聚合噪声地板：跨 boot ≤9%（L-040）只作趋势；同会话 <3% 不下结论。
-- 小读/首字跨 boot 按 ~7%（L-031）。
+- 改配置：`/opt/ai/bin/use-config.sh <json>`。
+- 装后核对：`verify-running-config.sh`、`/health`、实际进程 cmdline、文件 md5。
+- V2 窗口驱动：`tools/server/ops-v2-window.sh`（默认 dry-run）。
+- 服务故障：按 [`SERVER_RECOVERY.md`](SERVER_RECOVERY.md) 先恢复，再继续分析。
 
-## 3. 每轮 Gate（字段与 `PORTING_RULES.md` §3 一致）
+## 本项目口径
 
-```
-### Gate（本轮）
-- 轮次：R<n>
-- 项：<ID>（≤1 个代码项；测量轮写"测量：<臂>"）
-- 验收判据：<可测+阈值+条件>
-- 实现：<file:line / 配置键 / 无（测量轮）>
-- 测试：`<命令>` → PASS
-- 生产：health / 版本或 md5 / 开关；含开工自检
-- 证据：<原始日志路径 + 脚本名>
-- 回滚：<命令或快照>（演练：是/否）
-- 台账：L-<n>
-- 剩余未完成项：<n>（逐项列）
-- 没测什么：<清单>
+- 4 路聚合的跨 boot 噪声曾达到约 9%；同会话默认低于 3% 不下结论。
+- 小读/首字跨 boot 按约 7% 看。
+- 一次引擎构建约 10.6 min；冷装载约 165–190 s。把时间用于减少构建和污染，不把重启次数设成额度。
+- 测量期间不派子代理，不同时跑重负载。
+- 上游 `vLLM-2080Ti-Definitive` 只读。
+
+## 常用检查
+
+```sh
+python3 tools/server/preflight.py --offline
+python3 tools/server/four-questions.py
+sh tools/server/ops-v2-window.sh check
 ```
 
-机器检查：`python3 tools/server/round_gate.py`（默认查最新一条，`--round R11` 查指定轮）；
-不 PASS 不许提交。
-
-## 4. 本项目特有禁止
-
-- 上游 `vLLM-2080Ti-Definitive` 只读：不回帖、不开 PR、不提交。
-- 生产 `build/strata` 与 `serve/server.py` 只能在快照后覆盖；覆盖用 `cp .new && mv -f`。
-- 测量期间不派子代理、不并行跑重活（子代理也是这台机器上的第二路流）。
-- 生产不可用时的恢复顺序：`docs/SERVER_RECOVERY.md`。
-
-## 5. 文档落点（本项目文件名）
-
-| 内容 | 文件 |
-|---|---|
-| 做什么、顺序、臂 | [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md) |
-| 术语、阈值、矩阵、命名 | [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md) |
-| 通用规则、Gate 模板 | [`PORTING_RULES.md`](PORTING_RULES.md) |
-| 本项目适配 | 本文件 |
-| 每轮复盘 + Gate | [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)（最新在上） |
-| 结论与数字 | [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) |
-| 状态、决策、回滚 | [`HANDOVER.md`](HANDOVER.md) §3 / §13 |
-
-## 6. 四问（自检固定项，通用规则未覆盖的项目视角）
-
-① cron/timer 在跑吗；② 有残留进程吗；③ `/opt/ai/logs/vram-perf.csv` 有漂移吗；④ 方向要不要调。
-
----
-
-**变更记录**
-- v0.1 · 2026-10-24 · 初稿（已被替代）。
-- v0.2 · 2026-10-25 · DoD + Gate + 禁止清单（通用部分已迁到 `PORTING_RULES.md`）。
-- v0.4 · 2026-10-25 · §1 现网四件 hash 改为 V0 实测值（旧值非现网）；§2 预算改为批口径（1 次构建 + 1 个窗口 + 1 次矩阵，批内多项各带开关），与
-  `SELF_ITERATION_PLAN.md` §2 C1/C2 对齐；判据未动。
-- v0.3 · 2026-10-25 · 拆分：通用规则独立成 `PORTING_RULES.md` v1；本文件缩成项目适配层（事实、预算、
-  真实脚本名、文档落点、四问），事故复盘移出正文。
+历史部署事故和完整命令见 `tools/server/README.md`、`SERVER_RECOVERY.md` 和 `archive/`。

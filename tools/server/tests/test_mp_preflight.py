@@ -17,7 +17,6 @@ QUEUE = """| ID | 项 | 判据 | 状态 | 证据 | 备注 |
 STATE = """- 当前项：C1（容量矩阵）
 - 未完成采纳项：2（见 WORK_QUEUE）
 - 环境：health 200
-- 日重启：2026-10-25 0/6
 """
 
 
@@ -37,10 +36,10 @@ def test_current_item_must_be_in_queue():
     assert any("not in the work queue" in error for error in errors)
 
 
-def test_stale_restart_counter_fails():
-    bad = STATE.replace("2026-10-25 0/6", "2026-01-01 0/6")
-    errors = preflight.check_state(preflight.read_state(bad), QUEUE)
-    assert any("stale" in error for error in errors)
+def test_restart_counter_is_not_required():
+    with_counter = STATE + "- 日重启：2026-01-01 99/6\n"
+    errors = preflight.check_state(preflight.read_state(with_counter), QUEUE)
+    assert errors == []
 
 
 def test_missing_current_item_fails():

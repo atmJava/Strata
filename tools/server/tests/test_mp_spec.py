@@ -1,4 +1,4 @@
-"""T5 - speculative draft acceptance (docs/FEATURE_PARITY.md section 4, F4/T5).
+"""T5 - speculative draft acceptance (F4/T5).
 
 The fork's own tests (tests/v1/spec_decode/) assert that acceptance is measured and that the
 output is unchanged by drafting.  Strata exposes the same numbers on /metrics

@@ -3,7 +3,7 @@
 
 The fork's launcher enforces `N x CTX <= GPU KV tokens` (N = MAX_NUM_SEQS, CTX = MAX_MODEL_LEN).
 Strata streams KV beyond `--kv-resident` cells per QSA layer, so that formula has no direct
-analog (docs/FEATURE_PARITY.md F6); this tool checks the invariants that do hold, and - when
+analog (archived docs/archive/FEATURE_PARITY-2026-10-24.md F6); this tool checks the invariants that do hold, and - when
 the server is reachable - that the running engine matches the preset.
 
 Usage:

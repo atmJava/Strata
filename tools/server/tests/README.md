@@ -1,6 +1,6 @@
 # `tools/server/tests/` — black-box acceptance (T1–T4)
 
-These are the **T-tests** of [`docs/FEATURE_PARITY.md`](../../../docs/FEATURE_PARITY.md) §4: plain HTTP against
+These are the black-box server acceptance tests: plain HTTP against
 Strata's OpenAI-compatible server, standard library only. They need no GPU, no engine internals, and no vLLM code —
 that is the point: the fork's own tests (`tests/entrypoints/openai`, `tests/v1/core/...`) run inside vLLM and cannot
 run here; what they define (the behaviour) is what these tests check.
@@ -38,7 +38,7 @@ is not a pass**.  With `MP_BASE_URL` pointing at the box they run for real, one 
 | `test_mp_admission.py` (T3) | **xfail** | waits for busy slots; production stages only prompts ≥4096 tokens, so a 452-token reader stays un-staged (L-053) |
 | `test_mp_prefix.py` (T4) | pass | prompt cache is on in production |
 | `test_mp_spec.py` (T5) | pass | offer≥20 and acceptance≥50% from `/metrics` totals |
-| `test_mp_preflight.py`, `test_mp_round_gate.py` | pass | queue/Gate logic; batch V-rows are known ids but not backlog |
+| `test_mp_preflight.py`, `test_mp_round_gate.py` | pass | state/queue logic and the legacy Gate checker |
 | `test_mp_staged_switch.py` | pass | `STRATA_*STAGED_READ=0` really turns it off (source-level) |
 | `test_mp_staged_patch.py`, `test_mp_staged_cancel.py`, `test_mp_patch_parity.py` | pass | the 0.2.2 patch is patched into a temp copy and driven (S0c, S0d, `46d12fa9` parity) |
 | `test_mp_timings.py`, `test_mp_admission_limit.py`, `test_mp_admission_wait.py`, `test_mp_disconnect_keepalive.py` | pass | mock-engine protocol cases; no server needed |
@@ -56,7 +56,7 @@ measured 2026-10-25 on the V1 tree: 12 failed with only `pytest`; 8 failed after
 
 These tests send real requests. Do not run them while a measurement is in flight, and do not run them with a
 subagent generating (that is the same server's second stream, HANDOVER §9.16). One run at a time; record the log
-path in the round's `MULTIPATH_LOG` entry.
+path in the `ITERATION_LOG.md` retrospective.
 
 ## Files
 
@@ -80,7 +80,7 @@ path in the round's `MULTIPATH_LOG` entry.
 | `test_mp_staged_cancel.py` | S0d: a staged cancel holds the control lines |
 | `test_mp_patch_parity.py` | the shipped patch has `46d12fa9`'s strict BRDY parse and the 10 s cancel drain |
 | `test_mp_preflight.py` | `preflight.py` checks the queue/state pair, not the server |
-| `test_mp_round_gate.py` | `round_gate.py`: 11 fields, wording, counts (incl. batch V-rows) |
+| `test_mp_round_gate.py` | legacy `round_gate.py`: old 11-field logs, wording and queue counts |
 | `test_tap_parity.py` | `tap_parity.py compare/merge` on synthetic dumps |
 | `probe_long_read.py` | not a test: the staged-read neighbour-stall probe (R11/L-055) |
 | `probe_cancel_staged.py`, `probe_cancel_wait.py` | not tests: S0c/S0d probes against a live server |

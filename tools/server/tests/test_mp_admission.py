@@ -1,4 +1,4 @@
-"""T3 - admission and neighbour stalls at full slots (docs/FEATURE_PARITY.md section 4, F1/F2).
+"""T3 - admission and neighbour stalls at full slots (F1/F2).
 
 Four streams fill the production slots; a fifth cold prompt joins.  Acceptance
 (MULTIPATH_STANDARD.md section 1): its first token within 2 s, no neighbour stalls for

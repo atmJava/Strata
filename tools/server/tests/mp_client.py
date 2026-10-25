@@ -1,4 +1,4 @@
-"""Shared HTTP helpers for the black-box acceptance tests (docs/FEATURE_PARITY.md, T1-T4).
+"""Shared HTTP helpers for the black-box acceptance tests (T1-T4).
 
 Only the standard library: these tests run against the live server from any machine
 that can reach it, with no engine internals and no GPU.

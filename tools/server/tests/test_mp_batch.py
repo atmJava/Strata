@@ -1,4 +1,4 @@
-"""T2 - batch invariance (docs/FEATURE_PARITY.md section 4, F1).
+"""T2 - batch invariance (F1).
 
 One greedy reply alone must equal the same reply inside a batch.  Strata's batch
 windows are only exact with the settings in docs/BATCHING.md ("Exactness"):
