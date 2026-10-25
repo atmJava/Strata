@@ -1,5 +1,5 @@
 --- /opt/ai/tmp/mp-w3-A3-server.py	2026-10-21 09:07:39.000000000 +0000
-+++ strata-mp/serve/server.py	2026-10-25 01:16:39.966356809 +0000
++++ strata-mp/serve/server.py	2026-10-25 02:15:37.898554088 +0000
 @@ -1138,6 +1138,8 @@
          # (its flag leaked) and would keep every later request waiting for a slot that nothing will free.
          self.slot_claims: set[int] = set()
@@ -29,7 +29,7 @@
 +        staged_ready = None       # STRATA_MP_STAGED_READ: ("brdy", n, max_new, cont) once read without a slot
 +        staged_attempts = 0
 +        staged_enabled = os.environ.get("STRATA_MP_STAGED_READ") == "1" and not embeddings
-+        staged_min_tokens = int(os.environ.get("STRATA_MP_STAGED_READ_MIN_TOKENS") or "0")
++        staged_min_tokens = int(os.environ.get("STRATA_MP_STAGED_READ_MIN_TOKENS") or "4096")   # safe default: short reads never stage
          try:
              while True:   # a request in a slot that is left alone goes back to the solo path
                  if not holding:

@@ -1,6 +1,6 @@
 --- strata-0.2.2/src/program/generate.cpp	2026-10-24 10:34:33.687089624 +0000
-+++ strata-mp/src/program/generate.cpp	2026-10-24 16:11:14.050961330 +0000
-@@ -11224,6 +11224,22 @@
++++ strata-mp/src/program/generate.cpp	2026-10-25 02:15:37.895554171 +0000
+@@ -11224,6 +11224,25 @@
          };
          int admit_slot = -1;               ///< the slot the request being read will continue in (BGEN)
          long long admit_max_new = 0;
@@ -19,11 +19,14 @@
 +            bool cvec = true, cont = false;
 +            double drain_ms = 0.0;
 +        } staged_admit;
-+        static const bool staged_read_env = std::getenv("STRATA_BATCH_STAGED_READ") != nullptr;
++        static const bool staged_read_env = [] {
++            const char* staged_v = std::getenv("STRATA_BATCH_STAGED_READ");
++            return staged_v && *staged_v && std::strcmp(staged_v, "0") != 0;   // =0 disables, unlike a bare getenv
++        }();
          auto batch_on = [&] { for (const BSlot& b : bs) if (b.active) return true; return false; };
          auto try_next_line = [&](std::string& out) -> bool {
              std::lock_guard<std::mutex> lk(in_mu);
-@@ -11845,6 +11861,87 @@
+@@ -11845,6 +11864,87 @@
                  return 1;
              }
              admit_slot = -1;
@@ -111,7 +114,7 @@
              if (line.rfind("BGEN ", 0) == 0 || line.rfind("BGENI ", 0) == 0) {
                  const bool bimg = line.rfind("BGENI ", 0) == 0;
                  char* e1 = nullptr;
-@@ -15244,7 +15341,30 @@
+@@ -15244,7 +15344,30 @@
                          (long long) req_offload, chain_txt, (long long) req_chunk,
                          (long long) (sp.chain_experts_streamed() - streamed0));
              std::fflush(stdout);

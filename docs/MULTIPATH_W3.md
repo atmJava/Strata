@@ -64,7 +64,7 @@ staged 队首 + 客户端断开 → BCANCEL
 
 ## 3. 引擎改动（0.1.47，全部在 `src/program/generate.cpp`）
 
-原则：**现有路径一行不动**，新行为只在 `STRATA_BATCH_STAGED_READ=1` 时可达；默认关时逐字节同旧行为。
+原则：**现有路径一行不动**，新行为只在 `STRATA_BATCH_STAGED_READ=1`（不设或 `=0` 关） 时可达；默认关时逐字节同旧行为。
 
 1. **全局开关与暂存结构**（放在 `admit_slot` 声明附近，`11225`）：
    ```cpp

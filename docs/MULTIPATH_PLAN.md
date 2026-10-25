@@ -8,7 +8,7 @@
 >
 > **状态：已执行并收口（R0–R8，2026-10-25）。** 判决总表见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md) §8；
 > 每轮复盘见 [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)，证据见 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) L-046…L-052。
-> 生产当前运行 **A（原 0.2.2 / 0.1.47，health 200）**；W3 补丁默认关，按 `MULTIPATH_W3.md` §7 的方式启用。
+> 生产当前运行 **B（W3 已启用，引擎 `383b426a` / server `52b84d54`，health 200）**；回滚见 `MULTIPATH_W3.md` §7。
 
 **执行结果（一句话版）**：
 

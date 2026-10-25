@@ -4,7 +4,7 @@
 
 > 这份文件是接手入口：**先读它**，需要数字时按 `docs/EVIDENCE_LEDGER.md` 顶部的判决索引跳条目。
 > 文档地图：[`docs/README.md`](README.md)（哪些现行、哪些是历史存档）。工装手册：[`tools/server/README.md`](../tools/server/README.md)。
-> 最后更新：2026-10-24 06:45 UTC（文档与工装规范化那一轮）。
+> 最后更新：2026-10-25 02:25 UTC（规则 v3、计数与索引对齐那一轮）。
 
 
 ## 0. 十分钟接手
@@ -380,19 +380,20 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 **（2026-10-24 夜，多路融合立项）** 计划见 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)（W1–W4），
 功能清单与验收见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md)，口径见 [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)，
 执行规则与每轮复盘见 [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) / [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)。
-目标 `goal-402218d9-57d7-4af1-aea0-391a1494acd9`（active，上限 1000 轮）。
+当前目标 `goal-49e1a86f-f67c-491d-b12b-21a5be8e2407`（2026-10-25 状态复位后；旧 `goal-402218d9-57d7-4af1-aea0-391a1494acd9` 作废）。
 **24/7 协议 v1.1（2026-10-25）**：`PORTING_RULES.md` §12 队列驱动、轮次 ≤45 min、独立复核、自更新边界、
-熔断（同项 3 轮/生产 2 次/日重启 ≤6）、停机条件；`WORK_QUEUE.md`（14 项）为唯一事实源，`STATE.md` 为断点；
-`tools/server/preflight.py`（health/队列一致）+ `round_gate.py --queue`（计数与项必须对得上）。
+熔断（同项 3 轮/生产 2 次/日重启 ≤6）、停机条件；`WORK_QUEUE.md`（15 项）为唯一事实源，`STATE.md` 为断点；
+`tools/server/preflight.py`（health/队列一致）+ `round_gate.py`（默认核对计数与项）。
 
-**规则 v0.3 生效（2026-10-25）**：通用规则独立成 `PORTING_RULES.md` v1（DoD、每轮 Gate 11 字段、禁止清单、
-阻塞、收口需用户确认）；`MULTIPATH_RULES.md` 缩成项目适配层（事实/预算/真实脚本名/文档落点）。门禁脚本
-`tools/server/round_gate.py`（自测 11/11）。**没有 PASS 的验收测试，就不算这轮做完；不得自行 complete。**：`MULTIPATH_RULES.md` 改为 DoD + 每轮 Gate + 禁止清单 + 用户确认；
-门禁脚本 `tools/server/round_gate.py`（自测 7/7）。**没有 PASS 的验收测试，就不算这轮做完；不得自行 complete。**
+**规则 v1.1 生效（2026-10-25）**：通用规则独立成 `PORTING_RULES.md` v1.1（DoD、每轮 Gate 11 字段、禁止清单、
+阻塞、收口需用户确认、§12 24/7 协议）；上位章程 RULES v3 同步改为"执行自主、目标收口由用户确认"。
+`MULTIPATH_RULES.md` 缩成项目适配层（事实/预算/真实脚本名/文档落点）。
+门禁脚本 `tools/server/round_gate.py`（16 项自测）+ `preflight.py`（5 项自测），共 21/21。
+**没有 PASS 的验收测试，就不算这轮做完；不得自行 complete。**
 当前真实状态（`FEATURE_PARITY.md` §10）：F3/F4/F6/F7 验收通过；**F1/F2 已落地但验收未过**（T3 xfail，第二 token 38.6 s）；
-**12 项 S 项采纳·待实现**；F5/F11 搁置待用户确认；N×CTX 容量矩阵待测。**剩余 14 项 + 1 矩阵。**
+**12 项 S 项采纳·待实现**；F5/F11 搁置待用户确认；**剩余 15 项（`WORK_QUEUE.md` 口径，含 C1 容量矩阵）。**
 
-**当前轮：R10 完成（A-B-A 闭环：回滚 A 实测 42.3/36.3 s → 再启用 B 35.9/17.7 s；3 流冷读 8.0 s；L-054）。生产运行 B（引擎 4f6f635f / server e8edc558，阈值 4096），health 200，回滚备份 `/opt/ai/tmp/mp-w3-A3-*`。下一轮 R11：先跑 N×CTX 容量实验（6×192K / 8×128K），再按 P1 做 S2/S3/S8/S1/S7，每轮一项、过 Gate。**
+**当前轮：R11 进行中（S0 修正 staged-read 开关语义 + 阈值默认）；生产仍运行 B（引擎 `4f6f635f` / server `e8edc558`，阈值 4096），health 200，回滚备份 `/opt/ai/tmp/mp-w3-A3-*`。R11 收口后先做 C1（N×CTX 容量实验：6×192K / 8×128K），再按 P1 做 S2/S3/S8/S1/S7，每轮一项、过 Gate。**
 
 **（2026-10-24 夜更新）helper 这条线已经判完并关闭**：`--prefill-pipe 1` 时真实请求不进 `bind_stage_helper`
 （`planned_C < n` → `single_chunk=false`），`--prefill-pipe 0` 时才进；而启动时 `split_help_env()` 让 **flag 文件优先于

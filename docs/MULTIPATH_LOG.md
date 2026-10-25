@@ -8,6 +8,40 @@
 
 ---
 
+## R11 · 2026-10-25 · S0 修复开关语义与阈值默认（引擎 383b426a / server 52b84d54）；长读暂存**邻居停顿 3.43 s**
+
+- **改了什么**：引擎开关从裸 `getenv()!=nullptr` 改为 `strcmp(v,"0")!=0`（`=0` 真的关）；server 的
+  `STRATA_MP_STAGED_READ_MIN_TOKENS` 默认从 0 改为 **4096**；重构建 exit 0；部署并恢复健康。
+  新增 `test_mp_staged_switch.py` 防回退。
+- **数字**（同机、4 槽全忙）：
+  - 短读 452（<4096，不暂存）：首 token **40.68 s**、第二 40.73 s、邻居停顿 0.98 s → xfail（设计如此）。
+  - 长读 22.7K（暂存）：首 token **17.89 s**、第二 36.90 s、总 37.31 s、邻居总时长 41.37 s，
+    **邻居在读者窗口内最大停顿 3.43 s**（> 1 s 门槛）。
+  - 部署后引擎 `383b426a`、server `52b84d54`、health 200。
+- **预期被推翻**：R9/R10 只测了邻居**总时长**，看起来“不受害”；这次加了窗口内 token 停顿，实测 **3.43 s**。
+  “暂存读不卡邻居”不成立，至少在这个并发分支下不成立。这是 R11 最重要的发现。
+- **自检**：health 200；queue 一致；上轮 R10 剩余 14 → 本轮 S0 完成、新增 S0b，仍 15。
+- **四问**：① cron/timer 正常；② 无残留构建进程（`cc1plus` 0）；③ vram 未读；④ 方向：先查 3.43 s 的成因
+  （`STRATA_PIPED_CONCURRENT=1` vs `0`），再修审计指出的 `mp_staged` 泄漏与 BCANCEL 竞态。
+- **预算**：构建 1 次（exit 0）、重启 1 次（部署；一次 start 因 sudo 失败后补起，不重复计）。
+- **没测什么**：`STRATA_PIPED_CONCURRENT=0` 臂；6/8 路；`=0` 语义的运行验证（只有静态测试）。
+- **下一轮第一件事**：R12 = 测长读邻居停顿的成因（同 boot A-B：`PIPED_CONCURRENT=1/0`），给 3.43 s 定性。
+
+### Gate（本轮）
+- 轮次：R11
+- 项：S0
+- 验收判据：补丁含 `strcmp(=0 关)` + 阈值默认 4096；重构建 exit 0；部署后长读 17.89 s 走暂存、短读 40.68 s 不暂存
+- 实现：`src/program/generate.cpp:11242`、`serve/server.py:1786`、`tools/server/patches/*`
+- 测试：`pytest tools/server/tests/test_mp_staged_switch.py` → PASS
+- 生产：engine `383b426a`、server `52b84d54`、health 200
+- 证据：`/tmp/mp-w3-rebuild-*.log`；探针 `tools/server/tests/probe_long_read.py`；pytest 输出
+- 回滚：`/opt/ai/tmp/mp-w3-B0-strata.bin` + `mp-w3-B0-server.py`（演练：否）
+- 台账：L-055
+- 剩余未完成项：15（S0b、F1F2、C1、12 项 S）
+- 没测什么：PIPED_CONCURRENT=0、6/8 路、失败路径
+
+---
+
 ## R10 · 2026-10-25 · A-B-A 闭环：回滚 A 验证（42.3/36.3 s）→ 重新启用 B（35.9/17.7 s）；3 流冷读 8.0 s
 
 - **改了什么**：按 G4 做了一次**真实回滚**：从 `/opt/ai/tmp/mp-w3-A3-*` 恢复引擎 `4fd45369`、server `aec97a89`、
