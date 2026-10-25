@@ -242,6 +242,18 @@ int8 池、真实几何、无模型，单 QSA 层每次调用 µs）**。口径�
 编译期被拒，已实测 nvcc exit=2），注释写清为什么；要真扫 tile，必须先把 64-cell 相位改成 `CHUNK/64` 子 tile
 循环 + running max，并配自己的 parity 门。
 
+**这个 parity 门怎么做（下次改 tile 直接照抄，本次就是这样发现问题的）**：仓库里没有 decode-attn 的正确性测试，
+现有 parity 都在同一个 CHUNK 下编译两边、天然查不出 tile 错。做法是把 `src/kernels/qsa_rows_bench.cpp` 复制到
+/tmp，在计时循环后把 T=1..4 的 attn 输出 dump 成 float32，把变体 `qsa_decode_attn.o` 与 **pristine
+`libstrata_kernels.a`** 各链一次，逐位比：stock 必须与自身重跑一致（确定性），变体与 stock 的 rel RMS/max abs
+超阈值即失败。命令模板（2080 Ti/build75，本次实测有效）：
+
+```
+nvcc ... --options-file build75/CMakeFiles/strata_kernels.dir/includes_CUDA.rsp -DSTRATA_QSA_ATTN_CHUNK=<CH>      -x cu -c src/kernels/cuda/qsa_decode_attn.cu -o /tmp/p4/<v>/qsa_decode_attn.o
+c++ ... build75/CMakeFiles/qsa_rows_bench.dir/src/kernels/qsa_rows_bench.cpp.o /tmp/p4/<v>/qsa_decode_attn.o      -o /tmp/p4/<v>/bench build75/libstrata_kernels.a build75/libstrata_core.a ...   # 变体版；stock 版不换 .o
+CUDA_VISIBLE_DEVICES=1 P4_DUMP_DIR=/tmp/p4/<v>/dump /tmp/p4/<v>/bench --ctx 131072 --max-context 131072 --rows
+```
+
 其它可用事实：v3 kernel **128 regs/thread → 2 blocks/SM（512 线程 = sm_75 的 50% 占用）**；
 `cuobjdump -sass` 里 **0 条 HMMA/IMMA/DP4A**（纯标量 FMA，m8n8k16 与这层无关）；(256,256) 两块要 53.2 KB smem，
 超 48 KB 默认 carveout（静态推断 1 块/SM）。
