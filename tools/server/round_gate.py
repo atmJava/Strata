@@ -7,6 +7,7 @@ Exit 0 when the checked round passes; 1 otherwise (each problem printed).
 
 The gate is a format + wording check, not proof the feature works: it rejects missing fields,
 non-PASS test lines (xfail/skip/FAIL/TODO/未跑) and empty values where a value is required.
+Queue counts are compared only for the latest round (no --round): an older round records a snapshot.
 """
 from __future__ import annotations
 
@@ -17,7 +18,9 @@ import sys
 REQUIRED = ("轮次", "项", "验收判据", "实现", "测试", "生产", "证据", "回滚", "台账",
             "剩余未完成项", "没测什么")
 NON_PASS = re.compile(r"xfail|skip|FAIL|TODO|未跑", re.IGNORECASE)
-ROUND_RE = re.compile(r"^## (R\d+)\b.*$", re.MULTILINE)
+ROUND_RE = re.compile(r"^## (R\d+|V\d+)\b.*$", re.MULTILINE)
+# V0–V3 are batch headings (SELF_ITERATION_PLAN §4); they carry the same Gate as a round.
+BATCH_ROW = re.compile(r"^V\d+$")
 GATE_RE = re.compile(r"^### Gate\b", re.MULTILINE)
 
 
@@ -65,6 +68,8 @@ def parse_queue(text: str) -> tuple[list[str], int, list[str]]:
         if not item_id or item_id.startswith("ID"):
             continue
         ids.append(item_id)
+        if BATCH_ROW.match(item_id):
+            continue                  # a batch row (V0–V3) is a milestone; it is not a backlog item
         if status not in ("已完成", "否决") and not status.startswith("搁置"):
             unfinished += 1
     if declared is None:
@@ -123,9 +128,14 @@ def validate_log(text: str, round_name: str | None = None, queue_text: str | Non
     if queue_text is not None:
         ids, unfinished, problems = parse_queue(queue_text)
         errors.extend(problems)
-        gate_count = re.match(r"^(\d+)", value("剩余未完成项"))
-        if gate_count and gate_count.group(1) != str(unfinished):
-            errors.append(f"Gate says {gate_count.group(1)} unfinished but the queue counts {unfinished}")
+        # The count is a snapshot taken when the round was written: a later discovery-round item
+        # must not retroactively fail a past round. Comparing to the current queue is a write-time
+        # check, so it only runs for the latest round (no --round given).
+        if round_name is None:
+            gate_count = re.match(r"^(\d+)", value("剩余未完成项"))
+            if gate_count and gate_count.group(1) != str(unfinished):
+                errors.append(f"Gate says {gate_count.group(1)} unfinished but the queue counts {unfinished}"
+                              " (expected after a discovery round adds items; the next round's Gate must match)")
         item = re.split(r"[\s（(]", value("项").replace("测量：", "").strip())[0] if value("项") else ""
         if item and item not in ids:
             errors.append(f"Gate item '{item}' is not in the work queue")

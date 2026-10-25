@@ -129,3 +129,26 @@ def test_specific_round_selection():
     text = GOOD + "\n" + older
     assert round_gate.validate_log(text, "R98") == []
     assert round_gate.validate_log(text, "R97") != []
+
+
+def test_historical_round_keeps_its_snapshot_count():
+    older = GOOD.replace("R99", "R98").replace("L-999", "L-998")
+    text = GOOD + "\n" + older
+    # R98 recorded 1 unfinished; the queue now counts 2 because a later discovery round added an item.
+    # The old round's count is a snapshot and must not be retroactively failed.
+    assert round_gate.validate_log(text, "R98", QUEUE) == []
+    assert round_gate.validate_log(text, None, QUEUE)  # the latest round is still compared: 1 vs 2
+
+
+def test_batch_round_heading_is_validated():
+    # V0–V3 are batch headings (SELF_ITERATION_PLAN §4) and carry the same Gate as a round.
+    batch = GOOD.replace("R99", "V0")
+    assert round_gate.validate_log(batch, "V0") == []
+    assert round_gate.validate_log(batch, None) == []          # also the default (first) block
+
+
+def test_batch_rows_are_not_backlog_items():
+    # A V-row is a batch milestone: it must be a known id, but it adds nothing to the backlog count.
+    with_batch = QUEUE.replace("| S2 |", "| V1 | 免停机批 | z | 进行中 | | 批次行 |\n| S2 |")
+    ids, unfinished, problems = round_gate.parse_queue(with_batch)
+    assert "V1" in ids and unfinished == 2 and problems == []
