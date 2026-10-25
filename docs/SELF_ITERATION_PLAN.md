@@ -79,7 +79,7 @@
 | V1-5 | P2① RoPE 借用 + ③ logits 宽度的**显存账**在生产形状下真省（48 MiB/session、30.34 MiB/7 drafter） | INFO 行里的实测字节与代码公式差在噪声内 | `expert_cache_mib/slots`、session 定容打印、`vram-perf.csv` | W（1 次重启） |
 | V2-1 | staged read 在现网跑通且不遗留（S0c/S0d 的服务器判据） | 断开不吞别人的 `T`/`DONE`（S0c 原判据不成立，改写为 S0e） | 结构化日志（请求 id + 阶段 + 槽号）+ `test_mp_staged_*` | W |
 | V2-2 | P3c fused（`STRATA_PF_FUSED=1`）在现网 IQ3_XXS 上的**端到端**行为与速度 | 同 boot A-B：fused 开/关，prompt 时间中位差 ≥3% 才下结论；输出 parity 过（**V2b 实测 +0.61%，否决；文本 sha 相同**） | `exp-v2-prefill-ab.py`、`exp-v2-ab-summary.py` | W |
-| V2-3 | 冷读邻居停顿（S0b，M4 3.43 s → ≤1 s） | 同 boot A-B：`STRATA_PIPED_CONCURRENT=1/0` 邻居停顿 ≤1 s，或给出可接受上界 | 每请求 TTFT/queue/ITL（新 `metrics`）+ `warmup.py` | W |
+| V2-3 | 冷读邻居停顿（S0b，M4 3.43 s → ≤1 s） | 同 boot A-B：`STRATA_PIPED_CONCURRENT=1/0` 邻居停顿 ≤1 s，或给出可接受上界（**V2c 实测 10.87 vs 10.91 s，+0.37% 无差异；停顿≈读时长 → 需换机制**） | `exp-v2-warmup.py`、`exp-v2-ab-summary.py` | W |
 | V2-4 | warmup.py 自己的断言（第一次长读 ~10 s、第二次 0.6 s） | 实测两次冷读的邻居停顿，写进台账；**先量仪器代价**（V2a 实测：29.37 s / 0.73 s，邻居 28.48 / 0.15 s） | warmup 前后 /metrics 快照 | W |
 | V3-1 | C1 容量矩阵（6×192K / 8×128K） | 6/8 路聚合 ≥ 基线−3%、单路 ≥15 tok/s、晚到首 token ≤ 读时间+2 s、邻居 ≤1 s | `bench-strata.py`（`BENCH_N=6/8`）+ `warmup.py` | W + G |
 | V3-2 | DFlash2 A1 在现网 solo 下不崩、失败退回 MTP | `--draft dflash2` 起服务：无权重时明确拒绝并退回 MTP，不产生半开状态 | 启动日志 + `ENGINE_SERVES_DFLASH2` 状态 | G（drafter 权重） |
@@ -101,7 +101,11 @@
 - **V2b 完成**（2026-10-25 14:00–14:07Z；`/opt/ai/logs/V2b-fused-20261025T1359Z/`）：fused A-B `prompt_ms` 中位
   A 10968.9 / B 11035.6 = **+0.61%**（去首跑 +0.46%）<3% → **否决**；两臂文本 sha 相同（parity 过）；臂已恢复默认
   （config 与快照逐字节一致）。只测了 22K 冷读一条形状，不作一般结论。
-- V2c（S0b A-B）、V3-1…V3-3：**未开始**（V2c 需 2 次重启；V3-2/V3-3 等 drafter 权重）。
+- **V2c 完成**（2026-10-25 14:12–14:20Z；`/opt/ai/logs/V2c-piped-20261025T1412Z/`）：邻居停顿 A（piped 1）中位
+  10.87 s / B（0）10.91 s = **+0.37%**（<3%，无差异）→ **S0b 未达**；停顿≈读时长本身（11.5 s 读）；同 prompt
+  第二次读 0.6 s 是前缀缓存命中。`STRATA_PIPED_CONCURRENT` 不是杠杆，需换机制。
+- V3-1…V3-3：**未开始**（V3-2/V3-3 等 drafter 权重；V3-1 容量矩阵待排）。
+- 下一批：**S0e**（引擎崩溃后不自动重启 + health 不反映引擎状态，V2a 新发现）。
 
 ### 4.3 批的划分（一次做完一批，一次测完一批）
 
@@ -289,6 +293,7 @@ python3 tools/server/exp-v2-ab-summary.py on.json off.json --field prompt_ms
 ---
 
 **版本行**
+- v7 · 2026-10-25 22:22 · V2c 收尾：§4.2 进度（S0b 未达：两臂无差异、停顿≈读时长）、V2-3 判据行补实测、下一批 S0e；判据与阈值未动。
 - v6 · 2026-10-25 22:10 · V2b 收尾：§4.2 进度（fused +0.61% 否决/parity 过/臂已恢复）、V2-2 判据行补实测、下一步 V2c；判据与阈值未动。
 - v5 · 2026-10-25 22:05 · V2a 收尾：§4.2 进度（部署 PASS / 矩阵 4/4 / S0c 否决-前提不成立）、§11 的 V2a
   改成实际部署形状与失败教训（自包含树，不能只覆盖 serve/）、下一步 V2b；判据与阈值未动。

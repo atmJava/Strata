@@ -4,14 +4,19 @@
 
 - 目标：持续优化循环（`EVERGREEN_LOOP.md`；不设完成，直到用户叫停）；当前主线 = 移植代码的服务器验证战役
   V0→V3（`SELF_ITERATION_PLAN.md` §4）
-- 当前批次：**V2b 完成**（2026-10-25 14:00–14:07Z，fused A-B：+0.61% <3% → 否决，parity 过，臂已恢复默认）；下一批 **V2c S0b A-B**
-- 当前项：V2c（`STRATA_PIPED_CONCURRENT` 两臂）
-- 下一动作：**V2c S0b A-B**（`STRATA_PIPED_CONCURRENT` 1→0，各 3 跑邻居停顿；`ops-v2-arm.sh set
-  STRATA_PIPED_CONCURRENT 0 --go` 换臂，测完恢复 1 并 `cmp -s` 快照）；S0b 的判据是邻居停顿 ≤1 s 或给出上界。
+- 当前批次：**V2c 完成**（2026-10-25 14:12–14:20Z，S0b A-B：10.87 vs 10.91 s，+0.37% 无差异，S0b 未达）；下一批 **S0e（引擎崩溃不自动重启）**
+- 当前项：S0e（修引擎崩溃后的自愈 + health 反映引擎状态）
+- 下一动作：**S0e**——先静态读清"引擎死后为什么没有自动重启"（`serve/server.py` 的 `load()`/`ensure_loaded()`、
+  `_take_control` 的 503 路径、`_say_died`），再写默认关的修复 + mock 测试（杀 mock 引擎 → 下一请求成功或
+  health 报 not loaded）→ 部署 → 重跑 kill 测试。判据：崩溃后 ≤1 次自动重启恢复；health 反映引擎在/不在。
 - 环境（V2a 装后实测，2026-10-25 13:52Z）：health 200；引擎 **0.1.49.1** / `84a0d410`；server **`b6b695a1`**
   （`/opt/ai/src/strata-port-v1/serve/server.py`）；launcher `0eeee160`；config `6c362d01`（未动）；
   W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）；
   `ARGS : MATCH`、`ENV : DIFFERENT` 只有 launcher 的 `STRATA_MP_STAGED_READ_MIN_TOKENS`。
+- **V2c 结果**：~22K 读期间邻居停顿 A（piped 1）中位 10.87 s / B（0）10.91 s，**+0.37% 无差异**；
+  停顿≈读时长本身（11.5 s 读）；同 prompt 第二次读 0.6 s 是**前缀缓存命中**。**S0b 未达**，PIPED_CONCURRENT
+  不是杠杆。证据 `/opt/ai/logs/V2c-piped-20261025T1412Z/`。
+- **V2b 结果**：fused A-B `prompt_ms` +0.61% <3% → 否决，parity 过，臂已恢复；证据 `/opt/ai/logs/V2b-fused-20261025T1359Z/`。
 - **V2a 结果**：矩阵 4/4 PASS（V2-0 装后核对、V2-4 warmup、V1-5 显存账、V2-1 S0d+长读+短请求）；
   **S0c 未达（前提不成立）**：引擎被 kill 后 server 不退出（journal 无 systemd 事件）、`loaded`/health 仍报 true；
   在途 7 请求各报一次 `engine stopped unexpectedly (-9)`（同一个 kill 的 7 次报告）；此后**没有自动重启**，

@@ -8,6 +8,39 @@
 
 ---
 
+## V2c · 2026-10-25 · S0b A-B：邻居停顿 10.87 vs 10.91 s（+0.37%，无差异）；停顿≈读时长本身
+
+- **改了什么**：只换臂。臂 A = `STRATA_PIPED_CONCURRENT=1`（默认，V2a 部署）；臂 B = `ops-v2-arm.sh set
+  STRATA_PIPED_CONCURRENT 0 --go`（1 次重启）；测完从快照恢复 config 并重启（1 次），`cmp -s` 逐字节一致。
+- **数字**（`exp-v2-warmup.py` 每臂 3 跑，第一个 ~22K 读期间邻居最大 token 间隔）：
+  - A：19.06 / 10.81 / 10.87 s → 中位 **10.87**（读 wall 19.94/11.54/11.66）。
+  - B：20.2 / 10.9 / 10.91 s → 中位 **10.91**（读 wall 21.15/11.60/11.63）。
+  - **B−A = +0.37%**（<3%）→ `STRATA_PIPED_CONCURRENT` 不是这个停顿的杠杆；**S0b 未达**（要 ≤1 s 或上界）。
+- **关键观察**：邻居停顿与读自身时长同量级（10.8 s ≈ 11.5 s 读）——单读占着 GPU 时邻居拿不到解码机会；
+  同 prompt 第二次读 0.60–0.64 s 是**前缀缓存命中**（邻居间隔 0.15–0.24 s），V2-4 的"第二次 0.73 s"按此解释。
+- **预期被推翻**：S0b 的探针假设"换 `STRATA_PIPED_CONCURRENT` 就能把邻居停顿压到 1 s"——实测两臂无差异；
+  要 ≤1 s 需要分块/抢占式的读（新机制），不是这个开关。
+- **自检**：health 200；`cmp -s` 恢复验证；四问绿；queue/STATE 一致（18）。
+- **预算**：重启 2（臂 B 1、恢复 1；用户已取消重启限制）。
+- **没测什么**：不同读长度（8K/16K/32K）的停顿曲线；staged 场景；decode 侧并发；多卡。
+- **下一批第一件事**：V3-1 容量矩阵（6×192K / 8×128K）或先修 S0e（引擎崩溃不自动重启）——按 EVERGREEN §3
+  的收益/风险排序，S0e 是可用性缺陷，优先。
+
+### Gate（本轮）
+- 轮次：V2c
+- 项：V2c
+- 验收判据：邻居停顿 ≤1 s 或给出可接受上界（A-B 两臂各 3 跑，≥3% 才下结论）
+- 实现：只换臂（`ops-v2-arm.sh`），无代码改动
+- 测试：`python3 tools/server/exp-v2-warmup.py http://192.168.3.14:8080` ×3/臂 + `exp-v2-ab-summary.py --field neighbour_gap_s` → PASS（两臂各 3 跑，无失败）
+- 生产：health 200；engine 0.1.49.1 / `84a0d410`；server `b6b695a1`；launcher `0eeee160`；config 恢复 `6c362d01`；`STRATA_PIPED_CONCURRENT=1`
+- 证据：`/opt/ai/logs/V2c-piped-20261025T1412Z/`（armA/B 各 3 跑 + read1 汇总）、`/tmp/v2c-armB.log`、`/tmp/v2-restore-c2.log`；脚本 `exp-v2-warmup.py`、`exp-v2-ab-summary.py`、`ops-v2-arm.sh`
+- 回滚：快照 `pre-V2-20261025T133346Z/strata-022.json`（`cmp -s` 一致）
+- 台账：L-060
+- 剩余未完成项：18
+- 没测什么：不同读长度的停顿曲线、staged 场景、decode 侧并发、多卡
+
+---
+
 ## V2b · 2026-10-25 · fused A-B：22K 读的 prompt 时间 +0.61%（<3%，否决），输出文本一致
 
 - **改了什么**：只换臂，不改代码。臂 A = `STRATA_PF_FUSED` 不设（默认关，V2a 的部署）；臂 B = `ops-v2-arm.sh

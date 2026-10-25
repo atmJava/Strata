@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（60 条：L-000…L-059，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
+## 台账索引（61 条：L-000…L-060，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
 
 | 编号 | 日期 | 一句话结论 | 判决 |
 |---|---|---|---|
@@ -69,6 +69,7 @@
 | L-057 | 10-25 13:0xZ | V1 免停机批：HEAD `2294d4de` 在实验树构建 7m01s / 0 错（引擎 0.1.49.1、md5 `84a0d410`）；矩阵 5 项全 PASS（单测 61 passed / 10 skipped、isa_guard 2.36 s、64/256 锁死、staged wedge 3 passed）；首跑 12 failed 全是 venv 缺 `jinja2`/`regex` | **结论** |
 | L-058 | 10-25 13:4xZ | V2a 窗口：0.1.49.1 + 0.2.3 自包含树上线（引擎 `84a0d410`、server `b6b695a1`、launcher `0eeee160`，config 未动）；V2 矩阵 4 项全 PASS；S0c 未达（前提不成立：引擎被杀 server 不退出，无自动重启，请求 503 直到手动重启，health 仍 200） | **结论** |
 | L-059 | 10-25 14:0xZ | V2b fused A-B：22K 读 `prompt_ms` 中位 A 10968.9 / B 11035.6（+0.61%，<3%）；去首跑 +0.46%；文本 sha 相同（parity 过）；臂后已恢复默认（config 与快照逐字节一致） | **否决** |
+| L-060 | 10-25 14:1xZ | V2c S0b A-B：~22K 读期间邻居停顿 A 10.87 s / B 10.91 s（+0.37%，<3%）；停顿≈读时长；第二次读 0.6 s 是前缀缓存命中 | **结论** |
 | L-056 | 10-25 20:4x | V0 准备批：现网四件实测（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）；现网 server 是 hybrid 且 `52b84d54` 是 patch 树 hash；harness 2 红转绿、补丁追平 `46d12fa9`；S2 探针代价 1.36–1.40 µs/请求；回滚包字节核对（停机级未演练）；0 构建 0 重启 | **参考** |
 | L-055 | 10-25 02:2x | R11 开关修复部署（引擎 `383b426a`）：短读 40.68 s 不暂存、长读首 17.89 s；**邻居窗口停顿 3.43 s**（>1 s，新发现）；S0 完成 | **参考** |
 | L-054 | 10-25 01:3x | A-B-A 闭环：回滚 A 实测（短 42.3 s / 长 36.3 s，G4 ✓）→ 再启用 B（短 35.9 s / 长 **17.7 s**）；3 流冷读首 token 8.0 s（唯一提示词，修正缓存假象） | **参考** |
@@ -2029,3 +2030,22 @@ prompt 形状、一种 max_tokens；没有 B-A-A 反向复测；没有第二次�
 **原始日志**：`/opt/ai/logs/V2b-fused-20261025T1359Z/`（`V2b-armA.json`、`V2b-armB.json`）、
 `/opt/ai/src/strata-0.2.2/strata-022.log`（fused 标记）、`/tmp/v2b-armB.log`、`/tmp/v2-restore-default.log`；
 脚本 `tools/server/exp-v2-prefill-ab.py`、`tools/server/exp-v2-ab-summary.py`、`tools/server/ops-v2-arm.sh`。
+
+## L-060 V2c S0b A-B：邻居停顿 ~10.8 s，`STRATA_PIPED_CONCURRENT` 1/0 无差异（+0.37%）；停顿≈读时长本身
+
+**判定**：**S0b 未达**（要求"≤1 s 或给出可接受上界"）。两臂各 3 跑，每次 warmup 的第一个 ~22K 读期间邻居的
+最大 token 间隔：**A（PIPED_CONCURRENT=1）19.06 / 10.81 / 10.87 s，中位 10.87**；
+**B（=0）20.2 / 10.9 / 10.91 s，中位 10.91** → **B−A = +0.37%（<3%，两臂无差异）**。
+**`STRATA_PIPED_CONCURRENT` 不是这个停顿的杠杆。**
+
+**停顿 ≈ 读时长本身**：同一次 warmup 里第一个读的 wall 是 19.94/11.54/11.66 s（A）、21.15/11.60/11.63 s（B），
+邻居间隔 10.8–20.2 s 与它同量级——单个 ~22K 读占着 GPU 时，邻居基本拿不到解码机会。第二次读 0.60–0.64 s
+是**同 prompt 的前缀缓存命中**（邻居间隔 0.15–0.24 s），不是"热读"：V2-4 的"第二次 0.73 s"要按缓存命中解释，
+不能当成"同一 prompt 第二次读很快"的普遍结论。
+
+**没测什么**：不同读长度（8K/16K/32K）的停顿曲线；staged 等待场景（V2-1 的 `neighbour_gap_max_s` 10.83 s 同量级，
+但那是暂存读，不是 warmup 的普通长读）；decode 侧并发；多卡。
+
+**原始日志**：`/opt/ai/logs/V2c-piped-20261025T1412Z/`（`V2c-armA-1..3.json`、`V2c-armB-1..3.json`、
+`V2c-arm*-read1.json`）、`/tmp/v2c-armB.log`、`/tmp/v2-restore-c2.log`；脚本 `tools/server/exp-v2-warmup.py`、
+`tools/server/exp-v2-ab-summary.py`、`tools/server/ops-v2-arm.sh`。
