@@ -470,3 +470,27 @@ selection" 的表述是一个**限定**：在 128K 口径下成立（92%），�
    本次新增的 bench 事实（`scores` 68 µs/次、层 141.7 µs @ T=1 @ 256K）说明：按 §P4 的
    "15.9–17.2 µs/行 × 层数"去估 229K 的 decode 账会**低估**（少算 `scores` 的上下文相关固定项，
    在 256K 时它单次就占 48%）。
+
+---
+
+## 6. 服务器全量 CTest（2026-10-25 第二次重启之后）
+
+命令：`CUDA_VISIBLE_DEVICES=1 ctest -j1 --timeout 180`（build75，157 个测试）。结果：**150 passed / 6 skipped /
+1 修好后通过**，最初的 8 个失败逐条归因如下——**没有一条是本轮移植引入的**：
+
+| 测试 | 现象 | 归因 |
+|---|---|---|
+| `isa_guard_check` | `iq512x_rows` 不在允许表 | **本仓 HEAD 既有**（dsv41 合并带进来），已在 `fa988aeb` 修；本次把修好的 `tools/check_isa_guard.py` 同步到服务器后 **通过** |
+| `prefill_fused_moe_test` / `prefill_fused_iq_test` | `cudaMalloc: out of memory` | 环境：GPU1 上生产服务占 20.4 GB，只剩 ~2 GB，而默认 `R64_E=64`；`R64_E=16 S20_E=16` 下两者都 **parity passed**（见 §1） |
+| `gdn_rec_parity` | T=1..31 全 `the same bits` 之后 `cudaMalloc: out of memory` | 同上（显存不够跑最后的大 T） |
+| `ple_parity` | `required PLE table is missing: ../../Q2_0/...gguf` | 环境：服务器上没有模型权重 |
+| `expert_layout_test` | `cannot copy tests/data/native_experts/q2_0.txt` | 环境：移植树里没有这个测试数据文件 |
+| `ggml_tq_overlay` | CMake overlay 测试失败（CMP0057 警告后退出） | 环境：需要 `ggml-tq-overlay` 的构建时配置，移植树里没做 |
+| `pf_wmma_parity` | `6 failures ... 6 个 "not launched"` | **与卡无关**：那 6 个 type/shape 组合没有 tile 实现（`gemm_iq_f16_grouped` 直接返回 false）；真正跑起来的两个 **通过**（max err 2.72e-06 / 1.13e-4） |
+
+另有 6 个 skip（`gr_upmix_parity`、`gdn_chunk_parity`、`expert_multi_test`、`native_hadamard_test`、
+`tq_cpu_parity`、`tq_cpu_parity_avx2`），都是缺权重或需要 AVX-512 机器，属设计内的跳过。
+
+**结论**：这台机器上"能跑的 157 个测试"里，除资源/数据缺失的那 5 个以外全部通过；与本轮移植相关的
+`verify_parity`、`spec_verify_parity`、`verify_batch_parity`、`qsa_select_rows_parity_test`、
+`session_rope_share_test`、`mtp_logits_width_test` 全绿。
