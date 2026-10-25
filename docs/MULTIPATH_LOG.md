@@ -8,6 +8,37 @@
 
 ---
 
+## V3-1 · 2026-10-25 · 容量矩阵（部分）：8×128K 装得下，8 路聚合 +8.6%、单路 −5.8%；4 路 M1 对比没测成
+
+- **改了什么**：只换 config（`--max-context 128000` + `parallel 8`，server 注入 `--batch 8`），1 次重启；
+  测完从快照恢复 6×192K（1 次重启），`cmp -s` 逐字节一致。
+- **数字**（`bench-strata.py`，每档 3 跑中位）：
+  - 6×192K：单请求 75.2 tok/s；6 路聚合 138.7 tok/s；墙钟 17.3 s；接受率 75–80%。
+  - 8×128K：单请求 70.8 tok/s；8 路聚合 150.6 tok/s；墙钟 21.3 s；接受率 80.97%。
+  - 每路摊到的聚合 23.1 vs 18.8 tok/s；单路 **−5.8%**；**路数不同，聚合 +8.6% 不等于 M1 更好**。
+- **容量**：8×128K 起得来——`batch_slots 8`、`expert_slots 17437`、`max_context 128000`、`vram_free 1011 MiB`。
+- **没测成**：4 路（M1）两档对比——`BENCH_N=4` 跑了 9 min 0 rep 后被杀（疑似排在真实流量后面）；
+  晚到请求首 token、8 路邻居停顿也没测。→ **不选预设**，生产保持 6×192K。
+- **自检**：health 200；`cmp -s` 恢复验证；四问绿；queue/STATE 一致。
+- **预算**：重启 2（换 8×128K 1、恢复 1）。
+- **下一批第一件事**：安静窗口里补 4 路（M1）两档对比；若 8×128K 不更好，转 S0b 的机制性改进
+  （长读分块让出，把邻居停顿从 ~10.8 s 压下来）或补 S2（每请求时延指标）。
+
+### Gate（本轮）
+- 轮次：V3-1
+- 项：V3
+- 验收判据：6/8 路聚合 ≥ 基线−3%；单路 ≥15 tok/s；晚到首 token ≤ 读时间+2 s；邻居停顿 ≤1 s；选一个预设
+- 实现：只换 config（`--max-context 128000` + `parallel 8`），无代码改动
+- 测试：`BENCH_N=6 bench-strata.py V3-cap6 3` 与 `BENCH_N=8 bench-strata.py V3-cap8 3` → PASS（各 3 跑）；`BENCH_N=4` 未完成（9 min 0 rep，被杀）
+- 生产：health 200；engine 0.1.49.1 / `84a0d410`；server `b6b695a1`；config 恢复 `6c362d01`；parallel 6 / max-context 192000
+- 证据：`/opt/ai/logs/bench-results.jsonl`（V3-cap6、V3-cap8）、`/tmp/v3-cap8.log`、`/tmp/v3-restore.log`；脚本 `bench-strata.py`
+- 回滚：快照 `pre-V2-20261025T133346Z/strata-022.json`（`cmp -s` 一致）
+- 台账：L-062
+- 剩余未完成项：18（V3 批次进行中）
+- 没测什么：4 路 M1 两档对比、晚到请求首 token、8 路邻居停顿、真实流量下的稳定性
+
+---
+
 ## V2c · 2026-10-25 · S0b A-B：邻居停顿 10.87 vs 10.91 s（+0.37%，无差异）；停顿≈读时长本身
 
 - **改了什么**：只换臂。臂 A = `STRATA_PIPED_CONCURRENT=1`（默认，V2a 部署）；臂 B = `ops-v2-arm.sh set
