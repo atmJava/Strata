@@ -332,7 +332,7 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 | 项 | 状态 | 证据 |
 |---|---|---|
 | P1 DFlash2 轨道 | **A1 已实现（opt-in）·A2/B1 待做** | 库层已就位：`load(shared)` 共享 pack/blob/head、`draft_launch/collect` 异步、`set_lazy_capture`（`dflash2.hpp:52,72,75,83`）；taps 支持批窗+多 stage+`%d` per-stage dump（`verify.hpp:326`）；`--draft dflash2` 已接 serve solo 解码环、gate 去掉 `o.serve`（`generate.cpp:5478,9167-9211,15396-15418`）。`ENGINE_SERVES_DFLASH2=False`（`strata_control/drafting.py:146`）。A2 batch（每槽实例+共享权重+异步）→B1 层切分→B2 管道隐藏；验证前置=drafter 权重（服务器没有） |
-| P2 accounting 审计 | 已完成（只读） | 无统一预算器、真双扣 3 处；6×192K session 10,126 MiB/卡、8×128K 8,873；MTP 839 MiB 在 cache 定容前扣；split 搜索按 1 session 定价 → 预测偏大 ~8.7 GiB/卡；回收清单见 §P2 |
+| P2 accounting 审计 | 已完成（只读）；回收 ①③ 已实现，②④⑤待做 | 无统一预算器、真双扣 3 处；6×192K session 10,126 MiB/卡、8×128K 8,873；MTP 839 MiB 在 cache 定容前扣；split 搜索按 1 session 定价 → 预测偏大 ~8.7 GiB/卡；回收清单见 §P2。已落地：①RoPE 跨 session 借用（`ca4d6e85`，48 MiB/session、288 MiB/stage，含 split range 的 release 漏释放修复）、③`head_logits_` 按子词表宽度（`ab7b682a`，30.34 MiB/7 drafter）；**接线（把 slot session 的 donor 传进去）留到 C1 部署窗口**，因为那会改默认显存账 |
 | P3 GDN recurrent 移植 | 降级为研究项 | L030 实测 gdn 全部阶段 ≈10%（45K prompt），2× 上限省 ~5% |
 | P3b 专家管线定性 | 已完成 | bench：IQ3_XXS gate/up R=160 = 39.0 TOPS（8.5% 峰值 / 10% HBM）⇒ 反量化受限 |
 | P3c fused_iq Turing IQ3_XXS | 已实现·opt-in（未达 1.5× 门槛，不翻默认） | parity PASS（fused vs MMQ rel RMS 1.2e-4，2080 Ti/build75）；速度 1.16/1.13/1.01× @R=12/160/626 全路；探针 unset=0 / PF_FUSED=1 → 1 / SM75=0 → 0；`STRATA_PF_FUSED=1` 才启用（§P3c） |
@@ -340,3 +340,25 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 | P5 parser 修复 | 已覆盖·不移植 | `server.py:5988-6001,6044`、`serve/dsml.py:172,211` + 各自测试（2026-10-25 核实） |
 | P6 barrier 对照分析 | 已完成·不移植 | 三洞察两条已有等价机制、第三条=S0c；S0c 用例 `serve/test_staged_wedge.py`（已提交 `bfe515ca`）在**含未提交 staged 代码的工作区** 3 passed（HEAD 上按设计 skip），并抓到 `yield ("ping", None)` 真缺陷（§P6b） |
 | 不移植清单的逐条证据复核 | 已完成 | 本文档 §1（2026-10-25 源码核实） |
+
+## 6. 本轮交付与刻意留下的边界（2026-10-25）
+
+已提交：`d8ba8593`（P3c opt-in）、`55c802a5`+`d71b7311`（P4 宏→锁死 64/256 + 扫描结论）、`bfe515ca`（S0c 用例）、
+`869c1224`+`483c53f5`（tap 差分/合并工具 + 14 例单测）、`ca4d6e85`（P2 ①RoPE 借用 + release 修复）、
+`b009fab5`（dflash2 共享/异步）、`0ab5bdd1`+`1820894f`（verify 批窗/多 stage taps + `%d` per-stage dump）、
+`ab7b682a`（P2 ③logits 宽度）、`40125aa4`（P1 A1 serve solo）、`9c671598`（S0c 用例加固）、
+`0da05465`（评审修正的文档口径）。
+
+**明确没做、以及为什么**（不把"编译过"当"做完"）：
+
+1. **P1 A2（serve+batch 每槽 drafter）与 B1（层切分）**：库层（共享权重、异步、批窗/多 stage taps、per-stage dump）
+   和 A1 都在，A2 本体约 600 行 `generate.cpp`。**没有 drafter 权重**（服务器只有主模型），跑不了
+   `dflash2_parity`，也没有任何 e2e 路径能验证 6 个实例的 draft/commit 记账；交一份一次都没运行的 600 行改动
+   不算"做完"，所以停在这里。拿到 `draft_model` 的 checkpoint 后按 §P1 的 A2 步骤写，验收钩子已备好
+   （`tap_parity compare/merge`）。
+2. **P2 ① 的接线**（slot session 传 donor）：会改默认显存账，属"默认路径变更"，按仓库规则要部署窗口实测。
+3. **P3c 翻默认**：实测 1.13×（<1.5× 门槛）且数值 2e-4 级不同，不翻。
+4. **P4 tile 调参**：扫描证明除 64/256 外的 tile 是错的（128/256 与 256/256 数值错、32/128 崩），宏已锁死；
+   真要更快得先重写 64-cell 相位（`CHUNK/64` 子 tile + running max），那是新的实现工作，不是调参。
+5. **P1 的吞吐数字**：`220.84 vs 116.04` 是 fork 在 NVFP4/FP8 路线上的数据，Strata 侧只在拿到权重 + 部署窗口后
+   才谈得上数字（§4 口径）。
