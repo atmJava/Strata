@@ -126,6 +126,31 @@ def test_compare_of_a_merge_with_a_single_stage_file_is_the_parity_check(tmp_pat
     assert (compared, differing) == (1, 0)
 
 
+def test_a_file_with_an_extra_layer_is_not_the_same_measurement(tmp_path):
+    a = make(tmp_path / "a.stap", [5], {(0, 7): {5: (1.0, 2.0)}})
+    b = make(tmp_path / "b.stap", [5, 15], {(0, 7): {5: (1.0, 2.0), 15: (3.0, 4.0)}})
+    compared, differing, _, notes = tp.compare(tp.read_dump(a), tp.read_dump(b), 1e-6)
+    assert differing == 1, "a dump missing a tap layer must not pass"
+    assert any("only in the second file" in n for n in notes)
+    assert tp.main(["compare", str(a), str(b)]) == 1
+    assert tp.main(["compare", str(a), str(b), "--allow-missing"]) == 0, "the common layers do agree"
+
+
+def test_a_duplicate_record_is_a_format_error(tmp_path):
+    p = make(tmp_path / "a.stap", [5], {(0, 7): {5: (1.0, 2.0)}})
+    p2 = tmp_path / "dup.stap"
+    p2.write_bytes(Path(p).read_bytes() + Path(p).read_bytes()[20:])   # one record twice
+    with pytest.raises(tp.FormatError):
+        tp.read_dump(p2)
+
+
+def test_trailing_bytes_are_a_format_error(tmp_path):
+    p = make(tmp_path / "a.stap", [5], {(0, 7): {5: (1.0, 2.0)}})
+    p.write_bytes(Path(p).read_bytes() + b"\x00\x00\x00\x00")
+    with pytest.raises(tp.FormatError):
+        tp.read_dump(p)
+
+
 def test_a_bad_magic_is_a_format_error(tmp_path):
     p = tmp_path / "bad.stap"
     p.write_bytes(b"\x00" * 32)

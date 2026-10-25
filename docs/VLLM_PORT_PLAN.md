@@ -192,7 +192,7 @@ fork 在 Triton TQ decode 上发现 BLOCK_KV=2 对 Turing 寄存器/shared 平�
 
 **实测（2026-10-25，服务器卡 1，`qsa_rows_bench --ctx 131072 --max-context 131072 --iters 30 --rows`，
 int8 池、真实几何、无模型，单 QSA 层每次调用 µs）**。口径先说清：这张图的分数随**时钟态**变化很大，冷启动
-首跑与预热后能差 30-40%（T=3/4 尤甚），所以下面分成两组，比较只认预热组。
+首跑比预热后慢 23-40%（attn：+39.7/+35.2/+29.4/+23.4% 于 T=1..4，T=1 最大），所以下面分成两组，比较只认预热组。
 
 (a) 同一进程冷启动首跑的**分量**（只用来定位开销在哪，不用来算收益）：
 
@@ -258,8 +258,8 @@ CUDA_VISIBLE_DEVICES=1 P4_DUMP_DIR=/tmp/p4/<v>/dump /tmp/p4/<v>/bench --ctx 1310
 `cuobjdump -sass` 里 **0 条 HMMA/IMMA/DP4A**（纯标量 FMA，m8n8k16 与这层无关）；(256,256) 两块要 53.2 KB smem，
 超 48 KB 默认 carveout（静态推断 1 块/SM）。
 
-**时钟态警告**：冷启动首跑默认是 41.2/49.5/81.4/95.4（我第一次记的数），预热后是 29.5/36.6/62.9/77.3——T=3/4
-差 30-40%。以后这类比较必须预热 + 交错 A/B，否则会把时钟状态当成 tile 收益。
+**时钟态警告**：冷启动首跑默认是 41.2/49.5/81.4/95.4（我第一次记的数），预热后是 29.5/36.6/62.9/77.3——冷启动慢
+23-40%（T=1 最大，T=4 最小）。以后这类比较必须预热 + 交错 A/B，否则会把时钟状态当成 tile 收益。
 
 注：`qsa_block_scores` 在 7.5 卡上的**默认路径是 `block_scores_halve_kernel`**（`qsa_select.cu:1723` 分支，
 逐位相同），bench 的标签写的 "(multi)" 是历史名——上表的 37.2/39.9/49.6/51.0 实际是 Turing 默认的 halve 路径，
@@ -305,8 +305,8 @@ token 送进 detokenizer，`TypeError: '>=' not supported between tuple and int`
 ——它属别人未提交的 W3 staged-read 改动，随 W3 一起提交更合适，本页只记录判据与结论。
 
 另外两处**代码读出来的缺口**（未实测，属 W3 未提交代码，交回 W3 作者）：
-- 假引擎不校验 `STRATA_BATCH_STAGED_READ`（真实引擎要它，`generate.cpp:11395`），用例只设
-  `STRATA_MP_STAGED_READ`，所以 env 不配对的情况抓不到（用例已顺手把两个 env 都设上，仍无法证明生产一致）；
+- 假引擎不校验 `STRATA_BATCH_STAGED_READ`（真实引擎要它，`generate.cpp:11395`）：用例现在把两个 env 都设上，
+  但仍只是"照生产的样子设"，假引擎不读它，所以"生产 env 漏配"这种情况用例证明不了；
 - 真实引擎在槽忙时回 `ERR BADOPT: slot busy`，而 `serve/server.py` 是在读 BADM **之前**清 `mp_staged`、失败时
   不发 BCANCEL → 引擎侧 `staged_admit.pending` 残留，后续准入可能被拒（按代码推断，未复现）。
 
@@ -343,8 +343,8 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| P1 DFlash2 轨道 | **A1 已实现（opt-in）·A2/B1 待做** | 库层已就位：`load(shared)` 共享 pack/blob/head、`draft_launch/collect` 异步、`set_lazy_capture`（`dflash2.hpp:52,72,75,83`）；taps 支持批窗+多 stage+`%d` per-stage dump（`verify.hpp:326`）；`--draft dflash2` 已接 serve solo 解码环、gate 去掉 `o.serve`（`generate.cpp:5478,9167-9211,15396-15418`）。`ENGINE_SERVES_DFLASH2=False`（`strata_control/drafting.py:146`）。A2 batch（每槽实例+共享权重+异步）→B1 层切分→B2 管道隐藏；验证前置=drafter 权重（服务器没有） |
-| P2 accounting 审计 | 已完成（只读）；回收 ①③ 已实现，②④⑤待做 | 无统一预算器、真双扣 3 处；6×192K session 10,126 MiB/卡、8×128K 8,873；MTP 839 MiB 在 cache 定容前扣；split 搜索按 1 session 定价 → 预测偏大 ~8.7 GiB/卡；回收清单见 §P2。已落地：①RoPE 跨 session 借用（`ca4d6e85`，48 MiB/session、288 MiB/stage，含 split range 的 release 漏释放修复）、③`head_logits_` 按子词表宽度（`ab7b682a`，30.34 MiB/7 drafter）；**接线（把 slot session 的 donor 传进去）留到 C1 部署窗口**，因为那会改默认显存账 |
+| P1 DFlash2 轨道 | **A1 已实现（opt-in）·A2/B1 待做** | 库层已就位：`load(shared)` 共享 pack/blob/head、`draft_launch/collect` 异步、`set_lazy_capture`（`dflash2.hpp:52,72,75,83`）；taps 支持多 stage（`tap_layers_local()/tap_layers()`，`STRATA_TAP_FILE` 的 `%d` 给每 stage 一份 dump）；批窗只填 `tap_dev_`，**不写 dump**（`verify.cpp:3240` 仍限非批窗）；`--draft dflash2` 已接 serve solo 解码环、gate 去掉 `o.serve`（`generate.cpp:5478,9167-9211,15396-15418`）。`ENGINE_SERVES_DFLASH2=False`（`strata_control/drafting.py:146`）。A2 batch（每槽实例+共享权重+异步）→B1 层切分→B2 管道隐藏；验证前置=drafter 权重（服务器没有） |
+| P2 accounting 审计 | 已完成（只读）；回收 ①③ 已实现，②④⑤待做 | 无统一预算器、真双扣 2 处（双 head、每 slot RoPE；`--mtp-q4` 是反向增，不算双扣）；6×192K session 10,126 MiB/卡、8×128K 8,873；MTP 839 MiB 在 cache 定容前扣；split 搜索按 1 session 定价 → 预测偏大 ~8.7 GiB/卡；回收清单见 §P2。已落地：①RoPE 跨 session 借用（`ca4d6e85`，48 MiB/session、288 MiB/stage，含 split range 的 release 漏释放修复）、③`head_logits_` 按子词表宽度（`ab7b682a`，30.34 MiB/7 drafter）；**接线（把 slot session 的 donor 传进去）留到 C1 部署窗口**，因为那会改默认显存账 |
 | P3 GDN recurrent 移植 | 降级为研究项 | L030 实测 gdn 全部阶段 ≈10%（45K prompt），2× 上限省 ~5% |
 | P3b 专家管线定性 | 已完成 | bench：IQ3_XXS gate/up R=160 = 39.0 TOPS（8.5% 峰值 / 10% HBM）⇒ 反量化受限 |
 | P3c fused_iq Turing IQ3_XXS | 已实现·opt-in（未达 1.5× 门槛，不翻默认） | parity PASS（fused vs MMQ rel RMS 1.2e-4，2080 Ti/build75）；速度 1.16/1.13/1.01× @R=12/160/626 全路；探针 unset=0 / PF_FUSED=1 → 1 / SM75=0 → 0；`STRATA_PF_FUSED=1` 才启用（§P3c） |

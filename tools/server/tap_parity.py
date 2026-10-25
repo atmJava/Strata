@@ -73,10 +73,12 @@ def read_dump(path: str | Path) -> Dump:
         pos, tok = struct.unpack("<2i", raw[off:off + 8])
         vals = list(struct.unpack(f"<{per}f", raw[off + 8:off + stride]))
         key = (pos, tok)
-        if key in rows and rows[key] != vals:
-            raise FormatError(f"{path}: two records for position {pos} token {tok} disagree")
+        if key in rows:
+            raise FormatError(f"{path}: position {pos} token {tok} has two records (one window is written once)")
         rows[key] = vals
         off += stride
+    if off != len(raw):      # 1-7 bytes left: a cut record, not padding
+        raise FormatError(f"{path}: {len(raw) - off} trailing bytes after the last record")
     return Dump(n_embd=n_embd, layers=layers, rows=rows)
 
 
@@ -144,12 +146,14 @@ def compare(a: Dump, b: Dump, tol: float, allow_missing: bool = False,
         notes.append(f"only in the first file: layers {only_a}")
     if only_b:
         notes.append(f"only in the second file: layers {only_b}")
+    if (only_a or only_b) and not allow_missing:
+        notes.append("a file that does not carry every layer of the other is not the same measurement")
     missing = len(a.rows) + len(b.rows) - 2 * len(keys)
     if missing:
         notes.append(f"{missing} rows are in one file only (not compared)")
     if missing and not allow_missing:
         notes.append("one-sided rows are a failure here: pass --allow-missing to compare only the common rows")
-    compared = differing = 1 if (missing and not allow_missing) else 0
+    compared = differing = 1 if ((missing or only_a or only_b) and not allow_missing) else 0
     worst = 0.0
     detail: list[str] = []
     for pos, tok in keys:

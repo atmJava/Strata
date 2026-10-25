@@ -558,7 +558,11 @@ uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const 
         }
     }
     const int64_t n_logits = n_subset > 0 ? n_subset : n_vocab;
-    uint64_t bytes = head_logits_ ? 0 : (uint64_t) max_t_ * (uint64_t) n_logits * sizeof(float);
+    // A re-bind with a wider head or subset grows the buffer (bind() frees and reallocates), so what is reserved is the
+    // part beyond what this drafter already holds - not 0, and not the whole width twice.
+    const int64_t want = (int64_t) max_t_ * n_logits;
+    const uint64_t have = head_logits_ != nullptr ? (uint64_t) head_logits_cap_ : 0;
+    uint64_t bytes = want > 0 && (uint64_t) want > have ? ((uint64_t) want - have) * sizeof(float) : 0;
     if (n_subset > 0 && dhead_ == nullptr && owns_draft_head_)
         bytes += (uint64_t) n_subset * head_row_bytes + (uint64_t) n_subset * 4;
     // coupled draft sampling (STRATA_SPEC_COUPLED=1 only): an upper bound - the id -> subset map, the penalty ring,
