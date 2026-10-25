@@ -33,17 +33,17 @@
 
 | ID | 功能 | fork 证据（文件:行 / 版本） | 对 Strata 有用？ | Strata 现状 | 移植形态 | 测试 | 判决（待） |
 |---|---|---|---|---|---|---|---|
-| **F1** | 多路 continuous batching 的**步契约**：每请求是 cursor（`computed` vs `target`）；每步先喂饱 running decodes，剩余预算给 waiting prefill；晚到 prefill 只推迟"还没吐 token"的请求（`num_output_tokens==0`） | `scheduler.py:606-615, 727, 1185-1235, 734-740`；CHANGELOG v0.2.2-post1 | **是（核心）** | 槽一起解码、`BGEN` 中途入批；**无统一 per-step 预算**；满槽时读根本发不出去 | W2（配置）→ W3（代码） | T2/T3 | **采纳并已生产启用**（L-053：长读首 token 47.3→17.1 s；短读 <4096 token 不暂存，保持 40.9 s；第二 token 仍等槽 33.8 s；`STRATA_MP_STAGED_READ_MIN_TOKENS=4096`） |
-| **F2** | 单步 token 预算混批：所有 shipped profile 都是 `MAX_BATCHED_TOKENS=2048`；`request_token_budget = min(token_budget, input_budget - draft_slots)` | `scheduler.py:126-130, 624-627, 946`；`launcher.sh:6035` | **是** | `--prefill` 分块 + `STRATA_BATCH_DECODE_SHARE`，没有覆盖 decode+prefill 的统一预算 | W2 → W3 | T3 | **采纳并已生产启用**（同 F1；W2 配置臂否决见 L-047；统一 per-step 预算仍未移植） |
-| **F3** | 前缀缓存语义：refcount 共享 + CoW、命中块只读、最后一个 prompt token 重算取 logits、`num_cached_tokens` 计数 | `single_type_kv_cache_manager.py:300-322, 448-468`；`kv_cache_manager.py:275-285`；`tests/v1/core/prefix_cache/*` | **是** | 有 prompt cache / conversation cache；缺"缓存计数"的对外口径与测试 | 暴露统计 + 测试 | T4 | **采纳**（T4 通过：`cached_tokens` ≥50%，第二次读不慢于第一次，L-046/L-050） |
-| **F4** | 投机解码（MTP/DFlash2）与**接受率验证实践**：混批里 MTP 在 chunk 边界留 lookahead；验证器 KV 精确；接受率有测试 | `tests/v1/spec_decode/*`；`scheduler.py:583-602`；CHANGELOG v0.2.2 | **是（验证方法）** | 已有 `--spec 8 --mtp-max-t 4`，热接受率 ~99%（L-026） | 验证实践（不开关，只补测试） | T5 | **采纳**（T5 门槛：offer≥20 且接受率≥50%；实测窗口 69.3%、累计 70.5%、bench 78–82%） |
-| **F5** | SSD 前缀 KV 持久化 #243：`OffloadingConnector` + FS tier（`checkpoint-<sha256>`、每 block 一个 `.bin`、`PYTHONHASHSEED=0`），命中异步装入 `WAITING_FOR_REMOTE_KVS` | `launcher.sh:1748-1807`；`kv_offload/file_mapper.py:121-148`；`offloading/scheduler.py:1036-1209`；验证 1,568/1,929（重启）等 | **是（重启场景）** | 无；重启冷加载 ~165 s | 暂缓（P3，触发条件：重启频率或冷读占比升高） | T6 | **搁置**（触发条件未出现；T6 未建，见 R7） |
-| **F6** | profile 定容与启动门：命名 `<decoder>-<kv>-<N>x<CTX>-<msg>`（N=`MAX_NUM_SEQS`，CTX=`floor(MAX_MODEL_LEN/1000)`）；launcher 启动后强制 `N×CTX ≤ GPU KV tokens`；health + smoke + 审计 | `profiles/README.md:21-24`；`launcher.sh:176-205, 5803-5809, 5337-5391` | **是** | 有参数（`--kv-resident`/会话槽/预留），**无预设、无启动门** | W4 预设 + 校验脚本 | T7 | **部分采纳**（预设命名 `strata-022.mp-4x256.json` + `check_preset.py` 静态/运行中对账 + T7 负例 6/6；fork 的 `N×CTX ≤ KV tokens` 在 KV 流式下不适用，已写进工具输出） |
-| **F7** | OpenAI（及 Anthropic）API 契约：chat/completions、流式、usage、错误码 | `tests/entrypoints/openai/`（70 文件） | **是** | Strata 已有 serve（自研 + 单测） | 抽样黑盒测试 | T1 | **采纳**（T1 6/6：health、models、usage、流式、400、401） |
+| **F1** | 多路 continuous batching 的**步契约**：每请求是 cursor（`computed` vs `target`）；每步先喂饱 running decodes，剩余预算给 waiting prefill；晚到 prefill 只推迟"还没吐 token"的请求（`num_output_tokens==0`） | `scheduler.py:606-615, 727, 1185-1235, 734-740`；CHANGELOG v0.2.2-post1 | **是（核心）** | 槽一起解码、`BGEN` 中途入批；**无统一 per-step 预算**；满槽时读根本发不出去 | W2（配置）→ W3（代码） | T2/T3 | **采纳·已落地·验收未过**（W3 已生产启用，但 T3 xfail：第二 token 38.65 s > 2 s；L-053/L-054） |
+| **F2** | 单步 token 预算混批：所有 shipped profile 都是 `MAX_BATCHED_TOKENS=2048`；`request_token_budget = min(token_budget, input_budget - draft_slots)` | `scheduler.py:126-130, 624-627, 946`；`launcher.sh:6035` | **是** | `--prefill` 分块 + `STRATA_BATCH_DECODE_SHARE`，没有覆盖 decode+prefill 的统一预算 | W2 → W3 | T3 | **采纳·已落地·验收未过**（同 F1；W2 配置臂否决见 L-047；统一 per-step 预算未移植） |
+| **F3** | 前缀缓存语义：refcount 共享 + CoW、命中块只读、最后一个 prompt token 重算取 logits、`num_cached_tokens` 计数 | `single_type_kv_cache_manager.py:300-322, 448-468`；`kv_cache_manager.py:275-285`；`tests/v1/core/prefix_cache/*` | **是** | 有 prompt cache / conversation cache；缺"缓存计数"的对外口径与测试 | 暴露统计 + 测试 | T4 | **采纳·已实现·验收通过**（T4 PASS） |
+| **F4** | 投机解码（MTP/DFlash2）与**接受率验证实践**：混批里 MTP 在 chunk 边界留 lookahead；验证器 KV 精确；接受率有测试 | `tests/v1/spec_decode/*`；`scheduler.py:583-602`；CHANGELOG v0.2.2 | **是（验证方法）** | 已有 `--spec 8 --mtp-max-t 4`，热接受率 ~99%（L-026） | 验证实践（不开关，只补测试） | T5 | **采纳·已实现·验收通过**（T5 PASS） |
+| **F5** | SSD 前缀 KV 持久化 #243：`OffloadingConnector` + FS tier（`checkpoint-<sha256>`、每 block 一个 `.bin`、`PYTHONHASHSEED=0`），命中异步装入 `WAITING_FOR_REMOTE_KVS` | `launcher.sh:1748-1807`；`kv_offload/file_mapper.py:121-148`；`offloading/scheduler.py:1036-1209`；验证 1,568/1,929（重启）等 | **是（重启场景）** | 无；重启冷加载 ~165 s | 暂缓（P3，触发条件：重启频率或冷读占比升高） | T6 | **搁置·待用户确认**（触发条件未出现；T6 未建） |
+| **F6** | profile 定容与启动门：命名 `<decoder>-<kv>-<N>x<CTX>-<msg>`（N=`MAX_NUM_SEQS`，CTX=`floor(MAX_MODEL_LEN/1000)`）；launcher 启动后强制 `N×CTX ≤ GPU KV tokens`；health + smoke + 审计 | `profiles/README.md:21-24`；`launcher.sh:176-205, 5803-5809, 5337-5391` | **是** | 有参数（`--kv-resident`/会话槽/预留），**无预设、无启动门** | W4 预设 + 校验脚本 | T7 | **采纳·已实现·验收通过**（T7 PASS；N×CTX 矩阵另列 §10 待测） |
+| **F7** | OpenAI（及 Anthropic）API 契约：chat/completions、流式、usage、错误码 | `tests/entrypoints/openai/`（70 文件） | **是** | Strata 已有 serve（自研 + 单测） | 抽样黑盒测试 | T1 | **采纳·已实现·验收通过**（T1 6/6 PASS） |
 | **F8** | TP/PP 混合拓扑 | launcher TP/PP 支持 | **部分**：层切分已有；TP 已存档（L-033，单流 +3% 噪声内） | 不移植 TP；PP 不存在于 Strata | — | — | 否决（TP） |
 | **F9** | FP8/NVFP4 权重路线 | README 的模型表 | **否**：权重栈完全不同（Strata 是 IQ pack，`--native`） | — | — | — | 否决 |
 | **F10** | vLLM 内核（Marlin/FlashInfer/TurboQuant/FlashQLA） | csrc/、vllm/attention | **否**：引擎不同，不可移植 | — | — | — | 否决 |
-| **F11** | KV 压力下的抢占与优先级（`fcfs`/`priority`，preempt 后回队首、重算） | `request_queue.py:75-158`；`scheduler.py:883-933` | **暂缓**：Strata 满槽排队在服务端（W3 先解决准入），多路下是否需要优先级未测 | — | W3 之后再评 | — | **搁置**（W3 已交付 TTFT；满槽时是否需要优先级/抢占仍无需求证据；有需求再评） |
+| **F11** | KV 压力下的抢占与优先级（`fcfs`/`priority`，preempt 后回队首、重算） | `request_queue.py:75-158`；`scheduler.py:883-933` | **暂缓**：Strata 满槽排队在服务端（W3 先解决准入），多路下是否需要优先级未测 | — | W3 之后再评 | — | **搁置·待用户确认**（W3 已交付 TTFT；优先级/抢占无需求证据） |
 
 **判据**（与 `MULTIPATH_STANDARD.md` 一致）：F1/F2 看 T3；F3 看 T4；F4 看 T5；F6 看 T7；
 F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
@@ -125,25 +125,25 @@ F7 看 T1；性能项同 boot A-B-A、每臂 ≥3、中位、<3% 不算结论。
 
 | ID | 项 | 判决 | 理由（一句话） |
 |---|---|---|---|
-| S1 | API 侧准入上限（`max_num_queued_*`，503） | **采纳 P1** | 纯服务端；4 槽时防止排队打爆 TTFT |
-| S2 | 响应体带每请求时延（TTFT/generation/queue/ITL） | **采纳 P1** | 服务端已有全部时间戳，补字段即可 |
-| S3 | 每请求投机接受率（summary/detailed） | **采纳 P1** | 引擎已算 accepted/proposed，暴露即可调 `--spec` |
+| S1 | API 侧准入上限（`max_num_queued_*`，503） | **采纳·待实现 P1** | 纯服务端；4 槽时防止排队打爆 TTFT |
+| S2 | 响应体带每请求时延（TTFT/generation/queue/ITL） | **采纳·待实现 P1** | 服务端已有全部时间戳，补字段即可 |
+| S3 | 每请求投机接受率（summary/detailed） | **采纳·待实现 P1** | 引擎已算 accepted/proposed，暴露即可调 `--spec` |
 | S4 | 思考 token 预算（sampler 强制） | **否决** | Strata 已有 `reasoning_budget_tokens`（生产 12288），重复 |
 | S5 | reasoning 感知的结构化输出 + 异步语法编译 | **搁置** | 需要语法后端 + sampler bitmask，改动面大；有需求再评 |
 | S6 | 延迟等待队列（grammar/remote-KV 等） | **搁置** | 依附 S5；Strata 无这些等待态 |
-| S7 | 断开 → 取消 → 引擎 abort | **采纳 P1** | 服务端已有 cancel，补引擎幂等 abort 即可；先核现状 |
-| S8 | SSE 保活（`--sse-keep-alive-interval`） | **采纳 P1** | 纯 Python；cloudflare/lan 隧道会用得上 |
-| S9 | 流式输出合并（背压） | **采纳 P2** | 慢客户端不拖引擎；服务端 merge 语义 |
-| S10 | 阶段时延 + 等待原因指标 | **采纳 P2** | 引擎已有时间戳/状态，`/metrics` 暴露 |
-| S11 | 全 ISL 准入 + KV 水位 | **采纳 P2** | 256K 下防过准入；全量检查很便宜 |
-| S12 | 优雅停机（drain/abort） | **采纳 P2** | 重启窗口更安全，也给 F5 留 flush 窗口 |
-| S13 | profile schema 契约（命名/校验） | **采纳 P2** | 纯 launcher/CI，和 F6 的预设命名同源 |
-| S14 | 增量 detokenizer 的 stop 缓冲 | **采纳 P2** | 流式 stop 串泄漏的经典坑，服务端可做 |
+| S7 | 断开 → 取消 → 引擎 abort | **采纳·待实现 P1** | 服务端已有 cancel，补引擎幂等 abort 即可；先核现状 |
+| S8 | SSE 保活（`--sse-keep-alive-interval`） | **采纳·待实现 P1** | 纯 Python；cloudflare/lan 隧道会用得上 |
+| S9 | 流式输出合并（背压） | **采纳·待实现 P2** | 慢客户端不拖引擎；服务端 merge 语义 |
+| S10 | 阶段时延 + 等待原因指标 | **采纳·待实现 P2** | 引擎已有时间戳/状态，`/metrics` 暴露 |
+| S11 | 全 ISL 准入 + KV 水位 | **采纳·待实现 P2** | 256K 下防过准入；全量检查很便宜 |
+| S12 | 优雅停机（drain/abort） | **采纳·待实现 P2** | 重启窗口更安全，也给 F5 留 flush 窗口 |
+| S13 | profile schema 契约（命名/校验） | **采纳·待实现 P2** | 纯 launcher/CI，和 F6 的预设命名同源 |
+| S14 | 增量 detokenizer 的 stop 缓冲 | **采纳·待实现 P2** | 流式 stop 串泄漏的经典坑，服务端可做 |
 | S15 | 结构化工具调用（structural tag） | **搁置** | 依赖 S5 的语法后端 |
 | — | prefill 批屏障（fork 的 `--prefill-batch-barrier`） | **搁置** | 与 F1 的晚 prefill 策略重叠，先做实验再定 |
 | — | warmup/JIT 冷编译预热 | **搁置** | 只在运行时重编译/捕获时有用，未证实 Strata 需要（静态，未验证） |
 | — | 批量 chat 端点 `/v1/chat/completions/batch` | **搁置** | 全有或全无语义，对 4 槽收益不明 |
-| — | `cache_salt` 前缀缓存命名空间 | **采纳 P2** | 小改动；多租户会话隔离用得上 |
+| — | `cache_salt` 前缀缓存命名空间 | **采纳·待实现 P2** | 小改动；多租户会话隔离用得上 |
 | — | KV 驻留/前缀命中窗口指标 | **搁置** | 观测项，调缓存淘汰时再上 |
 
 **审计口径**：以上来自对 `/home/kali/IdeaProjects/vLLM-2080Ti-Definitive`（93c9013）的只读审计，
@@ -174,3 +174,19 @@ W3 的 3 流形状与聚合吞吐（B 的 bench 未跑）。
 
 - v0.1 · 2026-10-24 · 初稿：官方测试盘点（1,877 测试 / 70 API / 30 spec）、F1–F11 清单与判决位、G0–G4 门槛、
   T1–T7 用例、R1–R8 执行顺序、与 fork 测试的对照。
+
+## 10. v0.2 规则下的状态复位（2026-10-25）
+
+按 `MULTIPATH_RULES.md` v0.2 的 DoD（落地 + 测试 PASS + 生产生效 + 可回退），本清单的**真实状态**：
+
+| 状态 | 项 |
+|---|---|
+| 采纳·已实现·验收通过 | F3（T4）、F4（T5）、F6（T7）、F7（T1） |
+| **采纳·已落地·验收未过** | **F1、F2**（W3 生产启用，但 T3 仍 xfail：第二 token 38.65 s） |
+| 采纳·待实现 | S1、S2、S3、S7、S8（P1）；S9、S10、S11、S12、S13、S14、`cache_salt`（P2） |
+| 搁置·待用户确认 | F5（T6 未建）、F11（优先级/抢占） |
+| 否决 | F8、F9、F10、S4 |
+| 待测 | N×CTX 容量矩阵（6×192K、8×128K），决定 F1/F2 能否**真正**达到“第二 token ≤2 s” |
+
+**剩余未完成采纳项：2（F1/F2 验收）+ 12（S 项 P1/P2）= 14 项**；另有 2 项搁置待确认、1 个容量矩阵待测。
+按 v0.2 规则，这些全部 PASS 之前，目标不得标完成、不得停工。
