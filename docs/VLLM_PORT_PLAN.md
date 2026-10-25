@@ -134,13 +134,15 @@ gather/grouping 1.2% ≈ 32%；hc read 9.2%、qsa attn 9.2%、embed+steps 7.7%�
 
 | 案例 | R=12 | R=160（生产行制） | R=626 |
 |---|---|---|---|
-| iq3_xxs gate/up 1280×2560 | 9.3 TOPS | **31.9 TOPS** | 36.5 TOPS |
-| iq3_xxs down 2560×640 | 9.8 TOPS | 32.4 TOPS | 33.0 TOPS |
-| iq4_nl down | 8.2 TOPS | 26.6 TOPS | 25.6 TOPS |
+| iq3_xxs gate/up 1280×2560 | 8.0 TOPS（1905 MHz 时 10.4） | **31.9 TOPS** | 36.5 TOPS |
+| iq3_xxs down 2560×640 | 8.5 TOPS | 32.4 TOPS | 32.2 TOPS |
+| iq4_nl down | 7.5 TOPS | 26.6 TOPS | 26.9 TOPS |
 
-（2026-10-25 二次复现：原表 R=160 写的 39.0/38.3/31.1 与 45.8/37.4/30.2 **复现不出**，同一台机器同一 build 重测得
-上表；P3c 一节引用的 31.9/25.9 与这次一致，两处数字原来互相矛盾，以这次为准。R≥160 的差不是升频导致——
-1905 MHz 下仍 31.7。）
+（口径：2080 Ti / build75 / arch 75 / CUDA 13.0，连跑 5 次取中位，卡停在 1350 MHz（这个 bench 是 kernel 突发 +
+大量 CPU 计时，不像 `qsa_rows_bench` 那样升频）；R=12 那列在"先跑 qsa 顶到 1905 MHz"的对照里是 10.4。
+2026-10-25 二次复现：原表写的 9.3/9.8/8.2、39.0/38.3/31.1、45.8/37.4/30.2 **全部复现不出**，同一台机器同一 build
+重测为上表（R=160 低 15-18%，R=626 低 11-20%）；P3c 一节引用的 31.9/25.9 与这次一致（31.9/26.6），两处数字原来
+互相矛盾，以这次为准。R≥160 的差不是升频导致——1905 MHz 下仍 31.7。）
 int8 TC 峰值 ≈ 456 TOPS（2080 Ti fp16 228 TFLOPS ×2）、HBM 有效 ≈ 450 GB/s。R=160 时算力 7.0%、
 权重带宽 ~10%——**两头都不到 15% ⇒ 循环内反量化（shuffle/查表）是瓶颈**，正是 Marlin 设计的靶点。
 生产 45K prompt 的 gemm gate/up 3005 ms 与 bench 速率一致（按 16 专家组 × R≈160 推算 ≈3.2 s ✓），
@@ -203,13 +205,13 @@ fork 在 Triton TQ decode 上发现 BLOCK_KV=2 对 Turing 寄存器/shared 平�
 int8 池、真实几何、无模型，单 QSA 层每次调用 µs）**。口径先说清：这张图的分数随**时钟态**变化很大，冷启动
 首跑比预热后慢 +39/+35/+9/+0.3%（attn，T=1..4；T=1/2 明显，T=4 几乎为零），所以下面分成两组，比较只认预热组。
 
-(a) 同一进程冷启动首跑的**分量**（只用来定位开销在哪，不用来算收益；2026-10-25 二次复现：T=1/2 与表中一致，
-T=3/4 复现不出原来的 81.4/95.4，重测为 68.3/77.6）：
+(a) 同一进程冷启动首跑的**分量**（只用来定位开销在哪，不用来算收益；2026-10-25 二次复现：T=1/2 与旧表一致，
+T=3/4 全不复现，重测为下表的 44.8/45.0（scores）、32.8/30.9（topk）、68.3/77.6（attn））：
 
 | 阶段 | T=1 | T=2 | T=3 | T=4 | 每行增量 |
 |---|---:|---:|---:|---:|---:|
-| scores `qsa_block_scores` | 37.2 | 39.9 | 49.6 | 51.0 | +4.6 µs |
-| topk `qsa_block_topk` | 39.2 | 40.0 | 40.4 | 40.5 | +0.4 µs |
+| scores `qsa_block_scores` | 37.2 | 39.9 | 44.8 | 45.0 | +2.6 µs |
+| topk `qsa_block_topk` | 39.2 | 40.0 | 32.8 | 30.9 | −2.8 µs |
 | append indexer | 2.7 | 2.7 | 2.6 | 2.5 | ±0 |
 | **attn over selection (cap 2051)** | 41.2 | 49.4 | 68.3 | 77.6 | **+12.1 µs** |
 
@@ -223,8 +225,8 @@ T=3/4 复现不出原来的 81.4/95.4，重测为 68.3/77.6）：
 换算：每行 15.9-17.2 µs/QSA 层 → 4 层 stage0 0.06-0.07 ms、8 层 stage1 0.13 ms（该 bench 口径）。
 
 **两条结论**：
-1. **Turing 上每行代价的大头是"对选择集做注意力"**（预热态 +15.9 µs/行，冷启动口径 +18.1；scores 只有
-   +4.6），且 attn 约占层合计每行增量的 90%——fork 的 BLOCK_KV=2 直觉要落的地方是
+1. **Turing 上每行代价的大头是"对选择集做注意力"**（预热态 +15.9 µs/行，冷启动口径 +12.1；scores 只有
+   +2.6），且 attn 约占层合计每行增量的 92%——fork 的 BLOCK_KV=2 直觉要落的地方是
    `qsa_decode_attn_batch`。P4 的扫描确实聚焦了它，但结论是**这条路的默认 64 cell 不能动**（见本节末的
    正确性发现），`qsa_select` 只是次要项。
 2. `STRATA_QSA_ROWS=1`（`block_scores_rows`）在 Turing **不是单调赢**：scores/ids 与参照逐位相同（8 cases
@@ -281,7 +283,8 @@ CUDA_VISIBLE_DEVICES=1 P4_DUMP_DIR=/tmp/p4/<v>/dump /tmp/p4/<v>/bench --ctx 1310
 **长上下文的钱花在哪儿（2026-10-25 补测）**：ctx 32K/128K/256K 交错 3 轮，`attn over selection` 每次
 28.9/29.6/29.1 µs、每行 15.9/15.9/16.7 µs —— **几乎不随 ctx 变**；而 `qsa_block_scores` T=1 是
 6.1/35.9/68.0 µs（线性于块数），到 256K 已占该层时间的 48%，层每行增量 15.3→17.3→20.3 µs。所以"长上下文 decode
-更贵"成立，但贵在**选块**不在 attn；按 15.9–17.2 µs/行去估 229K 的账会低估 25% 左右。
+更贵"成立，但贵在**选块**不在 attn；层每行增量 15.3→17.3→20.3 µs（32K→128K→256K）就是 +33%，按 15.9-17.2 µs/行
+去估 229K 的账会偏小。
 ## P5 · server 侧 Qwen3 parser 正确性修复 → **判定：已覆盖，不移植**（2026-10-25 核实；本节的 `server.py` 行号是
 **工作区**（W3 staged-read 已打）的基准，HEAD 上会偏移）
 
@@ -365,7 +368,7 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 | P3 GDN recurrent 移植 | 降级为研究项 | L030 实测 gdn 全部阶段 ≈10%（45K prompt），2× 上限省 ~5% |
 | P3b 专家管线定性 | 已完成（数字已复现校正） | bench：IQ3_XXS gate/up R=160 = **31.9 TOPS**（7.0% 峰值 / 10% HBM，二次复现；原表 39.0 复现不出）⇒ 反量化受限 |
 | P3c fused_iq Turing IQ3_XXS | 已实现·opt-in（未达 1.5× 门槛，不翻默认） | parity PASS（fused vs MMQ rel RMS 1.2e-4，2080 Ti/build75）；速度 1.16/1.13/1.01× @R=12/160/626 全路；探针 unset=0 / PF_FUSED=1 → 1 / SM75=0 → 0；`STRATA_PF_FUSED=1` 才启用（§P3c） |
-| P4 tile 扫描 | 完成·**默认不动** | 每行大头=attn over selection（预热 15.9 / 冷启 18.1 µs/行 vs scores +4.6）；QSAROWS 在 Turing T≥3 反向，不默认开；tile 扫描证明 128/256 与 256/256 **数值是错的**、32/128 崩溃，`static_assert(CHUNK==64 && THREADS==256)` 已锁死（要扫先重写 64-cell 相位）；decode attn 是纯标量 FMA（0 HMMA） |
+| P4 tile 扫描 | 完成·**默认不动** | 每行大头=attn over selection（预热 15.9 / 冷启 12.1 µs/行 vs scores +2.6）；QSAROWS 在 Turing T≥3 反向，不默认开；tile 扫描证明 128/256 与 256/256 **数值是错的**、32/128 崩溃，`static_assert(CHUNK==64 && THREADS==256)` 已锁死（要扫先重写 64-cell 相位）；decode attn 是纯标量 FMA（0 HMMA） |
 | P5 parser 修复 | 已覆盖·不移植 | `server.py:5988-6001,6044`、`serve/dsml.py:172,211` + 各自测试（2026-10-25 核实） |
 | P6 barrier 对照分析 | 已完成·不移植 | 三洞察两条已有等价机制、第三条=S0c；S0c 用例 `serve/test_staged_wedge.py`（已提交 `bfe515ca`）在**含未提交 staged 代码的工作区** 3 passed（HEAD 上按设计 skip），并抓到 `yield ("ping", None)` 真缺陷（§P6b） |
 | 不移植清单的逐条证据复核 | 已完成 | 本文档 §1（2026-10-25 源码核实） |
@@ -397,13 +400,17 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 `PORT_AUDIT_MEASUREMENTS.md`（GPU1 重测）、`PORT_AUDIT_TESTS_CPU.md`（新测试清单）四份报告，改出三个提交：
 
 - `61c1bfc9` 修默认路径副作用与语义边界：7.5 卡不请求 fused 时不再做 `cudaFuncSetAttribute`/打 banner；无 `%d` 的
-  层切分不再互相截断 dump；drafter 的 tap 顺序与验证器不一致时关掉 DFlash2 而不是读错槽；`load`/`session_bytes`/
-  `session_init` 补回旧形参重载（陈旧 `.o` 该删还是得删）。
+  层切分不再互相截断 dump（**只有整模型写，切分必须用 `%d`**，该 stage 会在 init 时明说"本 stage 不 dump"）；
+  drafter 的 tap 顺序与验证器不一致时关掉 DFlash2 而不是读错槽；`session_bytes`/`session_init` 补回旧形参重载。
+  **`Dflash2Drafter::load` 的旧 3 参符号没有补**——`b009fab5` 给它加了成员、`SessionState` 也加了 `rope_donor`，
+  类布局已经变了，补个符号只会把"链接失败"换成"静默 UB"；升级后**必须删掉旧的 `.o`/增量构建目录**，
+  这一点 `PORT_AUDIT_DEFAULTS.md` §3.4 已写明。
 - `b8eb9a73` 三个可回归测试：RoPE 借用的"恰少一张表"（215/312 checks）、MTP logits 宽度（116/183 checks）、
   **QSA 选块默认分派 vs `STRATA_QSA_ROWS=1` 逐位一致**（839,740 个 score float + 61,530 个 id，0 differ，0.88 s）。
   最后一个补的是 P4 里说过"没有现成测试"的洞，并顺带证明 `qsa_rows_bench --rows` 的 0 differ 不能当回归
   （它在 `STRATA_QSA_ROWS=1` 下参照侧也走 rows）。
-- `8dbd89da` 四份报告入库；本节 P3b/P4/P3c 的数字按重测校正。
+- `8dbd89da` 只做四份报告入库；**P3b/P4/P3c 的数字校正在 `e7f35829`**（本页 §P3b/§P4/§P3c 已按
+  `PORT_AUDIT_MEASUREMENTS.md` 的原始输出逐格改过）。
 
 审查留下的**未做候选**（都在 `PORT_AUDIT_COVERAGE.md` §2 有最小验证实验，按收益÷难度排）：
 
