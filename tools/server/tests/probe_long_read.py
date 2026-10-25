@@ -16,7 +16,8 @@ KEY = "111"
 MODEL = "qwen3.8-flash-next-iq3_xxs"
 CORPUS = open("/tmp/corpus.md", encoding="utf-8").read()
 PROMPT = "写一篇大约 1200 字的说明文，解释混合专家（MoE）模型的路由机制、负载均衡与专家容量。"
-READER = CORPUS + "\n\n请用一句话回答：以上文档开头第一个标题是什么？"
+NONCE = str(__import__("time").time_ns())
+READER = CORPUS + f"\n\n（本次探针唯一标识 {NONCE}）请用一句话回答：以上文档开头第一个标题是什么？"
 
 
 def open_stream(text, max_tokens):
