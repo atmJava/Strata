@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
             float ms = 0;
             const double tops = run_case(c, R, rng, &ms);
             // the weight bytes one launch reads (16 experts), per ms: the bandwidth the product needs at residency
-            const double gbs = 16.0 * mmq::matrix_bytes(c.type, c.rows, c.cols) / (ms * 1e6);
+            const double gbs = 16.0 * mmq::matrix_bytes(c.t, c.rows, c.cols) / (ms * 1e6);
             std::printf("  R %4d  %-14s %8.3f ms  %7.1f TOPS  %7.1f GB/s weights\n", R, c.name, ms, tops, gbs);
         }
     return 0;
