@@ -313,6 +313,9 @@ def _timeout_env(name: str, default: float) -> float | None:
 # still working is never ended by this, only reported once (the recommendation: engine_silence_s, or this variable).
 # STRATA_ENGINE_STALL_S overrides it (0 = off).  Needs psutil (setup installs it); without it nothing is ended.
 ENGINE_STALL_S = _timeout_env("STRATA_ENGINE_STALL_S", 90.0)
+# a BCANCELLED that never comes must not hold the control lines for the drain default (300 s): the engine answers it
+# in the same round it reads the line, and the request is already ending
+BCANCEL_DRAIN_S = 10.0
 # --batch: new requests take the control lines (one prompt read at a time) short prompts first: a prompt of at most
 # STRATA_ADMIT_SHORT_FIRST tokens goes before longer ones (opt-in; unset or 0: whoever gets the lock first), and a
 # longer one that waited STRATA_ADMIT_MAX_WAIT_S (default 30) counts as short.  A chat question then waits for the one
@@ -1530,9 +1533,10 @@ class StrataEngine:
                 return
             elif line.startswith("BRDY "):       # STRATA_MP_STAGED_READ: the read is done, no slot yet
                 f = line.split()
-                self._ctl_result = ("brdy", int(f[1]) if len(f) > 1 else 0,
-                                    int(f[2]) if len(f) > 2 else 0,
-                                    len(f) > 3 and f[3] == "1")
+                if len(f) < 4 or not f[1].isdigit() or not f[2].isdigit() or f[3] not in ("0", "1"):
+                    self._ctl_erred = True               # a truncated/odd line is a protocol error, not a read of 0
+                    raise ValueError(f"BRDY: malformed staged-read reply ({line!r})")
+                self._ctl_result = ("brdy", int(f[1]), int(f[2]), f[3] == "1")
                 return
             elif line.startswith("YIELDED "):            # the read gave way (BYIELD): <slot> <tokens read>
                 f = line.split()
@@ -1916,7 +1920,7 @@ class StrataEngine:
                                 else:
                                     # max_new 1 (nothing left to adopt) or a cancelled read: drop the staged state
                                     self._send("BCANCEL")
-                                    self._drain_control("BCANCELLED", born=born)
+                                    self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born)
                                     with self.slot_cv:
                                         self.mp_staged = None
                                         self.slot_cv.notify_all()
@@ -2060,7 +2064,7 @@ class StrataEngine:
                                   f"({e}); cancelling it and waiting for another slot", flush=True)
                             try:
                                 self._send("BCANCEL")
-                                self._drain_control("BCANCELLED", born=born)
+                                self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born)
                             except EngineDied:
                                 raise
                             refused += 1
@@ -2179,7 +2183,7 @@ class StrataEngine:
                             self.slot_cv.notify_all()
                         if self.gen == born and self.alive():
                             self._send("BCANCEL")
-                            self._drain_control("BCANCELLED", born=born)
+                            self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born)
                         phase = "none"
                         staged_ready = None
                     finally:
