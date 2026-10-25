@@ -179,21 +179,28 @@ class StagedWedge(unittest.TestCase):
         """Start n streaming requests and wait until every slot is busy (the staged path needs pick_slot None)."""
         threads = []
 
+        died = []
+
         def stream(cancel, k):
             try:
-                list(svc.run(list(f"LONGREPLY {k}".encode()), True, [], 40, {}, cancel))
-            except BaseException:      # noqa: BLE001 - the engine may die under the request; the test decides below
-                pass
+                list(svc.run(list(f"LONGREPLY {k}".encode()), True, [], 400, {}, cancel))
+            except _server.EngineDied as exc:      # the engine may die under a fill request; the test decides below
+                died.append(exc)
 
         for k in range(n):
             cancel = threading.Event()
             t = threading.Thread(target=stream, args=(cancel, k), daemon=True)
             threads.append((t, cancel))
             t.start()
+        # both slots busy, and still busy 100 ms later: a fill request that has already finished would hand the
+        # staged request an empty slot, so the test would silently stop exercising the staged path
         end = time.monotonic() + 5.0
         while time.monotonic() < end:
             if sum(1 for b in self.engine_of(svc).slot_busy if b) >= n:
-                return threads
+                time.sleep(0.1)
+                if sum(1 for b in self.engine_of(svc).slot_busy if b) >= n:
+                    self.assertFalse(died, f"a fill request died: {died[0] if died else ''}")
+                    return threads
             time.sleep(0.02)
         self.assertTrue(self.wait_log("BGEN"), "the arriving requests must move the solo one into a slot")
         self.fail(f"only {sum(1 for b in self.engine_of(svc).slot_busy if b)} of {n} slots became busy")
