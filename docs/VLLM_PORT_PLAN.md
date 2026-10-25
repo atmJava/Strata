@@ -101,12 +101,18 @@ finish_reason 不给 `tool_calls`、非流式合并时丢弃不完整 call（`se
 `serve/test_tool_call_unclosed.py`、`test_tool_call_envelope.py`）；③`<think>` 跨块与无 `</think>`
 恢复在 `serve/dsml.py:172,211`（`test_parser_hold.py`、`test_reasoning_loop_recovery.py`）。
 
-### P6 · 调度：prefill frontier/barrier 思路（候选，等 S0b 定性后再动）
+### P6 · 调度：prefill frontier/barrier 思路 → **对照分析完成：不直接移植，结论汇入 S0b/S0c**
 
-fork 的 `--prefill-batch-barrier`：cohort 的 prefill_frontier 对齐步长；"最后一个 prefill step 也采样
-第一个 token，所以 block-decode-only 太晚"。Strata 对应面 = staged read（BREAD/BADOPT）+ BYIELD + pump 组。
-- 现状：生产 S0b（长读暂存时邻居停顿 3.43 s）正在用户循环里定性；**避免同一战场双头改**。
-- 动作：先写一页"barrier 语义 ↔ Strata 准入语义"对照分析；等 S0b 有结论再决定是否做策略 patch。
+fork 的 barrier 三条语义与 Strata 的对应面（两侧源码核实）：
+
+| fork 语义（scheduler.py:336-720） | Strata 对应面 | 判定 |
+|---|---|---|
+| ①"最后一个 prefill step 也采样第一个 token，block-decode-only 太晚"→ cohort 按 frontier 对齐步长 | Strata 是固定槽 + 串行 staged read（BREAD→BRDY→BADOPT FCFS），adopt 后首 token 天然进批窗口 | **无对应物**：架构不同（连续批 vs 槽位+串行读），frontier 逻辑没有放置点 |
+| ②新 prefill 不得让已在 decode 的 batch 整步停摆 | `BYIELD`（chunk 边界让路）+ `STRATA_PIPED_CONCURRENT`（读在独立线程） | **已实现**；残余停摆向量 = `ConcurrentReadSetup` 的互斥矩阵（helper/pcie-dma/staged 任一在场即关并发）——这正是 S0b（邻居停顿 3.43 s）的战场 |
+| ③KV 准入失败的请求必须退出 frontier（防 livelock） | staged 队列的失败/取消清理不变量；现状 S0c：引擎死于 BREAD → `mp_staged` 永久遗留 → 之后所有准入卡死 | **同一类 bug**，fork 的修法（失败即出队）= S0c 的验收判据，已在用户队列 |
+
+**结论：barrier 本身不移植（调度架构不同）；它的三个洞察里两个 Strata 已有等价机制，第三个已作为
+S0c 在队列里。本项产出即本页。**
 
 ## 3. 验证基线（本机已跑通，2026-10-25）
 
