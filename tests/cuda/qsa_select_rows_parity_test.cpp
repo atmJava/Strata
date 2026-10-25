@@ -1,7 +1,8 @@
 // tests/cuda/qsa_select_rows_parity_test.cpp - the QSA block-score selection's two paths, bit for bit, on one input.
 //
-//   default dispatch            qsa_block_scores (no active-block count, <= 8 queries): on Turing
-//                               block_scores_halve_kernel (STRATA_SM75_PERF unset), elsewhere block_scores_multi_kernel
+//   default dispatch            qsa_block_scores (no active-block count, <= 8 queries): block_scores_multi_kernel,
+//                               or block_scores_halve_kernel on a Turing card once the opt-in STRATA_SM75_PERF=1
+//                               series is asked for (sm75_series.hpp)
 //   STRATA_QSA_ROWS=1           block_scores_rows_kernel (QSAROWS, docs/QSAROWS.md), calls of up to 4 queries
 //
 // Both must produce the same scores bytes and the same top-k ids bytes (the ids the decoder actually consumes), and
@@ -29,6 +30,7 @@
 // checked against 60 s by the driver.
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
+#include "strata/core/sm75_series.hpp"
 #include "strata/kernels/qsa_select.hpp"
 
 #include <cuda_runtime.h>
@@ -329,13 +331,11 @@ int run_child(bool rows_path, const std::string& out_path, int device) {
     if (rows_path) {
         std::snprintf(dispatch, sizeof(dispatch), "STRATA_QSA_ROWS=1 -> block_scores_rows_kernel (QSAROWS)");
     } else {
-        const char* perf = std::getenv("STRATA_SM75_PERF");
-        const char* halve = std::getenv("STRATA_SCORES_HALVE");
-        const bool turing = prop.major == 7 && prop.minor == 5;
-        const bool halve_on = halve != nullptr ? std::atoi(halve) != 0
-                                              : (turing && !(perf != nullptr && std::atoi(perf) == 0));
+        // HEAD's default: the multi kernel.  The Turing halve kernel is part of the opt-in STRATA_SM75_PERF series
+        // (sm75_series.hpp), so it runs here only when that is set - the counters below say which one actually ran.
         std::snprintf(dispatch, sizeof(dispatch), "default dispatch -> %s",
-                      halve_on ? "block_scores_halve_kernel (Turing)" : "block_scores_multi_kernel / block_scores_kernel");
+                      strata::sm75_default(prop.major, prop.minor) ? "block_scores_halve_kernel (STRATA_SM75_PERF on)"
+                                                                   : "block_scores_multi_kernel (HEAD default)");
     }
     char e1[80], e2[80], e3[80];
     std::printf("[child:%s] device %d (%s, %d.%d), %s; %s, %s, %s (STRATA_SCORES_MULTI and "
@@ -441,22 +441,25 @@ int run_child(bool rows_path, const std::string& out_path, int device) {
             // which scorer actually launched: the three are bit-identical by design, so comparing their output
             // cannot tell them apart - a dispatch that silently fell back to the default kernel would still match.
             const long long rows0 = k::qsa_rows_launches(), halve0 = k::qsa_halve_launches();
+            const long long multi0 = k::qsa_multi_launches();
             k::qsa_block_scores(d_pooled, d_dead, d_q, d_steps, nq, mb, s, d_scores, nullptr);
             const long long rows1 = k::qsa_rows_launches(), halve1 = k::qsa_halve_launches();
-            if (rows_path) {
-                if (rows1 != rows0 + 1 || halve1 != halve0) {
-                    std::fprintf(stderr, "FAIL: STRATA_QSA_ROWS=1 case %lld took %lld rows launch(es) and %lld halve "
-                                         "launch(es); expected exactly one rows launch\n", (long long) case_index,
-                                 rows1 - rows0, halve1 - halve0);
-                    return 1;
-                }
-            } else {
-                if (halve1 != halve0 + 1 || rows1 != rows0) {
-                    std::fprintf(stderr, "FAIL: default dispatch case %lld took %lld rows launch(es) and %lld halve "
-                                         "launch(es); expected exactly one halve launch\n", (long long) case_index,
-                                 rows1 - rows0, halve1 - halve0);
-                    return 1;
-                }
+            const long long multi1 = k::qsa_multi_launches();
+            // exactly one scorer per case, and the arm's own one: the three are bit-identical by design, so a dispatch
+            // that silently fell back would still match byte for byte - these counters are the only evidence.
+            const bool rows_arm = rows_path;
+            const bool want_halve = !rows_path && strata::sm75_default(prop.major, prop.minor) &&
+                                    std::getenv("STRATA_SCORES_HALVE") == nullptr;
+            const bool ok = rows_arm   ? (rows1 == rows0 + 1 && halve1 == halve0 && multi1 == multi0)
+                          : want_halve ? (halve1 == halve0 + 1 && rows1 == rows0 && multi1 == multi0)
+                                       : (multi1 == multi0 + 1 && rows1 == rows0 && halve1 == halve0);
+            if (!ok) {
+                std::fprintf(stderr, "FAIL: %s case %lld took %lld rows / %lld halve / %lld multi launch(es); expected "
+                                     "%s\n", rows_path ? "STRATA_QSA_ROWS=1" : "default dispatch", (long long) case_index,
+                             rows1 - rows0, halve1 - halve0, multi1 - multi0,
+                             rows_arm ? "exactly one rows launch" : want_halve ? "exactly one halve launch"
+                                                                              : "exactly one multi launch");
+                return 1;
             }
             k::qsa_block_topk(d_scores, d_steps, nq, mb, cap_width, s, d_ids, nullptr);
             ck(cudaEventRecord(ev1), "event record");
