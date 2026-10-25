@@ -116,13 +116,18 @@ int main(int argc, char** argv) {
                           {"nvfp4 down", GGML_TYPE_NVFP4, 2560, 640},
                           {"q8_0 down", GGML_TYPE_Q8_0, 2560, 640},
                           {"iq3_s gate/up", GGML_TYPE_IQ3_S, 1280, 2560},
-                          {"iq4_nl down", GGML_TYPE_IQ4_NL, 2560, 640}};
+                          {"iq4_nl down", GGML_TYPE_IQ4_NL, 2560, 640},
+                          // the IQ3_XXS native pack's expert shapes (tools/iq_pack.py: gate/up IQ3_XXS, down IQ4_NL)
+                          {"iq3_xxs gate/up", GGML_TYPE_IQ3_XXS, 1280, 2560},
+                          {"iq3_xxs down", GGML_TYPE_IQ3_XXS, 2560, 640}};
     std::mt19937 rng(7);
     for (int R : Rs)
         for (const Case& c : cases) {
             float ms = 0;
             const double tops = run_case(c, R, rng, &ms);
-            std::printf("  R %4d  %-14s %8.3f ms  %7.1f TOPS\n", R, c.name, ms, tops);
+            // the weight bytes one launch reads (16 experts), per ms: the bandwidth the product needs at residency
+            const double gbs = 16.0 * mmq::matrix_bytes(c.type, c.rows, c.cols) / (ms * 1e6);
+            std::printf("  R %4d  %-14s %8.3f ms  %7.1f TOPS  %7.1f GB/s weights\n", R, c.name, ms, tops, gbs);
         }
     return 0;
 }
