@@ -28,14 +28,27 @@ pid=$(ssh_ "pgrep -f 'build/strata --serve' | head -1")
 [ -n "$pid" ] || { echo "no engine process found" >&2; exit 1; }
 say "engine pid=$pid"
 if [ "$GO" -eq 0 ]; then
-  say "dry run: would launch the staged drill, kill -9 $pid after 8 s, then wait for health and one request"
+  say "dry run: would launch the staged drill, wait for a 'staged read sent' line (<=25 s), kill -9 $pid," \
+      "then wait for health and one request"
   exit 0
 fi
 
-say "launching the staged drill in the background"
+staged_count() { ssh_ "grep -c 'staged read sent' /opt/ai/logs/strata-service.log" 2>/dev/null || echo 0; }
+before=$(staged_count)
+say "staged-read lines before: $before; launching the staged drill in the background"
 ( python3 tools/server/tests/probe_cancel_staged.py "$BASE" 6 > /tmp/v2-s0c-probe.json 2>/tmp/v2-s0c-probe.err ) &
 probe_pid=$!
-sleep 8
+seen=""
+for i in $(seq 1 25); do
+  sleep 1
+  now_count=$(staged_count)
+  if [ "${now_count:-0}" -gt "${before:-0}" ] 2>/dev/null; then seen=1; say "staged read seen ($before -> $now_count)"; break; fi
+done
+if [ -z "$seen" ]; then
+  say "no staged read appeared in 25 s; NOT killing (the scenario did not form)"
+  wait "$probe_pid" 2>/dev/null
+  exit 1
+fi
 
 now=$(ssh_ "pgrep -f 'build/strata --serve' | head -1")
 if [ -z "$now" ] || [ "$now" != "$pid" ]; then
