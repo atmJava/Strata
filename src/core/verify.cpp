@@ -864,7 +864,11 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                 err = "verify: the DFlash2 tap buffers could not be allocated";
                 return false;
             }
-            if (tap_path != nullptr) {
+            // A layer split used to open the file on the stage that reaches the head only, because every stage opening
+            // one path "wb" would truncate the last one's records.  That rule stays for a path without "%d"; with "%d"
+            // each stage has its own file and every stage writes its own rows.
+            const bool whole_model = lb_ == 0 && le_ == g.n_layers;
+            if (tap_path != nullptr && (tap_path_per_stage_ || whole_model)) {
                 tap_file_ = std::fopen(tap_file_path.c_str(), "wb");
                 if (tap_file_ == nullptr) { err = std::string("verify: cannot write STRATA_TAP_FILE ") + tap_file_path; return false; }
                 const int32_t hdr[4] = {0x50415453 /* 'STAP' */, 1, (int32_t) N, (int32_t) nt};

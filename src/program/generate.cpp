@@ -9200,6 +9200,15 @@ int main(int argc, char** argv) {
             use_df2 = false;
             df2.release();
         }
+        // The drafter reads its taps in the pack's own order (kDf2 row stride = taps_.size() * n_embd), while set_taps
+        // sorts and de-duplicates: a pack whose tap list is not ascending would read the wrong slots.  Refuse that here
+        // rather than drafting from the wrong layers.
+        if (use_df2 && ver.tap_layers() != df2.tap_layers()) {
+            std::fprintf(stderr, "strata serve: --draft dflash2: the pack's tap layers (%zu) are not the verifier's ascending list (%zu); "
+                                 "the MTP drafts instead\n", df2.tap_layers().size(), ver.tap_layers().size());
+            use_df2 = false;
+            df2.release();
+        }
         if (use_df2 && !df2.prepare(ver.tap_dev(), err)) {
             std::fprintf(stderr, "strata serve: --draft dflash2: %s. It needs about 1.2 GiB of VRAM in all (the pack 0.76 GiB, buffers and K/V ring "
                                  "0.25 GiB, a draft head 0.2 GiB); --vram-reserve-mib 1900 keeps it (the expert cache gives up about 2.5%% of its experts "
@@ -16332,6 +16341,15 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: --draft dflash2: %s. It needs about 1.2 GiB of VRAM in all (the pack 0.76 GiB, buffers and K/V ring "
                                  "0.25 GiB, a draft head 0.2 GiB); --vram-reserve-mib 1900 keeps it (the expert cache gives up about 2.5%% of its experts "
                                  "to the CPU). The MTP drafts instead.\n", err.c_str());
+            use_df2 = false;
+            df2.release();
+        }
+        // The drafter reads its taps in the pack's own order (kDf2 row stride = taps_.size() * n_embd), while set_taps
+        // sorts and de-duplicates: a pack whose tap list is not ascending would read the wrong slots.  Refuse that here
+        // rather than drafting from the wrong layers.
+        if (use_df2 && ver.tap_layers() != df2.tap_layers()) {
+            std::fprintf(stderr, "strata generate: --draft dflash2: the pack's tap layers (%zu) are not the verifier's ascending list (%zu); "
+                                 "the MTP drafts instead\n", df2.tap_layers().size(), ver.tap_layers().size());
             use_df2 = false;
             df2.release();
         }

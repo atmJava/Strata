@@ -114,8 +114,11 @@ struct SessionState {
 /// **the flag has to match the `session_init` call**: sizing with `true` and then passing no donor carves an
 /// arena one table short, while sizing with `false` and passing a donor only wastes it.  The default `false` is
 /// byte-for-byte today's formula.
+uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int64_t layer_lo,
+                       int64_t layer_hi, bool borrow_rope);
+/// The five-argument spelling (before `ca4d6e85`): the session's own table is counted here.
 uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int64_t layer_lo = 0,
-                       int64_t layer_hi = -1, bool borrow_rope = false);
+                       int64_t layer_hi = -1);
 /// Carves `base` (DEVICE memory) into `s`.  Returns the bytes used.  Same range convention as `session_bytes`.
 ///
 /// `share_rope_from` non-null: every QSA state in the new session BORROWS that session's RoPE table instead of
@@ -125,8 +128,10 @@ uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int
 /// anything is carved, rather than silently building a private table: a wrong table is a wrong rotation, not a
 /// fault, so a quiet fallback would be the expensive outcome.
 uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void* base, SessionState& s,
-                      int64_t layer_lo = 0, int64_t layer_hi = -1,
-                      const SessionState* share_rope_from = nullptr);
+                      int64_t layer_lo, int64_t layer_hi, const SessionState* share_rope_from);
+/// The seven-argument spelling (before `ca4d6e85`): every session owns its RoPE table.
+uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void* base, SessionState& s,
+                      int64_t layer_lo = 0, int64_t layer_hi = -1);
 /// **THE QSA STATE THAT OWNS THE RoPE TABLE `s` USES** - `&s.qsa_states[s.qsa_ord0]` when that state built it,
 /// the donor's when `s` borrowed (walking a borrow chain), and nullptr when there is none: no QSA state, no
 /// table built yet, or the owner has already been released.  This is the pointer `session_init` hands to

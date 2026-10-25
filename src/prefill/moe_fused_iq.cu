@@ -1305,13 +1305,18 @@ const DevInfo& dev_info() {
     major = strata::cc_major_of(major);   // STRATA_EMULATE_CC counts (tests)
     minor = strata::cc_minor_of(minor);
     cudaDeviceGetAttribute(&d.sms, cudaDevAttrMultiProcessorCount, dev);
-    // Turing (sm_75): the same kernels with plain copies (no cp.async below sm_80) and m8n8k16 MMAs.  The default on a
-    // 7.5 card, decided here and not by the deck; STRATA_PF_FUSED_SM75=0 keeps the MMQ path.
+    // Turing (sm_75): the same kernels with plain copies (no cp.async below sm_80) and m8n8k16 MMAs.  Set up only when
+    // the fused path is asked for (STRATA_PF_FUSED=1) or the Turing switch is set explicitly: an unrequested 7.5 card
+    // must stay exactly as it was - no cudaFuncSetAttribute calls and no banner on the default path.
     static const int sm75_env = [] {
         const char* v = std::getenv("STRATA_PF_FUSED_SM75");
         return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1;
     }();
-    const bool sm75 = sm75_env > 0 || (sm75_env < 0 && major == 7 && minor == 5);
+    static const bool fused_asked = [] {
+        const char* v = std::getenv("STRATA_PF_FUSED");
+        return v != nullptr && v[0] != '\0' && std::atoi(v) != 0;
+    }();
+    const bool sm75 = sm75_env > 0 || (sm75_env < 0 && major == 7 && minor == 5 && fused_asked);
     if (major < 8 && !(major == 7 && minor == 5 && sm75)) return d;
     int occ = 1 << 20;
     if (major < 8) {   // Turing: the canonical Q2_0 pack's kernels, plus the production pack's (gate/up IQ3_XXS, down

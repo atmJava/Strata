@@ -210,6 +210,15 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     return used;
 }
 
+// The old spellings (before the RoPE borrowing): a source build that still calls them keeps working.
+uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int64_t layer_lo, int64_t layer_hi) {
+    return session_bytes(g, max_cells, k, layer_lo, layer_hi, false);
+}
+uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void* base, SessionState& s,
+                      int64_t layer_lo, int64_t layer_hi) {
+    return session_init(g, max_cells, k, base, s, layer_lo, layer_hi, nullptr);
+}
+
 void session_release(SessionState& s) {
     // the ALLOCATED ordinals start at qsa_ord0: a split range (layer_lo > 0) that owned its table used to be skipped
     // here, leaking the table and leaving its #280 registry entry behind
