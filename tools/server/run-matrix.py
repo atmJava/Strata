@@ -70,8 +70,9 @@ BATCHES: dict[str, list[dict]] = {
              where="local", timeout=180, judge="exit0",
              cmd=["python3", "tools/server/probe-version-stamp.py", "--expect-engine-md5", "84a0d410367abfb3a8bcb9422a3b10ee",
                   "--out", "{out}/V2-0-version-stamp.json"]),
-        dict(id="V2-4", what="warmup: the first five requests after the restart (cold/warm series)",
-             criterion="5/5 answered; per-request TTFT printed (a measurement, not a threshold)",
+        dict(id="V2-4", what="warmup: the first long read after the restart vs the second (cold/warm claim)",
+             criterion="both ~22K reads answered; per-read wall_s and the neighbour's largest gap printed "
+                       "(a measurement, not a threshold)",
              where="local", timeout=900, judge="exit0",
              cmd=["python3", "tools/server/exp-v2-warmup.py", "{base_url}", "5"]),
         dict(id="V1-5", what="the VRAM account under the production shape (six slots, 192K, int8)",
