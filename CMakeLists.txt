@@ -489,6 +489,15 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(qsa_scores_parity PRIVATE strata_kernels CUDA::cudart)
     add_test(NAME qsa_scores_parity COMMAND qsa_scores_parity)
     set_tests_properties(qsa_scores_parity PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "STRATA_SCORES_THREAD=1")
+    # QSA selection: the default block scorer against STRATA_QSA_ROWS=1 (block_scores_rows_kernel), scores and
+    # top-k ids bit for bit.  The driver re-executes the binary twice (the dispatch is read once per process).
+    # The .cpp holds the synthetic-data kernels, so it is compiled as CUDA.
+    add_executable(qsa_select_rows_parity_test tests/cuda/qsa_select_rows_parity_test.cpp)
+    set_source_files_properties(tests/cuda/qsa_select_rows_parity_test.cpp PROPERTIES LANGUAGE CUDA)
+    target_include_directories(qsa_select_rows_parity_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(qsa_select_rows_parity_test PRIVATE strata_kernels CUDA::cudart)
+    add_test(NAME qsa_select_rows_parity_test COMMAND qsa_select_rows_parity_test)
+    set_tests_properties(qsa_select_rows_parity_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
   endif()
   # QSAROWS (docs/QSAROWS.md): what the T rows of a verification window cost in a QSA layer's decode kernels at a long
   # context (block scores, top-k, attention over each row's selection, indexer append), row by row; GPU, synthetic, no
@@ -1582,6 +1591,29 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(draft_cap_test src/core/draft_cap_test.cpp)
   target_include_directories(draft_cap_test PRIVATE include)
   add_test(NAME draft_cap_test COMMAND draft_cap_test)
+  # the session's one shared RoPE table: `session_bytes(..., borrow_rope)` is smaller by exactly one
+  # max_cells*(n_rot/2)*4*2 table for every range / cell count / k, and the table is a 256-byte multiple so no
+  # alignment slack can change it.  `strata_engine` (which owns session.cpp) only exists in a CUDA/HIP build,
+  # so this runs against the real function there and against a line-for-line transcription on a CPU-only PC.
+  add_executable(session_rope_share_test tests/core/session_rope_share_test.cpp)
+  target_include_directories(session_rope_share_test PRIVATE include)
+  if(TARGET strata_engine)
+    target_link_libraries(session_rope_share_test PRIVATE strata_engine)
+    target_compile_definitions(session_rope_share_test PRIVATE STRATA_TEST_REAL_ENGINE=1)
+  endif()
+  add_test(NAME session_rope_share_test COMMAND session_rope_share_test)
+  set_tests_properties(session_rope_share_test PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 60)
+  # the MTP draft logits' width (max_t rows over the draft head's token subset or the whole vocabulary), the
+  # zero increment bind_bytes() returns once head_logits is wide enough, and the card-class / Turing constants
+  # (CPU only; mtp.cpp is in strata_engine, so the real function is used when the engine exists)
+  add_executable(mtp_logits_width_test tests/core/mtp_logits_width_test.cpp)
+  target_include_directories(mtp_logits_width_test PRIVATE include)
+  if(TARGET strata_engine)
+    target_link_libraries(mtp_logits_width_test PRIVATE strata_engine)
+    target_compile_definitions(mtp_logits_width_test PRIVATE STRATA_TEST_REAL_ENGINE=1)
+  endif()
+  add_test(NAME mtp_logits_width_test COMMAND mtp_logits_width_test)
+  set_tests_properties(mtp_logits_width_test PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 60)
   # the f32 -> bf16 rounding against ggml's, NaN included, over every f32 bit pattern (header-only, CPU)
   add_executable(bf16_bits_test src/kernels/bf16_bits_test.cpp)
   target_include_directories(bf16_bits_test PRIVATE include)
