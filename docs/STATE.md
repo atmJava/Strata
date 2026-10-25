@@ -2,20 +2,45 @@
 
 > 上下文丢失、会话重启、换人接手：先读本文件 + `WORK_QUEUE.md` + 上轮 `MULTIPATH_LOG.md` 条目。
 
-- 目标：持续优化循环（`EVERGREEN_LOOP.md`；不设完成，直到用户叫停）
-- 当前轮次：R12（未开始；R11 完成）
-- 当前项：S0b（M4：长读邻居停顿 3.43 s → ≤1 s）
-- 下一动作：测 `STRATA_PIPED_CONCURRENT=1/0` 下邻居窗口停顿；定性 3.43 s 后决定修法（日重启余 2 次，R11 用完后停一天复盘）
-- 环境：health 200 / 引擎 `383b426a` / server `52b84d54` / W3 启用（阈值 4096）
-- 备份：`/opt/ai/tmp/mp-w3-A3-*`（引擎/server/launcher/config）
-- 上轮：R10（L-054；A-B-A 闭环）
-- 未完成采纳项：17（见 `WORK_QUEUE.md`；R12 审计新增 S0c/S0d）
+- 目标：持续优化循环（`EVERGREEN_LOOP.md`；不设完成，直到用户叫停）；当前主线 = 移植代码的服务器验证战役
+  V0→V3（`SELF_ITERATION_PLAN.md` §4）
+- 当前批次：**V0 完成**（2026-10-25 21:0x）；下一批 **V1（免停机批，0 重启）**
+- 当前项：V1（免停机批：V1-1 版本戳复跑、V1-2 服务器源码树单测、V1-3 `isa_guard_check`、V1-4 64/256 锁死、V1-5 staged wedge）
+- 下一动作：rsync HEAD → `/opt/ai/src/strata-port-v1` → 实验目录一次构建（不动 `build/`）→
+  `python3 tools/server/run-matrix.py --batch V1 --src /opt/ai/src/strata-port-v1`
+- 环境：health 200（2026-10-25 20:46 复核）；引擎 0.1.47 / `383b426a`；server `a3c7df58`；launcher `9b6bf792`；
+  config `6c362d01`；W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）
+
+## 版本戳基线（V0 实测：`tools/server/probe-version-stamp.py`，2026-10-25 20:46）
+
+| 件 | md5 | 备注 |
+|---|---|---|
+| engine | `383b426aea84783352c8166c3d93d1be` | 与 R11 记录一致；运行 pid 的 cmdline 指向的就是被 hash 的二进制 |
+| server | `a3c7df58611518dcfab01d84b2e7d508` | **R11 记的 `52b84d54` 是 patch 工作树 `/opt/ai/src/strata-mp` 的 hash，不是现网** |
+| launcher | `9b6bf792ae6ef3d8367839aca75af07c` | export `STRATA_MP_STAGED_READ=1`、`MIN_TOKENS=4096` |
+| config | `6c362d015fd45042db42323fd98d43cd` | `parallel=6`；`verify-running-config.sh` 判 ARGS MATCH、进程晚于配置写入 |
+
+现网 server 是 **hybrid**：0.2.2 + W3 补丁 + R12/R13 + staged-wait `yield "ping"` + S2 `done["metrics"]`，
+缺 `46d12fa9` 的两处（`BCANCEL_DRAIN_S`、BRDY 严格解析），且与任何 commit 都不相等——
+细节与证据见 `tools/server/patches/README.md` "Production is not the patch tree"。
+`docs/MULTIPATH_RULES.md` §1 已按本表更正（旧的 `4f6f635f`/`e8edc558` 是更早部署，非现网）。
+
+## 备份与回滚
+
+- 当前态快照：`/opt/ai/tmp/rollback-V0-20261025T124629Z/`（strata.bin / server.py / run-022.sh / strata-022.json
+  + MANIFEST.md5 / MANIFEST.sha256）。`md5sum -c`、`sha256sum -c`、与 live 的 `cmp -s` 全过；
+  回滚**演练**：文件级（复制 → 字节核对 → 原子替换 → 再核对）是，**停机级（停服/重启回滚）否**（V0 0 重启，
+  留给 V2 窗口）。日志 `/opt/ai/logs/V0-rollback-rehearsal-*.log`。
+- `/opt/ai/tmp/mp-w3-A3-*` = **W3 前**的旧快照（引擎 79076000 B / server 513180 B，与现网不同），只作"退回 A"用。
 
 ## 指标快照（每轮更新）
 
 | M1 4路聚合 | M2 单路 | M3 长读首 token | M4 邻居停顿 | M5 短读满槽 | M6 接受率 | M7 缓存 | M8 第5请求 |
 |---|---|---|---|---|---|---|---|
 | 122.1（R10） | 71.0 | 17.9（R11） | **3.43（R11）** | 40.7（R11） | 82.0%（R10） | T4 PASS | 未测 |
-- 日重启：2026-10-25 4/6（跨轮累计：R9 2 + R10 2；满 6 即停一天复盘）
+
+- V0 **没有新性能测量**（0 构建 / 0 重启 / 0 生产改动）；上表仍是 R10/R11 的数。
+- 日重启：2026-10-25 4/6（V0 用 0；V1 不需要窗口；V2/V3 排到 00:00 后，跨轮日预算重置）
+- 未完成采纳项：17（见 `WORK_QUEUE.md`；V0–V3 批次行不计入 backlog）
 - 阻塞：无
-- 最后更新：2026-10-25T10:25+08:00
+- 最后更新：2026-10-25T21:05+08:00（V0 收尾）

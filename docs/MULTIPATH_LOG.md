@@ -8,6 +8,53 @@
 
 ---
 
+## V0 · 2026-10-25 · 准备批：版本戳基线、0.2.2 harness、补丁追平、矩阵 runner、探针代价、回滚演练（0 构建 / 0 重启 / 0 生产改动）
+
+- **改了什么**：
+  - `tools/server/probe-version-stamp.py`（新）：四件 hash + 运行进程 + `STRATA_*` env + feature markers + `/health`。
+  - `tools/server/run-matrix.py`（新）：一批一次矩阵；V1 的 5 项已定义（判据/超时/日志/`summary.json`）。
+  - `tools/server/probe-instrument-cost.py`（新）：S2 每请求时延探针**自身代价**。
+  - `tools/server/check_assert_lock.py`（新）：64/256 负向编译（V1-4 的方法，已在旧移植树验证）。
+  - `tools/server/tests/staged_patch_harness.py`：基准改为 `patches/base-0.2.2/` 的 v0.2.2 副本（md5 钉住）。
+  - `tools/server/patches/mp-w3-server-0.2.2.patch`：追平 `46d12fa9`（`BCANCEL_DRAIN_S`=10 s、BRDY 严格解析）；
+    新增 `test_mp_patch_parity.py` 钉住这两处。
+  - 文档：`STATE.md` 版本戳表、`MULTIPATH_RULES.md` §1 hash、`RULES.md` v4 / `PORTING_RULES.md` v1.2 /
+    `MULTIPATH_RULES.md` v0.4（C1/C2 批次化）。
+- **数字（全部只读或本机，无性能结论）**：
+  - 现网四件 md5：引擎 `383b426a`、server `a3c7df58`、launcher `9b6bf792`、config `6c362d01`；
+    health 200、engine 0.1.47、`batch_slots=6`、config `parallel=6`/54 args（运行进程 59）。
+  - 现网 server 是 **hybrid**：有 `yield "ping"`（5 处）与 `request_started`（S2），**没有** `BCANCEL_DRAIN_S`、
+    `malformed staged-read`；`52b84d54` 是 `/opt/ai/src/strata-mp` 的 hash，**不是现网**。
+  - 本机测试：`pytest tools/server/tests` = **61 passed / 10 skipped / 0 failed**（10 个 skip 是"要活服务器"，
+    本机 127.0.0.1 无服务，**不是通过**）；门禁用的 6 个文件 = **31 passed**。
+  - S2 探针代价：中位 **1.37 µs/请求**（5×200k，离散度 6.8%）。
+  - 回滚演练：`md5sum -c`、`sha256sum -c`、与 live 的 `cmp -s` 全过；**停机级回滚未做**。
+  - 负向编译（旧移植树）：默认 64/256 编译过；`STRATA_QSA_ATTN_CHUNK=128` 被 static_assert 拒。
+- **预期被推翻**：R11 记的 server hash `52b84d54` 是 patch 工作树的，不是现网；两份文档的现网 hash 都不对。
+  `mp-w3-A3-*` 是 **W3 前**状态（与现网不同），不能当当前态回滚包。
+- **自检**：health 200；queue/STATE 一致（17 未完成）；上轮 R11 剩余 15，审计新增 S0c/S0d 后 17；V0 不加不减。
+- **四问**：① cron/timer 正常（`vram-perf` */5、`nvlink-crc` 每小时）；② 无残留安装器/构建（pgrep 空）；
+  ③ `vram-perf.csv` 539 行，最新 `58.6/92.2`，无漂移告警；④ 方向：先 V1（免停机），V2/V3 排到 00:00 后。
+- **预算**：构建 0、重启 0、停机 0。单文件负向编译 1 次（旧移植树，输出到 `/tmp`，不计批构建）。
+- **没测什么**：任何性能数字；服务器源码树单测（V1-2）；停机级回滚；引擎侧 `STRATA_*_TIMING`；
+  V0 期间现网有真实请求（`/opt/ai/logs/V0-metrics-baseline-20261025T124655Z.json`），本轮没有独立流量探针。
+- **下一批第一件事**：V1 = rsync HEAD 到 `/opt/ai/src/strata-port-v1`，实验目录一次构建，跑 `run-matrix.py --batch V1`。
+
+### Gate（本轮）
+- 轮次：V0
+- 项：V0
+- 验收判据：四件 hash 实测且运行进程对得上；harness 两红转绿；补丁含 `46d12fa9` 两处；矩阵 runner 可列出/干跑；探针代价已量；回滚包字节核对；四问与基线归档；C1/C2 版本行
+- 实现：`tools/server/probe-version-stamp.py`、`run-matrix.py`、`probe-instrument-cost.py`、`check_assert_lock.py`、`tools/server/patches/base-0.2.2/`、`tools/server/patches/mp-w3-server-0.2.2.patch`
+- 测试：`python3 -m pytest tools/server/tests/test_mp_patch_parity.py tools/server/tests/test_mp_staged_patch.py tools/server/tests/test_mp_staged_cancel.py tools/server/tests/test_mp_preflight.py tools/server/tests/test_mp_round_gate.py serve/test_staged_wedge.py -q` → PASS
+- 生产：health 200；engine `383b426a`、server `a3c7df58`、launcher `9b6bf792`、config `6c362d01`；无生产改动（0 重启）
+- 证据：`/opt/ai/logs/V0-metrics-baseline-20261025T124655Z.json`、`/opt/ai/logs/V0-vram-perf-baseline-20261025T124655Z.csv`、`/opt/ai/logs/V0-rollback-rehearsal-20261025T124635Z.log`、`/tmp/v0-*`；脚本 `probe-version-stamp.py`、`run-matrix.py`、`probe-instrument-cost.py`、`check_assert_lock.py`
+- 回滚：`/opt/ai/tmp/rollback-V0-20261025T124629Z/`（字节核对过；演练：文件级是、停机级否）
+- 台账：L-056
+- 剩余未完成项：17（S0c、S0d、S0b、C1、F1F2、S2、S3、S8、S1、S7、S9、S10、S11、S12、S13、S14、cache_salt）
+- 没测什么：性能、停机级回滚、引擎侧 TIMING、服务器源码树单测（V1）
+
+---
+
 ## R11 · 2026-10-25 · S0 修复开关语义与阈值默认（引擎 383b426a / server 52b84d54）；长读暂存**邻居停顿 3.43 s**
 
 - **改了什么**：引擎开关从裸 `getenv()!=nullptr` 改为 `strcmp(v,"0")!=0`（`=0` 真的关）；server 的

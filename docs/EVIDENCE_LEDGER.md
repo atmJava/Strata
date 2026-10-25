@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（55 条：L-000…L-054，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
+## 台账索引（57 条：L-000…L-056，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
 
 | 编号 | 日期 | 一句话结论 | 判决 |
 |---|---|---|---|
@@ -66,6 +66,7 @@
 | L-051 | 10-24 17:0x | 预设校验 `check_preset.py` 对生产配置 **OK**（4x256、groups 2x2、KV 流式、引擎形状一致）；F6 部分采纳、F7 采纳、F11/F5 搁置 | **参考** |
 | L-052 | 10-24 17:1x | 预设门负例 **6/6**（错配置必拒）；`check_preset.py` 对生产配置 OK；清单 11 项全部有判决 | **参考** |
 | L-053 | 10-25 01:2x | W3 **生产启用**（阈值 4096）：长读首 token **47.3 → 17.1 s**、短读保持 40.9 s 不假开始；bench 聚合 **130.2 tok/s**（+8%）、接受率 79.8%；G2 0.97 s、G3 ✓；2 次重启 | **采纳（启用）** |
+| L-056 | 10-25 21:0x | V0 准备批：现网四件实测（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）；现网 server 是 hybrid 且 `52b84d54` 是 patch 树 hash；harness 2 红转绿、补丁追平 `46d12fa9`；S2 探针代价 1.37 µs/请求；回滚包字节核对（停机级未演练）；0 构建 0 重启 | **参考** |
 | L-055 | 10-25 02:2x | R11 开关修复部署（引擎 `383b426a`）：短读 40.68 s 不暂存、长读首 17.89 s；**邻居窗口停顿 3.43 s**（>1 s，新发现）；S0 完成 | **参考** |
 | L-054 | 10-25 01:3x | A-B-A 闭环：回滚 A 实测（短 42.3 s / 长 36.3 s，G4 ✓）→ 再启用 B（短 35.9 s / 长 **17.7 s**）；3 流冷读首 token 8.0 s（唯一提示词，修正缓存假象） | **参考** |
 
@@ -1880,3 +1881,42 @@ F11 **搁置**（W3 已给 TTFT，抢占/优先级无需求证据）；F5 **搁�
 **没测什么**：错误配置的拒绝（只跑了正确配置，负例留 R8）；N×CTX 矩阵扫描。
 
 **原始日志**：`tools/server/check_preset.py` 的终端输出（本轮）。
+
+
+---
+
+## L-056 · V0 准备批：版本戳基线、harness 0.2.2、补丁追平、矩阵 runner、探针代价、回滚演练（2026-10-25 20:40–21:1x CST，0 重启）
+
+**做了什么**：按 `SELF_ITERATION_PLAN.md` §11 做开批前的 7 条：现网四件实测 hash；`staged_patch_harness.py`
+改指 `patches/base-0.2.2/`（`git show v0.2.2:serve/server.py`，md5 `aec97a89…`）；`mp-w3-server-0.2.2.patch`
+追平 `46d12fa9` 的两处并新增 `test_mp_patch_parity.py`；写 `probe-version-stamp.py` / `run-matrix.py`
+（V1 五项）/ `probe-instrument-cost.py` / `check_assert_lock.py`；新快照 + 回滚演练；四问 + `/metrics` 基线与
+`vram-perf.csv` 快照；C1/C2 写进三份规则文件的版本行。**0 构建、0 重启、0 生产改动。**
+
+**数字**：
+
+| 项 | 值 |
+|---|---|
+| 现网引擎 md5 | `383b426aea84783352c8166c3d93d1be`（79095824 B，2026-10-25T02:16:36Z） |
+| 现网 server md5 | `a3c7df58611518dcfab01d84b2e7d508`（521060 B，05:00:16Z） |
+| launcher md5 | `9b6bf792ae6ef3d8367839aca75af07c` |
+| config md5 | `6c362d015fd45042db42323fd98d43cd`（`parallel=6`，54 args；运行进程 59） |
+| 现网 server markers | `yield "ping"` ×5、`request_started` ×1；`BCANCEL_DRAIN_S = 10.0` ×0、`malformed staged-read` ×0 |
+| 本机测试 | `pytest tools/server/tests`：**61 passed / 10 skipped / 0 failed**（71 collected；10 skip 需活服务器） |
+| S2 探针代价 | 中位 **1.366 µs/请求**，5×200k，离散度 6.8%（1 s 请求的 0.00014%） |
+
+**判决：参考**（准备批，不改生产；"开批就绪"清单全绿）。附带结论：R11 记的 server `52b84d54` 实测是
+`/opt/ai/src/strata-mp/serve/server.py` 的 hash，不是现网；`/opt/ai/tmp/mp-w3-A3-*` 是 W3 前的快照，
+与现网不同，只可作"退回 A"。
+
+**回滚演练**：新快照 `/opt/ai/tmp/rollback-V0-20261025T124629Z/`（四件 + MANIFEST）；复制 → `cmp -s` 与 live
+逐字节相等 → `md5sum -c`/`sha256sum -c` OK → `cp .new && mv -f` 演练 → 再 `cmp -s` 仍相等。
+**停机级回滚没有演练**（V0 0 重启），留给 V2 窗口。
+
+**没测什么**：任何性能数字；服务器源码树单测（V1-2）；停机级回滚；引擎侧 `STRATA_*_TIMING` 与 btrace 写盘；
+V0 期间现网有真实请求，本轮没有独立流量探针。
+
+**原始日志**：`/opt/ai/logs/V0-metrics-baseline-20261025T124655Z.json`、
+`/opt/ai/logs/V0-vram-perf-baseline-20261025T124655Z.csv`、
+`/opt/ai/logs/V0-rollback-rehearsal-20261025T124635Z.log`、`/tmp/v0-*`、`/tmp/V1-matrix-*`（dry-run）；
+脚本 `tools/server/probe-version-stamp.py`、`run-matrix.py`、`probe-instrument-cost.py`、`check_assert_lock.py`。
