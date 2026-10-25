@@ -2532,11 +2532,10 @@ sm_86 as well as sm_61: bit-exact, and the time to the first token of a 150 / 30
 
 Kernels by rafatxf (#2069-#2072, #2093, #2220-#2222), imanu86 (#2081) and xrip (#1821) for compute capability 7.5. They were measured
 on one RTX 2080 Ti (decode +5..6 % at 4K-32K, prompts at depth up to +30 %, per the PRs) and are bitwise equal to the kernels they
-replace, but nobody on the team has an sm_75 card to confirm them, so on every other card they stay off:
+replace, but nobody on the team has an sm_75 card to confirm them, so they are off until asked for:
 
-On a 7.5 card every bitwise Turing kernel below is on by default; no other card is ever affected, and the series switch
-keeps its upstream spellings (`STRATA_SM75_PERF=0` turns all of them off, `=1` is the old opt-in and still accepted).
-Each kernel also has its own variable, which wins in both directions (`=0` off, `=1` on): `STRATA_SM75_IL` (interleaved small-batch matvec table),
+`STRATA_SM75_PERF=1` turns on every bitwise Turing kernel below on a 7.5 card (no other card is ever affected). Each has its own
+variable, which wins in both directions (`=0` off, `=1` on): `STRATA_SM75_IL` (interleaved small-batch matvec table),
 `STRATA_SM75_EXP` (expert layout mode 4), `STRATA_GR_UP75` / `STRATA_GR_DOWN_TG` (hyper-connection read), `STRATA_SCORES_HALVE`
 and `STRATA_TOPK_SPLIT` (decode QSA selection), `STRATA_TOPK_SAMPLE` (prompt top-k, one read of the scores), `STRATA_ATTN_V3`
 (decode attention), `STRATA_Q2_WARP` (Q2_0 matvec), `STRATA_FUSE_WAIT=2` and `STRATA_QIL` (fewer launches per decode layer),
@@ -2546,5 +2545,6 @@ CUDA card, where it measured +1..3 % prompt speed on a Tesla P100 at 30-60K toke
 
 Options that change answers (other summation order) are separate and explicit: `STRATA_SELECT_SIMT=1|2` (FP32 tiled block scorer,
 KL 0.01 against the warp scorer per #2071), `STRATA_PA_V2T=1` (v2 prompt attention, #2092/#2146), `STRATA_PF_FUSED=1` (fused int8
-prompt experts for the Q2_0 pack, #2145; on a 7.5 card these kernels are set up by default, the pair still needs
-`STRATA_PF_FUSED=1`, and `STRATA_PF_FUSED_SM75=0` puts a 7.5 card back on MMQ; sm_80+ is unchanged), `STRATA_BF16_TC=1` with `STRATA_XN_F16` (#2091).
+prompt experts for the Q2_0 pack, #2145; a 7.5 card sets its kernels up by default - its own switch, not the
+`STRATA_SM75_PERF` series - the pair still needs `STRATA_PF_FUSED=1`, and `STRATA_PF_FUSED_SM75=0` puts a 7.5 card back
+on MMQ; sm_80+ is unchanged), `STRATA_BF16_TC=1` with `STRATA_XN_F16` (#2091).

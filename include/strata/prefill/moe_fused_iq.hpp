@@ -1,9 +1,10 @@
 // include/strata/prefill/moe_fused_iq.hpp - #136: the fused int8 prompt experts (moe_fused.hpp) for the native GGUF
 // packs (tools/iq_pack.py: an expert is its raw GGUF slices [gate rows | up rows | down rows], formats per layer in
-// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; HIP: MMQ).  A compute
-// capability 7.5 (Turing) card gets the same TAILORED kernels by default (the series, sm75_series.hpp): dev_info sets
-// them up per kernel and prints one banner, so the default launch path is still MMQ - the fused pairs need
-// STRATA_PF_FUSED=1 like every other covered format.  With it, the production pack's pair (gate/up IQ3_XXS, down IQ4_NL) runs where its
+// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; HIP: MMQ).  These kernels
+// are set up by default on a compute capability 7.5 (Turing) card (their own switch, STRATA_PF_FUSED_SM75 - not the
+// STRATA_SM75_PERF series, whose kernels live in sm75_series.hpp): dev_info sets them up per kernel and prints one
+// banner, so the default launch path is still MMQ - the fused pairs need STRATA_PF_FUSED=1 like every other covered
+// format.  With it, the production pack's pair (gate/up IQ3_XXS, down IQ4_NL) runs where its
 // shapes fit the card's shared memory, and the Q2_0/Q2_0 pair runs the fused kernels on a 7.5 card too (before this it
 // needed STRATA_PF_FUSED_SM75=1 there - the series default is what changed, not the pair)
 // (checked per kernel in moe_fused_iq.cu; the IQ pair runs at 2 warps a row when the 4-warp shape does not fit);

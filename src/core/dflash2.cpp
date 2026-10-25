@@ -85,6 +85,21 @@ void Dflash2Drafter::release() {
     z(ev_fork_); z(ev_join_); z(ev_a_); z(ev_b_);
     for (cudaEvent_t& e : ev_ctx_) e = nullptr;
     for (cudaGraphExec_t& e : exec_) e = nullptr;
+    // nothing is bound or shared any more: context()/draft() report "released" instead of writing freed buffers
+    bound_ = false;
+    blob_ = nullptr;
+    dvocab_ = nullptr;
+    dhead_ = nullptr;
+    head_w_ = nullptr;
+    shared_ = nullptr;
+    m_meta_ = nullptr;
+    hp_out_ = nullptr;
+    out_prob_ = nullptr;
+    out_tok_ = nullptr;
+    topscratch_ = nullptr;
+    graph_taps_ = nullptr;
+    pending_ = false;
+    vram_ = 0;
     device_ = -1;
 }
 
@@ -620,6 +635,7 @@ bool Dflash2Drafter::prepare(const float* taps, std::string& err) {
 }
 
 bool Dflash2Drafter::context(const float* taps, int64_t n, int64_t pos0, std::string& err) {
+    if (device_ < 0 || !bound_) { err = "dflash2: the drafter was released"; return false; }
     const OnDevice on_device(device_);
     const int tap_n = (int) taps_.size() * N_;
     for (int64_t r0 = 0; r0 < n; r0 += kRows) {

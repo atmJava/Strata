@@ -62,6 +62,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <set>
@@ -69,6 +70,12 @@
 #include <optional>
 #include <thread>
 #include <vector>
+#if !defined(_WIN32)
+#include <unistd.h>      // getpid: a per-stage dump's name must not collide with an earlier run's
+#else
+#include <process.h>
+#define getpid _getpid
+#endif
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -804,10 +811,14 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             static std::set<std::string> used;
             std::lock_guard<std::mutex> lk(used_mu);
             if (!used.insert(tap_file_path).second) {
+                // a name nobody has: this process's table AND the file system both say free, so a leftover from an
+                // earlier run (or a name the person made) is never truncated
+                const std::string tag = ".p" + std::to_string((long long) getpid()) + "-";
                 std::string cand;
                 for (int n = 1;; ++n) {
-                    cand = tap_file_path + ".v" + std::to_string(n);
-                    if (used.insert(cand).second) break;
+                    cand = tap_file_path + tag + std::to_string(n);
+                    std::error_code ec;
+                    if (used.insert(cand).second && !std::filesystem::exists(cand, ec)) break;
                 }
                 std::fprintf(stderr, "strata verify: STRATA_TAP_FILE %s is already open in this process; this verifier writes %s\n",
                              tap_file_path.c_str(), cand.c_str());
