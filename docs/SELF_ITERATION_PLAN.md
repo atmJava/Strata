@@ -88,6 +88,13 @@
 > 表里没有的项（P2 记账空洞、图预热、"装进每个池"、验窗读原始 K/V）在 `PORT_AUDIT_COVERAGE.md` §2，
 > 等 V1–V3 有了结论再按收益÷难度插队。**判据不许为了变绿而改**（§2 C4）。
 
+**进度（每批更新）**：
+
+- **V1-1…V1-5 全 PASS**（2026-10-25 13:06Z；`/opt/ai/logs/V1-matrix-20261025T2115Z/`）：构建 7m01s / 0 错，
+  产物 0.1.49.1 `84a0d410`；单测 61 passed / 10 skipped / 0 failed；`isa_guard_check` 2.36 s；64/256 锁死；
+  staged wedge 3 passed。**仍不是端到端**——那要 V2 窗口。
+- V2-1…V2-4、V3-1…V3-3：**未开始**（V2 要窗口，排 00:00 后；S0b 的 1/0 两臂各需一次重启，按预算拆批）。
+
 ### 4.3 批的划分（一次做完一批，一次测完一批）
 
 | 批 | 内容 | 构建 | 窗口/重启 | 测试 | 产出 |
@@ -198,20 +205,25 @@
 harness 改用 0.2.2 基准（两条红转绿）、补丁追平 `46d12fa9`、矩阵 runner、探针代价、回滚包与演练、
 四问与 `/metrics` 基线、C1/C2 版本行。**0 构建、0 重启、0 生产改动。**
 
-### V1 免停机批（下一批，先做）
+### V1 免停机批（2026-10-25 已做，见 `MULTIPATH_LOG.md` 的 V1 与台账 L-057）
 
-1. 把 `hw/server-adapt-0.2.3` 的 HEAD rsync 到服务器实验树 `/opt/ai/src/strata-port-v1`（不动生产、不动旧快照）；
-   在实验目录 configure + build（`-arch=75`、`BUILD_TESTS=ON`，≈10.6 min，一次构建）。
-2. `python3 tools/server/run-matrix.py --batch V1 --src /opt/ai/src/strata-port-v1`：
-   V1-1 版本戳（复跑并核对 V0 基线）、V1-2 服务器源码树单测（判据 **0 failed**；skip 只打印不算过）、
-   V1-3 `isa_guard_check`、V1-4 64/256 锁死（负向编译）、V1-5 `serve/test_staged_wedge.py`。
-3. V1-2 若出现新红：逐条归因（环境 / 既有 / 移植），写进台账；**不改判据**。
-4. 决定 V2 的部署件（现网 server 是 hybrid：见 `tools/server/patches/README.md` "Production is not the
-   patch tree"），把命令写进 V2 计划；V1 本身**不部署**。
-5. 收尾：台账一条、`STATE.md`、V1 的 Gate、`WORK_QUEUE` 计数、本节改写成 V2。
+HEAD `2294d4de` 的 `git archive` 落到 `/opt/ai/src/strata-port-v1`，实验目录一次全量构建（7m01s、0.1.49.1、
+md5 `84a0d410`），`run-matrix.py --batch V1` 五项全 PASS：版本戳复跑一致、源码树单测 61/10/0、
+`isa_guard_check` 2.36 s、64/256 锁死、staged wedge 3 passed。**0 生产改动、0 重启。** 首跑 12 failed 的
+唯一原因是测试 venv 缺 `jinja2`/`regex`（已写进 `tools/server/tests/README.md`）。
 
-> V2 要 1 个窗口（重启 1–2 次）。2026-10-25 当天已记 4 次，**V2/V3 放到 00:00 之后**（跨轮日预算重置），
-> 不在当天硬凑。V1 不需要窗口。
+### V2 窗口批（下一批；准备现在做，窗口排 00:00 后）
+
+0. **准备（不碰生产）**：`ops-v2-window.sh`（默认 dry-run）——安装/回滚/核对；用构建出的
+   `build75/strata --help` 核对生产 config 的 54 个 args（缺一个就是"装上起不来"）；回滚用 V0 快照
+   `/opt/ai/tmp/rollback-V0-20261025T124629Z/`，窗口前再取一份。
+1. **一次装**：快照 → 引擎/server/launcher 用 `cp .new && mv -f` → `use-config.sh`（唯一入口）→
+   `verify-running-config.sh` + md5 + `strings` 双核（**构建成功不算跑的新代码**）。
+2. **一次矩阵**：V2-1 staged 跑通/不遗留（S0c/S0d 的服务器判据）、V2-2 fused `STRATA_PF_FUSED=1/0` 同 boot A-B、
+   V2-4 warmup、显存账（P2 的 6×192K/8×128K 静态账）；每项判据/超时/日志进 `run-matrix.py --batch V2`。
+3. **回滚**：矩阵后恢复 V0 快照 → `cmp -s` → health；若 health 连续 2 次失败，立即恢复并停轮。
+4. **预算**：本批 ≤2 重启；**S0b 的 1/0 两臂各需一次重启**（`pr_conc` 是进程级 static），不塞进本批
+   （拆 V2b，00:00 后日预算重置，两批合计 4 ≤6）。
 
 ## 12. 本文件怎么自我更新
 
@@ -222,6 +234,8 @@ harness 改用 0.2.2 基准（两条红转绿）、补丁追平 `46d12fa9`、矩
 ---
 
 **版本行**
+- v3 · 2026-10-25 21:10 · V1 收尾：§4.2 进度（V1 五项全 PASS + 证据路径）、§11 改为 V2 窗口批
+  （准备/一次装/一次矩阵/回滚/预算，S0b 拆 V2b）；判据与阈值未动。
 - v2 · 2026-10-25 20:51 · V0 收尾：§5.1 探针/日志约定与实测仪器代价、§11 改为 V1 的具体动作、
   §4.2 进度（V1-1 基线已在 V0 测出）；判据与阈值未动。
 - v1 · 2026-10-25 20:30 · 初版。依据用户当日要求（自我决策/自我更新目标/自我执行/批次化验证/准备先行）

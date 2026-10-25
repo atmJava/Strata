@@ -4,12 +4,21 @@
 
 - 目标：持续优化循环（`EVERGREEN_LOOP.md`；不设完成，直到用户叫停）；当前主线 = 移植代码的服务器验证战役
   V0→V3（`SELF_ITERATION_PLAN.md` §4）
-- 当前批次：**V0 完成**（2026-10-25 20:51）；下一批 **V1（免停机批，0 重启）**
-- 当前项：V1（免停机批：V1-1 版本戳复跑、V1-2 服务器源码树单测、V1-3 `isa_guard_check`、V1-4 64/256 锁死、V1-5 staged wedge）
-- 下一动作：rsync HEAD → `/opt/ai/src/strata-port-v1` → 实验目录一次构建（不动 `build/`）→
-  `python3 tools/server/run-matrix.py --batch V1 --src /opt/ai/src/strata-port-v1`
+- 当前批次：**V1 完成**（2026-10-25 21:06，矩阵 5/5 PASS）；下一批 **V2（窗口批，排 00:00 后）**
+- 当前项：V2（窗口批：V2-1…V2-4；V2 准备先做）
+- 下一动作：V2 准备——写安装/回滚驱动，检查构建出的 0.1.49.1 `--help` 与生产 config 的 54 个 args 是否兼容；
+  00:00 后开窗（1–2 重启，用 `/opt/ai/tmp/rollback-V0-20261025T124629Z/` 回滚）
 - 环境：health 200（2026-10-25 20:46 复核）；引擎 0.1.47 / `383b426a`；server `a3c7df58`；launcher `9b6bf792`；
   config `6c362d01`；W3 启用（阈值 4096）；`batch_slots=6`；config `parallel=6`、54 args（运行进程 59，5 个由 server 注入）
+
+## V1 结果（2026-10-25 12:52–13:06Z，0 重启）
+
+- 实验树 `/opt/ai/src/strata-port-v1` = HEAD `2294d4de`（`serve/server.py` md5 `b6b695a1` = 本机 HEAD）；
+  构建 **7m01s**、`BUILD_EXIT=0`、0 error；产物 `build75/strata` = **0.1.49.1**、md5 `84a0d410`。
+- 矩阵 `/opt/ai/logs/V1-matrix-20261025T2115Z/`（5/5 PASS）：V1-1 版本戳一致；V1-2 源码树单测
+  **61 passed / 10 skipped / 0 failed**；V1-3 `isa_guard_check` Passed 2.36 s；V1-4 默认过 / `CHUNK=128` 被
+  static_assert 拒；V1-5 staged wedge 3 passed。
+- 首跑 12 failed 的原因是测试 venv 缺 `jinja2`（补后 8 failed）与 `regex`（补后 0）；不是代码缺陷。
 
 ## 版本戳基线（V0 实测：`tools/server/probe-version-stamp.py`，2026-10-25 20:46）
 
@@ -40,7 +49,7 @@
 | 122.1（R10） | 71.0 | 17.9（R11） | **3.43（R11）** | 40.7（R11） | 82.0%（R10） | T4 PASS | 未测 |
 
 - V0 **没有新性能测量**（0 构建 / 0 重启 / 0 生产改动）；上表仍是 R10/R11 的数。
-- 日重启：2026-10-25 4/6（V0 用 0；V1 不需要窗口；V2/V3 排到 00:00 后，跨轮日预算重置）
+- 日重启：2026-10-25 4/6（V0、V1 各用 0；V2/V3 排到 00:00 后，跨轮日预算重置）
 - 未完成采纳项：17（见 `WORK_QUEUE.md`；V0–V3 批次行不计入 backlog）
 - 阻塞：无
-- 最后更新：2026-10-25T20:51+08:00（V0 收尾；V1 在 20:53 起独立开批）
+- 最后更新：2026-10-25T21:08+08:00（V1 收尾；V2 准备中，窗口排 00:00 后）

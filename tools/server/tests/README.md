@@ -44,6 +44,14 @@ is not a pass**.  With `MP_BASE_URL` pointing at the box they run for real, one 
 | `test_mp_timings.py`, `test_mp_admission_limit.py`, `test_mp_admission_wait.py`, `test_mp_disconnect_keepalive.py` | pass | mock-engine protocol cases; no server needed |
 | `test_tap_parity.py` | pass | tap dump compare/merge |
 
+## Dependencies on a bare machine
+
+`pytest` plus the two packages `serve/server.py` imports at load time: **`jinja2`** (through
+`serve/frontend.py`) and **`regex`** (through `tools/strata_tokenizer.py`).  The mock-server cases spawn
+`serve/server.py`, so without them they fail with `ModuleNotFoundError` instead of testing anything —
+measured 2026-10-25 on the V1 tree: 12 failed with only `pytest`; 8 failed after `jinja2`; 0 failed after
+`regex` too (`/opt/ai/tmp/venv-v0`, `/tmp/v1-pip.log`).
+
 ## Hygiene
 
 These tests send real requests. Do not run them while a measurement is in flight, and do not run them with a

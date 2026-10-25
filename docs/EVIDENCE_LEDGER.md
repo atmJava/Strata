@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（57 条：L-000…L-056，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
+## 台账索引（58 条：L-000…L-057，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
 
 | 编号 | 日期 | 一句话结论 | 判决 |
 |---|---|---|---|
@@ -66,6 +66,7 @@
 | L-051 | 10-24 17:0x | 预设校验 `check_preset.py` 对生产配置 **OK**（4x256、groups 2x2、KV 流式、引擎形状一致）；F6 部分采纳、F7 采纳、F11/F5 搁置 | **参考** |
 | L-052 | 10-24 17:1x | 预设门负例 **6/6**（错配置必拒）；`check_preset.py` 对生产配置 OK；清单 11 项全部有判决 | **参考** |
 | L-053 | 10-25 01:2x | W3 **生产启用**（阈值 4096）：长读首 token **47.3 → 17.1 s**、短读保持 40.9 s 不假开始；bench 聚合 **130.2 tok/s**（+8%）、接受率 79.8%；G2 0.97 s、G3 ✓；2 次重启 | **采纳（启用）** |
+| L-057 | 10-25 13:0xZ | V1 免停机批：HEAD `2294d4de` 在实验树构建 7m01s / 0 错（引擎 0.1.49.1、md5 `84a0d410`）；矩阵 5 项全 PASS（单测 61 passed / 10 skipped、isa_guard 2.36 s、64/256 锁死、staged wedge 3 passed）；首跑 12 failed 全是 venv 缺 `jinja2`/`regex` | **结论** |
 | L-056 | 10-25 20:4x | V0 准备批：现网四件实测（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）；现网 server 是 hybrid 且 `52b84d54` 是 patch 树 hash；harness 2 红转绿、补丁追平 `46d12fa9`；S2 探针代价 1.36–1.40 µs/请求；回滚包字节核对（停机级未演练）；0 构建 0 重启 | **参考** |
 | L-055 | 10-25 02:2x | R11 开关修复部署（引擎 `383b426a`）：短读 40.68 s 不暂存、长读首 17.89 s；**邻居窗口停顿 3.43 s**（>1 s，新发现）；S0 完成 | **参考** |
 | L-054 | 10-25 01:3x | A-B-A 闭环：回滚 A 实测（短 42.3 s / 长 36.3 s，G4 ✓）→ 再启用 B（短 35.9 s / 长 **17.7 s**）；3 流冷读首 token 8.0 s（唯一提示词，修正缓存假象） | **参考** |
@@ -1921,3 +1922,39 @@ V0 期间现网有真实请求，本轮没有独立流量探针。
 `/opt/ai/logs/V0-vram-perf-baseline-20261025T124655Z.csv`、
 `/opt/ai/logs/V0-rollback-rehearsal-20261025T124635Z.log`、`/tmp/v0-*`、`/tmp/V1-matrix-*`（dry-run）；
 脚本 `tools/server/probe-version-stamp.py`、`run-matrix.py`、`probe-instrument-cost.py`、`check_assert_lock.py`。
+
+
+---
+
+## L-057 · V1 免停机批：移植代码在服务器源码树上构建 + 矩阵全绿（2026-10-25 12:52–13:06Z，0 重启）
+
+**做了什么**：把 HEAD `2294d4de` 用 `git archive` 落到 `/opt/ai/src/strata-port-v1`（`serve/server.py`
+md5 `b6b695a1` = 本机 HEAD），实验目录一次全量构建（Release / sm_75 / nvcc 13.0 / `STRATA_GGML_DIR`
+/ `STRATA_BUILD_TESTS=ON`），再跑 `tools/server/run-matrix.py --batch V1`。**无生产改动、无仓库代码改动。**
+
+**数字**：
+
+| 项 | 值 |
+|---|---|
+| 构建 | configure `12:52:53Z` → build `12:53:00Z–13:00:01Z` = **7m01s**；`BUILD_EXIT=0`；0 error / 24 warning |
+| 产物 | `/opt/ai/src/strata-port-v1/build75/strata` = `strata 0.1.49.1`，md5 `84a0d410` |
+| V1-1 | 四件 hash 与 V0 相同：`383b426a` / `a3c7df58` / `9b6bf792` / `6c362d01`；运行引擎路径 = 被 hash 文件 |
+| V1-2 | `pytest tools/server/tests`（服务器树，`MP_BASE_URL=127.0.0.1:9`）= **61 passed / 10 skipped / 0 failed** |
+| V1-3 | `ctest -R ^isa_guard_check$` = **Passed 2.36 s** |
+| V1-4 | 默认 64/256 编译过；`-DSTRATA_QSA_ATTN_CHUNK=128` 被 `static_assert(CHUNK == 64 && THREADS == 256)` 拒 |
+| V1-5 | `serve/test_staged_wedge.py` = **3 passed / 2.20 s** |
+| 矩阵总 | `summary.json`：5/5 PASS，`started` 13:05:15Z、`finished` 13:06:11Z |
+
+**判决：结论**（移植代码在服务器源码树上可构建、单测/isa guard/形状锁/staged 协议全绿）。不是"端到端
+已验证"——那要 V2 窗口。
+
+**预期被推翻**：V1-2 首跑 12 failed，全部 `ModuleNotFoundError: jinja2`；补 `jinja2` 后 8 failed
+（`ModuleNotFoundError: regex`）；补 `regex` 后 0 failed。测试环境需要 `pytest` + `serve/` 的运行时依赖，
+这一点已写进 `tools/server/tests/README.md`。首跑日志保留在 `/opt/ai/logs/V1-firstrun-20261025T2100Z/`。
+
+**没测什么**：端到端（生产配置/真模型/真并发）；6/8 路；fused；停机级回滚；10 条 live 用例
+（`MP_BASE_URL` 指到空端口让它们 skip，测试期间没有给生产发请求）；0.1.49.1 与生产 config 的启动兼容性。
+
+**原始日志**：`/opt/ai/logs/V1-matrix-20261025T2115Z/`（`summary.json` + `V1-1…V1-5.log`；目录名 2115Z
+是手写笔误，`summary.started` 13:05:15Z）、`/opt/ai/logs/V1-firstrun-20261025T2100Z/`、服务器
+`/tmp/v1-build.log`；脚本 `tools/server/run-matrix.py`。

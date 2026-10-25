@@ -8,6 +8,48 @@
 
 ---
 
+## V1 · 2026-10-25 · 免停机批：服务器源码树全绿（构建 7m01s / 0 错；单测 61 passed / 10 skipped；isa_guard PASS；64-256 锁死；staged wedge 3 passed）
+
+- **改了什么**：**无生产改动、无仓库代码改动**。把 HEAD `2294d4de` 用 `git archive` 落到实验树
+  `/opt/ai/src/strata-port-v1`（`serve/server.py` md5 `b6b695a1`，与本机 HEAD 一致），实验目录一次全量构建，
+  然后跑 `run-matrix.py --batch V1`。测试 venv 补了 `jinja2` 与 `regex`（`serve/` 在 import 时要用；
+  不是仓库改动，也不是移植代码缺陷）。
+- **数字**：
+  - 构建：configure `12:52:53Z` → build `12:53:00Z–13:00:01Z`（**7m01s**），`BUILD_EXIT=0`、0 error、24 warning；
+    产物 `build75/strata` = **0.1.49.1**、md5 `84a0d410`。
+  - V1-1 版本戳：四件 hash 与 V0 完全一致（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）。
+  - V1-2 服务器源码树单测：**61 passed / 10 skipped / 0 failed**（skip = 需要活服务器；用
+    `MP_BASE_URL=127.0.0.1:9` 让它们 skip，**不给生产发请求**）。
+  - V1-3 `isa_guard_check`：Passed 2.36 s。
+  - V1-4：默认 64/256 编译过；`-DSTRATA_QSA_ATTN_CHUNK=128` 被 static_assert 拒（14.4 s）。
+  - V1-5 `serve/test_staged_wedge.py`：3 passed / 2.20 s。
+- **预期被推翻**：V1-2 首跑 **12 failed**——全部是 venv 缺 `jinja2`；补 `jinja2` 后 8 failed（缺 `regex`）；
+  再补 `regex` 后 0 failed。结论："服务器源码树跑单测"的隐含前提是 `pytest` + 运行时依赖，不只是 pytest。
+  已写进 `tools/server/tests/README.md`；首跑日志留在 `/opt/ai/logs/V1-firstrun-20261025T2100Z/`。
+- **自检**：health 200；queue/STATE 一致（17）；上轮 V0 全绿；四件生产 hash 未变（无部署）。
+- **四问**：① cron/timer 正常；② 无残留构建/安装进程（`nvcc/cc1plus/cmake --build/pip` 全空）；
+  ③ `vram-perf.csv` 最新 `2026-10-25T13:05:01Z,818,1122,0,58.6,92.2`，与 V0 基线同值；④ 方向：V2 要窗口，排 00:00 后。
+- **预算**：构建 1（7m01s，实验目录）、重启 0、停机 0。
+- **没测什么**：端到端（生产配置/真模型/真并发）；6/8 路；fused；停机级回滚；10 条 live 用例（V2 窗口才跑）；
+  0.1.49.1 引擎与生产 config 的启动兼容性（V2 的第一个门）。
+- **下一批第一件事**：V2 准备——写安装/回滚驱动、检查 0.1.49.1 对生产 config 54 个 args 的兼容；
+  窗口排在 00:00 之后。
+
+### Gate（本轮）
+- 轮次：V1
+- 项：V1
+- 验收判据：矩阵 5 项全 PASS（版本戳复跑一致 / 源码树单测 0 failed / isa_guard PASS / 64-256 锁死 / staged wedge 3 passed）
+- 实现：无仓库/生产改动；实验树 `/opt/ai/src/strata-port-v1` = HEAD `2294d4de`
+- 测试：`python3 tools/server/run-matrix.py --batch V1 --src /opt/ai/src/strata-port-v1` → PASS
+- 生产：health 200；四件 hash 与 V0 相同（引擎 `383b426a`、server `a3c7df58`、launcher `9b6bf792`、config `6c362d01`）；无部署
+- 证据：`/opt/ai/logs/V1-matrix-20261025T2115Z/`（summary.json + 5 个日志；目录名 2115Z 是手写笔误，`summary.started`=13:05:15Z）、`/tmp/v1-build.log`、`/opt/ai/logs/V1-firstrun-20261025T2100Z/`；脚本 `run-matrix.py`
+- 回滚：无生产改动；`/opt/ai/tmp/rollback-V0-20261025T124629Z/` 仍在（演练：文件级是、停机级否）
+- 台账：L-057
+- 剩余未完成项：17（S0c、S0d、S0b、C1、F1F2、S2、S3、S8、S1、S7、S9、S10、S11、S12、S13、S14、cache_salt）
+- 没测什么：端到端生产配置、6/8 路、fused、停机级回滚、0.1.49.1 的启动兼容性
+
+---
+
 ## V0 · 2026-10-25 · 准备批：版本戳基线、0.2.2 harness、补丁追平、矩阵 runner、探针代价、回滚演练（0 构建 / 0 重启 / 0 生产改动）
 
 - **改了什么**：
