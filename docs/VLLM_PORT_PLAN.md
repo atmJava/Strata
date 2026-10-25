@@ -43,6 +43,30 @@ Strata 有 DFlash2 实现（`dflash2.cpp/.cu`，7 drafts + selector）但生产�
 - 风险：IQ3_XXS 生产包上的 draft 接受率未知（fork 数字是 NVFP4/FP8 dense 路线）——先在日志里
   跑被动统计（`passive_windows.py` 类）再切默认。
 
+**设计结论（只读代码分析，2026-10-25，逐条带 文件:行）**：
+
+- df2 的图/状态是**单序列·多 context 行**设计，不是批形状：`n=1..8` 是本轮追加的 context 行数
+  （`dflash2.cpp:489-502`），block 恒 8 行 = 一条序列的 anchor+7 mask（`dflash2.hpp:35`）。接 serve/batch
+  的正路 = 照抄 `--batch-mtp` 的"每槽一个 drafter 实例 + 槽驻留"（`generate.cpp:5520-5544`），但要先给
+  `Dflash2Drafter` 加共享权重参数（`load(..., shared)`，照 `mtp.hpp:47-48`）与异步 launch/collect
+  （现在 `draft()` 同步，`dflash2.cpp:538`）；否则 6 槽 = 6×0.76 GiB 不成立。
+- 层切分：drafter 驻**最后 stage**（照 MTP `:5467/:5521-5524`）；taps 过卡最省的做法是**扩 hand-off 布局**
+  （`handoff_floats` 加 stage0 的 tap 行，`verify.hpp:194`；解除 `verify.cpp:788` 的单 stage 限制，各 stage
+  记 `requested ∩ [lb,le)` 子集），与 flag 发布同路、零额外同步。字节量：24/24 切分下过卡仅 stage0 的 2 个
+  tap = 20 KiB/行、≤160 KiB/窗，47 GB/s 口径 ~3.5 µs——不是瓶颈。
+- 分阶段：**A1 serve solo**（去掉 gate 的 `o.serve`，bind/prepare 挪到引擎级 `:9160-9190`，解码环换
+  df2.draft，prompt 走 `prefill.set_taps/on_taps`）→ **A2 serve+batch**（去掉 `verify.cpp:2203` 的
+  `!batch_rec_`，每槽 taps staging + `prepare`，`batch_step` 参数化 rows_per_slot）→ **B1 层切分 serial**
+  （memcpyPeer 搬 taps）→ **B2 pipelined groups**（df2 只读 tap_dev_ + 自己 ring、与 commit 无依赖，draft
+  可完全藏在管道下——MTP 做不到）。A1 改动 ~150 行 generate.cpp；A2 ~600 行 + dflash2 ~200 行重构。
+- df2 独有红利：7 个提案一次前向产出，接受即链仍有效 → 提案队列跨窗复用（82% 接受率下省 ~40-50% draft 轮，
+  需实测），MTP 是每窗必重发（`:5532`）。
+- 必须实测才能定：sm_75 的 draft_cap（`draft_cap.hpp:12-19` 对 Ampere 类返回 0）、draft_conf 每槽截多长、
+  rows_per_slot×groups、提案复用命中率、draft 轮 GPU ms、IQ3_XXS 包接受率、温度>0 请求退 MTP 的比例。
+- 生产配置（`--serve`/`--batch`/多卡）下 df2 **本就不启用**（`generate.cpp:5476-5480`），所以这条移植的收益
+  全部来自"打开它"，不是修 bug；VRAM 账：共享权重设计 ≈ 0.76 + 0.2 + 6×0.25 ≈ **2.5 GiB**（全压最后 stage），
+  顶替 batch_mtp 时回收 slot_mtp 私有 K/V。
+
 ### P2 · draft/target 显存与容量 accounting 审计（"更强"= 更多槽，直连队列项 C1）
 
 fork 教训：共享池 accounting 曾把 DFlash2 限到约 1/6 容量；修复 = 独立池 + "请求必须装进每个池"。
@@ -50,6 +74,30 @@ fork 教训：共享池 accounting 曾把 DFlash2 限到约 1/6 容量；修复 
   重复计费（`mtp.cpp`、`generate.cpp` 的 VRAM 命令、`pin_budget`、`--peer-reserve-mib`）；能省 = C1
   （6×192K / 8×128K）直接受益。产出"每池需求表"+ 若发现重复预留则改为按池独立 accounting 的 patch。
 - 验证：本地策略单测（`tests/core/` 模式）+ 构建 + 部署窗口实测容量。
+
+**审计结果（只读代码，2026-10-25，数字由代码公式推出，MiB=1024²）**：
+
+- 结论：Strata **没有统一显存预算器**。session（KV 池）、MTP drafter、DFlash2、expert cache、verify arena、
+  CUDA graph 各自独立 `cudaMalloc`，互不记账。**真重复计费只有 3 处**（双 head 85 MiB×2、每 slot RoPE 表
+  重复 48 MiB×6、`--mtp-q4` 反向增），其余是**记账空洞**（预留公式漏项），不是双扣。
+- 生产 6×192K：每卡 1 主 + 6 slot 的 session ≈ **10,126 MiB（9.89 GiB）**（KV int8 8,316 + fp32 indexer
+  1,008 + GDN 131 + RoPE 336），22 GB 卡剩 ~7 GiB 给 expert cache/graph。8×128K = **8,873 MiB/卡**（省 1.2 GiB），
+  7×160K = 9,730，6×128K = 6,901；`serve/server.py` 的 `PARALLEL_MAX=8` 不挡 `--batch 8`。
+- MTP drafter ≈ **839 MiB**（dense 111 + 512 专家 Q2_0 675 + draft KV 33.1 + arena 17-20 + logits 7.6 + head 85.2），
+  在 expert cache 定容**之前**分配 → 真实挤压 cache（顺序性，非双扣）；`--mtp-q4` 不省显存（新增 `dense4_`）。
+- 记账空洞（会让预测偏乐观）：split 搜索每 stage 只按 **1 个 session** 定价（`generate.cpp:4578-4581`）→ 生产
+  要 7 个 → **每卡预测偏大约 8.7 GiB**，搜索给出的 cache/覆盖率预测不可直接用于 C1 决策；`kDrafterMib` 等只活
+  在搜索里（`:4508-4515`），真实末 stage 定容（`:6543`）不记 draft head 与 slot logits。
+- 可回收（按性价比）：①**跨 slot 共享 RoPE 表 ~288 MiB/卡**（`session.cpp:69,108-119`）；②`--mtp-window 8192`
+  ~240 MiB（末 stage，接受率需 A/B）；③`head_logits_` 按子词表宽度 ~30 MiB；④`--draft-vocab en` ~53 MiB（接受率
+  变化）；⑤verify `staging_` blob 上限 ~34 MiB（max_blob 需实测）；⑥CUDA graph LRU 上限（每对 20-30 MiB，需实测）。
+- 另两条对 C1 直接有用的现状：`--batch-mtp` 在 2 张 N 卡上**默认被 drop**（`batch_groups.hpp` `resolve()`，
+  `nv_serial_faster` 默认 true，`generate.cpp:5295`）——别假设 6 个 slot drafter 在跑；多卡下 `--kv-grow`
+  弹性 KV 是硬关闭（`:5196-5212`）。
+- 对 C1 的建议：先做 ①+⑥+③（≈320 MiB/卡，正确性风险低），再上 6×192K；8×128K 是更稳的容量点。
+- 待部署窗口实测（代码不可定）：每 stage 权重/free 打印（`:5267`）、`expert_cache_mib/slots` INFO 行
+  （`:11078-11100`）、`expert_layout().max_blob`、graph exec 实际 footprint、真实 split 边界、IQ3_XXS pack 是否
+  落 VRAM、pinned host 副本是否全部成功（否则 drafter KV 各 +198 MiB）。
 
 ### P3 · GDN FlashQLA 递归 kernel 研究移植 → **降级为研究项**（2026-10-25 实测占比后）
 
