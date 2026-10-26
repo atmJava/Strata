@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-84 · stage 计时 event 的失败与退出清理
+
+- 目标 / 指标：session 分层 stage 回放和 `--stage-timing` 诊断在 event 创建中途失败时，必须回收已创建
+  event；成功创建的全局 2,560 个 event 在退出时也必须在创建设备销毁。
+- 假设与预期：per-layer 回放的 RAII 清理器在创建循环之后才构造，前 N 个 event 创建后第 N+1 个失败会直接
+  泄漏；stage sweep 在第二个 event 失败时泄漏第一个；`StageTimer` 没有析构函数，成功路径也一直占用 event。
+- 为什么选这条路线：把 per-layer 清理器移到创建循环之前；第二个 event 失败时显式销毁第一个；给
+  `StageTimer` 增加设备记录、`clear()` 和析构，创建失败立即走同一清理路径。测量、记录时点和输出不变。
+- 改动与实验：`session.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）；
+  `layer.cpp` 通过同一检查，仅排除源码原有的未使用变量和 misleading-indentation 告警。
+- 判决：采纳。诊断 event 的构造失败和正常退出都有完整所有权闭环。
+- 生产状态与回滚：诊断关闭时无行为变化；启用时只改资源回收，不改 event 对、时点或计时公式；单提交可回退。
+- 未验证：当前无法让真实 `cudaEventCreate` 在指定序号失败，也未在 RTX 2080 Ti 上运行 stage timing；
+  主机 shim 不能验证真实 event 所属设备。
+- 下一步与理由：继续检查正常成功后仍只依赖进程退出的设备资源，以及全局诊断单例的析构顺序。
+
 ## I-20261027-83 · HC Q8 上传事务化并由设备所有者释放
 
 - 目标 / 指标：`STRATA_HC_REQ8` 的 BF16→Q8 上传在任一文件打开、读取或 `cudaMemcpy` 失败时，不得泄漏设备

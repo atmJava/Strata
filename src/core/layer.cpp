@@ -4,6 +4,7 @@
 #include "strata/core/pin_budget.hpp"
 #include "strata/core/native_dense.hpp"
 #include "strata/core/native_head.hpp"
+#include "strata/core/on_device.hpp"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/elementwise.hpp"
@@ -1003,16 +1004,33 @@ struct StageTimer {
     cudaEvent_t b[64][STAGE_SLOTS] = {};
     const char* names[STAGE_SLOTS] = {};
     int nslots = 0;
+    int device = -1;
+    void clear() {
+        const OnDevice on_device(device);
+        for (int l = 0; l < 64; ++l)
+            for (int s = 0; s < STAGE_SLOTS; ++s) {
+                if (a[l][s]) cudaEventDestroy(a[l][s]);
+                if (b[l][s]) cudaEventDestroy(b[l][s]);
+                a[l][s] = b[l][s] = nullptr;
+            }
+        device = -1;
+        on = false;
+    }
+    ~StageTimer() { clear(); }
 };
 
 static StageTimer g_st;
 
 bool stage_timing_enable() {
     if (g_st.on) return true;
+    cudaGetDevice(&g_st.device);
     for (int l = 0; l < 64; ++l) {
         for (int s = 0; s < STAGE_SLOTS; ++s) {
-            if (cudaEventCreate(&g_st.a[l][s]) != cudaSuccess) return false;
-            if (cudaEventCreate(&g_st.b[l][s]) != cudaSuccess) return false;
+            if (cudaEventCreate(&g_st.a[l][s]) != cudaSuccess ||
+                cudaEventCreate(&g_st.b[l][s]) != cudaSuccess) {
+                g_st.clear();
+                return false;
+            }
         }
     }
     g_st.on = true;

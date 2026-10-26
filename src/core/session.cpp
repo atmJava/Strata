@@ -418,13 +418,16 @@ bool session_replay_stages_per_layer(const ModelGeometry& g, int64_t pos, int32_
     // serialised time rather than the graph's.
     const int64_t n = g.n_layers;
     std::vector<cudaEvent_t> ev((size_t) (n * 4));
+    struct Free {
+        std::vector<cudaEvent_t>* v;
+        ~Free() {
+            for (cudaEvent_t e : *v)
+                if (e) cudaEventDestroy(e);
+        }
+    } frees{&ev};
     for (auto& e : ev) {
         if (cudaEventCreate(&e) != cudaSuccess) { err = "session_replay_stages: event create"; return false; }
     }
-    struct Free {
-        std::vector<cudaEvent_t>* v;
-        ~Free() { for (auto& e : *v) cudaEventDestroy(e); }
-    } frees{&ev};
 
     for (int64_t l = 0; l < n; ++l) {
         cudaEventRecord(ev[(size_t) (l * 4 + 0)], cs);
@@ -470,8 +473,13 @@ bool session_replay_stage_sweep(const ModelGeometry& g, int64_t pos, int32_t pos
     cudaStream_t cs = (cudaStream_t) stream;
     stage_token(g, pos, pos_base, s);
 
-    cudaEvent_t a, b;
-    if (cudaEventCreate(&a) != cudaSuccess || cudaEventCreate(&b) != cudaSuccess) {
+    cudaEvent_t a = nullptr, b = nullptr;
+    if (cudaEventCreate(&a) != cudaSuccess) {
+        err = "session_replay_stage_sweep: event create";
+        return false;
+    }
+    if (cudaEventCreate(&b) != cudaSuccess) {
+        cudaEventDestroy(a);
         err = "session_replay_stage_sweep: event create";
         return false;
     }
