@@ -233,6 +233,20 @@ void test_fill_thread_fallback() {
     source.close();
 }
 
+void test_lookahead_thread_fallback() {
+    using namespace strata::core;
+    FileExpertSource source;
+    RouterLookahead lookahead;
+    std::string err;
+    std::vector<std::vector<uint16_t>> routers(1, std::vector<uint16_t>(16, 0));
+    set_env("STRATA_TEST_LOOKAHEAD_THREAD_FAIL", "1");
+    const bool started = lookahead.start(std::move(routers), 8, 2, 1, &source, err, true);
+    set_env("STRATA_TEST_LOOKAHEAD_THREAD_FAIL", nullptr);
+    require(!started, "router look-ahead accepted a refused helper thread");
+    require(err.find("cannot start its prefetch thread") != std::string::npos,
+            "router look-ahead thread failure did not explain the fallback");
+}
+
 #if defined(STRATA_NATIVE_EXPERTS)
 void test_native_variable_layout() {
     using namespace strata::core;
@@ -1117,6 +1131,7 @@ int main(int argc, char** argv) {
         test_host_memory();
         test_canonical_layout();
         test_fill_thread_fallback();
+        test_lookahead_thread_fallback();
         test_expert_load_thread_fallback();
         test_unbuffered_reads();
         test_io_prefetch();

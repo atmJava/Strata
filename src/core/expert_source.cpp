@@ -2721,11 +2721,22 @@ bool RouterLookahead::start(std::vector<std::vector<uint16_t>> routers, int64_t 
     k_ = k < 1 ? 1 : k > (int) n_expert ? (int) n_expert : k;
     src_ = src;
     x_.assign((size_t) (8 * n_embd), 0.f);
-    thread_ = std::thread([this] {
-        strata::platform::name_this_thread("strata-lookahead");
-        strata::aux_cpus::pin_current_thread();
-        run();
-    });
+    try {
+        // STRATA_TEST_LOOKAHEAD_THREAD_FAIL=1 injects the constructor failure the caller must survive.
+        if (const char* fail = std::getenv("STRATA_TEST_LOOKAHEAD_THREAD_FAIL"); fail != nullptr && std::atoi(fail) > 0)
+            throw std::runtime_error("injected thread start failure");
+        thread_ = std::thread([this] {
+            strata::platform::name_this_thread("strata-lookahead");
+            strata::aux_cpus::pin_current_thread();
+            run();
+        });
+    } catch (const std::exception& error) {
+        err = std::string("RouterLookahead: cannot start its prefetch thread: ") + error.what();
+        return false;
+    } catch (...) {
+        err = "RouterLookahead: cannot start its prefetch thread";
+        return false;
+    }
     return true;
 }
 

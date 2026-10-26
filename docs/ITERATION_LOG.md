@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-52 · router look-ahead 线程失败关闭预取
+
+- 目标 / 指标：`RouterLookahead` 的辅助线程被系统拒绝时，模型初始化必须继续，路由感知预取退回关闭；不能因一个可选
+  prefetch 线程异常逃出初始化并吞掉错误。
+- 假设与预期：`start()` 直接把线程构造函数放在返回 true 之前。`std::system_error` 会越过 `generate.cpp` 的“启动失败
+  则打印预取关闭”分支，使主流程提前展开；该线程只预测下一层专家并预热页面，不参与数值正确性。
+- 为什么选这条路线：捕获构造异常、填写现有 `err` 并返回 false，让调用方沿用既有关闭预取路径。成功路径线程函数、预测
+  数据和调度不变；失败路径明确、可诊断，也不需要冒险同步预测整个请求。
+- 改动与实验：增加确定性故障注入 `STRATA_TEST_LOOKAHEAD_THREAD_FAIL=1`，补充 `file_expert_source_test` 断言 `start()`
+  返回 false 且错误说明线程未启动。标准构建与 ASan/UBSan 构建均为 `file_expert_source_test: PASS`。
+- 结果：`expert_source.cpp` 与测试文件通过 C++20 主机侧 `-Wall -Wextra -Werror` 语法检查；`git diff --check` 通过。
+  未在真实线程配额耗尽、RTX 2080 Ti、CUDA sm_75 或真实 Qwen pack 上运行。
+- 判决：采纳。可选 look-ahead 失败只关闭预取，不终止模型启动。
+- 生产状态与回滚：未改预测、warm/madvise、Foresight 或成功路径线程；单提交可回退。
+- 学到什么：可选后台功能必须在启动 API 内捕获线程创建错误；让异常穿过主初始化会把“降级”变成“启动失败”。
+- 下一步与理由：继续检查其他直接线程构造点，再转入 Python 与 CPU 综合回归。
+
 ## I-20261027-51 · verify 下一窗口线程失败回退同步预启动
 
 - 目标 / 指标：layer-split verify 链启动下一 stage 的窗口 helper 时，如果系统拒绝新线程，当前窗口必须继续按原协议推进，
