@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-04 · MCP 启动与关闭竞争可中断，stdio 读线程随进程退出
+
+- 目标 / 指标：服务器关闭时，尚在 `initialize` 或工具列表阶段的 MCP 启动线程不能继续等待完整启动超时；
+  stdio 子进程关闭后，stdout/stderr 读取线程必须结束；关闭后的 HTTP 会话不能再次被调用。
+- 假设与预期：旧 `McpServer.close()` 需要先取得启动线程持有的锁，因此可能阻塞最长
+  `start_timeout_s`；stdio 传输虽关闭管道，但没有保存和 join stdout 读线程。
+- 为什么选这条路线：这是明确的关闭竞争和线程泄漏，能用阻塞假传输在无网络、无 MCP SDK 的环境中复现。
+- 改动与实验：给每个 MCP server 增加关闭事件；关闭直接打断当前 transport，不等待启动锁；启动完成或失败后
+  再检查关闭状态；stdio 保存两个读线程并在关闭后有界 join；HTTP transport 关闭后标记为不可用；
+  `McpHub.close()` 在关闭所有 server 后对启动线程统一执行 3 秒 join；新增“启动阻塞时关闭”回归。
+- 结果：`python3 -m pytest serve/test_mcp.py -q` 为 `26 passed / 8 subtests passed`；新增用例证明
+  `close()` 在阻塞 transport 下 2 秒内返回、启动线程结束且状态为 `stopped`；`compileall` 与
+  `git diff --check` 通过。
+- 判决：采纳。关闭仍保持 best-effort，但不再被长启动超时或启动锁拖住。
+- 生产状态与回滚：未改生产；MCP 仍是可选功能，可用单个提交回退。
+- 学到什么：关闭路径不能先获取由长时间启动任务持有的互斥锁；“先发取消信号，再有界等待”才能保证退出。
+- 下一步与理由：继续检查 HTTP/stdio 子进程的独立后台请求，确认关闭后不会重新启动或写回旧会话。
+
 ## I-20261027-03 · 遥测采样线程在关闭时等待退出
 
 - 目标 / 指标：服务器关闭后，后台 NVML/CPU/RAM 采样线程必须收到停止信号并完成退出，而不只依赖

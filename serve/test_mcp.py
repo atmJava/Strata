@@ -15,6 +15,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import mcp_fake_server as fake  # noqa: E402
@@ -227,6 +228,44 @@ class Config(unittest.TestCase):
                 hub_from_config(cfg)
         with self.assertRaises(SystemExit):
             hub_from_config({}, os.path.join(tempfile.gettempdir(), "strata-no-such-mcp.json"))
+
+
+class Closing(unittest.TestCase):
+    def test_close_interrupts_a_start_and_joins_its_thread(self):
+        from serve import mcp
+        entered, released = threading.Event(), threading.Event()
+
+        class BlockingTransport:
+            def __init__(self, _name, _cfg):
+                self.protocol = None
+
+            def start(self):
+                pass
+
+            def request(self, *_args, **_kwargs):
+                entered.set()
+                released.wait(5)
+                raise mcp.McpError("closed")
+
+            def notify(self, *_args, **_kwargs):
+                pass
+
+            def close(self):
+                released.set()
+
+            def alive(self):
+                return not released.is_set()
+
+        with mock.patch.object(mcp, "HttpTransport", BlockingTransport):
+            hub = mcp.McpHub({"slow": {"url": "http://example.invalid/mcp"}},
+                             {"start_timeout_s": 30})
+            hub.start()
+            self.assertTrue(entered.wait(2), "the fake transport did not enter initialize")
+            started = time.monotonic()
+            hub.close()
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertTrue(all(not thread.is_alive() for thread in hub.threads))
+            self.assertEqual(hub.servers["slow"].status, "stopped")
 
 
 # ------------------------------------------------------------------------------------------------ the tool loop

@@ -103,7 +103,8 @@ class StdioTransport:
             raise McpError(f"could not start {command!r}: {e}") from None
         self._err_reader = threading.Thread(target=self._read_stderr, daemon=True)
         self._err_reader.start()
-        threading.Thread(target=self._read, daemon=True).start()
+        self._read_thread = threading.Thread(target=self._read, daemon=True)
+        self._read_thread.start()
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None and not getattr(self, "ended", False)
@@ -207,6 +208,7 @@ class StdioTransport:
         p = self.proc
         if p is None:
             return
+        self.ended = True
         try:
             p.stdin.close()
         except OSError:
@@ -220,6 +222,10 @@ class StdioTransport:
                 f.close()
             except OSError:
                 pass
+        threads = [getattr(self, "_read_thread", None), getattr(self, "_err_reader", None)]
+        for thread in threads:
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
 
     @staticmethod
     def _kill_tree(p):
@@ -250,12 +256,13 @@ class HttpTransport:
         self.next_id = 0
         self.lock = threading.Lock()
         self.broken = None
+        self.closed = False
 
     def start(self):
         pass
 
     def alive(self) -> bool:
-        return self.broken is None
+        return self.broken is None and not self.closed
 
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
@@ -329,6 +336,8 @@ class HttpTransport:
         return None
 
     def request(self, method: str, params: dict, timeout: float, cancel=None):
+        if self.closed:
+            raise McpError("the MCP server is closed")
         if self.broken:
             raise self.broken
         with self.lock:
@@ -356,6 +365,8 @@ class HttpTransport:
                    None, 10, None)
 
     def close(self):
+        self.closed = True
+        self.broken = McpError("the MCP server is closed")
         if not self.session:
             return
         try:                                             # end the session on the server (it may not allow that)
@@ -378,6 +389,7 @@ class McpServer:
         self.info: dict = {}
         self.transport = None
         self.lock = threading.Lock()
+        self.closed = threading.Event()
         self.last_start = 0.0
 
     def start(self) -> bool:
@@ -385,6 +397,9 @@ class McpServer:
             return self._start()
 
     def _start(self) -> bool:
+        if self.closed.is_set():
+            self.status, self.error = "stopped", "the server is closing"
+            return False
         if self.transport is not None:
             self.transport.close()
         self.status, self.error, self.last_start = "starting", None, time.monotonic()
@@ -413,18 +428,28 @@ class McpServer:
                 if not cursor:
                     break
             self.tools, self.status = tools, "ready"
+            if self.closed.is_set():
+                t.close()
+                self.status, self.error = "stopped", "the server is closing"
+                return False
             names = ", ".join(x["name"] for x in tools[:8]) + (", ..." if len(tools) > 8 else "")
             print(f"[strata] MCP server {self.name!r}: {len(tools)} tool{'s' * (len(tools) != 1)}"
                   f"{' (' + names + ')' if tools else ''}", flush=True)
             return True
         except McpError as e:
-            self.status, self.error, self.tools = "failed", str(e), []
+            if self.closed.is_set():
+                self.status, self.error = "stopped", "the server is closing"
+            else:
+                self.status, self.error, self.tools = "failed", str(e), []
             t.close()
-            print(f"[strata] MCP server {self.name!r} did not start: {e}. Its tools are left out; the chat works "
-                  "without them.", flush=True)
+            if not self.closed.is_set():
+                print(f"[strata] MCP server {self.name!r} did not start: {e}. Its tools are left out; the chat works "
+                      "without them.", flush=True)
             return False
 
     def call(self, tool: str, arguments: dict, timeout: float, cancel=None) -> dict:
+        if self.closed.is_set():
+            raise McpError("the MCP server is closing")
         with self.lock:
             if self.transport is None or not self.transport.alive():
                 # it stopped since its last call (a crash, an expired session): start it again; one that failed to
@@ -443,11 +468,12 @@ class McpServer:
             raise
 
     def close(self):
-        with self.lock:
-            if self.transport is not None:
-                self.transport.close()
-            if self.status in ("ready", "starting"):
-                self.status = "stopped"
+        self.closed.set()
+        transport = self.transport
+        if transport is not None:
+            transport.close()
+        if self.status in ("ready", "starting"):
+            self.status = "stopped"
 
 
 # ------------------------------------------------------------------------------------------------ the hub
@@ -584,6 +610,7 @@ class McpHub:
                 s.close()
             except Exception:  # noqa: BLE001 - closing is best effort
                 pass
+        self.wait(3.0)
 
 
 # ------------------------------------------------------------------------------------------------ config
