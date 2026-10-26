@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-112 · DFlash2 重绑定保留旧 logits
+
+- 目标 / 指标：DFlash2 在重新绑定向更宽的 draft vocabulary 时，只有新 logits 缓冲成功分配后才能释放旧缓冲和
+  调整 VRAM 计数；alloc failure 不得破坏仍可用的旧实例。
+- 假设与预期：`alloc_logits()` 旧路径先 free 旧缓冲、清容量并从 `vram_` 减去尺寸，再向成员分配新块。`cudaMalloc`
+  失败时对象失去旧 logits，且容量/VRAM 已经是“未分配”状态。
+- 为什么选这条路线：与 MTP 的修复采用同一事务顺序：局部新块成功后，才 free 旧块并替换指针，随后一次性更新容量和
+  `vram_`。槽位共享、同宽重绑定和缩窄重绑定的成功语义不变。
+- 改动与实验：不改变 logits 宽度公式、行数、使用的 kernel 或成功路径容量；只改失败路径。`dflash2.cpp` 通过
+  C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；DFlash2 Python pack 测试通过。
+- 判决：采纳。DFlash2 logits 重绑定不再先破坏旧资源。
+- 生产状态与回滚：默认首次 bind 的行为完全不变；仅重绑定且新分配失败时保留旧缓冲，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、DFlash2 pack 或 RTX 2080 Ti，未真实注入 logits allocation failure。
+- 下一步与理由：继续检查 DFlash2 bind 的成员发布顺序，重点看失败后 `bound_` 与 head 指针是否一致。
+
 ## I-20261027-111 · MTP 重绑定保留旧 logits 与 draft head
 
 - 目标 / 指标：MTP `bind()` 需要更宽的 logits 时必须先成功取得新缓冲，再释放旧缓冲；`--mtp-q4=head` 转换失败时，

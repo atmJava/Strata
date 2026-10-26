@@ -517,13 +517,17 @@ bool Dflash2Drafter::bind_raw(EmbedFn embed, const void* head_w, int head_type, 
 bool Dflash2Drafter::alloc_logits(std::string& err) {
     const size_t need = (size_t) kDrafts * (size_t) n_dvocab_ * sizeof(float);
     if (logits_ != nullptr && logits_cap_ >= need) return true;      // a re-bind at the same (or a narrower) width
-    if (logits_ != nullptr) {                                         // a wider head: replace the buffer, count it once
-        cudaFree(logits_);
-        logits_ = nullptr;
-        vram_ -= logits_cap_;
-        logits_cap_ = 0;
+    float* replacement = nullptr;
+    if (cudaMalloc((void**) &replacement, need) != cudaSuccess) {
+        err = "dflash2: the draft logits do not fit";
+        return false;
     }
-    if (cudaMalloc((void**) &logits_, need) != cudaSuccess) { err = "dflash2: the draft logits do not fit"; return false; }
+    // A re-bind may follow a wider head: keep the working buffer until its replacement exists.
+    if (logits_ != nullptr) {
+        cudaFree(logits_);
+        vram_ -= logits_cap_;
+    }
+    logits_ = replacement;
     logits_cap_ = need;
     vram_ += need;
     return true;
