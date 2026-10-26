@@ -851,6 +851,15 @@ void test_io_prefetch() {
     require(c.cached_bytes + c.uncached_bytes > 0, "no residency counted");
     std::cout << "io prefetch: " << c.pf_read_blobs << " read ahead, " << c.pf_used << " used, " << c.pf_resident_skips
               << " skipped, pread " << c.pread_bytes << " B: bytes PASS\n";
+    set_env("STRATA_TEST_IO_ENQUEUE_FAIL", "1");
+    const int64_t fallback_expert = 5;
+    source.prefetch(2, &fallback_expert, 1);
+    set_env("STRATA_TEST_IO_ENQUEUE_FAIL", nullptr);
+    const uint8_t* fallback = source.blob(2, fallback_expert);
+    require(fallback != nullptr &&
+                std::memcmp(fallback, bytes.data() + (size_t) (2 * (int64_t) layer_bytes + fallback_expert * (int64_t) BLOB),
+                            BLOB) == 0,
+            "a dropped io-prefetch hint did not fall back to a synchronous read");
     source.set_io_prefetch(false, 0);
     require(!source.io_prefetch() && !source.io_stats() && !source.io_sched(),
             "disabling io prefetch retained its worker configuration");

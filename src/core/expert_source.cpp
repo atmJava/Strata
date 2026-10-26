@@ -1205,7 +1205,14 @@ void FileExpertSource::io_enqueue(int64_t layer, int64_t expert, bool ahead) {
             io_q_.pop_front();
             io_pf_dropped_.fetch_add(1, std::memory_order_relaxed);
         }
-        io_q_.emplace_back((int32_t) layer, (int32_t) expert | (ahead ? kIoAhead : 0));
+        try {
+            if (std::getenv("STRATA_TEST_IO_ENQUEUE_FAIL") != nullptr) throw std::bad_alloc();
+            io_q_.emplace_back((int32_t) layer, (int32_t) expert | (ahead ? kIoAhead : 0));
+        } catch (...) {
+            // I/O prefetch is optional.  `blob()` performs the same read synchronously when this hint is dropped.
+            io_pf_dropped_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
     }
     io_cv_.notify_one();
 }

@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-69 · I/O 预取排队失败退化为同步读取
+
+- 目标 / 指标：`FileExpertSource` 的可选 I/O 预取队列在 deque 分配失败或内部入队异常时，不得把异常抛入
+  解码线程；被丢弃的 demand hint 仍须由 `blob()` 同步完成，读到相同字节。
+- 假设与预期：`io_enqueue()` 在锁内直接 `emplace_back()`；虽然队列以 512 项为上限，单次节点/块分配仍可失败。
+  demand hint 只是提前启动读取，真正数据路径有 `io_blob()` 的同步回退，因此不需要把失败升级为模型读取失败。
+- 为什么选这条路线：在 `io_enqueue()` 内捕获全部入队异常，增加既有的 `pf_dropped` 计数并返回；成功路径仍
+  保持锁、512 项淘汰、LIFO prediction 与 worker 通知不变。
+- 改动与实验：新增确定性入队失败注入；`io_prefetch` 回归在注入后请求同一 expert，验证 `prefetch()` 不抛出且
+  随后 `blob()` 返回文件中的完整正确数据。
+- 结果：`expert_source.cpp` 与 `file_expert_source_test.cpp` 均通过 C++20 主机侧
+  `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）；`git diff --check` 通过。
+- 判决：采纳。预取队列内存压力只减少提前读取，不改变推理结果或错误边界。
+- 生产状态与回滚：未改读取数据、worker、队列成功路径或提前量；单提交可回退。
+- 未验证：当前无 CUDA 工具链，未链接运行完整 `file_expert_source_test`，也未在真实 NVMe、Linux direct I/O、
+  RTX 2080 Ti 或双卡路径上注入内存压力。
+- 下一步与理由：继续检查其他由热路径调用的“可选优化”容器分配，并保持每个修复独立提交。
+
 ## I-20261027-68 · RouterLookahead worker 异常只关闭前瞻
 
 - 目标 / 指标：可选路由前瞻线程在初始化缓冲区、预测窗口或预热队列发生任意异常时，不能触发
