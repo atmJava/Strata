@@ -134,9 +134,9 @@ void MtpDrafter::release() noexcept {
     if (cring_) cudaFree(cring_);
     if (dinv_) cudaFree(dinv_);
     if (cscratch_) cudaFree(cscratch_);
-    if (h_cparams_) cudaFreeHost(h_cparams_);
-    if (h_chist_) cudaFreeHost(h_chist_);
-    if (h_q_) cudaFreeHost(h_q_);
+    host_free_guarded(h_cparams_);
+    host_free_guarded(h_chist_);
+    host_free_guarded(h_q_);
     if (cs_) cudaStreamDestroy(cs_);
     if (side_) cudaStreamDestroy(side_);
     if (sh_fork_) cudaEventDestroy(sh_fork_);
@@ -152,7 +152,7 @@ void MtpDrafter::release() noexcept {
     if (ev_chain_) cudaEventDestroy(ev_chain_);
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
-    for (void* h : hosts) if (h) cudaFreeHost(h);
+    for (void* h : hosts) host_free_guarded(h);
 
     // Nothing above owns memory after this point.  Clear every alias as well as the owners: a failed load leaves some
     // carve pointers in the reserved arena, and a second release must not try to free any of them.
@@ -667,9 +667,9 @@ bool MtpDrafter::setup_coupled(std::string& err) {
         if (params) cudaFree(params);
         if (ring_dev) cudaFree(ring_dev);
         if (scratch_dev) cudaFree(scratch_dev);
-        if (host_params) cudaFreeHost(host_params);
-        if (host_hist) cudaFreeHost(host_hist);
-        if (host_q) cudaFreeHost(host_q);
+        host_free_guarded(host_params);
+        host_free_guarded(host_hist);
+        host_free_guarded(host_q);
         if (inv_dev) cudaFree(inv_dev);
     };
     if (cudaMalloc((void**) &params, sizeof(strata::kernels::SamplerParams)) != cudaSuccess ||

@@ -64,8 +64,8 @@ void Dflash2Drafter::release() {
     blob_owner_.reset();
     dvocab_owner_.reset();
     dhead_owner_.reset();
-    if (h_meta_) cudaFreeHost(h_meta_);
-    if (h_out_) cudaFreeHost(h_out_);
+    strata::core::host_free_guarded(h_meta_);
+    strata::core::host_free_guarded(h_out_);
     if (cs_) cudaStreamDestroy(cs_);
     if (cs2_) cudaStreamDestroy(cs2_);
     if (ev_fork_) cudaEventDestroy(ev_fork_);

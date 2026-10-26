@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-108 · Mapped staging 按 pin 预算统一释放
+
+- 目标 / 指标：通过 `alloc_mapped_pinned()` / `host_alloc_guarded()` 取得的 mapped-pinned host 内存，必须通过
+  `host_free_guarded()` 释放；失败回滚和正常析构都要把同一笔 pin 预算归还。Verifier 的 trace 映射区也必须有所有者。
+- 假设与预期：MTP、DFlash2 和 Verifier 的分配已经走 guarded allocator，但析构仍直接调用 `cudaFreeHost`。在
+  `STRATA_TEST_PIN_BUDGET_MIB` 模拟耗尽时，内存已经释放而记账不归零，后续分配会误报耗尽；Verifier trace 的
+  `trace_h_` 甚至不在析构释放列表里。
+- 为什么选这条路线：只替换同一所有权链的释放入口，并在 Verifier 现有 host 指针列表加入 `trace_h_`；直接
+  `cudaHostAlloc` 的 profiler 缓冲不属于 guarded allocator，继续走原生释放，语义保持清楚。
+- 改动与实验：MTP 的 coupled/load mapped staging、DFlash2 的 metadata/output staging、Verifier 的窗口、batch、
+  hand-off、trace 和 tap mapped staging 全部走 guarded free；buffer 大小、内容、初始化和成功路径不变。三个文件均通过
+  C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；普通及 ASan/UBSan mapped ownership 测试通过。
+- 判决：采纳。mapped-pinned 的分配与释放重新对称，Verifier trace 不再泄漏 host 映射。
+- 生产状态与回滚：不改 API、布局、数值或 CUDA 分配 flags；只改释放路径和补漏，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 RTX 2080 Ti，未用真实 pin 耗尽触发整条 Verifier/MTP/DFlash2 生命周期，也未
+  测量预算计数在长期多槽切换后的最终值。
+- 下一步与理由：修复 `tools/test_gguf_paths.py` 对已不存在 `_paths._install_dirs` 的 mock，使该可运行测试恢复绿色。
+
 ## I-20261027-107 · Coupled draft sampler 初始化事务化
 
 - 目标 / 指标：MTP 的 coupled draft sampler 参数、penalty ring、scratch、mapped staging、可选 q 分布缓冲和 token map
