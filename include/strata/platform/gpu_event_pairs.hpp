@@ -21,7 +21,8 @@ public:
 
     bool ensure(int device, size_t pairs);
     bool ready(int device, size_t pairs) const;
-    void release();
+    /// False on a device switch/destroy failure. Events are retained when they could not all be destroyed.
+    bool release();
 
     cudaError_t record_start(size_t pair, cudaStream_t stream) const;
     cudaError_t record_end(size_t pair, cudaStream_t stream) const;

@@ -128,6 +128,29 @@ int main() {
     fail_restore_at = -1;
     current_device = 0;
 
+    creates = destroys = 0;
+    GpuEventPairs retained;
+    check(retained.ensure(1, 2), "release-retry fixture creation failed");
+    fail_set_device = 1;
+    check(!retained.release(), "a release device-switch failure was not reported");
+    check(retained.ready(1, 2), "a failed release lost ownership of its event group");
+    check(destroys == 0, "a failed release partially destroyed its event group");
+    fail_set_device = -1;
+    check(retained.release(), "release retry after device recovery failed");
+    check(destroys == 4 && !retained.ready(1, 2), "release retry did not destroy the retained events");
+
+    creates = destroys = 0;
+    set_device_calls = 0;
+    GpuEventPairs restore_failed;
+    check(restore_failed.ensure(1, 1), "release-restore fixture creation failed");
+    set_device_calls = 0;
+    fail_restore_at = 2;
+    check(!restore_failed.release(), "a release device-restore failure was not reported");
+    check(destroys == 2 && !restore_failed.ready(1, 1),
+          "a release device-restore failure did not destroy its event group exactly once");
+    fail_restore_at = -1;
+    current_device = 0;
+
     std::printf("gpu_event_pairs_test: transactional creation and device-owned release passed\n");
     return 0;
 }

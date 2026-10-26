@@ -5,13 +5,16 @@
 namespace strata::platform {
 
 bool GpuEventPairs::ready(int device, size_t pairs) const {
-    return device_ == device && pairs_ == pairs && events_.size() == pairs * 2;
+    if (device_ != device || pairs_ != pairs || events_.size() != pairs * 2) return false;
+    for (cudaEvent_t event : events_)
+        if (event == nullptr) return false;
+    return true;
 }
 
 bool GpuEventPairs::ensure(int device, size_t pairs) {
     if (ready(device, pairs)) return true;
     if (device < 0 || pairs == 0 || pairs > std::numeric_limits<size_t>::max() / 2) return false;
-    release();
+    if (!release()) return false;
 
     int previous = -1;
     if (cudaGetDevice(&previous) != cudaSuccess) return false;
@@ -52,19 +55,36 @@ bool GpuEventPairs::ensure(int device, size_t pairs) {
     return true;
 }
 
-void GpuEventPairs::release() {
+bool GpuEventPairs::release() {
     if (!events_.empty() && device_ >= 0) {
         int previous = -1;
-        if (cudaGetDevice(&previous) == cudaSuccess && cudaSetDevice(device_) == cudaSuccess) {
-            for (cudaEvent_t event : events_)
-                if (event) (void) cudaEventDestroy(event);
-            (void) cudaSetDevice(previous);
+        if (cudaGetDevice(&previous) != cudaSuccess || cudaSetDevice(device_) != cudaSuccess) {
+            (void) cudaGetLastError();
+            return false;
         }
+        bool destroyed = true;
+        for (cudaEvent_t& event : events_) {
+            if (event == nullptr) continue;
+            if (cudaEventDestroy(event) == cudaSuccess) event = nullptr;
+            else destroyed = false;
+        }
+        const bool restored = cudaSetDevice(previous) == cudaSuccess;
+        if (!destroyed) {
+            pairs_ = 0;
+            (void) cudaGetLastError();
+            return false;
+        }
+        events_.clear();
+        pairs_ = 0;
+        device_ = -1;
+        (void) cudaGetLastError();
+        return restored;
     }
     events_.clear();
     pairs_ = 0;
     device_ = -1;
     (void) cudaGetLastError();
+    return true;
 }
 
 cudaError_t GpuEventPairs::record_start(size_t pair, cudaStream_t stream) const {

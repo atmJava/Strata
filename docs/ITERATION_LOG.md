@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-128 · GpuEventPairs release 失败保留事件所有权
+
+- 目标 / 指标：`GpuEventPairs::release()` 无法切回事件所属 device 时不得清空事件句柄；后续 `ensure()` 也不得覆盖旧组。
+  单个 destroy 或恢复调用者 device 失败应向调用者报告。
+- 假设与预期：旧 release 只在切换成功时销毁，却无条件 `clear()` 并把 device 置为 -1；一次 device switch 失败会永久丢失
+  全部事件，随后 ensure 会创建新组。
+- 为什么选这条路线：复用已经登记的 `gpu_event_pairs_test`，通过真实 failure wrappers 验证 retain/retry，改动集中在 owner
+  自己的状态机。
+- 改动与实验：`release()` 返回成功状态；进入 device 失败时保留整组，destroy 失败时保留未销毁句柄，恢复失败时报告但所有
+  已销毁事件不重复释放；`ensure()` 在旧组清理失败时停止。`ready()` 同时检查所有句柄非空。新增 device-switch retain/retry
+  和 restore-failure 用例，普通及 ASan/UBSan 通过，clang analyzer 通过。
+- 判决：采纳。release 的返回值与实际资源所有权一致。
+- 生产状态与回滚：正常 release/析构路径不增加驱动调用，只增加状态检查；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 GPU；switch/destroy failure 由 link wrapper 注入，未在真实多卡 context 中制造。
+- 下一步与理由：完成全量回归、文档检查和远端 SHA 复核；07:50 后不再开始新改动。
+
 ## I-20261027-127 · Peer close 清空旧 pending 与 resident 视图
 
 - 目标 / 指标：`PeerExperts::close()` 成功后，旧 tier 的 pending swap、上次 launch 和 resident 计数不得泄漏到下一次
