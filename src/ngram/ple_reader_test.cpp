@@ -415,6 +415,14 @@ int selftest(const std::string& dir, uint32_t rb) {
               "an impossible row-cache allocation was accepted");
         CHECK(!err.empty(), "the row-cache allocation failure has no message");
         CHECK(!rd.is_open(), "the reader stayed open after its row-cache allocation failed");
+        // The table range must be validated without overflowing offset + rows * row_bytes.
+        const uint64_t max = std::numeric_limits<uint64_t>::max();
+        CHECK(!rd.open(path, max, 1, 8, 0, err, false, rb), "a table offset at UINT64_MAX was accepted");
+        CHECK(!err.empty(), "the overflowing table offset has no message");
+        CHECK(!rd.is_open(), "the reader stayed open after the table offset overflow");
+        CHECK(!rd.open(path, HEADER, max, 8, 0, err, false, rb), "a UINT64_MAX row count was accepted");
+        CHECK(!err.empty(), "the overflowing row count has no message");
+        CHECK(!rd.is_open(), "the reader stayed open after the row-count overflow");
         // An incomplete caller-thread ticket can be abandoned without leaving buffers or a worker behind.
         CHECK(rd.open(path, HEADER, N, 8, 0, err, false, rb), "open before close-with-ticket: %s", err.c_str());
         const uint32_t row = 7;

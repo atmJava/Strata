@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-32 · PLE 直接读表范围的溢出安全校验
+
+- 目标 / 指标：`PleReader::open()` 必须在乘法或加法前确认 `[table_offset, table_offset + n_rows * row_bytes)` 落在文件内；
+  损坏的 GGUF 头不得借助 `uint64_t` 回绕变成合法范围，也不得在失败后留下打开的文件或无主 worker。
+- 假设与预期：旧检查先计算 `table_offset + n_rows * row_bytes > file.size()`。当乘法或加法回绕到较小值时，非法表会被接受，
+  后续行偏移同样回绕并产生错误读取或难以解释的短读。
+- 为什么选这条路线：低层直接表读取是 PLE 所有格式共同经过的边界；CPU 合成表能覆盖极端头信息、全部格式、同步/worker I/O，
+  不需要模型或 GPU，而且正常 offset、行宽和字节完全不变。
+- 改动与实验：先用 `table_offset > file_size` 拒绝起点，再用
+  `n_rows > (file_size - table_offset) / row_bytes` 比较可用行数，避免任何可能溢出的乘法/加法。新增 `UINT64_MAX` offset 与
+  row count 两个拒绝用例，并断言错误信息和关闭状态。
+- 结果：直接编译的 `ple_reader_test --selftest` 通过全部八种格式和 90/110 字节行宽的 Direct/Mmap 对拍；ASan/UBSan
+  （泄漏检测开启、遇错停止）和 TSan（遇错停止、记录第二把锁）同样通过；`-Wall -Wextra -Werror` 与 `git diff --check` 通过。
+- 判决：采纳。表范围验证在第一次算术前 fail-closed，损坏头不会进入文件缓存、slab 或 worker 资源分配。
+- 生产状态与回滚：未改正常表布局或读取行为；单提交可回退。未使用真实 Qwen PLE 分片、真实 NVMe 故障或 CUDA sm_75 数据。
+- 学到什么：验证“区间在文件内”时，用文件剩余长度做除法比较，比先算结束偏移更直接，也天然规避无符号回绕。
+- 下一步与理由：继续审查同一读取栈的异常路径和 probe 资源清理，再做下一轮 CPU/终端回归并重试远端推送。
+
 ## I-20261027-31 · MCP 传输线程启动失败与关闭/启动竞争
 
 - 目标 / 指标：MCP HTTP 请求线程无法创建时必须返回统一的 `McpError`；超时后取消通知线程再失败不能覆盖原始超时；
