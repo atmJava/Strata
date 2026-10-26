@@ -1677,16 +1677,38 @@ public:
     }
     void run(size_t n, const std::function<void(size_t)>& job) {
         if (n == 0) return;
+        bool parallel = false;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            while (threads_.size() + 1 < n) {
-                const size_t k = threads_.size() + 1;
-                threads_.emplace_back([this, k] { loop(k); });
+            if (!threading_failed_) {
+                try {
+                    threads_.reserve(n - 1);
+                    while (threads_.size() + 1 < n) {
+                        const size_t k = threads_.size() + 1;
+                        threads_.emplace_back([this, k] { loop(k); });
+                    }
+                    parallel = true;
+                } catch (const std::exception& e) {
+                    threading_failed_ = true;
+                    std::fprintf(stderr,
+                                 "strata serve: checkpoint stage workers fell back to the request thread (%s)\n",
+                                 e.what());
+                } catch (...) {
+                    threading_failed_ = true;
+                    std::fprintf(stderr,
+                                 "strata serve: checkpoint stage workers fell back to the request thread\n");
+                }
             }
-            job_ = &job;
-            n_ = n;
-            pending_ = n - 1;
-            ++round_;
+            if (parallel) {
+                job_ = &job;
+                n_ = n;
+                pending_ = n - 1;
+                ++round_;
+            }
+        }
+        if (!parallel) {
+            for (size_t k = 0; k < n; ++k) job(k);
+            return;
         }
         go_.notify_all();
         job(0);
@@ -1730,6 +1752,7 @@ private:
     size_t n_ = 0, pending_ = 0;
     uint64_t round_ = 0;
     bool stop_ = false;
+    bool threading_failed_ = false;
 };
 
 // --control-vector-scaled: llama.cpp's `common_control_vector_load` (every file's `direction.<l>` times its scale,

@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-55 · checkpoint stage 线程失败串行保存
+
+- 目标 / 指标：`STRATA_CKPT_THREADS` 启动多 stage checkpoint 线程时，任一线程构造失败都必须由请求线程补齐全部 stage；
+  已启动的等待线程不能遗留为 joinable 局部状态，请求也不能因可选并行保存而中止。
+- 假设与预期：`StageThreads::run()` 在发布 round 前逐个 `emplace_back`。部分成功后再失败会抛异常，既没有执行任何
+  stage job，也没有阻断后续线程继续等待；`checkpoint_at` 没有捕获这一构造异常。
+- 为什么选这条路线：每个 stage 的 checkpoint part 已设计为可串行保存，job 自身捕获并记录异常。线程失败时直接按 stage
+  顺序在调用线程执行全部 job，数据、同步和写入同一 checkpoint 的约束不变。
+- 改动与实验：启动前 reserve；构造失败记录一次并永久标记 `threading_failed_`；当前及后续 round 都走串行。已有部分 worker
+  保持等待并由析构统一 stop/join；成功路径 round 发布和并行 job 不变。
+- 结果：`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA 调用由 shim 模拟；跳过该配置原有
+  的未使用变量告警）。`git diff --check` 通过。没有真实线程配额失败、checkpoint、双卡 layer split 或长上下文验证。
+- 判决：采纳。可选 checkpoint 并行失败只降低保存速度，不丢 stage、不泄漏等待线程、不结束请求。
+- 生产状态与回滚：未改成功路径线程/job；单提交可回退。
+- 学到什么：线程组发布状态必须晚于整组启动，启动失败后调用线程应完成整组副作用，而不是只完成一部分。
+- 下一步与理由：进行本轮 Python 与 CPU 综合回归，之后只处理回归暴露的问题。
+
 ## I-20261027-54 · adaptive copy worker 失败退化请求线程
 
 - 目标 / 指标：可选 `--adapt-async` 的复制 worker 被系统拒绝时，请求仍应完成 adaptive refill；不能因线程构造异常退出
