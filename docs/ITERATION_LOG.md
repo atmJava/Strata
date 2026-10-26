@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-10 · Runtime supervisor 启动失败不泄漏日志、管道或服务器子进程
+
+- 目标 / 指标：`Host._launch()` 在打开日志、创建 owner pipe、启动 `Popen`、写入进程记录或 child marker
+  任一步失败时，都必须关闭所有已取得的描述符；`Popen` 已成功但 ownership 记录失败时，必须终止并
+  `wait()` 子进程，避免留下无人管理的服务器。
+- 假设与预期：原实现只在 `Popen` 周围关闭 reader/writer；`os.pipe()` 本身失败会漏掉已打开的日志 fd，
+  而 `Popen` 成功后的 `procs.write_record()` 异常不在清理边界内，可能留下运行中的子进程。
+- 为什么选这条路线：这是本地 supervisor 的真实资源所有权问题，可用 mock 子进程和真实 fd 检查稳定复现，
+  不需要启动模型或 GPU。
+- 改动与实验：pipe 创建失败时关闭日志；`fdopen` 前记录所有权并在失败时补关；把进程记录和 marker
+  发布放进同一个启动回滚边界；新增无异常泄漏的 `_abort_launch()`；owner pipe 关闭改为幂等 best-effort；
+  已退出或刚消失的子进程不再被当作可 killpg 的活动进程。新增 pipe 失败、`Popen` 失败、
+  ownership 记录失败和已退出 child 四个回归。
+- 结果：新增 4 个用例通过；完整 `tests/terminal/test_runtime.py` 为
+  `44 passed / 11 subtests passed`，`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。启动成功前不留下任何仍归 supervisor 所有的 fd 或子进程。
+- 生产状态与回滚：未改生产；只影响 managed runtime 的启动失败路径，可用单个提交回退。
+- 学到什么：`Popen` 返回后、ownership 文件落盘前仍处于“未完成构造”状态，必须按失败处理。
+- 下一步与理由：继续检查停止/重启流程中 SIGTERM 与 fast-exit 的竞争，以及 server 端持久化写入的原子性。
+
 ## I-20261027-09 · CPU 池部分线程启动失败可回滚，真实任务一致性通过
 
 - 目标 / 指标：`ExpertPool` 构造期间若创建到一半的 worker 抛出异常，必须停止并 join 已启动线程、清理全局

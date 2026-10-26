@@ -716,7 +716,11 @@ class Host:
         log = self.state_path.parent / f"{self.name}.server.log"
         self._mark_child("launching")
         descriptor = os.open(log, flags, 0o600)
-        reader, writer = os.pipe()
+        try:
+            reader, writer = os.pipe()
+        except BaseException:
+            os.close(descriptor)
+            raise
         server_args = [*args, "--ready-file", str(ready),
                        "--shutdown-timeout", str(self.shutdown_timeout),
                        "--owner-fd", str(reader)]
@@ -726,8 +730,10 @@ class Host:
         child_env["STRATA_OWNER_ATTEST_KEY"] = attestation_key.hex()
         child_env["STRATA_NO_ACQUIRE"] = "1"      # a managed server never installs or downloads (acquisition.py)
         child_env["STRATA_RUNTIME_PROFILE"] = self.name   # the records of its engine say which profile they belong to
+        stream = None
         try:
-            with os.fdopen(descriptor, "ab") as stream:
+            stream = os.fdopen(descriptor, "ab")
+            with stream:
                 self.child = subprocess.Popen([sys.executable, "-m", "serve.server", *server_args],
                                               cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stream,
                                               stderr=subprocess.STDOUT, close_fds=True,
@@ -737,16 +743,16 @@ class Host:
             raise
         finally:
             os.close(reader)
+            if stream is None:
+                os.close(descriptor)
         self.owner_write_fd = writer
-        procs.write_record(self.child.pid, "server", profile=self.name)
         try:
+            procs.write_record(self.child.pid, "server", profile=self.name)
             self._mark_child("owned", pid=self.child.pid, ready=ready)
         except BaseException:
             # No ownership record means a future start cannot safely reclaim
             # this instance. Stop this child immediately instead.
-            self._kill_child_tree()
-            self.child.wait(timeout=10)
-            self._close_owner_pipe()
+            self._abort_launch()
             raise
         self.ready_path = ready
         self.args, self.source, self.source_bytes, self.revision = list(args), source, source_bytes, revision
@@ -864,15 +870,36 @@ class Host:
 
     def _close_owner_pipe(self) -> None:
         if self.owner_write_fd is not None:
-            os.close(self.owner_write_fd)
+            descriptor = self.owner_write_fd
             self.owner_write_fd = None
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def _abort_launch(self) -> None:
+        """Best-effort teardown after Popen succeeded but ownership was not published."""
+        child = self.child
+        try:
+            self._kill_child_tree()
+        except OSError:
+            pass
+        if child is not None:
+            try:
+                child.wait(timeout=10)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        self._close_owner_pipe()
 
     def _kill_child_tree(self) -> None:
         """Kill the server this host started and its dedicated process group."""
         child = self.child
-        if child is None:
+        if child is None or child.poll() is not None:
             return
-        os.killpg(child.pid, signal.SIGKILL)
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
     def _restart(self, startup_wait: float, expected_profile_revision: str | None = None,
                  allow_source_switch: bool = False,

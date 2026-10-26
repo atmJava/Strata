@@ -82,6 +82,72 @@ class RuntimeTests(unittest.TestCase):
             code = main(["runtime", *args, "--output", "json"])
         return code, json.loads(output.getvalue())
 
+    def test_launch_pipe_failure_closes_private_log_descriptor(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        opened = []
+        real_open = os.open
+
+        def record_open(*args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            opened.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(runtime.os, "open", side_effect=record_open), \
+                mock.patch.object(runtime.os, "pipe", side_effect=OSError("pipe failed")):
+            with self.assertRaisesRegex(OSError, "pipe failed"):
+                host._launch([], self.config, self.config.read_bytes(), None)
+        with self.assertRaises(OSError):
+            os.fstat(opened[-1])
+        self.assertIsNone(host.child)
+
+    def test_launch_record_failure_reaps_child_and_closes_owner_pipe(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock(pid=987654)
+        child.wait.return_value = 0
+        with mock.patch.object(runtime.subprocess, "Popen", return_value=child), \
+                mock.patch.object(runtime.procs, "write_record", side_effect=OSError("record failed")), \
+                mock.patch.object(host, "_kill_child_tree") as kill:
+            with self.assertRaisesRegex(OSError, "record failed"):
+                host._launch([], self.config, self.config.read_bytes(), None)
+        kill.assert_called_once_with()
+        child.wait.assert_called_once_with(timeout=10)
+        self.assertIsNone(host.owner_write_fd)
+
+    def test_popen_failure_closes_launch_descriptors(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        descriptors = []
+        real_open, real_pipe = os.open, os.pipe
+
+        def record_open(*args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor
+
+        def record_pipe():
+            pair = real_pipe()
+            descriptors.extend(pair)
+            return pair
+
+        with mock.patch.object(runtime.os, "open", side_effect=record_open), \
+                mock.patch.object(runtime.os, "pipe", side_effect=record_pipe), \
+                mock.patch.object(runtime.subprocess, "Popen", side_effect=OSError("spawn failed")):
+            with self.assertRaisesRegex(OSError, "spawn failed"):
+                host._launch([], self.config, self.config.read_bytes(), None)
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        self.assertIsNone(host.child)
+        self.assertIsNone(host.owner_write_fd)
+
+    def test_kill_child_tree_ignores_an_already_exited_child(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock(pid=987654)
+        child.poll.return_value = 0
+        host.child = child
+        with mock.patch.object(runtime.os, "killpg") as killpg:
+            host._kill_child_tree()
+        killpg.assert_not_called()
+
     def test_local_management_bridge_and_cli_share_owner_and_journal(self):
         command = [sys.executable, "-m", "strata_control.management"]
         root = Path(__file__).resolve().parents[2]
