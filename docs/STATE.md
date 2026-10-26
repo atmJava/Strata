@@ -4,34 +4,42 @@
 > 本文件只写当前断点，不重复历史、规则或完整证据。
 
 - 目标：持续优化用户可感知的推理性能、稳定性和资源效率；当前全局优化目标暂停。
-- 当前阶段：文档与记录已按 2026-10-26 的实际生产、实验和中断状态整理。
-- 当前项：P7（暂停/待做）。
-- 当前迭代：无运行中实验。P7 的 A1 在首个请求期间被用户中断，没有有效 JSONL/summary，
-  因此不得把该次执行写成进行中、完成或已获得性能结论。
-- 下一动作：等待用户明确恢复目标；恢复后 P7 必须从全新的 A1 起完整重跑 A-B-A，
+- 当前阶段：生产已从 `6×192K` 切换到 `6×256K` 并完成功能验证；256K 长时间 soak 尚未开始。
+- 当前项：CTX256（256K mixed soak）。
+- 当前迭代：无运行中实验。切换后的两次长上下文 needle、一次基础请求和一次 6 路短并发已完成；
+  这不等替一小时 mixed soak。
+- 下一动作：用户恢复全局目标后，先跑 256K mixed soak；P7 之后必须从全新的 A1 起完整重跑 A-B-A，
   B 只增加 `STRATA_PF_WMMA=1`，并重新从 `/proc/<engine-pid>/environ` 证明运行态。
 - 当前候选：P7 仍是未验证候选；engine read 与 wall 均需改善 ≥3%，A2 需回到 A 的 3% 内。
-  P4 生产回滚基线为 `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`，P7 前快照为
-  `/opt/ai/tmp/pre-P7-pf-wmma-20261026T065341Z/`。
-- 未完成采纳项：15。
+  256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
+  `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
+- 未完成采纳项：16。
 - 阻塞：DFlash2 drafter 权重缺失；该路线搁置，不阻塞主线。
 
 ## 生产
 
-- `strata.service` 在 `192.168.2.223:8080`，health 200（P7 中断后的恢复检查实测）。
+- `strata.service` 在 `192.168.2.223:8080`，health 200、`loaded=true`（256K 切换后实测）。
 - **生产已部署合并引擎 `0.1.51` / `a09d78b1`**：server `de09cffd`、launcher `34271059`、
-  config `05c9d253`；自身一小时 mixed soak 与 T-probe 均通过。
-- 生产配置：`parallel=6`、`max_context=192000`、`STRATA_HC_Q8=1`，W3 staged read 开启，阈值 2048；
+  config `ea1e2959`；引擎自身一小时 mixed soak 与 T-probe 均通过。
+- 生产配置：`parallel=6`、`max_context=262144`、`STRATA_HC_Q8=1`，W3 staged read 开启，阈值 2048；
   lead-in 1600 ms、等待 750 ms、只处理 ≥4096-token 的冷读，短请求首准入阈值 2048。
+- 256K 下 `batch_slots=6`、`kv_resident=32768`、`expert_slots=17248`、expert cache `28222 MiB`；
+  启动后两卡自报空闲 `1005/1073 MiB`。
 - `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 config 的 `env` 只会传给引擎子进程。
-- 回滚快照：当前生产优先使用 `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`；P7 前生产快照为
-  `/opt/ai/tmp/pre-P7-pf-wmma-20261026T065341Z/`。更早的 400 ms P3 配置仍保留在
+- 回滚快照：当前生产优先使用 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；P4 严格基线仍保留在
+  `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。更早的 400 ms P3 配置仍保留在
   `/opt/ai/tmp/pre-P3-ABA-20261025T213040Z/strata-022.json`，仅用于历史回退。
 
 ## 已知结果
 
 - V3-1 容量预设已收口：4 路中位 `6×192K` 聚合 120.6、`8×128K` 133.9、`8×192K` 122.8；
   默认保持 `6×192K`。8×128K 的 +11% 以 192K→128K 上下文为代价。
+- 256K 生产切换已完成：config 仅把 `max_context` 从 `192000` 改为 `262144`，同时保留
+  `batch_slots=6` 与 `kv_resident=32768`。expert slots 从 `17728` 降到 `17248`（−2.7%），
+  expert cache 从 `29010` 降到 `28222 MiB`；启动后两卡空闲 `1005/1073 MiB`。
+- 256K 功能门通过：`222,322` token、50% needle 和 `253,633` token、90% needle 均命中，
+  墙钟分别为 `147.2/152.7 s`；6 路短并发 `6/6` 成功，单请求墙钟 `2.0–3.1 s`。
+  长读后 RAM 为 `56 GiB used / 5.8 GiB available`，swap 仍为 0；两卡实际空闲约 `856/950 MiB`。
 - V3-4 已完成：MTP 草稿深度 2/4/6 在噪声内，保持 4。
 - V2b fused prefill +0.61%，否决；V2c `STRATA_PIPED_CONCURRENT` 两臂无差异，S0b 仍需换机制。
 - S0b 已否决：gate 修复后并发读 3/3 触发，但邻居静默中位 ON 7.09/7.59 s、OFF 7.41 s；
@@ -114,5 +122,11 @@
 - P7 已暂停且没有有效样本；恢复后必须新建完整 A-B-A，不能复用被中断的首请求或把“实验已启动”
   当作部分结果。`STRATA_PF_WMMA=1` 走 FP16 tensor-core prompt experts，输出可能变化；
   速度达标后仍必须有质量门。
+- 256K 只完成了两次单请求 needle 和一次 6 路短并发，尚未跑一小时 mixed soak；不能把当前结果
+  写成“256K 全负载稳定”。
+- `253,633` token 已覆盖上限的约 96.8%，但仍比 `262144` 少 `8,511` token；真实满窗口请求、
+  多长读同时到达、取消和长时间 pinned RAM 压力仍未覆盖。
+- 两次长读后可用 RAM 降到约 `5.8 GiB`；虽然 swap 为 0，后续 soak 必须监控最低可用内存、
+  conversation cache 淘汰和 KV host read，而不是只看两卡显存。
 
-- 最后更新：2026-10-26T15:04+08:00（文档与记录整理；P7 标记为暂停/待做，无有效结果）
+- 最后更新：2026-10-26T16:05+08:00（生产切换为 `6×256K`；功能门通过，mixed soak 待做）

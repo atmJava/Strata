@@ -102,6 +102,7 @@
 | L-085 | 10-26 06:2xZ | P5：96K 冷读 GPU timeline 中位 32.653 s、phase 总墙钟 35.441 s，host staging 仅 0.341 s；成本主要在 GPU 计算，timing 工装开销 +0.72% | **结论** |
 | L-086 | 10-26 06:5xZ | P6 `STRATA_PA_V2T=1`：同 boot A-B-A 全门禁通过但 engine read/wall 只改善 2.346%/2.297%，低于 3%，生产不采纳 | **未定** |
 | L-087 | 10-26 06:5xZ | P7 `STRATA_PF_WMMA=1`：A1 首个请求期间被用户中断，无有效 JSONL/summary；实验暂停、待从全新 A1 重跑 | **结论** |
+| L-088 | 10-26 08:0xZ | 生产 `6×192K→6×256K`：6 槽保留，expert slots 17248；222K/253K needle 命中，6 路短并发 6/6；一小时混合 soak 待做 | **采纳·待 soak** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3237,3 +3238,66 @@ md5 为 `6fb45df03ed7a9e903459ead547fbdfe`；A2 和最终恢复都没有该 env�
 
 **恢复条件**：用户明确恢复优化目标后，重新确认生产运行路径与 engine hash，再启动全新 A1。
 不得把本次被中断的请求补写成第一个样本。
+
+## L-088 生产切换到 `6×256K`：6 槽与长上下文功能门通过
+
+**判定**：**采纳并已上线，mixed soak 待做**。这次切换证明 256K 配置可启动、6 个 batch slot 可保留，
+并能服务超过旧 192K 上限的真实请求；尚无证据证明一小时混合流量、满窗口和多长读压力下稳定。
+
+**实验条件**：双 RTX 2080 Ti 22 GB、sm_75、INT8 KV、`kv_resident=32768`、groups=2、
+`parallel=6`、engine `0.1.51` / `a09d78b13c39378d1532a024b983d286`、server
+`de09cffdac39ff150a689bd3a44cc242`、launcher `342710595d34936f40e40233f5b62837`。
+
+**切换前快照**：`/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`。快照包含原 config、engine、
+server、launcher、systemd unit、运行前 cmdline/env、metrics、health 和 nvidia-smi；切换后加入
+新 config、两次 needle、最终 metrics/health、nvidia-smi、free 与 server 日志。
+`MANIFEST.sha256` 全项通过。
+
+**最小改动**：config 仅有一行语义变化：
+
+```text
+--max-context
+- 192000
++ 262144
+```
+
+其他 args、`parallel=6`、`batch-groups=2`、`kv=int8`、`kv-resident=32768` 和 12 个关键运行态 env
+不变。新 config md5 为 `ea1e29598ba7e671280cafd7604cfd0b`。
+
+**启动结果**：service 在约 190 s 后返回 `loaded=true`；engine 与 `/health` 都报告
+`max_context=262144`，`batch_slots=6`。启动日志报告每卡 session 相关 pinned KV `1.55 GiB`、
+CUDA0 的 6 个 slot session `2.69 GiB`，最终 expert slots 为 `17248`，expert cache 为
+`28222 MiB`。相对 192K 的 `17728` slots / `29010 MiB`，容量减少约 2.7%，但槽数没有下降。
+
+**功能门与资源**：
+
+| 测试 | prompt tokens | 结果 | 墙钟 |
+|---|---:|---|---:|
+| needle，50% 深度 | 222,322 | FOUND | 147.2 s |
+| needle，90% 深度 | 253,633 | FOUND | 152.7 s |
+| 6 路短并发 | 57 each | 6/6 成功，无 HTTP 错误 | 2.0–3.1 s |
+
+253K 请求的 engine prompt 日志为 `253,626 of 253,633 tokens, 149 s`。启动后两卡自报空闲
+`1005/1073 MiB`；长读后 `nvidia-smi` 为 `856/950 MiB`。两次长读后 RAM 为约 `56 GiB used`、
+`5.8 GiB available`、swap 0。一次目标约 257K 但实际编码为 `349,343` token 的探针被服务端以
+`400` 拒绝，证明超窗请求不会被静默截断；该预期拒绝不计入功能失败。
+
+**没测什么**：没有一小时 mixed soak；最高成功 prompt `253,633` 仍比上限少 `8,511` token；
+没有覆盖 262144 满窗口、多长读同时到达、取消、真实外部多租户或 conversation cache 长时间淘汰。
+后续必须监控最低可用 RAM、swap、KV host read、expert hit rate、请求错误和槽降级。
+
+**原始证据**：
+
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/MANIFEST.sha256`
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/strata-022.262144.json`
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/ctx256k-needle.json`
+  （sha256 `f5df4f629e5686cb645de84fc8074ca83e62be632788bb79a69128d0110cc36f`）
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/ctx256k-needle-251k.json`
+  （sha256 `2b764c96a06de642577675eeae220f46479163dad108c2a80b0e8cab7bf991ce`）
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/metrics-after.json`
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/metrics-final.json`
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/free-final.txt`
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/nvidia-smi-final.txt`
+- `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/server-tail-final.log`
+- 仓库内规范化副本：`docs/work/evidence/ctx256k-needle-222k-20261026.json`、
+  `docs/work/evidence/ctx256k-needle-253k-20261026.json`

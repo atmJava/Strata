@@ -35,6 +35,7 @@
 | P5 | 96K 冷 prefill 相位归因 | 3 个唯一 96K prompt 可解析 21 相与 host 成本；3 个同形状 plain prompt 能量化工装开销；零执行错误，恢复后 T-probe 无 problems | 已完成 | L-085：GPU timeline 中位 32.653 s、phase 总墙钟 35.441 s、host staging 0.341 s；timing 开销 +0.72% | 结论是 GPU 计算主导，不直接改生产 |
 | P6 | Turing prompt-attention v2 A-B-A | 同 boot A-B-A；每臂 3 个唯一 96K prompt；B 的 engine read 与 wall 中位均改善 ≥3%；A2 回到 A 的 3% 内；零执行错误、needle 3/3；greedy parity 一致或过质量门 | 已完成 | L-086：B 相对 A1 −2.346%/−2.297%，A2 漂移 +0.57%，parity 一致 | 方向和正确性正常但低于 3%，生产不采纳 |
 | P7 | Turing FP16 tensor-core prompt experts | 同 boot A-B-A；每臂 3 个唯一 96K prompt；B 的 engine read 与 wall 中位均改善 ≥3%；A2 回到 3% 内；零错误、needle 3/3；输出变化时必须过质量门 | 待做 | L-087：A1 被中断，无有效 JSONL/summary | 用户中断后暂停；恢复时必须从全新 A1 重跑，不复用中断样本 |
+| CTX256 | 256K 生产混合负载 soak | 至少 1 小时 mixed traffic；覆盖 32K/64K/96K、接近 256K 的长读与短请求并发；零意外错误、零 needle 失败、6 槽不降级；记录 TTFT/wall、KV host read、expert hit、RAM/swap 与最低显存余量 | 待做 | L-088：功能门通过，长期 soak 未做 | 用户恢复全局目标后优先执行；不得用两次单请求 needle 替代 |
 | QSA-SLOTS | 合并 batch window 的 QSA launch | 4/6 路交错 A-B 均稳定改善聚合吞吐 | 否决 | L-081：4 路无收益，6 路首次 +3.5% 不复现，最终相邻 −0.49% | 同配置不再重试 |
 | HEAD-ENGINE | 合并源码的 sm_75 可部署验证 | 从当前 HEAD 独立构建；测试、输出 parity、版本 marker、运行路径 hash 与一小时 soak 通过 | 已完成（外部资产例外） | L-082/L-083：CTest 151/8/1；唯一失败缺 Q2_0 PLE 资产；单路 +3.6%、4 路 −0.3%；`a09d78b1` 已部署并 soak | 外部资产例外保留 |
 | S0d | staged 取消不吞他人控制行 | 客户端断开时其它流不丢 token，有回归测试 | 待做 | V2-1 PASS，待固化 | 只差测试与复核 |
@@ -51,7 +52,7 @@
 | F1F2 | 多路准入判据 | 由 S0b/S2 的证据决定可接受上界；不允许首 token 后静默数十秒 | 待做 | R11 旧提案 | AI 根据测量裁决，不等待用户 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀；有测试 | 待做 | | |
 
-未完成采纳项：15
+未完成采纳项：16
 
 ## 搁置
 

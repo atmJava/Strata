@@ -3,6 +3,33 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261026-21 · 生产切换到 `6×256K`，容量与长上下文功能门通过
+
+- 目标 / 指标：把生产上下文从 `192000` 提到 `262144`，同时保持 6 个 batch slot、INT8 KV、
+  `kv_resident=32768` 和现有调度开关不变；用真实长请求与 6 路并发验证切换。
+- 假设与预期：KV streaming 会把显存 K/V 窗口固定住，新增上下文主要增加 indexer、RoPE 和
+  pinned host KV；expert cache 应小幅缩小，但 6 槽仍能启动。
+- 为什么选这条路线：这是用户明确要求的容量升级，不需要改代码；先做最小 config diff 和真实请求，
+  比直接扩大 expert cache 或其他性能开关更能隔离风险。
+- 改动与实验：建立 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/` 完整快照；只把 config 的
+  `max_context` 改为 `262144`，预设检查通过后原子安装并重启。服务在约 190 s 后 loaded；
+  随后跑 `222,322` token 与 `253,633` token 两次 needle，以及 6 路短并发。
+- 结果：两次 needle 均命中，墙钟 `147.2/152.7 s`；6 路短并发 `6/6` 成功。生产保持
+  `batch_slots=6`、`kv_resident=32768`；expert slots `17728→17248`，expert cache
+  `29010→28222 MiB`。启动后两卡空闲 `1005/1073 MiB`；长读后 RAM 可用约 `5.8 GiB`、swap 0。
+- 判决：**采纳并已上线，mixed soak 待做**。功能门足以证明 256K 上下文实际可服务，但不足以证明
+  长时间混合流量稳定。
+- 预期被推翻：没有；expert cache 实际只缩小约 788 MiB（双卡合计），6 槽未因显存不足降级。
+- 生产状态与回滚：health 200、`loaded=true`、engine `a09d78b1`、server `de09cffd`、
+  config `ea1e2959`；回滚快照完整并通过 SHA-256 清单校验。
+- 证据：L-088；仓库内 `docs/work/evidence/ctx256k-needle-222k-20261026.json`、
+  `docs/work/evidence/ctx256k-needle-253k-20261026.json`；快照中的 `metrics-after.json`、
+  `metrics-final.json`、`nvidia-smi-final.txt` 与 `free-final.txt`。
+- 学到什么：`--kv-resident` 下上下文扩张不等价于整段 KV 进 VRAM；真实瓶颈需要同时看 expert cache、
+  pinned RAM 和 conversation cache，不能只按显存估算。
+- 下一步与理由：先跑 256K mixed soak，覆盖 32K/64K/96K/长读与短请求并发；P7 等该基线稳定后再从
+  全新 A1 重跑。
+
 ## I-20261026-20 · P7 在 A1 首个请求期间中断，暂停而非进行中
 
 - 目标 / 指标：验证 `STRATA_PF_WMMA=1` 能否让 96K 冷读的 engine read 与 wall 均改善 ≥3%，
