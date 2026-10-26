@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-64 · 区分 spawn 失败与启动线程失败的日志所有权
+
+- 目标 / 指标：缺失/不可执行的引擎程序失败时保留 `eng.log.closed` 供调用方确认句柄归还；narrator、echo、READY reader、
+  output thread 或 slot queue 失败时继续要求 `eng.log is None`，不能在启动未完成后保留看似可用的对象。
+- 假设与预期：`I-20261027-59` 为避免日志引用被过早清空，移除了所有启动失败路径上的 `self.log = None`。完整 `serve`
+  回归随后在 `EngineStartRollback` 的 5 个子用例失败，说明不同失败阶段的所有权契约并不相同。
+- 为什么选这条路线：只有真正进入 `popen` 的失败属于“外部可执行程序无法启动”；其后的线程/状态构造失败应由
+  `_abort_start()` 完整回滚。用 `spawn_attempted` 精确区分两者，同时保留两条既有测试契约。
+- 改动与实验：narrator/echo 等在 `popen` 前失败时关闭并清空日志；`popen` 本身失败时关闭但保留对象；READY reader、
+  output thread 和 post-READY 构造失败继续在 `_abort_start()` 关闭并清空日志。
+- 结果：`python -m pytest -q serve/test_ready_timeout.py serve/test_server.py::EngineStartRollback` →
+  `8 passed, 4 subtests passed`。完整 `serve` 复跑随后仍须确认全部通过。未验证 Windows 上 `CreateProcess` 的不同错误类型；
+  分支只依赖“是否调用过 `popen`”，不依赖异常子类。
+- 判决：采纳。启动失败对象的可观察状态与失败阶段一致，成功路径不变。
+- 生产状态与回滚：未改正常启动、请求或子进程控制；单提交可回退。
+- 学到什么：资源清理契约要按事务阶段区分；把所有失败路径统一成一种对象状态会破坏另一阶段已有的回归。
+- 下一步与理由：重跑完整 `serve`，随后汇总本轮 C++ 与 Python 验证并更新状态文档。
+
 ## I-20261027-63 · PLE I/O worker 异常结束全部等待 ticket
 
 - 目标 / 指标：PLE persistent I/O worker 若在运行中抛出未预期异常，`collect()` 不能永久等待；所有已存在和新提交的 ticket

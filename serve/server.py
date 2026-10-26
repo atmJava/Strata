@@ -969,6 +969,7 @@ class StrataEngine:
         loading = threading.Event()                     # set once READY: the narrator below stops
         narrator = None
         echo_key = None
+        spawn_attempted = False
         try:
             log_start = os.path.getsize(log) if log else 0  # where this start's lines begin (start_failure_hint)
             self.log_start = log_start                      # #596: the Monitor's conversation cache reads from here
@@ -1008,6 +1009,7 @@ class StrataEngine:
                 print(f"[strata] engine priority: nice +{nice} (STRATA_ENGINE_NICE=0 turns it off)", flush=True)
             end_leftover_engines(exe)                    # one an earlier run lost still holds the GPU and the memory
             spawned_at = time.monotonic()
+            spawn_attempted = True
             self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env,
                               **pin)
@@ -1018,6 +1020,8 @@ class StrataEngine:
             if self.log not in (None, subprocess.DEVNULL):
                 with contextlib.suppress(OSError, ValueError):
                     self.log.close()
+            if not spawn_attempted:
+                self.log = None
             raise
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
@@ -1096,6 +1100,7 @@ class StrataEngine:
             if self.log not in (None, subprocess.DEVNULL):
                 with contextlib.suppress(OSError, ValueError):
                     self.log.close()
+            self.log = None
             return None
         with contextlib.suppress(OSError):
             if proc.poll() is None:
@@ -1113,6 +1118,7 @@ class StrataEngine:
         if self.log not in (None, subprocess.DEVNULL):
             with contextlib.suppress(OSError, ValueError):
                 self.log.close()
+        self.log = None
         self.proc = None
         self.ended = True
         return proc.poll()
