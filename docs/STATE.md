@@ -3,19 +3,34 @@
 > 接手顺序：`RULES.md` → 本文件 → `ROADMAP.md` → `ITERATION_LOG.md` 最近两条。
 > 本文件只写当前断点，不重复历史、规则或完整证据。
 
-- 目标：持续优化用户可感知的推理性能、稳定性和资源效率；当前全局优化目标暂停。
-- 当前阶段：生产已从 `6×192K` 切换到 `6×256K` 并完成功能验证；256K 长时间 soak 尚未开始。
-- 当前项：CTX256（256K mixed soak）。
-- 当前迭代：无运行中实验。切换后的两次长上下文 needle、一次基础请求和一次 6 路短并发已完成；
-  这不等替一小时 mixed soak。
-- 下一动作：用户恢复全局目标后，先跑 256K mixed soak；P7 之后必须从全新的 A1 起完整重跑 A-B-A，
-  B 只增加 `STRATA_PF_WMMA=1`，并重新从 `/proc/<engine-pid>/environ` 证明运行态。
+- 目标：当前全局目标为精简和稳定 Linux x86_64、CUDA sm_75、双 RTX 2080 Ti、Qwen3.8-Flash-Next
+  专用分支，截止 `2026-10-27 08:00 Asia/Shanghai`。
+- 当前阶段：`refactor/sm75-cli-server` 的 CUDA 设备归属、故障路径清理和并发/资源生命周期审查与主机回归已完成；
+  256K mixed soak 仍未开始。
+- 当前项：本轮交接；不再开始新的生产代码改动。
+- 当前迭代：无运行中实验。本轮 8 个代码提交已逐个推送，当前 `HEAD` 为 `2f62734b`（文档收尾提交之前）。
+- 下一动作：在有 CUDA Toolkit、驱动和双 RTX 2080 Ti 的主机上，实际构建 sm_75，注入双卡 device switch/copy 失败，
+  运行模型加载、API 推理和 256K mixed soak。P7 仍须从全新的 A1 起完整重跑 A-B-A，并从
+  `/proc/<engine-pid>/environ` 证明运行态。
 - 当前候选：P7 仍是未验证候选；engine read 与 wall 均需改善 ≥3%，A2 需回到 A 的 3% 内。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 未完成采纳项：16。
-- 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
-  该测量路线不阻塞主线。
+- 阻塞：当前开发机没有 `nvcc`、CUDA Toolkit、驱动、`nvidia-smi` 或 GPU；外部 `llama.cpp/gguf-py`
+  也缺失。因此真实 CUDA 编译、双卡故障注入、DFlash2 权重测试和模型推理只能留待目标硬件验证。
+
+## 本轮 sm_75 生命周期加固
+
+- 代码范围：remote expert、adaptive swap、residency patch、prefill peer/helper、MTP、Verifier 和 DFlash2
+  的每个 CUDA 入口先确认所属 device；失败时停止启动新工作，并避免在错误 context 中复制或释放资源。
+- 提交链：`59b27746`、`73d2499c`、`bf5a9375`、`7abf0743`、`0f363042`、`9c4eafc6`、`f35e5d16`、`2f62734b`。
+  每条都同步更新 [`ITERATION_LOG.md`](ITERATION_LOG.md) 并已推送到 `origin/refactor/sm75-cli-server`。
+- 实际通过：`tests/terminal` 200 passed / 46 skipped / 93 subtests；`serve` 984 passed / 8 skipped /
+  10797 subtests；`strata_control` 16 passed；tools 显式清单 206 passed / 9 skipped / 116 subtests；
+  C++ 故障注入目标及其 5 个 ASan 目标通过；3 个 TSan 并发目标通过；`compileall` 与 `git diff --check` 通过。
+- 未验证：上述 C++ 通过项使用 declaration shim 和 link wrapper，不等于 sm_75 CUDA 编译或两块真实 GPU
+  上的执行。逐项 `cudaFree` / event destroy 失败后的完整重试仍不覆盖；`PeerExperts::close()` 在 device
+  switch 持续失败时保留资源但该对象不能自动重开。
 
 ## 生产
 
@@ -130,4 +145,4 @@
 - 两次长读后可用 RAM 降到约 `5.8 GiB`；虽然 swap 为 0，后续 soak 必须监控最低可用内存、
   conversation cache 淘汰和 KV host read，而不是只看两卡显存。
 
-- 最后更新：2026-10-26T16:05+08:00（生产切换为 `6×256K`；功能门通过，mixed soak 待做）
+- 最后更新：2026-10-27T07:48+08:00（sm_75 设备生命周期加固和主机回归完成；真实 CUDA 与 256K soak 待目标硬件执行）
