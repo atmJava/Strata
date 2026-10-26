@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-36 · MCP 关闭错误响应与配置对象校验
+
+- 目标 / 指标：HTTP MCP 关闭会话时，DELETE 的 4xx/5xx `HTTPError` 必须在归一化后关闭；配置中的 `mcp` 字段不是对象时
+  必须返回清晰 `SystemExit`；诊断入口读取配置也要显式关闭文件。
+- 假设与预期：`HttpTransport.close()` 用 `urlopen(...).close()` 启动 DELETE，但 4xx/5xx 在赋值前变成异常，其响应体
+  进入 `except OSError` 后未关闭。`settings_from()` 对 `"mcp": "fast"` 调用 `.items()`，以未处理的 `AttributeError` 终止。
+  `python -m serve.mcp config.json` 的 `json.load(open(...))` 还依赖引用计数关闭配置。
+- 为什么选这条路线：三处都有无网络 mock 或无副作用的配置测试；修复不改变 MCP 请求、成功 DELETE、设置默认值或协议字段。
+- 改动与实验：成功 DELETE 使用上下文管理；`HTTPError` 单独用上下文关闭；`mcp` 块先验证为对象；诊断入口改用 `with open`
+  并保留原有文件/JSON 错误文本。新增 DELETE 405 关闭和字符串 `mcp` 配置拒绝两项断言。
+- 结果：`serve/test_mcp.py` 为 `36 passed / 9 subtests`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。MCP 关闭的每个 HTTP 结果都有显式响应 owner，错误配置在读取字段前被拒绝，诊断入口不再依赖 GC 关文件。
+- 生产状态与回滚：未改正常 initialize/tools/call、会话 DELETE 或运行配置中的合法 `mcp` 对象；单提交可回退。未访问真实
+  MCP 服务、代理、TLS 中断或企业鉴权端点。
+- 学到什么：HTTP 的异常也是响应；配置容器类型校验必须发生在 `.items()` 等迭代操作前。
+- 下一步与理由：继续检查其余产品入口的 JSON/文件读取和 HTTP 错误分支，再做一轮高价值 C++ 装载资源审查。
+
 ## I-20261027-35 · 统一 expert source 辅助线程的失败与回收
 
 - 目标 / 指标：`expert_source.cpp` 中共享 atomic 工作队列的批读、缓存补集构建、补集校验、GGUF 专装载、Arena 读取和

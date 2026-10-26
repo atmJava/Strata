@@ -414,7 +414,11 @@ class HttpTransport:
             return
         try:                                             # end the session on the server (it may not allow that)
             req = urllib.request.Request(self.url, headers=self._headers(), method="DELETE")
-            urllib.request.urlopen(req, timeout=3).close()
+            with urllib.request.urlopen(req, timeout=3):
+                pass
+        except urllib.error.HTTPError as e:
+            with e:
+                pass
         except (OSError, ValueError):
             pass
 
@@ -695,7 +699,12 @@ def servers_from(block, where: str) -> dict[str, dict]:
 def settings_from(cfg: dict) -> dict:
     """The run config's optional `"mcp"` block: timeout_s, max_result_chars, max_rounds, start_timeout_s."""
     out = {}
-    for key, value in (cfg.get("mcp") or {}).items():
+    block = cfg.get("mcp")
+    if block is None:
+        return out
+    if not isinstance(block, dict):
+        raise SystemExit(f"[strata] config mcp={block!r}: expected an object")
+    for key, value in block.items():
         number = isinstance(value, (int, float)) and not isinstance(value, bool)
         if key in ("timeout_s", "start_timeout_s"):
             if not number or value <= 0:
@@ -732,8 +741,15 @@ def hub_from_config(cfg: dict, mcp_config_path: str | None = None) -> McpHub | N
 
 
 if __name__ == "__main__":                               # python -m serve.mcp config.json: list what a config offers
-    hub = hub_from_config(json.load(open(sys.argv[1], encoding="utf-8-sig")) if len(sys.argv) > 1 else {},
-                          sys.argv[2] if len(sys.argv) > 2 else None)
+    if len(sys.argv) > 1:
+        try:
+            with open(sys.argv[1], encoding="utf-8-sig") as f:
+                config = json.load(f)
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"[strata] {sys.argv[1]}: {e}") from None
+    else:
+        config = {}
+    hub = hub_from_config(config, sys.argv[2] if len(sys.argv) > 2 else None)
     if hub is None:
         sys.exit("no MCP servers configured")
     hub.start(wait=True)

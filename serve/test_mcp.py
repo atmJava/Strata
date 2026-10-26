@@ -156,6 +156,17 @@ class StartupCleanup(unittest.TestCase):
                 transport._post({"jsonrpc": "2.0", "method": "ping"}, None, 5, None)
         error.close.assert_called_once_with()
 
+    def test_session_delete_error_response_is_closed(self):
+        from serve import mcp
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        transport.session = "s-1"
+        error = urllib.error.HTTPError(transport.url, 405, "not allowed", {}, io.BytesIO())
+        error.close = mock.Mock()
+        with mock.patch.object(mcp.urllib.request, "urlopen", side_effect=error):
+            transport.close()
+        error.close.assert_called_once_with()
+
     def test_http_request_thread_start_failure_is_an_mcp_error(self):
         from serve import mcp
 
@@ -369,7 +380,8 @@ class Config(unittest.TestCase):
         for cfg in ({"mcp_servers": {"x": {}}}, {"mcp_servers": {"x": {"command": "a", "args": "b"}}},
                     {"mcp_servers": ["x"]}, {"mcpServers": {"x": {"url": "http://a", "type": "sse"}}},
                     {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"timeout_s": 0}},
-                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"max_rounds": 1.5}}):
+                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"max_rounds": 1.5}},
+                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": "fast"}):
             with self.subTest(cfg=cfg), self.assertRaises(SystemExit):
                 hub_from_config(cfg)
         with self.assertRaises(SystemExit):
