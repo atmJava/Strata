@@ -9,6 +9,7 @@
 #include <deque>
 #include <exception>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <unordered_map>
 
@@ -455,7 +456,6 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
     const double now = now_us();
     const bool rearm = m.keep_us > 0 && (m.last_issue_us <= 0 || now - m.last_issue_us > m.keep_window_us);
     m.last_issue_us = now;
-    TicketState& ts = m.tickets[id];
     std::unordered_map<uint64_t, size_t> by_page;     // aligned offset -> index in `jobs`
     std::vector<Job> jobs;
     for (size_t i = 0; i < n; ++i) {
@@ -492,9 +492,23 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
     }
     // Sorted by offset: prefill chunks then read the SSD in near-sequential order.
     std::sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) { return a.offset < b.offset; });
-    ts.pending = (uint32_t) jobs.size();
-    const bool has_jobs = ts.pending > 0;
-    for (Job& j : jobs) m.queue.push_back(std::move(j));
+    const bool has_jobs = !jobs.empty();
+    size_t queued = 0;
+    const int fail_after = [&] {
+        const char* value = std::getenv("STRATA_TEST_PLE_QUEUE_FAIL");
+        return value != nullptr ? std::atoi(value) : -1;
+    }();
+    try {
+        for (Job& j : jobs) {
+            if ((int) queued == fail_after) throw std::bad_alloc();
+            m.queue.push_back(std::move(j));
+            ++queued;
+        }
+        m.tickets.emplace(id, TicketState{(uint32_t) jobs.size()});
+    } catch (...) {
+        while (queued-- > 0) m.queue.pop_back();
+        throw;
+    }
     if (m.threaded) {
         lk.unlock();
         if (has_jobs) {

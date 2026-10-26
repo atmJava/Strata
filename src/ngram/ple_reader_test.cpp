@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <new>
 #include <random>
 #include <sstream>
 #include <string>
@@ -423,6 +424,20 @@ int selftest(const std::string& dir, uint32_t rb) {
         CHECK(!rd.open(path, HEADER, max, 8, 0, err, false, rb), "a UINT64_MAX row count was accepted");
         CHECK(!err.empty(), "the overflowing row count has no message");
         CHECK(!rd.is_open(), "the reader stayed open after the row-count overflow");
+        // Queue allocation failure rolls back rows already appended and leaves no ticket that its caller cannot collect.
+        CHECK(rd.open(path, HEADER, N, 8, 0, err, false, rb), "open before queue-failure: %s", err.c_str());
+        std::vector<uint32_t> queue_rows{11, N / 2, N - 1};
+        std::vector<uint8_t> queue_out(queue_rows.size() * rb);
+        setenv("STRATA_TEST_PLE_QUEUE_FAIL", "1", 1);
+        bool failed = false;
+        try {
+            (void) rd.issue(queue_rows.data(), queue_rows.size(), queue_out.data());
+        } catch (const std::bad_alloc&) {
+            failed = true;
+        }
+        unsetenv("STRATA_TEST_PLE_QUEUE_FAIL");
+        CHECK(failed, "the queue allocation failure was not injected");
+        check_rows(rd, queue_rows, N, rb, "after queue failure");
         // An incomplete caller-thread ticket can be abandoned without leaving buffers or a worker behind.
         CHECK(rd.open(path, HEADER, N, 8, 0, err, false, rb), "open before close-with-ticket: %s", err.c_str());
         const uint32_t row = 7;

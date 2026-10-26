@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-37 · PLE issue 队列与 ticket 提交保持一致
+
+- 目标 / 指标：`PleReader::issue()` 在 jobs 的 vector/unordered_map/deque 或 ticket 表分配失败时，必须回滚本次已追加
+  的队列项；不能先发布一张调用方永远拿不到的 ticket，也不能让后续 reader 继承 pending 或半队列状态。
+- 假设与预期：旧实现把 `TicketState&` 插入 `tickets` 后才逐项构建和入队 job。任一分配异常都会抛穿，但 ticket 已占用
+  id；部分 job 已进入 queue，另一些没有，ticket 的 pending 永远无法归零，后续 collect/close 只能依赖整体清理。
+- 为什么选这条路线：这是直接 PLE 读取和 prefill 共用的事务边界，可用 CPU 合成表与确定性注入覆盖；正常表布局、行宽、
+  job 排序和提交后的读取字节不变。
+- 改动与实验：先在局部 jobs 完成去重、排序，再追加到 deque；每次追加成功计数，ticket 只在队列完整提交后插入。捕获异常时
+  移除本次追加的队尾并重新抛出。新增 `STRATA_TEST_PLE_QUEUE_FAIL=1`，在首个 job 后失败，断言异常发生且下一次读取正确。
+- 结果：`ple_reader_test --selftest` 通过全部八种格式和 90/110 字节行宽；ASan/UBSan（泄漏检测开启、遇错停止）与
+  TSan（遇错停止、记录第二把锁）均通过；`-Wall -Wextra -Werror` 和 `git diff --check` 通过。
+- 判决：采纳。队列项和 ticket 在同一个提交边界内发布，分配失败恢复成 issue 前的 reader 状态。
+- 生产状态与回滚：未改成功路径的 job 顺序、去重、缓存或 notify 时机；单提交可回退。未验证真实地址空间耗尽的 OOM killer、
+  真实 Qwen PLE 分片或 CUDA sm_75 预填。
+- 学到什么：调用方以返回 ticket 为所有权的资源必须在返回值可构造前最后提交；先发布所有权再填充数据会留下不可达状态。
+- 下一步与理由：继续审查 hot path 中“先改对象状态、后执行可失败分配/队列操作”的提交顺序。
+
 ## I-20261027-36 · MCP 关闭错误响应与配置对象校验
 
 - 目标 / 指标：HTTP MCP 关闭会话时，DELETE 的 4xx/5xx `HTTPError` 必须在归一化后关闭；配置中的 `mcp` 字段不是对象时
