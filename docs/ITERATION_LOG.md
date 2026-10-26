@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-68 · RouterLookahead worker 异常只关闭前瞻
+
+- 目标 / 指标：可选路由前瞻线程在初始化缓冲区、预测窗口或预热队列发生任意异常时，不能触发
+  `std::terminate()`；解码线程应继续，后续预测明确跳过，析构必须能立即 join 已停止线程。
+- 假设与预期：线程构造失败已由 `start()` 处理，但 `run()` 内的 `logits/order/want/wconf/sm/votes` 分配和
+  source 预热仍无异常边界。`busy_` 若异常退出时未复位，还会让 `set_foresight(nullptr)` 永等。
+- 为什么选这条路线：前瞻只影响预取，不参与路由或输出。线程体捕获异常后在锁内清 `pending_/busy_`、标记
+  `failed_` 并退出；`submit()` 在同一把锁下检查该标记，因此不会把新预测遗留给已退出的线程。
+- 改动与实验：`start()` 的模型状态与线程构造统一纳入失败返回；新增异步 body 故障注入和 `failed()` 状态。
+  同时拒绝空/非正 router geometry、尺寸乘法溢出和负 layer，避免预测线程越界访问。
+- 结果：`expert_source.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）。独立
+  `RouterLookahead` 失败用例以 `-O2 -Wall -Wextra -Werror` 构建并重复 20 次通过；ASan/UBSan 通过；
+  ThreadSanitizer 通过，唯一输出是源码原有 `atomic_thread_fence` 不受 TSan 跟踪的编译器提示。
+- 判决：采纳。预测线程内部失败退化为本会话关闭前瞻，正常解码、路由和输出路径不变。
+- 生产状态与回滚：成功路径的线程、预测深度、router dot、预热顺序与统计均未改；单提交可回退。
+- 未验证：因无 `nvcc`/GPU，未构建完整 CUDA sm_75 引擎，也未在 RTX 2080 Ti、双卡和真实 Qwen pack
+  上运行成功预测、Foresight 预测提交或性能路径。
+- 下一步与理由：继续审查其余持久 worker 的异常边界与停止条件，并定期重试推送。
+
 ## I-20261027-67 · DirectFile 完成队列失败不再终止 worker
 
 - 目标 / 指标：已由 `submit()` 接受的无缓冲读取，即使完成队列或 `std::deque` 节点分配失败，也必须恰好产生一个

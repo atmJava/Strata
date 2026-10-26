@@ -2711,24 +2711,54 @@ void RouterLookahead::set_foresight(ForesightSwap* fs) {
 
 bool RouterLookahead::start(std::vector<std::vector<uint16_t>> routers, int64_t n_embd, int64_t n_expert, int k,
                             ExpertSource* src, std::string& err, bool allow_cold_source) {
+    err.clear();
+    if (thread_.joinable()) { err = "RouterLookahead: already started"; return false; }
     if (src == nullptr || (!allow_cold_source && !src->warms())) { err = "RouterLookahead: the expert source does not warm"; return false; }
+    if (routers.empty() || n_embd <= 0 || n_expert <= 0 ||
+        (uint64_t) n_embd > std::numeric_limits<size_t>::max() / (uint64_t) n_expert ||
+        (uint64_t) n_embd > std::numeric_limits<size_t>::max() / 8) {
+        err = "RouterLookahead: invalid router geometry";
+        return false;
+    }
     if (n_embd % 8 != 0) { err = "RouterLookahead: n_embd is not a multiple of 8"; return false; }
     for (const auto& r : routers)
         if (r.size() != (size_t) (n_embd * n_expert)) { err = "RouterLookahead: a router of another shape"; return false; }
-    routers_ = std::move(routers);
-    n_embd_ = n_embd;
-    n_expert_ = n_expert;
-    k_ = k < 1 ? 1 : k > (int) n_expert ? (int) n_expert : k;
-    src_ = src;
-    x_.assign((size_t) (8 * n_embd), 0.f);
     try {
+        routers_ = std::move(routers);
+        n_embd_ = n_embd;
+        n_expert_ = n_expert;
+        k_ = k < 1 ? 1 : k > (int) n_expert ? (int) n_expert : k;
+        src_ = src;
+        x_.assign((size_t) (8 * n_embd), 0.f);
         // STRATA_TEST_LOOKAHEAD_THREAD_FAIL=1 injects the constructor failure the caller must survive.
         if (const char* fail = std::getenv("STRATA_TEST_LOOKAHEAD_THREAD_FAIL"); fail != nullptr && std::atoi(fail) > 0)
             throw std::runtime_error("injected thread start failure");
-        thread_ = std::thread([this] {
-            strata::platform::name_this_thread("strata-lookahead");
-            strata::aux_cpus::pin_current_thread();
-            run();
+        const char* run_fail = std::getenv("STRATA_TEST_LOOKAHEAD_RUN_FAIL");
+        const bool inject_run_failure = run_fail != nullptr && std::atoi(run_fail) > 0;
+        thread_ = std::thread([this, inject_run_failure] {
+            try {
+                strata::platform::name_this_thread("strata-lookahead");
+                strata::aux_cpus::pin_current_thread();
+                // Tests force the asynchronous body to fail after start() has already returned.
+                if (inject_run_failure) throw std::runtime_error("injected look-ahead failure");
+                run();
+            } catch (const std::exception& e) {
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    failed_.store(true, std::memory_order_release);
+                    pending_ = false;
+                    busy_ = false;
+                }
+                std::fprintf(stderr, "RouterLookahead: prediction worker stopped (%s); decode continues\n", e.what());
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    failed_.store(true, std::memory_order_release);
+                    pending_ = false;
+                    busy_ = false;
+                }
+                std::fprintf(stderr, "RouterLookahead: prediction worker stopped; decode continues\n");
+            }
         });
     } catch (const std::exception& error) {
         err = std::string("RouterLookahead: cannot start its prefetch thread: ") + error.what();
@@ -2741,10 +2771,13 @@ bool RouterLookahead::start(std::vector<std::vector<uint16_t>> routers, int64_t 
 }
 
 void RouterLookahead::submit(int64_t layer, const float* x, int64_t n_tok, const int32_t* host_res) {
-    if (layer + 1 >= (int64_t) routers_.size() || n_tok <= 0 || x == nullptr) return;
+    if (layer < 0 || layer + 1 >= (int64_t) routers_.size() || n_tok <= 0 || x == nullptr) return;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        if (busy_ || pending_) { skipped_.fetch_add(1, std::memory_order_relaxed); return; }
+        if (failed_.load(std::memory_order_acquire) || busy_ || pending_) {
+            skipped_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         n_tok_ = std::min<int64_t>(n_tok, 8);
         std::memcpy(x_.data(), x, (size_t) (n_tok_ * n_embd_) * sizeof(float));
         layer_ = layer + 1;

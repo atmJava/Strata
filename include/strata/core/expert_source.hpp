@@ -328,6 +328,8 @@ public:
     int64_t predicted() const { return predicted_.load(std::memory_order_relaxed); }
     int64_t skipped() const { return skipped_.load(std::memory_order_relaxed); }
     double busy_ms() const { return (double) busy_us_.load(std::memory_order_relaxed) / 1000.0; }
+    /// The optional worker stopped after an unexpected exception; predictions are skipped from then on.
+    bool failed() const { return failed_.load(std::memory_order_acquire); }
 
 private:
     void run();
@@ -347,6 +349,7 @@ private:
     std::vector<float> x_;
     std::atomic<int64_t> predicted_{0}, skipped_{0};
     std::atomic<uint64_t> busy_us_{0};
+    std::atomic<bool> failed_{false};
     // STRATA_LOOKAHEAD_STATS
     bool stats_on_ = false;
     int64_t words_ = 0;

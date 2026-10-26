@@ -247,6 +247,25 @@ void test_lookahead_thread_fallback() {
             "router look-ahead thread failure did not explain the fallback");
 }
 
+void test_lookahead_worker_failure() {
+    using namespace strata::core;
+    FileExpertSource source;
+    RouterLookahead lookahead;
+    std::string err;
+    std::vector<std::vector<uint16_t>> routers(2, std::vector<uint16_t>(16, 0));
+    set_env("STRATA_TEST_LOOKAHEAD_RUN_FAIL", "1");
+    const bool started = lookahead.start(std::move(routers), 8, 2, 1, &source, err, true);
+    set_env("STRATA_TEST_LOOKAHEAD_RUN_FAIL", nullptr);
+    require(started, "router look-ahead did not start for the worker-failure case: " + err);
+    for (int i = 0; i < 5000 && !lookahead.failed(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    require(lookahead.failed(), "a failed router look-ahead worker stayed enabled");
+    const int64_t skipped = lookahead.skipped();
+    const float x[8] = {};
+    lookahead.submit(0, x, 1, nullptr);
+    require(lookahead.skipped() == skipped + 1, "a failed look-ahead worker accepted another prediction");
+}
+
 #if defined(STRATA_NATIVE_EXPERTS)
 void test_native_variable_layout() {
     using namespace strata::core;
@@ -1132,6 +1151,7 @@ int main(int argc, char** argv) {
         test_canonical_layout();
         test_fill_thread_fallback();
         test_lookahead_thread_fallback();
+        test_lookahead_worker_failure();
         test_expert_load_thread_fallback();
         test_unbuffered_reads();
         test_io_prefetch();
