@@ -2,6 +2,7 @@
 #include "strata/core/mtp.hpp"
 #include "strata/core/graph_capture.hpp"
 #include "strata/core/pin_budget.hpp"
+#include "strata/core/scoped_value_restore.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/spec_prob.hpp"
@@ -1166,23 +1167,6 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
 }
 
 namespace {
-template <typename T>
-class RestoreValue {
-public:
-    explicit RestoreValue(T& value) : value_(value), saved_(value) {}
-    ~RestoreValue() { if (active_) value_ = saved_; }
-    void restore() {
-        if (!active_) return;
-        value_ = saved_;
-        active_ = false;
-    }
-
-private:
-    T& value_;
-    T saved_;
-    bool active_ = true;
-};
-
 bool finish_capture(cudaStream_t cs, bool ok, cudaGraphExec_t& exec, const char* what, std::string& err) {
     cudaGraph_t graph = nullptr;
     const cudaError_t ce = cudaStreamEndCapture(cs, &graph);
@@ -1233,9 +1217,9 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
     const int64_t HCN = g_->hc * g_->n_embd;
     g_mp.init();   // (its allocation before the capture)
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
-    RestoreValue<int> restore_base(g_mp.base);
-    RestoreValue<bool> restore_coupled(coupled_rec_);
-    RestoreValue<int> restore_j(coupled_j_);
+    strata::core::ScopedValueRestore<int> restore_base(g_mp.base);
+    strata::core::ScopedValueRestore<bool> restore_coupled(coupled_rec_);
+    strata::core::ScopedValueRestore<int> restore_j(coupled_j_);
     g_mp.base = 0;
     bool ok = true;
     try {
@@ -1269,6 +1253,9 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
     } catch (const std::exception& e) {
         err = std::string("mtp: round capture: ") + e.what();
         ok = false;
+    } catch (...) {
+        err = "mtp: round capture: unknown exception";
+        ok = false;
     }
     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
 }
@@ -1285,9 +1272,9 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
     const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
                               {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
-    RestoreValue<int> restore_base(g_mp.base);
-    RestoreValue<bool> restore_coupled(coupled_rec_);
-    RestoreValue<int> restore_j(coupled_j_);
+    strata::core::ScopedValueRestore<int> restore_base(g_mp.base);
+    strata::core::ScopedValueRestore<bool> restore_coupled(coupled_rec_);
+    strata::core::ScopedValueRestore<int> restore_j(coupled_j_);
     bool ok = true;
     g_mp.base = j < kMpGraphs ? j : -1;
     try {
@@ -1303,6 +1290,9 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
         if (ok && force_on_ && !coupled) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
     } catch (const std::exception& e) {
         err = std::string("mtp: step capture: ") + e.what();
+        ok = false;
+    } catch (...) {
+        err = "mtp: step capture: unknown exception";
         ok = false;
     }
     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);

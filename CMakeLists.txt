@@ -439,6 +439,12 @@ if(STRATA_ENABLE_CUDA)
       add_test(NAME graph_capture_test COMMAND graph_capture_test)
       set_tests_properties(graph_capture_test PROPERTIES
         ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+      add_executable(scoped_value_restore_test tests/core/scoped_value_restore_test.cpp)
+      target_include_directories(scoped_value_restore_test PRIVATE include)
+      target_link_libraries(scoped_value_restore_test PRIVATE strata_warnings)
+      add_test(NAME scoped_value_restore_test COMMAND scoped_value_restore_test)
+      set_tests_properties(scoped_value_restore_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
       add_executable(qsa_state_resource_test
         tests/core/qsa_state_resource_test.cpp src/core/qsa_state.cpp)
       target_include_directories(qsa_state_resource_test PRIVATE

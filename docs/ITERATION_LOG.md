@@ -3,6 +3,29 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-96 · Capture 异常退出恢复录制状态
+
+- 目标 / 指标：Verifier 的普通窗口和 batch 窗口在 `record_window` 返回失败或抛出异常时，都必须结束 stream
+  capture 并销毁 partial graph；batch 的 `batch_rec_`、`row_base_` 必须恢复。MTP 与 DFlash2 的未知异常也不能
+  绕过 capture 收尾。重复的临时值恢复逻辑应收敛为一个可测试实现。
+- 假设与预期：旧的普通窗口没有录制异常的防护；batch 路径在异常抛出时不会执行手动清零，后续调用会误以为仍在
+  录制 batch，并读取不属于当前调用的 `brow_`。DFlash2 的 fork 事件错误或未知异常也可能留下错误录制状态。
+- 为什么选这条路线：新增共享 `ScopedValueRestore<T>`，显式 `restore()` 后析构不再覆盖后续值，未显式恢复时由
+  栈展开恢复。Verifier 两个窗口 capture 将录制包在 `std::exception` 与 unknown-exception 处理器中，再统一调用
+  `cudaStreamEndCapture` 和部分 graph 清理。MTP round/step 与 DFlash2 使用同一个恢复器；DFlash2 检查 fork/join
+  事件错误，并在 context 录制抛出后仍尝试把侧流汇合回 capture 主流。
+- 改动与实验：正常录制顺序、节点、stream、upload 和图形内容不变；batch 成功路径在 end capture 前恢复旧标志。
+  新增 `scoped_value_restore_test`，覆盖显式恢复、作用域恢复、异常展开恢复和显式恢复后的析构幂等性；普通及
+  ASan/UBSan 通过。`mtp.cpp`、`dflash2.cpp`、`verify.cpp` 通过严格 C++20 主机侧语法检查（仅跳过仓库既有
+  未使用/缩进告警）；`graph_capture_test` 与 Terminal/Control 全量通过（200 passed、46 skipped、
+  93 subtests passed）。
+- 判决：采纳。录制状态不再因失败或异常污染后续 capture，清理逻辑有单点实现和主机侧回归。
+- 生产状态与回滚：成功路径行为和数值不变；异常路径更严格收尾；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动和 RTX 2080 Ti，未真实让 kernel 录制函数抛异常，也未在驱动中注入
+  event-record/wait 或 end-capture 故障。主机侧测试验证恢复器，C++ 语法检查验证生产调用接线，不替代 GPU
+  capture 级测试。
+- 下一步与理由：继续检查 graph 之外的初始化失败回滚，优先处理仍把多块 host/device 资源直接写入成员后再失败的入口。
+
 ## I-20261027-95 · Graph 实例化与上传事务化
 
 - 目标 / 指标：CUDA graph 的 instantiate 与 upload/sync 必须遵循同一发布规则。失败时不能覆盖调用者已有的

@@ -1,6 +1,7 @@
 // src/core/dflash2.cpp - see include/strata/core/dflash2.hpp.
 #include "strata/core/dflash2.hpp"
 #include "strata/core/graph_capture.hpp"
+#include "strata/core/scoped_value_restore.hpp"
 
 #include "strata/core/native_head.hpp"
 #include "strata/core/on_device.hpp"
@@ -645,20 +646,32 @@ bool Dflash2Drafter::capture(int n, const float* taps, std::string& err) {
     // measured: -0.3 ms a round on an RTX 3060, +0.0..0.7 on a Strix Halo (gfx1151), so the HIP builds keep one stream (STRATA_DF2_FORK=1 / 0 overrides)
     static const bool fork_default = true;
     static const bool fork_on = [] { const char* e = std::getenv("STRATA_DF2_FORK"); return e && e[0] ? e[0] == '1' : fork_default; }();
-    const bool fork_was = fork_;
+    strata::core::ScopedValueRestore<bool> restore_fork(fork_);
     fork_ = fork_on && prof_ == nullptr && cs2_ != nullptr;
     bool ok = false;
+    bool fork_started = false;
+    bool fork_ready = true;
     try {
         if (fork_) {
-            cudaEventRecord(ev_fork_, cs_);
-            cudaStreamWaitEvent(cs2_, ev_fork_, 0);
+            const cudaError_t record = cudaEventRecord(ev_fork_, cs_);
+            const cudaError_t wait = record == cudaSuccess ? cudaStreamWaitEvent(cs2_, ev_fork_, 0) : record;
+            if (record != cudaSuccess || wait != cudaSuccess) {
+                err = std::string("dflash2: capture fork: ") +
+                      cudaGetErrorString(record != cudaSuccess ? record : wait);
+                fork_ready = false;
+            } else {
+                fork_started = true;
+            }
         }
-        ok = record_context(taps, n, fork_ ? cs2_ : cs_, err);
+        if (fork_ready) ok = record_context(taps, n, fork_started ? cs2_ : cs_, err);
     } catch (const std::exception& e) {
         err = std::string("dflash2: capture: ") + e.what();
         ok = false;
+    } catch (...) {
+        err = "dflash2: capture: unknown exception";
+        ok = false;
     }
-    if (fork_) {
+    if (fork_started) {
         const cudaError_t record = cudaEventRecord(ev_join_, cs2_);
         const cudaError_t wait = record == cudaSuccess ? cudaStreamWaitEvent(cs_, ev_join_, 0) : record;
         if (record != cudaSuccess || wait != cudaSuccess) {
@@ -673,9 +686,13 @@ bool Dflash2Drafter::capture(int n, const float* taps, std::string& err) {
         } catch (const std::exception& e) {
             err = std::string("dflash2: capture: ") + e.what();
             ok = false;
+        } catch (...) {
+            err = "dflash2: capture: unknown exception";
+            ok = false;
         }
     }
-    fork_ = fork_was;
+    restore_fork.restore();
+    if (!ok && err.empty()) err = "dflash2: capture recording failed";
     cudaGraph_t graph = nullptr;
     const cudaError_t ce = cudaStreamEndCapture(cs_, &graph);
     if (!ok) { if (graph) cudaGraphDestroy(graph); return false; }

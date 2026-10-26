@@ -7,6 +7,7 @@
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/graph_capture.hpp"
+#include "strata/core/scoped_value_restore.hpp"
 #include "strata/core/spec_prob.hpp"
 #include "strata/platform/worker_guard.hpp"
 
@@ -2328,7 +2329,14 @@ bool Verifier::capture(int T, std::string& err) {
         return false;
     }
     std::string rerr;
-    const bool ok = record_window(T, cs_, rerr);
+    bool ok = false;
+    try {
+        ok = record_window(T, cs_, rerr);
+    } catch (const std::exception& e) {
+        rerr = std::string("verify: window capture: ") + e.what();
+    } catch (...) {
+        rerr = "verify: window capture: unknown exception";
+    }
     cudaGraph_t graph = nullptr;
     const cudaError_t ce = cudaStreamEndCapture(cs_, &graph);
     if (!ok) {
@@ -2486,6 +2494,9 @@ bool Verifier::capture_commit(std::string& err) {
         if (ok && ss.ple.ready() && ple_stage()) copy_indexed(ss.ple.hist, hist_snap_, HS, commit_ + 1, HS, cs_);
     } catch (const std::exception& e) {
         err = std::string("verify commit: ") + e.what();
+        ok = false;
+    } catch (...) {
+        err = "verify commit: unknown exception";
         ok = false;
     }
     cudaGraph_t graph = nullptr;
@@ -3275,13 +3286,22 @@ bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err
         err = "verify: begin batch capture failed";
         return false;
     }
+    ScopedValueRestore<bool> restore_batch(batch_rec_);
+    ScopedValueRestore<int> restore_row(row_base_);
     batch_rec_ = true;
     row_base_ = hbase;
-    for (int t = 0; t < S; ++t) brow_[t] = rows[t];
     std::string rerr;
-    const bool ok = record_window(S, cs_, rerr);
-    batch_rec_ = false;
-    row_base_ = 0;
+    bool ok = false;
+    try {
+        for (int t = 0; t < S; ++t) brow_[t] = rows[t];
+        ok = record_window(S, cs_, rerr);
+    } catch (const std::exception& e) {
+        rerr = std::string("verify: batch capture: ") + e.what();
+    } catch (...) {
+        rerr = "verify: batch capture: unknown exception";
+    }
+    restore_batch.restore();
+    restore_row.restore();
     cudaGraph_t graph = nullptr;
     const cudaError_t ce = cudaStreamEndCapture(cs_, &graph);
     if (!ok || ce != cudaSuccess) {
@@ -3396,6 +3416,9 @@ bool Verifier::capture_commit_batch(const int* rows, int S, int hbase, std::stri
             }
     } catch (const std::exception& e) {
         err = std::string("verify batch commit: ") + e.what();
+        ok = false;
+    } catch (...) {
+        err = "verify batch commit: unknown exception";
         ok = false;
     }
     cudaGraph_t graph = nullptr;
