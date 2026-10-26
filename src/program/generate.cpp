@@ -5908,11 +5908,15 @@ int main(int argc, char** argv) {
             std::atomic<bool> copy_ok{true};
             auto hash_work = [&] {
                 std::vector<uint8_t> hb;
-                for (size_t i; (i = next_slot.fetch_add(1)) < sl.size();) {
-                    hb.resize((size_t) sl[i].second);
-                    if (cudaMemcpy(hb.data(), xcache.device_slot(sl[i].first), hb.size(), cudaMemcpyDeviceToHost) !=
-                        cudaSuccess) copy_ok = false;
-                    sh[i] = strata::core::fnv1a64(hb.data(), (uint64_t) hb.size());
+                try {
+                    for (size_t i; (i = next_slot.fetch_add(1)) < sl.size();) {
+                        hb.resize((size_t) sl[i].second);
+                        if (cudaMemcpy(hb.data(), xcache.device_slot(sl[i].first), hb.size(), cudaMemcpyDeviceToHost) !=
+                            cudaSuccess) copy_ok = false;
+                        sh[i] = strata::core::fnv1a64(hb.data(), (uint64_t) hb.size());
+                    }
+                } catch (...) {
+                    copy_ok = false;
                 }
             };
             std::vector<std::thread> hth;
@@ -9889,6 +9893,16 @@ int main(int argc, char** argv) {
             for (float& v : drive.d.usage) v *= o.adapt_decay;
             return true;
         };
+        auto adapt_safely = [&]() -> bool {
+            try {
+                return adapt();
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "strata serve: the adaptive refill failed: %s\n", e.what());
+            } catch (...) {
+                std::fprintf(stderr, "strata serve: the adaptive refill failed\n");
+            }
+            return false;
+        };
         // ---- --adapt-async 1: the asynchronous adaptive tier (opt-in; the resident RAM mode, see the checks where
         // the RAM copy is built).  adapt() runs a whole round - choose, copy the evicted slots back with a stream sync,
         // copy the new experts in from the RAM copy - on a thread the decode loop joins after the draft: ~24 ms every
@@ -10372,32 +10386,38 @@ int main(int argc, char** argv) {
                 // stdin's lock, which getline holds while it waits for input - an engine ending on an error (every
                 // std::exit) would hang in exit() on Linux, and the server would wait for it forever
                 std::string l, buf;
-                char chunk[4096];
-                auto getline_fd = [&](std::string& out) -> bool {
-                    for (;;) {
-                        const size_t nlpos = buf.find('\n');
-                        if (nlpos != std::string::npos) {
-                            out.assign(buf, 0, nlpos);
-                            buf.erase(0, nlpos + 1);
-                            return true;
+                try {
+                    char chunk[4096];
+                    auto getline_fd = [&](std::string& out) -> bool {
+                        for (;;) {
+                            const size_t nlpos = buf.find('\n');
+                            if (nlpos != std::string::npos) {
+                                out.assign(buf, 0, nlpos);
+                                buf.erase(0, nlpos + 1);
+                                return true;
+                            }
+                            const ssize_t n = ::read(0, chunk, sizeof chunk);
+                            if (n < 0 && errno == EINTR) continue;
+                            if (n <= 0) {
+                                if (buf.empty()) return false;
+                                out.swap(buf);
+                                buf.clear();
+                                return true;
+                            }
+                            buf.append(chunk, (size_t) n);
                         }
-                        const ssize_t n = ::read(0, chunk, sizeof chunk);
-                        if (n < 0 && errno == EINTR) continue;
-                        if (n <= 0) {
-                            if (buf.empty()) return false;
-                            out.swap(buf);
-                            buf.clear();
-                            return true;
-                        }
-                        buf.append(chunk, (size_t) n);
+                    };
+                    while (getline_fd(l)) {
+                        if (!l.empty() && l.back() == '\r') l.pop_back();
+                        if (l == "STOP") { st->stop_req.store(true); continue; }
+                        std::lock_guard<std::mutex> lk(st->mu);
+                        st->lines.push_back(l);
+                        st->cv.notify_one();
                     }
-                };
-                while (getline_fd(l)) {
-                    if (!l.empty() && l.back() == '\r') l.pop_back();
-                    if (l == "STOP") { st->stop_req.store(true); continue; }
-                    std::lock_guard<std::mutex> lk(st->mu);
-                    st->lines.push_back(l);
-                    st->cv.notify_one();
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "strata serve: the stdin reader stopped (%s); ending the engine\n", e.what());
+                } catch (...) {
+                    std::fprintf(stderr, "strata serve: the stdin reader stopped; ending the engine\n");
                 }
                 std::lock_guard<std::mutex> lk(st->mu);
                 st->eof = true;
@@ -11061,7 +11081,7 @@ int main(int argc, char** argv) {
             } adapt_run;
             if (!drive.d.usage.empty() && !ajob && !in_prompt_read && (++ba_window % o.adapt_every) == 0 && pending.empty()) {
                 try {
-                    adapt_run.th = std::thread([&] { adapt_run.ok = adapt(); });
+                    adapt_run.th = std::thread([&] { adapt_run.ok = adapt_safely(); });
                 } catch (const std::exception& e) {
                     static bool said = false;
                     if (!said) std::fprintf(stderr, "strata batch: adaptive refill thread did not start (%s); this round is skipped\n",
@@ -14114,7 +14134,7 @@ int main(int argc, char** argv) {
                             pl_adapt_thr = std::thread([&] {
                                 strata::platform::name_this_thread("strata-adapt");
                                 strata::aux_cpus::pin_current_thread();
-                                pl_adapt_ok = adapt();
+                                pl_adapt_ok = adapt_safely();
                                 pl_adapt_done = true;
                             });
                         } catch (const std::exception& e) {
@@ -14815,7 +14835,7 @@ int main(int argc, char** argv) {
                         adapt_thr = std::thread([&] {
                             strata::platform::name_this_thread("strata-adapt");
                             strata::aux_cpus::pin_current_thread();
-                            adapt_ok = adapt();
+                            adapt_ok = adapt_safely();
                         });
                     } catch (const std::exception& e) {
                         static bool said = false;
@@ -16178,6 +16198,16 @@ int main(int argc, char** argv) {
             ms_adapt += std::chrono::duration<double, std::milli>(Clock::now() - ta).count();
             return true;
         };
+        auto adapt_safely = [&]() -> bool {
+            try {
+                return adapt();
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "strata generate: the adaptive refill failed: %s\n", e.what());
+            } catch (...) {
+                std::fprintf(stderr, "strata generate: the adaptive refill failed\n");
+            }
+            return false;
+        };
         int64_t p = spec_pos;
         int32_t x = (int32_t) tok;
         std::vector<int32_t> drafts((size_t) o.spec, 0);
@@ -16476,7 +16506,7 @@ int main(int argc, char** argv) {
                     adapt_thr = std::thread([&] {
                         strata::platform::name_this_thread("strata-adapt");
                         strata::aux_cpus::pin_current_thread();
-                        adapt_ok = adapt();
+                        adapt_ok = adapt_safely();
                     });
                 } catch (const std::exception& e) {
                     static bool said = false;

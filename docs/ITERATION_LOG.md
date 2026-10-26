@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-65 · generate 线程体异常转成受控失败
+
+- 目标 / 指标：adaptive helper、stdin reader 和 checksum helper 的线程体即使发生分配或内部异常，也不能触发
+  `std::terminate()`；自适应失败沿既有错误返回，stdin 失败发布 EOF，checksum 诊断保留“READ-BACK FAILED”状态。
+- 假设与预期：此前只处理了线程构造失败。线程内 `adapt()`、队列 `push_back`、checksum buffer `resize` 仍可能抛出，
+  detached thread 或普通 thread 上的未捕获异常会结束整个进程；checksum 的部分 worker 也可能留下未处理槽。
+- 为什么选这条路线：三类工作都有明确降级结果。`adapt_safely()` 把异常变成 false，由现有 join 后检查结束请求；stdin
+  reader 捕获后统一发布 `eof`；checksum 捕获后停止该 worker、保留共享工作队列给其他 worker/调用线程完成，并标记读回失败。
+- 改动与实验：两条 generate/serve serial adaptive 作用域各新增异常边界并替换所有 helper 调用；stdin 的读/队列操作放入
+  异常边界并始终在退出前发布 EOF；cache checksum per-worker 循环捕获全部异常。
+- 结果：`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；跳过该配置原有的未使用变量
+  告警）。`git diff --check` 通过。未运行真实 adaptive copy、stdin 队列 OOM、checksum read-back、CUDA sm_75 或 RTX 2080 Ti。
+- 判决：采纳。可选自适应/诊断异常不再终止引擎，必需 stdin 异常变成可诊断的干净退出。
+- 生产状态与回滚：未改成功路径的 adaptive 决策、stdin 字节、checksum 顺序或 GPU 调度；单提交可回退。
+- 学到什么：线程构造与线程体是两个异常边界；detached 线程尤其必须在线程体内部捕获所有异常。
+- 下一步与理由：等待完整 Python 回归并重试远端推送，之后更新状态与未验证风险。
+
 ## I-20261027-64 · 区分 spawn 失败与启动线程失败的日志所有权
 
 - 目标 / 指标：缺失/不可执行的引擎程序失败时保留 `eng.log.closed` 供调用方确认句柄归还；narrator、echo、READY reader、
