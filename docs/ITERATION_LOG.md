@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-140 · Prefill 主路径在设备切换失败时停止
+
+- 目标 / 指标：初始化、运行、draft 与清理只能在该 stage 的 device 上下文中操作资源；切卡失败时必须保留资源并
+  返回失败，而不是把 CUDA 调用送到当前卡。
+- 假设与预期：`init()` 忽略记录 device 的失败，`run_impl()`、`draft_kv()`、`reserve_uploads()`、`clear_taps()`、
+  `release()` 忽略 `OnDevice.ok`；失败后可能创建、同步或销毁错误卡上的对象，并覆盖唯一指针造成泄漏。
+- 改动与实验：入口与清理在 `OnDevice.ok == false` 时停止；`PeTimer` 与 `HelpScope` 也只在成功进入所属卡后
+  销毁/同步。`HelpScope` 仍换回指针所有权，避免帮助对象悬空。
+- 判决：采纳。设备上下文不可获得时宁可保留资源并报错，也不在错误的 CUDA context 中继续。
+- 生产状态与回滚：适用于所有 Prefill 路径；成功路径不变，单提交可回退。
+- 未验证：当前无 CUDA Toolkit/双 GPU，无法注入 stage/peer 切换失败；Clang 主机侧 CUDA 声明兼容语法构建、
+  `prefill_plan_test`、`share_rules_test`、`on_device_test` 与 Terminal 回归通过。
+- 下一步与理由：完成本阶段验证后只做最终检查。
+
 ## I-20261027-139 · Residency patch 与整表回退检查每张目标卡
 
 - 目标 / 指标：`res_pairs_alloc()` 只有在每个目标 device 都成为当前上下文并映射到同一 host 地址时，才能启用

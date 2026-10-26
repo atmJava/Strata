@@ -1067,6 +1067,7 @@ Prefill::~Prefill() {
 
 void Prefill::clear_taps() {
     const core::OnDevice on_device(impl_ ? impl_->device : -1);
+    if (!on_device.ok) return;   // retain the tap allocation until its owning device can be entered
     if (tap_dev_ != nullptr) {
         cudaFree(tap_dev_);
         tap_dev_ = nullptr;
@@ -1084,6 +1085,7 @@ void Prefill::reset() {
 void Prefill::release() {
     if (!impl_) return;
     const core::OnDevice on_device(impl_->device);
+    if (!on_device.ok) return;   // retain device objects; the caller can retry while the implementation still exists
     impl_->hand_worker.reset();   // idle here (run drains the chain before it returns); joins its thread
     if (impl_->cs) cudaStreamSynchronize(impl_->cs);
     if (impl_->copy) cudaStreamSynchronize(impl_->copy);
@@ -1264,7 +1266,11 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
                 return false;
             }
     }
-    cudaGetDevice(&m.device);
+    const cudaError_t current = cudaGetDevice(&m.device);
+    if (current != cudaSuccess) {
+        err = std::string("prefill: cannot read the stage's CUDA device: ") + cudaGetErrorString(current);
+        return false;
+    }
     if (stage_le_ < 0) stage_le_ = g.n_layers;
     if (stage_lb_ < 0 || stage_lb_ >= stage_le_ || stage_le_ > g.n_layers || (stage_le_ < g.n_layers) != (next_ != nullptr)) {
         err = "prefill: the stage's layer range is wrong";
@@ -1566,6 +1572,11 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
                        std::string& err, const char** why) {
     Impl& m = *impl_;
     const core::OnDevice on_device(m.device);   // the stage's own GPU current (a layer split's drafter: the last stage)
+    if (!on_device.ok) {
+        err = std::string("prefill: cannot enter CUDA") + std::to_string(m.device) + " for the drafter: " +
+              cudaGetErrorString(on_device.error);
+        return false;
+    }
     auto decline = [&](const char* reason) { if (why != nullptr) *why = reason; return false; };
     static const bool off = [] { const char* v = std::getenv("STRATA_MTP_BATCH"); return v != nullptr && v[0] == '0'; }();
     // A ring (KV streaming: the drafter's window, page p in slot p % n_slots over a host copy) takes the same appends
@@ -2425,12 +2436,9 @@ struct PeTimer {
         used = 1;
     }
     ~PeTimer() {
-        if (dev < 0) return;
-        int prev = 0;
-        cudaGetDevice(&prev);
-        cudaSetDevice(dev);
+        const core::OnDevice on(dev);
+        if (!on.ok) return;   // profiling events must not be destroyed in another device's context
         for (cudaEvent_t e : ev) cudaEventDestroy(e);
-        cudaSetDevice(prev);
     }
 };
 }  // namespace
@@ -2442,6 +2450,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     const bool forced_single = force_single_, forced_planned = force_planned_;
     Impl& m = *impl_;
     const core::OnDevice on_device(m.device);
+    if (!on_device.ok) {
+        err = std::string("prefill: cannot enter CUDA") + std::to_string(m.device) + ": " +
+              cudaGetErrorString(on_device.error);
+        return false;
+    }
     const core::ModelGeometry& g = *m.g;
     core::SessionState& ss = *m.ss;
     const auto t_start = Clock::now();
@@ -2501,9 +2514,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         ~HelpScope() {
             if (!on) return;
             const core::OnDevice d(m.pp->dev);   // its work is done before the stage hands over; settle its streams
-            cudaStreamSynchronize(m.pp->s_cp);
-            cudaStreamSynchronize(m.pp->s_out);
-            cudaStreamSynchronize(m.pp->s);
+            if (d.ok) {
+                cudaStreamSynchronize(m.pp->s_cp);
+                cudaStreamSynchronize(m.pp->s_out);
+                cudaStreamSynchronize(m.pp->s);
+            }
             std::swap(m.pp, m.help_pp);
         }
     } help_scope{m, helped};
@@ -4803,6 +4818,7 @@ bool Prefill::reserve_uploads(int64_t T) {
     if (impl_ != nullptr && T > 0) {
         Impl& m = *impl_;
         const core::OnDevice on_device(m.device);   // (the ring is the device's that is current at its first use)
+        if (!on_device.ok) return false;
         // a text chunk's largest pageable uploads through the ring: the routing tables (and their ids down, T x K
         // each); the PLE rows when they could not be pinned (T x N).  A picture's rows are not covered.
         size_t bytes = (size_t) (T * K) * sizeof(int32_t);
