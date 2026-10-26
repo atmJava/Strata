@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-42 · batch slot 释放线程失败不泄漏服务容量
+
+- 目标 / 指标：消费者提前离开后，释放线程必须先完成 `BSTOP`/`BDONE` 所有权收敛；若系统拒绝新线程，slot 仍应最终恢复为
+  可调度状态。BGEN 被引擎拒绝后用于延迟归还 slot 的 Timer 创建失败，也不能把异常抛给请求或永久占用 slot。
+- 假设与预期：`_release_slot_when_done()` 先登记 `slot_releasing` 再启动线程。线程创建失败会留下 busy+releasing，而 orphan
+  reaper 明确跳过 releasing，后续请求永久少一个 slot。`_park_slot()` 的 Timer 失败则会让当前请求异常，但 orphan reaper 可在
+  `ORPHAN_SLOT_S` 后恢复。
+- 为什么选这条路线：两处都在 batch 并发主路径，fake engine/queue 可确定复现，不依赖 GPU；正常成功路径仍由后台线程或 Timer
+  完成，队列清理与缓存记账不变。
+- 改动与实验：释放线程启动失败时在已经结束响应的请求线程执行同一有界 `BDONE` 等待；Timer 启动失败只记录诊断，保留无主 busy
+  标记交给 orphan reaper。新增队列预置 BDONE 的同步清理断言和 Timer 失败的 reaper 恢复断言。
+- 结果：`serve/test_parallel.py` 为 `24 passed`；相关文件 `py_compile` 与 `git diff --check` 通过。
+- 判决：采纳。线程配额耗尽可以降低并发释放的及时性，但不能永久泄漏 slot 或把可恢复的 BGEN 拒绝变成 500。
+- 生产状态与回滚：未改正常 BDONE 缓存、slot 选择、BGEN 重试或 Timer 延迟；单提交可回退。未在真实引擎长卡死、线程配额耗尽、
+  CUDA sm_75 双卡并发或真实 Qwen 批处理上运行。
+- 学到什么：busy/releasing 这类互斥所有权状态必须在任何线程启动异常后仍有确定的收敛路径。
+- 下一步与理由：继续审查“登记状态后才启动辅助线程/Timer”的其他位置，并跑并发回归。
+
 ## I-20261027-41 · 周期性空闲任务与浏览器线程失败不中止服务
 
 - 目标 / 指标：服务已经绑定 HTTP 端口后，空闲模型卸载、弹性视觉编码器回收或自动打开浏览器的后台线程若无法创建，服务仍应

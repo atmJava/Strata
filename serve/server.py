@@ -1641,7 +1641,14 @@ class StrataEngine:
                 busy[slot] = False
                 releasing.discard(slot)
                 self.slot_cv.notify_all()
-        threading.Thread(target=wait, daemon=True).start()
+        try:
+            threading.Thread(target=wait, daemon=True).start()
+        except RuntimeError as exc:
+            # Keep the slot's ownership transition correct when the OS
+            # refuses another thread. The response is already ending, so
+            # finish the bounded BDONE wait on this request thread.
+            print(f"[strata] batch slot release worker did not start ({exc}); waiting here", flush=True)
+            wait()
 
     BGEN_REFUSALS_MAX = 6    # #1994: how often one request tries another slot after the engine refused a BGEN
     SLOT_PARK_S = 2.0        # ... and how long a refused slot stays out of the picks
@@ -1661,7 +1668,12 @@ class StrataEngine:
                 self.slot_cv.notify_all()
         t = threading.Timer(self.SLOT_PARK_S, free)
         t.daemon = True
-        t.start()
+        try:
+            t.start()
+        except RuntimeError as exc:
+            # The slot remains ownerless-but-busy: _reap_orphan_slots gives
+            # it back after ORPHAN_SLOT_S instead of failing the request.
+            print(f"[strata] could not park a refused batch slot ({exc})", flush=True)
 
     ORPHAN_SLOT_S = 3.0   # #1603: a busy flag nobody owns this long is a leak and is given back
 

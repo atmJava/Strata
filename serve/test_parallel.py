@@ -5,6 +5,7 @@ real StrataEngine and Service, so the server's side is tested without a GPU: req
 wait for a slot, /metrics shows the slots, each request's history row is its own, and a conversation's next turn
 goes back to the slot that holds it."""
 import json
+import queue
 import sys
 import tempfile
 import threading
@@ -246,6 +247,7 @@ class PickSlot(unittest.TestCase):
         e.slot_used = [0.0] * n
         e.slot_live = [None] * n
         e.slot_group = [0] * n
+        e._orphan_seen = {}
         return e
 
     def test_the_slot_that_holds_the_conversation(self):
@@ -314,6 +316,35 @@ class PickSlot(unittest.TestCase):
         self.assertEqual(v[0]["state"], "decoding")
         self.assertEqual(v[0]["generated"], 4)
         self.assertEqual(v[1], {"slot": 1, "state": "idle", "held_tokens": 2})
+
+    def test_slot_release_thread_failure_finishes_the_bounded_wait(self):
+        e = self.engine(1)
+        e.slot_q = [queue.Queue()]
+        e.slot_releasing = set()
+        e.slot_cv = threading.Condition()
+        e._send = lambda _line: None
+        e.slot_q[0].put("BDONE 0 1 stop 1.0")
+        with mock.patch.object(threading.Thread, "start",
+                               side_effect=RuntimeError("thread limit")):
+            e._release_slot_when_done(0, [1, 2, 3])
+        self.assertEqual(e.slot_busy, [False])
+        self.assertEqual(e.slot_releasing, set())
+        self.assertEqual(e.slot_held, [[1, 2]])
+
+    def test_slot_park_timer_failure_is_recovered_by_orphan_reaper(self):
+        e = self.engine(1)
+        e.slot_claims = {0}
+        e.slot_releasing = set()
+        e.slot_cv = threading.Condition()
+        with mock.patch.object(threading.Timer, "start",
+                               side_effect=RuntimeError("thread limit")):
+            e._park_slot(0)
+        self.assertTrue(e.slot_busy[0])
+        self.assertNotIn(0, e.slot_claims)
+        e.ORPHAN_SLOT_S = 0
+        with e.slot_cv:
+            self.assertEqual(e._reap_orphan_slots(), [0])
+        self.assertFalse(e.slot_busy[0])
 
 
 class FakeEngineCase(unittest.TestCase):
