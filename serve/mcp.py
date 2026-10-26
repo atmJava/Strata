@@ -84,6 +84,8 @@ class StdioTransport:
     def __init__(self, name: str, cfg: dict):
         self.name, self.cfg = name, cfg
         self.proc = None
+        self.ended = False
+        self.lifecycle = threading.Lock()               # publishing proc and closing it are one ownership handoff
         self.lock = threading.Lock()                    # the pending requests
         self.write_lock = threading.Lock()              # stdin; separate, so a full pipe can't block the reader
         self.pending: dict[int, _Slot] = {}
@@ -97,9 +99,12 @@ class StdioTransport:
         command = str(self.cfg["command"])
         exe = shutil.which(command, path=env.get("PATH")) or command
         try:
-            self.proc = lifeline.popen([exe, *[str(a) for a in self.cfg.get("args") or []]], "mcp", stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.cfg.get("cwd") or None,
-                                       env=env, start_new_session=True)
+            with self.lifecycle:
+                if self.ended:
+                    raise McpError("the MCP server is closed")
+                self.proc = lifeline.popen([exe, *[str(a) for a in self.cfg.get("args") or []]], "mcp",
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           cwd=self.cfg.get("cwd") or None, env=env, start_new_session=True)
         except OSError as e:
             raise McpError(f"could not start {command!r}: {e}") from None
         self._err_reader = threading.Thread(
@@ -118,7 +123,7 @@ class StdioTransport:
             raise McpError(f"could not start {command!r} readers: {exc}") from None
 
     def alive(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None and not getattr(self, "ended", False)
+        return self.proc is not None and self.proc.poll() is None and not self.ended
 
     @staticmethod
     def _lines(f):
@@ -216,10 +221,11 @@ class StdioTransport:
 
     def close(self):
         """As the spec says: close its stdin, give it a moment to exit, then end it (and what it started)."""
-        p = self.proc
+        with self.lifecycle:
+            self.ended = True
+            p = self.proc
         if p is None:
             return
-        self.ended = True
         try:
             p.stdin.close()
         except (OSError, ValueError):
@@ -372,13 +378,23 @@ class HttpTransport:
             rid = self.next_id
         slot = _Slot()
         # the POST runs on its own thread so the stop button and the deadline are noticed while it waits
-        threading.Thread(target=self._post, args=({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
-                                                  rid, timeout + 5, slot), daemon=True).start()
+        worker = threading.Thread(target=self._post,
+                                  args=({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
+                                        rid, timeout + 5, slot), daemon=True)
+        try:
+            worker.start()
+        except BaseException as exc:
+            raise McpError(f"could not start the HTTP request: {exc}") from None
         try:
             return _wait(slot, timeout, cancel, method)
         except (McpTimeout, McpCancelled) as e:
-            threading.Thread(target=self._quiet_notify, args=("notifications/cancelled",
-                                                              {"requestId": rid, "reason": str(e)}), daemon=True).start()
+            # Cancellation is best effort. A second thread-start failure must not replace the timeout or Stop result.
+            try:
+                threading.Thread(target=self._quiet_notify, args=("notifications/cancelled",
+                                                                  {"requestId": rid, "reason": str(e)}),
+                                 daemon=True).start()
+            except BaseException:
+                pass
             raise
 
     def _quiet_notify(self, method, params):

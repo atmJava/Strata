@@ -75,6 +75,16 @@ class StartupCleanup(unittest.TestCase):
         self.assertFalse(transport._err_reader.is_alive())
         self.assertIsNone(transport._read_thread.ident)
 
+    def test_stdio_start_after_close_does_not_create_a_child(self):
+        from serve import mcp
+
+        transport = mcp.StdioTransport("fake", stdio())
+        transport.close()
+        with mock.patch.object(mcp.lifeline, "popen") as popen:
+            with self.assertRaisesRegex(mcp.McpError, "closed"):
+                transport.start()
+        popen.assert_not_called()
+
     def test_hub_start_failure_closes_started_servers_and_skips_unstarted_joins(self):
         from serve import mcp
         entered, released = threading.Event(), threading.Event()
@@ -145,6 +155,33 @@ class StartupCleanup(unittest.TestCase):
             with self.assertRaisesRegex(mcp.McpError, "HTTP 500 bad: detail"):
                 transport._post({"jsonrpc": "2.0", "method": "ping"}, None, 5, None)
         error.close.assert_called_once_with()
+
+    def test_http_request_thread_start_failure_is_an_mcp_error(self):
+        from serve import mcp
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        with mock.patch.object(mcp.threading.Thread, "start", side_effect=RuntimeError("thread limit")):
+            with self.assertRaisesRegex(mcp.McpError, "could not start the HTTP request: thread limit"):
+                transport.request("ping", {}, 5)
+
+    def test_cancel_thread_start_failure_keeps_the_original_timeout(self):
+        from serve import mcp
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        real_start = threading.Thread.start
+        calls = 0
+
+        def fail_second(thread):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("thread limit")
+            return real_start(thread)
+
+        with mock.patch.object(transport, "_post"), \
+                mock.patch.object(mcp.threading.Thread, "start", fail_second):
+            with self.assertRaisesRegex(mcp.McpTimeout, "ping timed out"):
+                transport.request("ping", {}, 0.01)
 
 
 class ScriptedEngine(MockEngine):

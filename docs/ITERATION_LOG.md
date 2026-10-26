@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-31 · MCP 传输线程启动失败与关闭/启动竞争
+
+- 目标 / 指标：MCP HTTP 请求线程无法创建时必须返回统一的 `McpError`；超时后取消通知线程再失败不能覆盖原始超时；
+  stdio 传输关闭后或关闭与启动交错时，不得继续发布一个无人拥有的子进程。
+- 假设与预期：`HttpTransport.request()` 直接调用 `Thread.start()`，线程资源耗尽时会让 `RuntimeError` 穿出工具循环；
+  取消通知是尽力而为，却可能用第二个线程启动异常替换 `McpTimeout`/`McpCancelled`。stdio `start()` 原先先检查加锁外的
+  `proc`，`close()` 查不到进程就返回，随后启动仍可发布子进程。
+- 为什么选这条路线：三个分支都可用线程启动故障和关闭后启动精确复现，不需要 MCP SDK、网络或模型；修复不改变协议消息、
+  超时值或工具结果文本。
+- 改动与实验：HTTP 请求线程启动失败归一化为 `McpError`；取消通知线程启动失败被隔离，原始超时/停止结果继续抛出。
+  stdio 增加生命周期锁，进程发布与关闭读取位于同一所有权切换；`ended` 在构造时定义，关闭后的启动在 `popen` 前失败。
+  新增 HTTP 首次/第二次线程启动失败和关闭后 stdio 启动三项测试。
+- 结果：`serve/test_mcp.py` 为 `34 passed / 8 subtests`；服务端相关套件
+  `serve/test_server.py serve/test_images.py serve/test_lifeline.py serve/test_mcp.py` 为 `406 passed / 530 subtests`；
+  `compileall` 与 `git diff --check` 通过。
+- 判决：采纳。MCP 传输在本地线程资源耗尽和关闭竞争下保持明确错误与单一进程所有权，尽力通知不再改变主调用判决。
+- 生产状态与回滚：未改服务配置或正常协议路径；单提交可回退。未运行真实 MCP 市场包、企业网络代理或操作系统线程配额耗尽。
+- 学到什么：附属线程启动也是启动事务的一部分；但附属通知失败不能覆盖主操作已经形成的超时/取消结果。
+- 下一步与理由：继续检查 HTTP 请求在超时后的连接回收，以及产品入口中未关闭的配置文件/响应对象。
+
 ## I-20261027-30 · strata_bench 的 HTTPError 正文读取后关闭
 
 - 目标 / 指标：流式基准请求收到 4xx/5xx 时，保留 `HTTP <code>: <body>` 错误文本，并在返回结果前关闭
