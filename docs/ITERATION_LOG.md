@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-18 · 子进程所有权记录与 reaper 线程失败保持同一回收边界
+
+- 目标 / 指标：`lifeline.popen()` 已创建 child 后，若所有权记录失败或 reaper 线程无法启动，正常推理启动不得失败；
+  child 仍须进入统一退出清理。`end_children()` 还要清理已结束 child 的记录，并在 SIGTERM 超时、SIGKILL 后再次有界
+  wait，不能只发信号就返回。
+- 假设与预期：旧实现把记录写入和 reaper 线程启动放在同一个静默 `try` 中。线程启动失败时 child 虽未必失活，但没有
+  owner 关联，无法安全删除其记录；`end_children()` kill 后立即返回也可能留下尚未被 wait 的进程资源。
+- 为什么选这条路线：child 是否可关闭、记录是否可删除和线程启动是否成功可以独立验证；故障注入无需 GPU。
+- 改动与实验：维护 child 到 record token 的 owner 映射；reaper 成功、下一次 `popen()` 或 `end_children()` 都可回收已结束
+  child。record 写入与线程启动分别 best-effort，失败不影响返回的可用 child。`end_children()` 先清理已结束项，
+  SIGTERM 超时后 SIGKILL 并额外 `wait(1s)`，最后只删除已验证 token 的记录。新增 reaper 启动失败和忽略 SIGTERM
+  的 child 测试。
+- 结果：`serve/test_lifeline.py serve/test_images.py` 合计 `31 passed / 20 subtests`；`compileall` 与
+  `git diff --check` 通过。
+- 判决：采纳。进程跟踪不再依赖 reaper 线程一定创建成功，退出路径在 kill 后完成有界回收。
+- 生产状态与回滚：未改生产；正常 child 启动、PDEATHSIG 和记录格式不变，单提交可回退。未验证真实引擎和 GPU。
+- 学到什么：best-effort 的附属记录不能成为进程回收的唯一索引；主跟踪表和记录 token 必须分开维护。
+- 下一步与理由：继续审查 `serve/server.py::StrataEngine` 在日志、READY 与 stdout pump 线程部分启动失败时的回滚。
+
 ## I-20261027-17 · 图片任务的读线程、子进程和临时目录统一收尾
 
 - 目标 / 指标：`sd-cli` 创建成功后，读线程启动失败、进程不退出或 kill 后仍等待超时时，必须终止并等待子进程、

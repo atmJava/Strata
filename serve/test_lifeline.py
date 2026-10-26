@@ -12,9 +12,11 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -122,6 +124,49 @@ class Lifeline(unittest.TestCase):
         self.assertEqual(data["token"], procs.start_token(info["child"]))
         self.hard_kill(proc)
         self.assertTrue(self.wait_gone(info["child"]))
+
+    def test_a_reaper_thread_failure_keeps_the_child_in_the_shutdown_path(self):
+        from serve import lifeline
+
+        real_start = threading.Thread.start
+
+        def start(thread):
+            if thread.name == "strata-lifeline-reaper":
+                raise RuntimeError("no reaper thread")
+            return real_start(thread)
+
+        with mock.patch.object(threading.Thread, "start", autospec=True, side_effect=start), \
+                mock.patch.dict(os.environ, self.env):
+            child = lifeline.popen([sys.executable, "-c", "import time; time.sleep(600)"], "engine")
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.assertIn(child, lifeline._children)
+        record = Path(self.temp.name) / "strata" / "procs" / f"{child.pid}.json"
+        self.assertTrue(record.is_file())
+
+        with mock.patch.dict(os.environ, self.env):
+            lifeline.end_children(grace=1)
+        self.assertIsNotNone(child.poll())
+        self.assertNotIn(child, lifeline._children)
+        self.assertFalse(record.exists())
+
+    def test_end_children_waits_after_killing_a_child_that_ignores_sigterm(self):
+        from serve import lifeline
+
+        child = subprocess.Popen([
+            sys.executable, "-c",
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(600)",
+        ], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.addCleanup(child.stdout.close)
+        self.assertEqual(child.stdout.readline(), "ready\n")
+        with lifeline._children_lock:
+            lifeline._children.add(child)
+            lifeline._child_tokens[child] = None
+
+        lifeline.end_children(grace=0.1)
+        self.assertIsNotNone(child.poll())
+        self.assertNotIn(child, lifeline._children)
 
 
 if __name__ == "__main__":

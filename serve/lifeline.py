@@ -91,10 +91,28 @@ def mechanism() -> str:
 
 
 _children: set[subprocess.Popen] = set()
+_child_tokens: dict[subprocess.Popen, str | None] = {}
 _children_lock = threading.Lock()
 
 
+def _forget_child(child: subprocess.Popen) -> None:
+    """Forget one reaped child under the same lock, then remove only its ownership record."""
+    with _children_lock:
+        token = _child_tokens.pop(child, None)
+        _children.discard(child)
+    if token is not None:
+        procs.drop_record(child.pid, token)
+
+
+def _forget_finished() -> None:
+    with _children_lock:
+        finished = [child for child in _children if child.poll() is not None]
+    for child in finished:
+        _forget_child(child)
+
+
 def end_children(grace: float = 3.0) -> None:
+    _forget_finished()
     with _children_lock:
         alive = [child for child in _children if child.poll() is None]
     for child in alive:
@@ -111,17 +129,23 @@ def end_children(grace: float = 3.0) -> None:
                 child.kill()
             except OSError:
                 pass
+            try:
+                child.wait(timeout=1.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+    _forget_finished()
 
 
 atexit.register(end_children)
 
 
-def _after_exit(child: subprocess.Popen, token: str | None) -> None:
-    child.wait()
-    with _children_lock:
-        _children.discard(child)
-    if token is not None:
-        procs.drop_record(child.pid, token)
+def _after_exit(child: subprocess.Popen) -> None:
+    try:
+        child.wait()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if child.poll() is not None:
+        _forget_child(child)
 
 
 ISOLATED_ROLES = ("engine", "vision")
@@ -138,24 +162,30 @@ def _own_group(then=None):
 
 def popen(args, role: str = "engine", **kw) -> subprocess.Popen:
     """Start a child that cannot outlive this server."""
+    _forget_finished()
     isolate = role in ISOLATED_ROLES
     if isolate and "start_new_session" not in kw:
         kw["preexec_fn"] = _own_group(kw.pop("preexec_fn", None))
     parent, then = os.getpid(), kw.pop("preexec_fn", None)
     kw["preexec_fn"] = _die_with_parent(parent, then)
     child = _the_anchor().call(lambda: subprocess.Popen(args, **kw))
-    if isinstance(child, _REAL_POPEN):
-        with _children_lock:
-            _children.add(child)
+    token = None
     try:
         token = procs.write_record(
             child.pid,
             role,
             profile=os.environ.get("STRATA_RUNTIME_PROFILE") or None,
         )
+    except Exception:  # noqa: BLE001 - ownership records are best-effort
+        pass
+    if isinstance(child, _REAL_POPEN):
+        with _children_lock:
+            _children.add(child)
+            _child_tokens[child] = token
+    try:
         threading.Thread(
             target=_after_exit,
-            args=(child, token),
+            args=(child,),
             name="strata-lifeline-reaper",
             daemon=True,
         ).start()
