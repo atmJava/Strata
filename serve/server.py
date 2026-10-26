@@ -5601,15 +5601,22 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
                 except McpCancelled:
                     box["cancelled"] = True
             worker = threading.Thread(target=work, daemon=True)
-            worker.start()
             try:
-                while worker.is_alive():
-                    worker.join(1.0)
-                    if worker.is_alive():
-                        yield "ping", None
-            except GeneratorExit:
-                cancel.set()                             # the client is gone: stop the tool too
-                raise
+                worker.start()
+            except BaseException:
+                # The worker exists only to keep the response stream alive while a slow tool runs. If the OS cannot
+                # create it, run the same call here: losing heartbeats is better than skipping the tool or failing
+                # an otherwise valid answer.
+                work()
+            else:
+                try:
+                    while worker.is_alive():
+                        worker.join(1.0)
+                        if worker.is_alive():
+                            yield "ping", None
+                except GeneratorExit:
+                    cancel.set()                         # the client is gone: stop the tool too
+                    raise
             if "r" not in box:
                 break
             r = box["r"]
@@ -6123,7 +6130,15 @@ def make_handler(svc: Service):
                         svc.note_client_disconnect(cancel)
                         return
 
-            threading.Thread(target=watch, daemon=True, name="strata-client-watch").start()
+            try:
+                threading.Thread(target=watch, daemon=True, name="strata-client-watch").start()
+            except BaseException as e:
+                # Disconnect detection is an optimisation. Keep serving when the OS refuses another thread; the
+                # request still ends on its normal completion, timeout, or generation cancel path.
+                self.watch_done = None
+                with svc.status_lock:
+                    svc.active_cancels.discard(cancel)
+                print(f"[strata] client disconnect watcher did not start ({e}); the request continues", flush=True)
 
         def _note(self, **values):
             """#332: what the monitor shows about this request (nothing when the monitor is off)."""
@@ -7756,11 +7771,7 @@ def start_replicas(cfg: dict, groups: list[list[int]], exe: str, effort_end: lis
         for i in range(n):
             one(i)
     else:
-        ts = [threading.Thread(target=one, args=(i,)) for i in range(n)]
-        for t in ts:
-            t.start()
-        for t in ts:
-            t.join()
+        rp._run_together(lambda i=i: one(i) for i in range(n))
     if errors:
         for e in engines:
             if e is not None:

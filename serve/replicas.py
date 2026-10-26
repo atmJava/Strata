@@ -39,6 +39,26 @@ class ReplicaConfigError(ValueError):
     pass
 
 
+def _run_together(callbacks) -> None:
+    """Run callbacks concurrently; if the OS refuses another thread, finish the not-started work serially."""
+    callbacks = list(callbacks)
+    threads = []
+    for at, callback in enumerate(callbacks):
+        thread = threading.Thread(target=callback, daemon=True)
+        try:
+            thread.start()
+        except BaseException as e:                   # noqa: BLE001 - thread creation is an optimisation here
+            print(f"[strata] could not start a replica worker ({e}); continuing serially", flush=True)
+            for running in threads:
+                running.join()
+            for remaining in callbacks[at:]:
+                remaining()
+            return
+        threads.append(thread)
+    for thread in threads:
+        thread.join()
+
+
 def gpu_groups(cfg: dict) -> list[list[int]]:
     """The cards of each replica, from the config's "replicas" (see the module doc); [] when there are none or one."""
     spec = cfg.get("replicas")
@@ -313,11 +333,7 @@ class ReplicaEngine:
                 self.router.forget(k)
             except BaseException as e:           # noqa: BLE001
                 errors[k] = e
-        ts = [threading.Thread(target=one, args=(k,), daemon=True) for k in dead]
-        for t in ts:
-            t.start()
-        for t in ts:
-            t.join()
+        _run_together(lambda k=k: one(k) for k in dead)
         if errors and not self.alive():
             raise next(iter(errors.values()))
         for k, e in errors.items():
@@ -377,7 +393,12 @@ class ReplicaEngine:
                     print(f"[strata] replica {k} did not start again: {x}", flush=True)
                 finally:
                     self.healing[k] = False
-            threading.Thread(target=run, daemon=True).start()
+            try:
+                threading.Thread(target=run, daemon=True).start()
+            except BaseException as e:               # noqa: BLE001 - another replica still serves
+                self.healing[k] = False
+                print(f"[strata] replica {k} could not start its healing thread ({e}); it will be retried later",
+                      flush=True)
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         # imported here: serve.server imports this module

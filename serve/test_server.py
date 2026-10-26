@@ -2029,6 +2029,35 @@ class ClientHangUp(unittest.TestCase):
         self.hang_up(True)
 
 
+class ClientWatchFallback(unittest.TestCase):
+    def test_a_watcher_thread_failure_does_not_fail_the_request(self):
+        from serve import server as server_module
+
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "</think>\n\nOK", max_context=CTX), tok,
+                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        real_start = threading.Thread.start
+
+        def fail_watcher(thread):
+            if thread.name == "strata-client-watch":
+                raise RuntimeError("thread limit")
+            return real_start(thread)
+
+        req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(
+            {"model": "m", "messages": [{"role": "user", "content": "hello"}]}).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with mock.patch.object(server_module.threading.Thread, "start", fail_watcher):
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("choices", json.load(response))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 class EngineDeath(unittest.TestCase):
     """Issue #27: a dead engine is an error (not "length"), and the next request starts it again."""
 

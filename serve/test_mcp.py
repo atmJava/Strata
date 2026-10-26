@@ -21,9 +21,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import mcp_fake_server as fake  # noqa: E402
-from serve.frontend import ChatTemplate  # noqa: E402
+from serve.frontend import ChatTemplate, Event, ToolCall  # noqa: E402
 from serve.mcp import McpCancelled, McpHub, hub_from_config  # noqa: E402
-from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
+from serve.server import ByteTokenizer, MockEngine, Service, run_with_mcp, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE = str(ROOT / "serve" / "mcp_fake_server.py")
@@ -445,6 +445,56 @@ class Closing(unittest.TestCase):
         self.assertTrue(slot.done.is_set())
         self.assertIsNone(slot.msg)
         self.assertEqual(str(slot.error), "the MCP server is closed")
+
+
+class ToolLoopFallback(unittest.TestCase):
+    def test_tool_runs_here_when_its_heartbeat_thread_cannot_start(self):
+        from serve import server as server_module
+
+        class Engine:
+            def __init__(self):
+                self.rounds = 0
+
+            def run(self, *_args, **_kwargs):
+                self.rounds += 1
+                if self.rounds == 1:
+                    yield "event", Event("tool_call", call=ToolCall("fake__echo", {"text": "hello"}))
+                else:
+                    yield "event", Event("content", "done")
+                yield "done", {"completion_tokens": 1, "finish": "stop"}
+
+            @staticmethod
+            def prepare(*_args, **_kwargs):
+                return [1], False, 4
+
+        class Hub:
+            settings = {"max_rounds": 1}
+            class Server:
+                name = "fake"
+
+            def __init__(self):
+                self.calls = []
+
+            @staticmethod
+            def routes():
+                return {"fake__echo": (Hub.Server(), "echo")}
+
+            def call(self, name, arguments, _cancel):
+                self.calls.append((name, arguments))
+                return {"ok": True, "text": "hello", "chars": 5, "truncated": False, "ms": 0}
+
+        svc, hub = Engine(), Hub()
+        with mock.patch.object(server_module.threading.Thread, "start",
+                               side_effect=RuntimeError("thread limit")):
+            events = list(run_with_mcp(svc, hub, [], [], {}, [1], False, 4, 4, {}, threading.Event(),
+                                       {"fake__echo"}))
+        self.assertEqual(hub.calls, [("fake__echo", {"text": "hello"})])
+        result = next(value for kind, value in events if kind == "mcp" and value.get("event") == "result")
+        self.assertEqual({key: result[key] for key in ("ok", "text", "chars", "truncated", "ms")},
+                         {"ok": True, "text": "hello", "chars": 5, "truncated": False, "ms": 0})
+        self.assertIsInstance(result["id"], str)
+        self.assertEqual(svc.rounds, 2)
+        self.assertEqual(events[-1][1]["finish"], "stop")
 
 
 # ------------------------------------------------------------------------------------------------ the tool loop

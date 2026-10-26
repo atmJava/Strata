@@ -83,6 +83,9 @@ class FakeEngine:
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         yield 7
 
+    def restart(self, tries=3):
+        self.up = True
+
 
 class RouteChoice(unittest.TestCase):
     def test_least_loaded_then_affinity(self):
@@ -154,6 +157,24 @@ class RouteChoice(unittest.TestCase):
         cancel._strata_replica_selected = selected.append
         self.assertEqual(list(engine.generate([1, 2], 1, {}, cancel)), [7])
         self.assertEqual(selected, [1])
+
+    def test_restart_falls_back_to_this_thread_when_workers_cannot_start(self):
+        a, b = FakeEngine(), FakeEngine()
+        a.up = b.up = False
+        engine = ReplicaEngine([a, b])
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("thread limit")):
+            engine.restart()
+        self.assertTrue(a.up and b.up)
+
+    def test_healing_thread_failure_leaves_the_other_replica_routing(self):
+        a, b = FakeEngine(), FakeEngine()
+        a.up = False
+        engine = ReplicaEngine([a, b])
+        engine.heal_at[0] = 0
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("thread limit")):
+            engine.heal()
+        self.assertFalse(engine.healing[0])
+        self.assertEqual(engine.route([1, 2, 3]), 1)
 
 
 class ReplicaService(unittest.TestCase):
