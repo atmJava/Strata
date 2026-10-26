@@ -3,6 +3,28 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-91 · Doorbell 初始化失败整体回滚
+
+- 目标 / 指标：`doorbell_init()` 为 embedding、token ids、routing weights、sequence 和 acknowledgement flag
+  建立五块 mapped-pinned 内存。任一 host 分配或 device alias 建立失败时，必须释放本轮已经取得的全部内存，
+  且不能向调用者发布半完成句柄或改变已有对象。
+- 假设与预期：旧实现逐字段直接写入调用者的 `Doorbell`。第一次 `cudaHostAlloc` 成功而
+  `cudaHostGetDevicePointer` 失败时，host 指针尚未进入返回对象；后续字段失败时，前面已发布的四块内存也不会
+  被调用者立即清理。尺寸乘法也没有独立的溢出边界。
+- 为什么选这条路线：把 Doorbell 生命周期从巨大的 `layer.cpp` 拆到独立实现。初始化先校验全部尺寸并计算总字节，
+  在局部 `replacement` 中逐块获取 host/device 视图；每块 mapping 失败立即释放当前 host 区，任一后续失败由
+  `doorbell_free(replacement)` 统一回滚，五块全部完成后才整体赋值给 `db`。已初始化对象拒绝再次初始化，避免
+  静默覆盖旧所有权。
+- 改动与实验：成功路径的五个区域大小、零初始化、mapped 标志、字段顺序和返回字节数不变。新增
+  `doorbell_transaction_test`，逐一让五次 host 分配和五次 device mapping 失败，检查调用者对象保持为空且每个
+  已取得区域恰好释放一次；另覆盖成功发布、零初始化、旧对象保护、重复初始化和非法尺寸。
+- 判决：采纳。Doorbell 初始化具备明确的事务边界，晚到失败不再泄漏未发布 pinned 内存。
+- 生产状态与回滚：未改 ring 写入、poll、reset、显存布局或 graph 捕获；单提交可回退。
+- 未验证：当前没有 CUDA 工具链、驱动或 RTX 2080 Ti，未让真实 `cudaHostGetDevicePointer` 在指定序号失败；
+  新测试用 link-wrap 验证控制流和释放次数，不能替代真实驱动的 pinned 内存统计。
+- 下一步与理由：继续检查 Session 初始化与 graph capture 的多资源早退路径，优先处理可由单个 owner 统一回滚
+  且能用主机侧故障注入覆盖的代码。
+
 ## I-20261027-90 · MTP prefill 记录缓冲事务式扩容
 
 - 目标 / 指标：`MtpDrafter` 的 prompt 输入记录缓冲在 `prepare_prefill`、`reserve_prefill` 和实际 `prefill`
