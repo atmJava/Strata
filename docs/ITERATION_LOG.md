@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-105 · Verifier 初始化检查必需 memset
+
+- 目标 / 指标：Verifier 的主 device arena 与 overlapped hand-off counter 是正确运行所需资源，`cudaMemset` 失败必须
+  终止 init。route-stats 与 profiler 是诊断资源，分配或清零失败必须释放并关闭，不能保留未初始化 device buffer。
+- 假设与预期：旧实现忽略 arena/hand-off memset 返回值，GPU 上未清零的重用状态可能污染首窗口；route-stats 在
+  allocation 成功后不检查 memset，profiler 也只检查 allocation，导致 `rs_on_/prof_on_` 与可读数据不一致。
+- 为什么选这条路线：必需 arena 和 counter 在 memset 失败时返回具体 init 错误，由现有对象析构释放已分配资源；诊断
+  buffer 使用 allocation+memset 联合成功条件，失败分支释放指针、清空状态并清除驱动错误，其他推理路径继续。成功
+  路径的 arena 布局、counter 内容、诊断开关和采样不变。
+- 改动与实验：`verify.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；
+  `python3 -m pytest tests/terminal -q` 通过（200 passed、46 skipped、93 subtests passed）。
+- 判决：采纳。必需 buffer 不再带着未知初值进入首窗口，可选诊断资源也只在完整初始化后启用。
+- 生产状态与回滚：未改 buffer 大小、graph、窗口顺序或推理数值；正常初始化行为不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动和 RTX 2080 Ti，未真实注入 `cudaMemset` 失败，也未验证 route-stats/profiler
+  在驱动错误后的降级日志。此阶段为严格静态审查与全量 Terminal/Control 回归。
+- 下一步与理由：运行跨工具 Python 测试与所有可执行主机故障测试，整理最终未验证风险与远端提交范围。
+
 ## I-20261027-104 · DFlash2 load 失败整体回滚
 
 - 目标 / 指标：DFlash2 `load()` 从 pack 解析、blob 上传、streams/events、profiler 到 private buffer 分配，任一步失败都

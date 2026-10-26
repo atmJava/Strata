@@ -831,10 +831,16 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         err = "verify: the device arena (" + std::to_string(count.used >> 20) + " MiB) does not fit";
         return false;
     }
-    cudaMemset(arena_, 0, count.used);
+    if (cudaMemset(arena_, 0, count.used) != cudaSuccess) {
+        err = "verify: the device arena could not be initialized";
+        return false;
+    }
     if (hflag_out_d_ != nullptr && hcount_d_ == nullptr) {   // the overlapped split's hand-off counter
         if (cudaMalloc((void**) &hcount_d_, 64) != cudaSuccess) { err = "verify: hand-off counter allocation failed"; return false; }
-        cudaMemset(hcount_d_, 0, 64);
+        if (cudaMemset(hcount_d_, 0, 64) != cudaSuccess) {
+            err = "verify: hand-off counter initialization failed";
+            return false;
+        }
         if (!mapped(64, (void**) &hdrop_h_, (void**) &hdrop_d_)) { err = "verify: hand-off test word allocation failed"; return false; }
     }
     if (hflag_in_d_ != nullptr && herr_h_ == nullptr &&
@@ -851,18 +857,26 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     prof_on_ = std::getenv("STRATA_VERIFY_PROFILE") != nullptr;
     if (const char* rs = std::getenv("STRATA_ROUTE_STATS"); rs != nullptr && rs[0] == '1') {
         const size_t nrs = (size_t) 9 * (size_t) g.n_layers * 8;
-        if (cudaMalloc((void**) &rs_dev_, nrs * 8) == cudaSuccess) {
-            cudaMemset(rs_dev_, 0, nrs * 8);
+        if (cudaMalloc((void**) &rs_dev_, nrs * 8) == cudaSuccess &&
+            cudaMemset(rs_dev_, 0, nrs * 8) == cudaSuccess) {
             rs_on_ = true;
         } else {
+            if (rs_dev_) cudaFree(rs_dev_);
             rs_dev_ = nullptr;
             cudaGetLastError();
         }
     }
     if (prof_on_) {
         const size_t np = (size_t) g.n_layers * kProfPer + 4;
-        if (cudaMalloc((void**) &prof_, np * 8) != cudaSuccess) { prof_on_ = false; prof_ = nullptr; cudaGetLastError(); }
-        else { cudaMemset(prof_, 0, np * 8); prof_h_.assign(np, 0); }
+        if (cudaMalloc((void**) &prof_, np * 8) != cudaSuccess ||
+            cudaMemset(prof_, 0, np * 8) != cudaSuccess) {
+            if (prof_) cudaFree(prof_);
+            prof_on_ = false;
+            prof_ = nullptr;
+            cudaGetLastError();
+        } else {
+            prof_h_.assign(np, 0);
+        }
     }
     Bump real;
     real.base = (uint8_t*) arena_;
