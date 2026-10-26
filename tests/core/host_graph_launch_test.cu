@@ -71,6 +71,12 @@ int main(int argc, char** argv) {
             strata::core::HostGraphLaunch invalid(exec, stream, -1, true, [] {});
             check(invalid.finish() == cudaErrorInvalidDevice, "launch-thread device error propagated");
             (void)cudaGetLastError();
+            setenv("STRATA_TEST_GRAPH_LAUNCH_THREAD_FAIL", "1", 1);
+            strata::core::HostGraphLaunch no_thread(exec, stream, 0, true, [] {});
+            unsetenv("STRATA_TEST_GRAPH_LAUNCH_THREAD_FAIL");
+            check(no_thread.finish() == cudaErrorLaunchFailure,
+                  "thread-start failure becomes a clean launch error");
+            (void)cudaGetLastError();
         }
     }
     gpu(cudaGraphExecDestroy(exec));

@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-53 · graph launch 线程失败返回可清理错误
+
+- 目标 / 指标：异步 verify graph launch 的 helper 线程创建失败时，constructor 不能把异常抛出所有权边界，也不能让
+  `pending` 永久为真；含 CPU doorbell 的 graph 不能冒险改走同步 launch。
+- 假设与预期：`HostGraphLaunch` 在线程模式先设置 `pending=true` 再构造 `std::thread`。构造失败时对象尚未完成，
+  异常会穿过 `verify.cpp`，且没有受控 launch error。
+- 为什么选这条路线：此 graph 可能在 `cudaGraphLaunch` 中等待调用线程敲 doorbell，constructor 返回前无法提供该服务；
+  同步兜底会死锁。正确策略是 fail-closed：清除 `pending`，返回 `cudaErrorLaunchFailure`，让现有状态机报错并析构清理。
+- 改动与实验：捕获线程构造异常并记录日志；增加 `STRATA_TEST_GRAPH_LAUNCH_THREAD_FAIL=1`，扩展 CUDA 测试的错误臂。
+  主机 shim 构造/运行测试为 `host_graph_launch_thread_failure: PASS`，`verify.cpp` 通过 C++20 `-Wall -Wextra -Werror`
+  主机侧语法检查。
+- 结果：`git diff --check` 通过。未运行真实 CUDA graph、doorbell、RTX 2080 Ti 或双卡 layer split；本机没有 `nvcc`，
+  `host_graph_launch_test.cu` 的新增错误臂未执行。
+- 判决：采纳。无法启动 launch helper 时请求可诊断地失败，不泄漏异常、不挂起等待、不伪造成功。
+- 生产状态与回滚：未改成功路径线程、graph 或 doorbell；单提交可回退。目标机必须补跑真实 graph 错误测试。
+- 学到什么：对可能等待调用线程的异步 API，失败兜底不能只追求“仍然启动”，还要避免构造期间的同步死锁。
+- 下一步与理由：处理可选 adaptive copy worker 的同形启动失败，再进入综合回归。
+
 ## I-20261027-52 · router look-ahead 线程失败关闭预取
 
 - 目标 / 指标：`RouterLookahead` 的辅助线程被系统拒绝时，模型初始化必须继续，路由感知预取退回关闭；不能因一个可选

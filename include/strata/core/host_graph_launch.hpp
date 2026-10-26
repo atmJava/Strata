@@ -2,7 +2,10 @@
 
 #include <cuda_runtime.h>
 #include <atomic>
+#include <cstdlib>
+#include <cstdio>
 #include <functional>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -19,12 +22,28 @@ public:
         : stream_(stream), release_waits_(std::move(release_waits)) {
         if (threaded) {
             pending_.store(true);
-            worker_ = std::thread([this, graph, device] {
-                auto error = cudaSetDevice(device);
-                if (error == cudaSuccess) error = cudaGraphLaunch(graph, stream_);
-                error_ = error;
+            try {
+                if (const char* fail = std::getenv("STRATA_TEST_GRAPH_LAUNCH_THREAD_FAIL");
+                    fail != nullptr && std::atoi(fail) > 0)
+                    throw std::runtime_error("injected thread start failure");
+                worker_ = std::thread([this, graph, device] {
+                    auto error = cudaSetDevice(device);
+                    if (error == cudaSuccess) error = cudaGraphLaunch(graph, stream_);
+                    error_ = error;
+                    pending_.store(false, std::memory_order_release);
+                });
+            } catch (const std::exception& error) {
+                // A CPU-doorbell graph cannot be launched synchronously here: this constructor
+                // returns before its caller can service the graph.  Fail this launch cleanly
+                // instead of leaking an exception or risking a deadlocked synchronisation.
                 pending_.store(false, std::memory_order_release);
-            });
+                error_ = cudaErrorLaunchFailure;
+                std::fprintf(stderr, "verify: graph launch thread did not start (%s)\n", error.what());
+            } catch (...) {
+                pending_.store(false, std::memory_order_release);
+                error_ = cudaErrorLaunchFailure;
+                std::fprintf(stderr, "verify: graph launch thread did not start\n");
+            }
         } else {
             error_ = cudaGraphLaunch(graph, stream_);
         }
