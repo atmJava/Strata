@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-83 · HC Q8 上传事务化并由设备所有者释放
+
+- 目标 / 指标：`STRATA_HC_REQ8` 的 BF16→Q8 上传在任一文件打开、读取或 `cudaMemcpy` 失败时，不得泄漏设备
+  分配，也不得让已经处理的 `WeightRef` 指向随后释放的 VRAM；成功分配在 `WeightTable` 销毁时释放。
+- 假设与预期：旧实现一次 `cudaMalloc` 后仅在循环中逐张量发布指针，任何晚到失败都会同时丢失裸设备指针并留下
+  指向已释放内存的引用；成功路径也没有显式所有者，依赖进程退出。
+- 为什么选这条路线：预计算全部 offset，上传期间只使用局部 `shared_ptr` 设备所有者；全部成功后一次性发布
+  `data/q8_scale/resident/bytes`，再把所有者交给 `WeightTable`。删除器记录分配设备并在该上下文 `cudaFree`。
+- 改动与实验：新回归用两个 synthetic HC 张量覆盖成功发布、重复上传拒绝，以及第二个张量截断时的失败事务；
+  `weights_hc_q8_test` 以 C++20、`-O2 -Wall -Wextra -Werror` 通过，ASan/UBSan + leak detection 通过。
+  `weights.cpp` 通过严格主机侧语法编译；另给 `DeviceArena` 析构补上 `ordinal_` 设备作用域。
+- 判决：采纳。HC Q8 上传具备事务式发布和明确所有权，late failure 不泄漏、不发布悬空引用。
+- 生产状态与回滚：Q8 量化公式、segment 布局、上传顺序和成功字节数不变；单提交可回退。
+- 未验证：未在真实 CUDA 上运行 HC pack，也未注入 `cudaMalloc`/`cudaMemcpy` 驱动失败；`DeviceArena` 属于 CUDA
+  编译单元，当前环境只能静态审查其析构设备作用域。
+- 下一步与理由：继续处理“裸所有者只在进程退出释放”与“失败前已发布引用”的同类模式。
+
 ## I-20261027-82 · foresight event 与 embedding 回退按设备释放
 
 - 目标 / 指标：`ForesightSwap` 在每张 helper 卡申请的 copy event 必须在该卡上下文销毁；`NativeEmbed` 因

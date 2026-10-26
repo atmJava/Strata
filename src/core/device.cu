@@ -1,5 +1,6 @@
 // src/core/device.cu - P2.S1: the CUDA side of the runtime core.
 #include "strata/core/device.hpp"
+#include "strata/core/on_device.hpp"
 
 #include <cuda_runtime.h>
 
@@ -134,6 +135,7 @@ DeviceArena::DeviceArena(uint64_t bytes, int ordinal, bool poison)
 }
 
 DeviceArena::~DeviceArena() {
+    const OnDevice on_device(ordinal_);
     if (base_) cudaFree(base_);          // best effort: a destructor must not throw
 }
 

@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -153,6 +154,7 @@ private:
     std::map<std::string, WeightRef> table_;
     LoadReport report_;
     std::string pack_dir_;
+    std::shared_ptr<void> hc_q8_owner_;   ///< the STRATA_HC_REQ8 upload, freed on its allocating device
 };
 
 }  // namespace strata::core

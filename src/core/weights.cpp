@@ -1,5 +1,6 @@
 // src/core/weights.cpp - the dense-weight loader.  See the header for the engine-vs-pack distinction.
 #include "strata/core/weights.hpp"
+#include "strata/core/on_device.hpp"
 #include <vector>
 #include <cmath>
 
@@ -21,6 +22,14 @@ namespace strata::core {
 namespace {
 
 constexpr uint64_t CHUNK = 8ull << 20;   // 8 MiB of SOURCE per staging round
+
+struct CudaFreeOnDevice {
+    int device = -1;
+    void operator()(void* p) const {
+        const OnDevice on_device(device);
+        cudaFree(p);
+    }
+};
 
 double now_ms() {
     using namespace std::chrono;
@@ -514,6 +523,10 @@ void WeightTable::hc_q8_names(int64_t n_layers, std::set<std::string>& out) {
 
 bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::string& err) {
     bytes = 0;
+    if (hc_q8_owner_) {
+        err = "STRATA_HC_REQ8: the Q8 tensors are already loaded";
+        return false;
+    }
     std::vector<WeightRef*> todo;
     for (auto& [name, w] : table_) {
         const bool hc = name.find(".hc_attn_down.") != std::string::npos || name.find(".hc_attn_up.") != std::string::npos ||
@@ -531,13 +544,18 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
     auto al = [](uint64_t b) { return (b + 255) & ~(uint64_t) 255; };
     uint64_t total = 0;
     for (const WeightRef* w : todo) total += al((uint64_t) w->elements) + al((uint64_t) w->elements / 32 * 4);
+    std::vector<uint64_t> offsets(todo.size());
+    int device = -1;
+    cudaGetDevice(&device);
     uint8_t* dev = nullptr;
     if (cudaMalloc((void**) &dev, total) != cudaSuccess) { err = "STRATA_HC_REQ8: cudaMalloc failed"; return false; }
+    std::shared_ptr<void> owner(dev, CudaFreeOnDevice{device});
     std::vector<float> src;
     std::vector<int8_t> q;
     std::vector<float> sc;
     uint64_t at = 0;
-    for (WeightRef* w : todo) {
+    for (size_t wi = 0; wi < todo.size(); ++wi) {
+        WeightRef* w = todo[wi];
         const char* fn = file_name(w->file_id);
         const std::string path = pack_dir + "/" + (fn ? fn : "?");
         std::FILE* f = std::fopen(path.c_str(), "rb");
@@ -567,6 +585,7 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
             sc[b] = d;
             for (int j = 0; j < 32; ++j) q[b * 32 + j] = (int8_t) std::nearbyint(src[b * 32 + j] * id);
         }
+        offsets[wi] = at;
         uint8_t* codes = dev + at;
         at += al(q.size());
         float* scales = (float*) (dev + at);
@@ -576,11 +595,17 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
             err = "STRATA_HC_REQ8: upload failed";
             return false;
         }
-        w->data = codes;
-        w->q8_scale = scales;
-        w->resident = true;
-        w->bytes = q.size() + sc.size() * 4;
     }
+    // Publish only after every tensor has uploaded: a late I/O failure must leave no WeightRef pointing into the
+    // allocation that the local owner is about to release.
+    for (size_t wi = 0; wi < todo.size(); ++wi) {
+        WeightRef* w = todo[wi];
+        w->data = dev + offsets[wi];
+        w->q8_scale = (const float*) (dev + offsets[wi] + al((uint64_t) w->elements));
+        w->resident = true;
+        w->bytes = (uint64_t) w->elements + (uint64_t) w->elements / 32 * 4;
+    }
+    hc_q8_owner_ = std::move(owner);
     bytes = total;
     return true;
 }
