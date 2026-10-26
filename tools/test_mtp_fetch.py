@@ -264,22 +264,6 @@ class Pinned(unittest.TestCase):
         self.assertIn(M.PINNED_REVISION, M.PINNED)
 
 
-class Setup(unittest.TestCase):
-    def test_setup_rebuilds_a_corrupt_install(self):
-        import setup
-        with tempfile.TemporaryDirectory() as d:
-            mtp = Path(d)
-            self.assertFalse(setup.mtp_corrupt(mtp))              # no tensors kept: nothing to check
-            (mtp / "tensors").mkdir()
-            for code, want in ((0, False), (3, True), (1, False)):
-                with self.subTest(code=code), mock.patch.object(
-                        setup.subprocess, "run", return_value=mock.Mock(returncode=code)) as run:
-                    self.assertEqual(setup.mtp_corrupt(mtp), want)
-                    self.assertIn("verify", run.call_args[0][0])
-
-
-
-
 class Progress(FetchCase):
     """#3257: the fetch says how far it is in the form of setup's own download line, so the app can show it."""
 
@@ -291,20 +275,13 @@ class Progress(FetchCase):
         self.assertIn("/ %.2f GB" % (total / 1e9), lines[-1])
         self.assertIn("(100%)", lines[-1])
         import re
-        for x in lines:                                  # the shape tools/strata_mcp.py install_progress reads
+        for x in lines:
             self.assertTrue(re.match(r"\s*(\S.*?): +([\d.]+) / ([\d.]+) GB \((\d+)%\)", x), x)
 
     def test_a_resumed_fetch_starts_from_what_is_already_there(self):
         self.fetch(Mirror())
         err = self.fetch(Mirror())
         self.assertIn("(100%)", [x for x in err.splitlines() if "MTP draft layer:" in x][0])
-
-    def test_the_progress_figure_follows_the_job_in_strata_mcp(self):
-        import strata_mcp as MCP
-        got = MCP.install_progress(["=== Step 6: preparing the model for Strata ===",
-                                    "  MTP draft layer:   1.23 / 5.04 GB (24%)"])
-        self.assertEqual(got["download"], {"file": "MTP draft layer", "done_gb": 1.23, "total_gb": 5.04, "percent": 24})
-
 
 class Flaky(FetchCase):
     def test_a_connection_that_drops_mid_tensor_does_not_end_the_run(self):

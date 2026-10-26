@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-130 · 清理已删除入口的孤儿测试与夹具
+
+- 目标 / 指标：工具测试必须只覆盖仍存在的 CLI/server 代码；不得因 `setup.py`、Docker entrypoint、SYCL launcher
+  或旧 MCP 模块已删除而在收集阶段导入失败。
+- 假设与预期：主线收敛时已删除这些生产入口，但仍留下直接导入它们的测试和两份大型 setup 快照夹具；它们既不能提供
+  当前行为证据，又会掩盖真正回归。
+- 为什么选这条路线：先只裁剪已无被测对象的用例，保留 `user_args`、`calibrate`、`strata_pack` 仍有效的断言，并为
+  `user_args` 的 `apply/stamp/set_flag/dropped_by_setup` 增加当前入口测试。
+- 改动与实验：删除 7 个孤儿测试/夹具文件，裁剪 `test_calibrate`、`test_shards`、`test_mtp_fetch` 中旧 setup/容器
+  断言，重写 `test_user_args` 为当前 server/runconfig 用例。工具集 `206 passed, 9 skipped, 116 subtests passed`；
+  `tools/test_iq_pack.py` 因缺少外部 `llama.cpp/gguf-py` 未运行。
+- 判决：采纳。工具测试收集不再依赖已删除模块，静态夹具减少约 3.5k 行。
+- 生产状态与回滚：不改变运行时代码；单提交可回退。
+- 未验证：缺少 `gguf-py` 的外部量化用例仍未运行。
+- 下一步与理由：检查文档中的已删除入口引用，再做最终 Python/C++ 回归和远端 SHA 复核。
+
 ## I-20261027-129 · PinnedRing release 失败保留可重试所有权
 
 - 目标 / 指标：`PinnedRing::release()` 在无法进入 slot 所属 device，或 event/slot 清理失败时，不得把未释放资源标成已释放；

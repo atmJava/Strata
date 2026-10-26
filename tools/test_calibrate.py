@@ -1,12 +1,11 @@
-"""Tests for tools/calibrate.py and setup's use of it, without a GPU: a stand-in engine whose decode speed is a
-function of the settings it runs with.
+"""Tests for tools/calibrate.py without a GPU: a stand-in engine whose decode speed is a function of the
+settings it runs with.
 
     python -m unittest tools.test_calibrate
 """
 from __future__ import annotations
 
 import json
-import os
 import sys
 import tempfile
 import threading
@@ -355,100 +354,6 @@ class Calibrate(unittest.TestCase):
         self.assertEqual(CAL.pick({"a": [50, 51, 49], "b": [53, 52, 60]}, "a"), "b")
         self.assertEqual(CAL.pick({"a": [50, 51, 49], "b": [51, 51.5, 51]}, "a"), "a")
         self.assertEqual(CAL.pick({}, "a"), "a")
-
-
-class SetupIntegration(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.old = {k: os.environ.get(k) for k in ("APPDATA", "XDG_CONFIG_HOME")}
-        os.environ["APPDATA"] = self.tmp.name
-        os.environ["XDG_CONFIG_HOME"] = self.tmp.name
-        import setup as S
-        self.S = S
-        self.saved = (S.gpu_info, S.cpu_info, S.ram_gb, CAL.run)
-        S.gpu_info = lambda pick=None: {"name": "RTX Test", "vram_gb": 12.0, "arch": "120", "count": 1, "index": 0}
-        S.cpu_info = lambda: ("Test CPU", True, True)
-        S.ram_gb = lambda: 64.0
-
-    def tearDown(self):
-        self.S.gpu_info, self.S.cpu_info, self.S.ram_gb, CAL.run = self.saved
-        for k, v in self.old.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        self.tmp.cleanup()
-
-    def test_calibrate_config_writes_and_remembers(self):
-        cfg_path = Path(self.tmp.name) / "strata-q2_0.json"
-        cfg = {"exe": "x", "args": list(BASE), "model_name": "qwen3.8-flash-next-q2_0"}
-        cfg_path.write_text(json.dumps(cfg))
-        CAL.run = lambda c, say=print, start_engine=None: {"settings": {"--pcie-frac": "0.20"}, "report": {"tok_s": 61.2}}
-        self.assertTrue(self.S.calibrate_config(cfg_path))
-        written = json.loads(cfg_path.read_text())
-        self.assertEqual(CAL.arg_value(written["args"], "--pcie-frac"), "0.20")
-        saved = self.S.saved_calibration(written)
-        self.assertEqual(saved["settings"], {"--pcie-frac": "0.20"})
-        # another model on the same PC has no calibration yet
-        self.assertIsNone(self.S.saved_calibration({**written, "model_name": "swift-iq2_xs"}))
-        # another context size is another key (its KV cache changes the expert cache)
-        other = dict(written, args=CAL.with_arg(written["args"], "--max-context", "131072"))
-        self.assertIsNone(self.S.saved_calibration(other))
-
-    def test_calibrate_config_writes_the_env_choice(self):
-        # HIP: the measured engine variable goes into the config's "env" and the settings file; a re-run that finds it
-        # no longer faster removes it again, and leaves the config's other variables alone
-        cfg_path = Path(self.tmp.name) / "strata-iq3_s.json"
-        cfg = {"exe": "x", "args": list(BASE), "model_name": "m", "backend": "hip", "env": {"STRATA_ROCBLAS_TUNING": "t"}}
-        cfg_path.write_text(json.dumps(cfg))
-        CAL.run = lambda c, say=print, start_engine=None: {"settings": {}, "env": {CAL.SH_STREAM: "1"}, "report": {"tok_s": 70.1}}
-        self.assertTrue(self.S.calibrate_config(cfg_path))
-        written = json.loads(cfg_path.read_text())
-        self.assertEqual(written["env"], {"STRATA_ROCBLAS_TUNING": "t", CAL.SH_STREAM: "1"})
-        self.assertEqual(self.S.saved_calibration(written)["env"], {CAL.SH_STREAM: "1"})
-        CAL.run = lambda c, say=print, start_engine=None: {"settings": {}, "env": {}, "report": {"tok_s": 65.0}}
-        self.assertTrue(self.S.calibrate_config(cfg_path))
-        self.assertEqual(json.loads(cfg_path.read_text())["env"], {"STRATA_ROCBLAS_TUNING": "t"})
-
-    def test_failed_calibration_keeps_defaults(self):
-        cfg_path = Path(self.tmp.name) / "strata-q2_0.json"
-        cfg_path.write_text(json.dumps({"exe": "x", "args": list(BASE), "model_name": "m"}))
-
-        def boom(*a, **k):
-            raise RuntimeError("the engine exited before it was ready")
-        CAL.run = boom
-        self.assertFalse(self.S.calibrate_config(cfg_path))
-        self.assertEqual(json.loads(cfg_path.read_text())["args"], BASE)
-        self.assertIsNone(self.S.saved_calibration({"args": BASE, "model_name": "m"}))
-
-    def test_failed_calibration_says_the_engines_reason(self):
-        # #447: the engine's last error line is printed, and the --calibrate run repeats the failure before it starts
-        import contextlib
-        import io
-        log = Path(self.tmp.name) / "strata-q2_0.log"
-        log.write_text("strata generate: an error of an earlier start\n", encoding="utf-8")
-        cfg_path = Path(self.tmp.name) / "strata-q2_0.json"
-        cfg_path.write_text(json.dumps({"exe": "x", "args": list(BASE), "model_name": "m", "log": str(log)}))
-
-        def boom(*a, **k):
-            with open(log, "a", encoding="utf-8") as f:
-                f.write("strata generate: --expert-cache-remote with a layer split needs a GPU that runs no stage\n")
-            raise RuntimeError(f"the engine exited before it was ready (see {log})")
-        CAL.run = boom
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertFalse(self.S.calibrate_config(cfg_path))
-        self.assertIn("the engine said: strata generate: --expert-cache-remote with a layer split", out.getvalue())
-        self.assertNotIn("an earlier start", out.getvalue())
-        out = io.StringIO()
-        with mock.patch.object(self.S, "ROOT", Path(self.tmp.name)), \
-                mock.patch.object(self.S, "data_folder", lambda d, *a, **k: (Path(self.tmp.name) / "data", [])), \
-                mock.patch.object(self.S, "update_installed_engine", lambda *a: None), \
-                mock.patch.object(sys, "argv", ["setup.py", "--calibrate", "--no-start"]), \
-                contextlib.redirect_stdout(out):
-            self.assertEqual(self.S.main(), 0)
-        self.assertIn("this PC is NOT tuned: the tuning failed (the reason is above); the model keeps the default "
-                      "settings", out.getvalue())
 
 
 if __name__ == "__main__":

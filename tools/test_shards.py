@@ -1,6 +1,5 @@
-"""A missing or short model shard is named with its numbers, a pack's verify reads back the source hash its
-manifest recorded, and a pack's build refuses an output directory that already holds one - over a minimal GGUF
-written here (no download, no model, no GPU).
+"""A pack's verify reads back the source hash its manifest recorded, and its build refuses an output directory
+that already holds one - over a minimal GGUF written here (no download, no model, no GPU).
 
     python -m unittest tools.test_shards
 """
@@ -19,12 +18,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))
-import setup as S  # noqa: E402
 import strata_pack  # noqa: E402
 
 
 class Stop(Exception):
-    """setup.fail(), caught instead of exiting: the message is what the test reads."""
+    """Stops build at its first step after the checks under test."""
 
 
 def write_gguf(path: Path, names=("blk.0.attn_q.weight", "blk.0.attn_k.weight")) -> int:
@@ -35,67 +33,6 @@ def write_gguf(path: Path, names=("blk.0.attn_q.weight", "blk.0.attn_k.weight"))
     b += bytes(-len(b) % 32 + 32 * len(names))
     path.write_bytes(b)
     return len(b)
-
-
-class ShardCheck(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp.name)
-        self.saved = S.fail
-        S.fail = lambda msg, hint=None: (_ for _ in ()).throw(Stop(msg))
-
-    def tearDown(self):
-        S.fail = self.saved
-        self.tmp.cleanup()
-
-    def test_whole_shards_pass(self):
-        shards = [self.dir / f"m-0000{i}-of-00002.gguf" for i in (1, 2)]
-        for s in shards:
-            write_gguf(s)
-        S.check_shards(shards)
-
-    def test_missing_shard_is_named(self):
-        shards = [self.dir / "m-00001-of-00002.gguf", self.dir / "m-00002-of-00002.gguf"]
-        write_gguf(shards[0])
-        with self.assertRaises(Stop) as cm:
-            S.check_shards(shards)
-        self.assertIn("m-00002-of-00002.gguf", str(cm.exception))
-
-    def test_short_shard_names_file_and_sizes(self):
-        s = self.dir / "m-00001-of-00002.gguf"
-        whole = write_gguf(s)
-        s.write_bytes(s.read_bytes()[:-40])
-        with self.assertRaises(Stop) as cm:
-            S.check_shards([s])
-        msg = str(cm.exception)
-        self.assertIn("m-00001-of-00002.gguf is short", msg)
-        self.assertIn(f"{whole - 40:,} of {whole:,} bytes", msg)
-        self.assertIn("40 missing", msg)
-
-    def test_single_tensor_shard_with_extra_bytes_is_refused(self):
-        # #657: the PLE table's shard is exactly as long as its one tensor; 612 extra bytes are a damaged file
-        s = self.dir / "m-00002-of-00002.gguf"
-        whole = write_gguf(s, names=("per_layer_token_embd.weight",))
-        S.check_shards([s])
-        s.write_bytes(s.read_bytes() + bytes(612))
-        with self.assertRaises(Stop) as cm:
-            S.check_shards([s])
-        msg = str(cm.exception)
-        self.assertIn("m-00002-of-00002.gguf is longer than its tensor", msg)
-        self.assertIn(f"{whole + 612:,} bytes, {whole:,} expected", msg)
-        # a shard with several tensors is not held to the rule
-        t = self.dir / "m-00001-of-00002.gguf"
-        write_gguf(t)
-        t.write_bytes(t.read_bytes() + bytes(612))
-        S.check_shards([t])
-
-    def test_truncated_header_is_refused(self):
-        s = self.dir / "m-00001-of-00002.gguf"
-        write_gguf(s)
-        s.write_bytes(s.read_bytes()[:12])
-        with self.assertRaises(Stop) as cm:
-            S.check_shards([s])
-        self.assertIn("m-00001-of-00002.gguf is not a whole GGUF shard", str(cm.exception))
 
 
 class PackVerifyHash(unittest.TestCase):
