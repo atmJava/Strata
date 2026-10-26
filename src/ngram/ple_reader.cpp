@@ -102,6 +102,7 @@ struct PleReader::Impl {
     uint64_t n_rows = 0;
     uint32_t row_bytes = ROW_BYTES;
     uint32_t max_inflight = 0;
+    uint32_t outstanding = 0;              // submitted reads whose one completion is still owned here
     uint8_t* slab = nullptr;              // max_inflight slots of 2 pages
     std::vector<uint32_t> free_slots;
     std::vector<Job> inflight;            // indexed by slot
@@ -129,7 +130,7 @@ struct PleReader::Impl {
     std::thread worker;
 
     uint8_t* slot_buf(uint32_t s) { return slab + (size_t) s * 2 * PAGE; }
-    bool busy() const { return free_slots.size() < max_inflight || !delayed.empty(); }
+    bool busy() const { return outstanding > 0; }
 
     void cancel_queued() {
         for (const Job& job : queue) {
@@ -168,6 +169,7 @@ struct PleReader::Impl {
                 cancel_queued();
                 return false;
             }
+            ++outstanding;
             last_read_us = j.issued_us;
             if (!j.keepalive) {                    // a keep-alive read counts when it completes (`finish`)
                 stats.submit_us += now_us() - j.issued_us;
@@ -213,6 +215,7 @@ struct PleReader::Impl {
                 keep_us = 0;
             }
             j.keepalive = false;
+            if (outstanding > 0) --outstanding;
             free_slots.push_back(s);
             return error.empty() ? pump() : true;
         }
@@ -222,6 +225,7 @@ struct PleReader::Impl {
             j.uses.clear();
             auto it = tickets.find(j.ticket);
             if (it != tickets.end() && it->second.pending > 0) --it->second.pending;
+            if (outstanding > 0) --outstanding;
             free_slots.push_back(s);
             return false;
         }
@@ -235,6 +239,7 @@ struct PleReader::Impl {
                 j.uses.clear();
                 auto it = tickets.find(j.ticket);
                 if (it != tickets.end() && it->second.pending > 0) --it->second.pending;
+                if (outstanding > 0) --outstanding;
                 free_slots.push_back(s);
                 return false;
             }
@@ -245,6 +250,7 @@ struct PleReader::Impl {
         }
         auto it = tickets.find(j.ticket);
         if (it != tickets.end() && it->second.pending > 0) --it->second.pending;
+        if (outstanding > 0) --outstanding;
         j.uses.clear();
         free_slots.push_back(s);
         return error.empty() ? pump() : true;
@@ -350,10 +356,20 @@ bool PleReader::open(const std::string& path, uint64_t table_offset, uint64_t n_
     impl_->max_inflight = max_inflight;
     impl_->slab = (uint8_t*) DirectFile::alloc_aligned((size_t) max_inflight * 2 * PAGE);
     if (impl_->slab == nullptr) { err = "PleReader: cannot allocate read buffers"; close(); return false; }
-    impl_->inflight.assign(max_inflight, Job{});
-    impl_->free_slots.clear();
-    for (uint32_t s = max_inflight; s-- > 0;) impl_->free_slots.push_back(s);
-    impl_->cache.init(cache_rows, row_bytes);
+    try {
+        impl_->inflight.assign(max_inflight, Job{});
+        impl_->free_slots.clear();
+        for (uint32_t s = max_inflight; s-- > 0;) impl_->free_slots.push_back(s);
+        impl_->cache.init(cache_rows, row_bytes);
+    } catch (const std::exception& e) {
+        err = std::string("PleReader: cannot allocate table buffers: ") + e.what();
+        close();
+        return false;
+    } catch (...) {
+        err = "PleReader: cannot allocate table buffers";
+        close();
+        return false;
+    }
     impl_->error.clear();
     impl_->keep_us = 0;
     impl_->last_issue_us = impl_->last_read_us = 0;
@@ -390,15 +406,22 @@ void PleReader::close() {
         m.file.wake();
         m.worker.join();
     }
+    // Completions already reaped but held by fault injection are no longer in DirectFile's port. Drop them before
+    // waiting for the reads that are still in flight; no output pointer is valid during close.
+    for (const Completion& c : m.delayed) {
+        if (c.tag != DirectFile::WAKE_TAG && m.outstanding > 0) --m.outstanding;
+    }
+    m.delayed.clear();
     // Outstanding reads must finish before their buffers are released (caller-thread mode, or a worker that
-    // stopped on an error).
+    // stopped on an error). `outstanding` is explicit: an open() that failed before filling free slots has no
+    // reads to wait for.
     if (m.file.is_open()) {
-        while (m.free_slots.size() < m.max_inflight) {
+        while (m.outstanding > 0) {
             Completion c[64];
             const int n = m.file.wait(c, 64, -1);
             if (n == 0) break;
             for (int i = 0; i < n; ++i)
-                if (c[i].tag != DirectFile::WAKE_TAG) m.free_slots.push_back((uint32_t) c[i].tag);
+                if (c[i].tag != DirectFile::WAKE_TAG && m.outstanding > 0) --m.outstanding;
         }
     }
     m.file.close();
@@ -409,6 +432,7 @@ void PleReader::close() {
     m.delayed.clear();
     m.inflight.clear();
     m.free_slots.clear();
+    m.outstanding = 0;
     m.cache.init(0);
     m.threaded = false;
     m.stop = false;
@@ -495,7 +519,11 @@ bool PleReader::collect(Ticket t, std::string& err) {
         });
         it = m.tickets.find(t.id);
         if (it == m.tickets.end()) { err = "PleReader: unknown ticket"; return false; }
-        if (!m.error.empty()) { err = m.error; return false; }
+        if (!m.error.empty()) {
+            err = m.error;
+            m.tickets.erase(it);
+            return false;
+        }
         m.stats.wait_us += now_us() - start;
         m.tickets.erase(it);
         return true;
@@ -508,7 +536,11 @@ bool PleReader::collect(Ticket t, std::string& err) {
         it = m.tickets.find(t.id);
         if (it == m.tickets.end()) { err = "PleReader: unknown ticket"; return false; }
     }
-    if (!m.error.empty()) { err = m.error; return false; }
+    if (!m.error.empty()) {
+        err = m.error;
+        m.tickets.erase(it);
+        return false;
+    }
     m.stats.wait_us += now_us() - start;
     m.tickets.erase(it);
     return true;
@@ -542,7 +574,13 @@ void PleReader::reset_stats() {
     m.stats = ReaderStats{};
     m.ring_pos = 0;
 }
-uint64_t PleReader::cache_capacity() const { return impl_->cache.sets * WAYS; }
-uint64_t PleReader::cache_size() const { return impl_->cache.used; }
+uint64_t PleReader::cache_capacity() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->cache.sets * WAYS;
+}
+uint64_t PleReader::cache_size() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->cache.used;
+}
 
 }  // namespace strata::ngram

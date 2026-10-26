@@ -365,7 +365,13 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
                 (void) sink;
             };
             std::vector<std::thread> pool;
-            for (unsigned t = 0; t < threads; ++t) pool.emplace_back(touch);
+            try {
+                for (unsigned t = 0; t < threads; ++t) pool.emplace_back(touch);
+            } catch (...) {
+                // Pre-faulting is an optimisation, not a correctness step. Thread creation can fail after some
+                // helpers have started; the caller helps finish their shared work before joining those helpers.
+            }
+            touch();
             for (auto& t : pool) t.join();
         }
         if (mlock((const void*) a0, a1 - a0) == 0) {

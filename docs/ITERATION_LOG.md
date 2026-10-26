@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-15 · PLE 初始化回滚与在途 I/O 显式计数，消除 close 等待和缓存竞争
+
+- 目标 / 指标：`PleReader::open()` 在 slab、向量或行缓存分配失败时不能抛穿或留下半开状态；`close()` 只等待确实
+  提交给 DirectFile 的完成事件；缓存统计查询与 worker 更新之间不得存在数据竞争。
+- 假设与预期：旧 `close()` 用“空闲槽少于 max_inflight”推断在途 I/O，初始化在填满空闲槽之前失败时会误判并
+  永久等待。故障注入延迟产生的 completion 已离开 DirectFile 队列，也必须从等待计数中移除。预取缓存 worker 会
+  更新 `used`，主线程直接读取会造成真实竞争。
+- 为什么选这条路线：这些问题都集中在无 GPU 的 SSD/PLE 边界，可用合成表、真实 O_DIRECT 和小范围 sanitizer 复现；
+  修复不改变行格式、读取顺序或公开配置。
+- 改动与实验：新增显式 `outstanding` 计数，只在 `DirectFile::submit()` 成功后增加、每个 completion 仅减少一次；
+  初始化分配异常统一返回错误并回滚，close 丢弃 fault-injected completion 后按真实在途数等待；错误 ticket 在 collect
+  失败时移除。缓存容量/用量查询纳入 mutex。mmap 预热线程池部分创建失败时由调用线程补做剩余工作并 join 已启动线程。
+  selftest 新增不可能的缓存分配与未 collect 即 close 的路径，并让并发测试进程使用独立目录。
+- 结果：普通 `-Wall -Wextra -Werror`、ASan/UBSan、TSan 三套构建和 `ple_reader_test --selftest` 均通过 90/110 字节行、
+  Direct/Mmap、八种 PLE 格式。首次 TSan 运行发现 `cache_size()` 与 worker `cache.insert()` 的竞争；修复后 TSan 复验通过。
+- 判决：采纳。在途 I/O、失败回滚和缓存查询均有明确同步边界。
+- 生产状态与回滚：未改生产；单提交可回退。mmap 预热线程创建失败分支仅完成编译和静态审查，未做故障注入。
+- 学到什么：“所有槽都不空闲”不等于“所有槽都有在途 I/O”；资源释放必须依据正向提交计数，不能从空闲池反推。
+- 下一步与理由：继续审查其他线程池的部分构造与 close 同步，优先选择能由主机侧 sanitizer 覆盖的路径。
+
 ## I-20261027-14 · 描述符所有权转移失败统一关闭，覆盖 runtime、编辑草稿、锁与临时图片
 
 - 目标 / 指标：`os.open()` 成功后，若 `fdopen()` 在包装既有描述符时失败，调用方仍必须关闭原 fd；
