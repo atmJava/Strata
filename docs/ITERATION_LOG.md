@@ -3,6 +3,27 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-28 · 非透传图片规范化的 Pillow 图像释放
+
+- 目标 / 指标：`Vision.normalize()` 处理 EXIF 旋转、模式转换和透明图像扁平化时，源图、旋转副本、拆分 band、
+  转换结果和临时背景图都必须在成功或异常路径关闭。
+- 假设与预期：旧实现用 `with Image.open(...)` 只关闭源图，随后 `ImageOps.exif_transpose()` 返回的新图和
+  `convert()` 返回的新图都没有显式关闭；透明分支的 `im.split()` band 也未关闭。连续直接图片请求会依赖 Pillow
+  对象回收，极端情况下保留临时缓冲或文件资源。
+- 为什么选这条路线：图片规范化是纯 Pillow 路径，可用无 GPU 的合成 JPEG/TIFF 精确覆盖；修复不改变输出格式、
+  像素方向或透明区白色背景规则。
+- 改动与实验：把源图、旋转和转换放进同一所有权范围；转换替换前关闭旧图，band 使用后逐个关闭，背景图和输出
+  `BytesIO` 使用上下文，最终副本在 `finally` 关闭。新增 Pillow `close` 调用计数断言，以及透明 TIFF 转 RGB PNG
+  的方向/尺寸/白底测试；测试构造的图片也显式关闭。
+- 结果：`serve/test_exif_orientation.py serve/test_images.py` 为 `29 passed / 20 subtests`；`compileall` 与
+  `git diff --check` 通过。首次测试确认旧计数阈值设置过高，调整为只验证旋转副本的显式关闭，普通源图由既有上下文
+  负责。
+- 判决：采纳。每个 Pillow 图像/band 在所有规范化分支都有明确 close；失败仍归一化为原有 `ValueError`。
+- 生产状态与回滚：未改生产；JPEG/PNG/BMP/GIF 透传、EXIF 方向、透明白底和错误文本行为由测试保持，单提交可回退。
+  未运行真实视觉编码器或 GPU。
+- 学到什么：`with Image.open()` 只覆盖源图，图像变换返回的新对象仍需要独立所有权；颜色 band 也是图像对象。
+- 下一步与理由：继续检查 HTTP 下载和图片缓存的响应/临时文件收尾，再做一次完整服务端回归。
+
 ## I-20261027-27 · 驻留预算、NUMA 与 stage lend 计划的溢出边界
 
 - 目标 / 指标：pin 判断不得因 `bytes + reserve` / `step + reserve` 溢出而错误放行；NUMA 估算不得因节点数乘法

@@ -2951,22 +2951,42 @@ class Vision:
             raise ValueError("this image format needs Pillow (python -m pip install pillow); JPEG, PNG, BMP and "
                              "GIF work without it") from None
         try:
-            im = Image.open(io.BytesIO(data))
-            im.load()
-            from PIL import ImageOps
-            im = ImageOps.exif_transpose(im)             # the camera's orientation tag, applied (#1229)
+            with Image.open(io.BytesIO(data)) as source:
+                source.load()
+                from PIL import ImageOps
+                im = ImageOps.exif_transpose(source)      # the camera's orientation tag, applied (#1229)
+                try:
+                    if im.mode in ("RGBA", "LA", "P") and "transparency" in im.info or im.mode in ("RGBA", "LA"):
+                        converted = im.convert("RGBA")
+                        if converted is not im:
+                            im.close()
+                        im = converted
+                        bg = Image.new("RGB", im.size, (255, 255, 255))
+                        try:
+                            bands = im.split()
+                            try:
+                                bg.paste(im, mask=bands[-1])   # transparent areas become white, not black
+                            finally:
+                                for band in bands:
+                                    band.close()
+                            with io.BytesIO() as out:
+                                bg.save(out, format="PNG")
+                                return out.getvalue()
+                        finally:
+                            bg.close()
+                    if im.mode != "RGB":
+                        converted = im.convert("RGB")
+                        if converted is not im:
+                            im.close()
+                        im = converted
+                    with io.BytesIO() as out:
+                        im.save(out, format="PNG")
+                        return out.getvalue()
+                finally:
+                    if im is not source:
+                        im.close()
         except Exception as e:
             raise ValueError(f"the image could not be read ({e})") from None
-        if im.mode in ("RGBA", "LA", "P") and "transparency" in im.info or im.mode in ("RGBA", "LA"):
-            im = im.convert("RGBA")
-            bg = Image.new("RGB", im.size, (255, 255, 255))   # transparent areas become white, not black
-            bg.paste(im, mask=im.split()[-1])
-            im = bg
-        elif im.mode != "RGB":
-            im = im.convert("RGB")
-        out = io.BytesIO()
-        im.save(out, format="PNG")
-        return out.getvalue()
 
     def encode_all(self, sources: list, cancel=None) -> list[tuple[Path, int]]:
         """encode() for every image of one request: the files of this request's earlier images are never evicted to
