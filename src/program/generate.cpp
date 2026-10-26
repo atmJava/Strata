@@ -1489,6 +1489,11 @@ int32_t* res_pairs_alloc(size_t cap, const std::vector<int>& devs) {
     }
     for (int dev : devs) {
         const strata::core::OnDevice on(dev);
+        if (!on.ok) {
+            (void) cudaGetLastError();
+            cudaFreeHost(p);
+            return nullptr;
+        }
         void* d = nullptr;
         if (cudaHostGetDevicePointer(&d, p, 0) != cudaSuccess || d != p) {
             (void) cudaGetLastError();
@@ -9614,6 +9619,10 @@ int main(int argc, char** argv) {
             cudaError_t r = d_res != nullptr ? res_put(d_res) : cudaSuccess;
             for (auto& st : stages) {
                 const strata::core::OnDevice on(st->dev);
+                if (!on.ok) {
+                    if (r == cudaSuccess) r = on.error;
+                    continue;
+                }
                 const cudaError_t e = res_put(st->d_res);
                 if (r == cudaSuccess) r = e;
             }
@@ -9694,6 +9703,10 @@ int main(int argc, char** argv) {
                     }
                     for (size_t k = 0; k < stages.size() && r == cudaSuccess; ++k) {
                         const strata::core::OnDevice on(stages[k]->dev);
+                        if (!on.ok) {
+                            r = on.error;
+                            break;
+                        }
                         strata::kernels::res_patch(stages[k]->d_res, res_pairs, (int) n, stages[k]->ver.stream());
                         r = cudaGetLastError();
                     }
@@ -9711,11 +9724,21 @@ int main(int argc, char** argv) {
             cudaStreamSynchronize(ver.stream());   // the patches landed (the verifier streams do not block the read)
             for (auto& st : stages) {
                 const strata::core::OnDevice on(st->dev);
+                if (!on.ok) {
+                    e = std::string("the residency table check cannot enter CUDA") + std::to_string(st->dev) + ": " +
+                        cudaGetErrorString(on.error);
+                    return false;
+                }
                 cudaStreamSynchronize(st->ver.stream());
             }
             int64_t bad = 0;
             for (auto& st : stages) {   // the later stages' copies first: res_back ends with CUDA0's (the pool's check)
                 const strata::core::OnDevice on(st->dev);
+                if (!on.ok) {
+                    e = std::string("the residency table check cannot enter CUDA") + std::to_string(st->dev) + ": " +
+                        cudaGetErrorString(on.error);
+                    return false;
+                }
                 bad += res_check(st->d_res, host_res, res_back, g.n_expert, res_windows);
             }
             bad += res_check(d_res, host_res, res_back, g.n_expert, res_windows);

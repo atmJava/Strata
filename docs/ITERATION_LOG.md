@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-139 · Residency patch 与整表回退检查每张目标卡
+
+- 目标 / 指标：`res_pairs_alloc()` 只有在每个目标 device 都成为当前上下文并映射到同一 host 地址时，才能启用
+  patched residency table；整表上传、patch 与校验也必须在每张 stage 的上下文中执行。
+- 假设与预期：函数忽略 `OnDevice.ok` 后，切换失败的卡仍可能在当前上下文得到 `d == p`，使调用方在未映射的卡上
+  启动 patch kernel；整表回退、patch 和诊断校验同样忽略 `OnDevice.ok`，可能静默跳过某张卡的 table。
+- 改动与实验：任一目标卡映射切换失败即释放 host buffer 并返回 null；整表上传、patch、同步和 check 把切换错误
+  作为本轮失败传播，不再在错误上下文操作后续 stage。
+- 判决：采纳。mapped fast path 与 full-table fallback 都必须覆盖全部目标卡，不能以部分成功代替。
+- 生产状态与回滚：只影响 adaptive residency 的 mapped patch 快路径；回退行为原本已存在，单提交可回退。
+- 未验证：当前无 CUDA Toolkit/双 GPU，无法注入映射失败；Clang 主机侧 CUDA 声明兼容语法构建通过，
+  `tools/test_*.py`（排除外部 `test_iq_pack.py`）与 `tests/terminal` 合计 406 passed、55 skipped。
+- 下一步与理由：完成本阶段验证后进入最终收尾。
+
 ## I-20261027-138 · Prefill peer/helper 资源按主卡与 peer 卡分别释放
 
 - 目标 / 指标：`PeerPrefill` 的 `ev_in`、`x_stream`、`ev_x` 必须在 primary device 生命周期内管理；peer
