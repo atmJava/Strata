@@ -99,6 +99,17 @@ def popen(what: str, args: list, role: str = "engine", **kw):
         raise
 
 
+def start_auxiliary_thread(target, *, name: str, failure: str, args: tuple = ()):
+    """Start optional background work without making thread quotas a service requirement."""
+    thread = threading.Thread(target=target, name=name, args=args, daemon=True)
+    try:
+        thread.start()
+    except RuntimeError as exc:
+        print(f"[strata] {failure}: {exc}", file=sys.stderr, flush=True)
+        return None
+    return thread
+
+
 # How long close() gives the engine at each step of ending it (seconds). Module values so that a test can shorten them.
 ENGINE_QUIT_WAIT_S, ENGINE_TERM_WAIT_S, ENGINE_KILL_WAIT_S = 20, 5, 20
 
@@ -4085,7 +4096,11 @@ class Service:
                     self._vision_idle_down()
                 except Exception as e:                 # tried again at the next turn; the thread keeps running
                     print(f"[strata] images: stopping the idle image encoder: {e}", flush=True)
-        threading.Thread(target=loop, daemon=True).start()
+        start_auxiliary_thread(
+            loop,
+            name="strata-vision-idle",
+            failure="elastic image encoder idle shutdown is disabled",
+        )
 
     def free_vram_mib(self) -> int | None:
         """Free VRAM on the engine's first NVIDIA GPU from NVML; None when it cannot be read."""
@@ -4311,7 +4326,11 @@ class Service:
                     self.unload(idle_for=self.idle_unload_s)
                 except EngineStuck as e:                # tried again at the next turn; the thread keeps running
                     print(f"[strata] idle unload: {e}", flush=True)
-        threading.Thread(target=loop, daemon=True).start()
+        start_auxiliary_thread(
+            loop,
+            name="strata-idle-unload",
+            failure="idle model unloading is disabled",
+        )
 
     def set_shared(self, defaults) -> dict:
         """The Chat settings every client gets for what it leaves out; {} / None = clients use their own again."""
@@ -8400,8 +8419,12 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         import webbrowser                                  # run-<model>.bat still passes --open)
         # on its own thread: webbrowser.open waits for the browser launcher, which on Linux can run for as long as
         # the browser does, and the main thread must be free to take Ctrl+C and SIGTERM (#1872)
-        threading.Thread(target=webbrowser.open, daemon=True, name="strata-open-browser",
-                         args=(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{bound_port}/",)).start()
+        start_auxiliary_thread(
+            webbrowser.open,
+            args=(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{bound_port}/",),
+            name="strata-open-browser",
+            failure="the browser was not opened",
+        )
     if ready_path is not None or event_sink is not None:
         ready_host = f"[{here}]" if ":" in here and not here.startswith("[") else here
         record = {"schema_version": 1, "instance_id": svc.instance_id, "pid": os.getpid(),

@@ -2058,6 +2058,22 @@ class ClientWatchFallback(unittest.TestCase):
             httpd.server_close()
 
 
+class AuxiliaryThreadFallback(unittest.TestCase):
+    def test_optional_browser_thread_failure_is_reported_without_raising(self):
+        from serve import server as server_module
+        output = io.StringIO()
+        with mock.patch.object(server_module.threading.Thread, "start",
+                               side_effect=RuntimeError("thread limit")), \
+                contextlib.redirect_stderr(output):
+            thread = server_module.start_auxiliary_thread(
+                lambda: None,
+                name="strata-test-auxiliary",
+                failure="the browser was not opened",
+            )
+        self.assertIsNone(thread)
+        self.assertIn("the browser was not opened: thread limit", output.getvalue())
+
+
 class EngineDeath(unittest.TestCase):
     """Issue #27: a dead engine is an error (not "length"), and the next request starts it again."""
 
@@ -3732,6 +3748,17 @@ class SharingTheGpu(unittest.TestCase):
             time.sleep(0.1)
         self.assertFalse(self.engine.alive())
         self.assertEqual(self.chat()[0], 200)
+
+    def test_idle_worker_thread_failures_keep_the_server_serving(self):
+        from serve import server as server_module
+        self.svc.idle_unload_s = 1
+        self.svc.vision = SimpleNamespace(elastic=True, elastic_idle_s=1, elastic_mib=0)
+        with mock.patch.object(server_module.threading.Thread, "start",
+                               side_effect=RuntimeError("thread limit")):
+            self.svc.start_idle_unload()
+            self.svc.start_vision_idle()
+        self.assertTrue(self.engine.alive())
+        self.assertEqual(self.req("/health")[0], 200)
 
     def test_min_free_vram_refuses_to_load(self):
         self.svc.min_free_vram_mib = 8000
