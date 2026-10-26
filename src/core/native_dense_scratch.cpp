@@ -49,6 +49,7 @@ NativeDenseScratch::~NativeDenseScratch() {
 
 void NativeDenseScratch::release() {
     const OnDevice on_device(device_);
+    if (!on_device.ok) return;   // retain the buffers and events until their owning device is available again
     if (device_ >= 0) (void) cudaDeviceSynchronize();
     for (cudaEvent_t& event : released_) {
         if (event) (void) cudaEventDestroy(event);

@@ -18,6 +18,7 @@ int stream_waits = 0;
 int synchronizations = 0;
 int fail_alloc_at = 0;
 int fail_event_at = 0;
+bool fail_set_device = false;
 
 void check(bool condition, const char* message) {
     if (condition) return;
@@ -29,6 +30,7 @@ void reset_counts() {
     allocations = frees = event_creates = event_destroys = 0;
     event_records = stream_waits = synchronizations = 0;
     fail_alloc_at = fail_event_at = 0;
+    fail_set_device = false;
 }
 
 } // namespace
@@ -39,6 +41,7 @@ extern "C" cudaError_t __wrap_cudaGetDevice(int* device) {
 }
 
 extern "C" cudaError_t __wrap_cudaSetDevice(int device) {
+    if (fail_set_device) return cudaErrorInvalidValue;
     current_device = device;
     return cudaSuccess;
 }
@@ -121,6 +124,18 @@ int main() {
     check(synchronizations == 1, "scratch destruction did not synchronize its device");
     check(event_destroys == 2, "scratch destruction retained an event");
     check(frees == 4, "scratch destruction retained a device buffer");
+
+    reset_counts();
+    err.clear();
+    auto wrong_device_release = NativeDenseScratch::create(2, 8, err);
+    check(wrong_device_release != nullptr, "wrong-device release fixture could not be created");
+    current_device = 1;
+    fail_set_device = true;
+    wrong_device_release.reset();
+    check(frees == 0 && event_destroys == 0 && synchronizations == 0,
+          "destruction touched resources while its device was unavailable");
+    check(current_device == 1, "failed destruction changed the caller's device");
+    current_device = 0;
 
     reset_counts();
     fail_alloc_at = 3;

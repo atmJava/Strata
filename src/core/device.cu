@@ -136,6 +136,7 @@ DeviceArena::DeviceArena(uint64_t bytes, int ordinal, bool poison)
 
 DeviceArena::~DeviceArena() {
     const OnDevice on_device(ordinal_);
+    if (!on_device.ok) return;           // best effort: never free another device's allocation in this context
     if (base_) cudaFree(base_);          // best effort: a destructor must not throw
 }
 

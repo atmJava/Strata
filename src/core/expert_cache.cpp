@@ -563,6 +563,7 @@ bool ExpertCache::open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_l
 
 void ExpertCache::close() {
     const strata::core::OnDevice on_device(device_);
+    if (!on_device.ok) return;   // retain every allocation: freeing it in the caller's context is invalid
     off_.clear();
     if (!segs_.empty()) {
         release_segmented();

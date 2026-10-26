@@ -1038,6 +1038,7 @@ struct StageTimer {
     int device = -1;
     void clear() {
         const OnDevice on_device(device);
+        if (!on_device.ok) return;       // retain every event until its owning device is available again
         for (int l = 0; l < 64; ++l)
             for (int s = 0; s < STAGE_SLOTS; ++s) {
                 if (a[l][s]) cudaEventDestroy(a[l][s]);

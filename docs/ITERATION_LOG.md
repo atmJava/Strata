@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-133 · 其他 device 所属资源只在正确 context 清理
+
+- 目标 / 指标：NativeDense scratch、ExpertCache、DeviceArena、阶段计时事件和权重共享指针的 deleter 在无法进入资源所属
+  device 时，不得在调用者 context 上释放或销毁资源。
+- 假设与预期：这些 owner 已经持有 device 编号并使用 `OnDevice`，但多数没有检查 `ok`；与刚修复的 drafter 相同，
+  `cudaSetDevice` 失败后仍会执行错误 context 的 clean-up。
+- 为什么选这条路线：在资源操作前增加同一条显式门控，成功路径无额外驱动调用；失败时保留对象状态，避免把错误释放当成
+  成功。先为可直接构造的 NativeDense scratch 增加故障注入，其他路径做严格静态检查。
+- 改动与实验：五个 owner 在 `!on_device.ok` 时停止清理；`native_dense_scratch_test` 新增“设备不可用时析构不得
+  sync/free/destroy”用例。普通及 ASan/UBSan 当前源码构建通过，相关 `.cpp` 的 GCC 严格语法检查通过。
+- 判决：采纳。错误 device 上不再尝试释放 GPU 状态。
+- 生产状态与回滚：正常路径不变；单提交可回退。
+- 未验证：`device.cu` 当前没有 nvcc，未执行 CUDA 编译；ExpertCache、DeviceArena、阶段计时和权重 deleter 的故障分支
+  没有集成故障测试。逐项 free 失败后的 partial-retry 仍是后续工作。
+- 下一步与理由：在 08:00 前复跑完整 Python/C++ 主机回归，清理临时构建产物并汇报。
+
 ## I-20261027-132 · Drafter 清理不再忽略设备切换失败
 
 - 目标 / 指标：`MtpDrafter::release()` 与 `Dflash2Drafter::release()` 必须先成功进入资源所属 device；失败时不得

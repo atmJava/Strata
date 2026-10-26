@@ -28,6 +28,7 @@ struct CudaFreeOnDevice {
     int device = -1;
     void operator()(void* p) const {
         const OnDevice on_device(device);
+        if (!on_device.ok) return;       // never release another device's allocation in the caller's context
         cudaFree(p);
     }
 };
