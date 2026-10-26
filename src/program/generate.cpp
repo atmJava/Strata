@@ -11018,8 +11018,20 @@ int main(int argc, char** argv) {
                 bool ok = true;
                 ~AdaptRun() { if (th.joinable()) th.join(); }   // an error return below still joins it
             } adapt_run;
-            if (!drive.d.usage.empty() && !ajob && !in_prompt_read && (++ba_window % o.adapt_every) == 0 && pending.empty())
-                adapt_run.th = std::thread([&] { adapt_run.ok = adapt(); });
+            if (!drive.d.usage.empty() && !ajob && !in_prompt_read && (++ba_window % o.adapt_every) == 0 && pending.empty()) {
+                try {
+                    adapt_run.th = std::thread([&] { adapt_run.ok = adapt(); });
+                } catch (const std::exception& e) {
+                    static bool said = false;
+                    if (!said) std::fprintf(stderr, "strata batch: adaptive refill thread did not start (%s); this round is skipped\n",
+                                            e.what());
+                    said = true;
+                } catch (...) {
+                    static bool said = false;
+                    if (!said) std::fprintf(stderr, "strata batch: adaptive refill thread did not start; this round is skipped\n");
+                    said = true;
+                }
+            }
             // Accept the proposal only when the target picked it and there is room to emit both tokens.
             std::vector<int> keep(bs.size(), 0);
             for (int a = 0; a < A; ++a) {
@@ -13914,6 +13926,7 @@ int main(int argc, char** argv) {
                 std::thread pl_adapt_thr;
                 std::atomic<bool> pl_adapt_done{true};
                 bool pl_adapt_ok = true;
+                bool pl_adapt_unavailable = false;
                 // an error ends the engine, as the serial loop's do: every GPU wait is released first (#267), so no
                 // window in flight keeps spinning on a flag nobody raises, and the tier's thread can finish (the
                 // asynchronous tier's job does host work alone: it ends)
@@ -14054,9 +14067,27 @@ int main(int argc, char** argv) {
                     if (pl_adapt_thr.joinable()) return true;   // still adapting
                     pl_apply();
                     if (!drive.d.usage.empty() && o.adapt_every > 0 && (rounds % o.adapt_iv(rounds)) == 0 && pending.empty() &&
-                        !exch_wait) {
+                        !exch_wait && !pl_adapt_unavailable) {
                         pl_adapt_done = false;
-                        pl_adapt_thr = std::thread([&] { strata::platform::name_this_thread("strata-adapt"); strata::aux_cpus::pin_current_thread(); pl_adapt_ok = adapt(); pl_adapt_done = true; });
+                        try {
+                            pl_adapt_thr = std::thread([&] {
+                                strata::platform::name_this_thread("strata-adapt");
+                                strata::aux_cpus::pin_current_thread();
+                                pl_adapt_ok = adapt();
+                                pl_adapt_done = true;
+                            });
+                        } catch (const std::exception& e) {
+                            pl_adapt_done = true;
+                            pl_adapt_unavailable = true;
+                            std::fprintf(stderr,
+                                         "strata serve: pipelined adaptive worker did not start (%s); adaptive rounds are skipped\n",
+                                         e.what());
+                        } catch (...) {
+                            pl_adapt_done = true;
+                            pl_adapt_unavailable = true;
+                            std::fprintf(stderr,
+                                         "strata serve: pipelined adaptive worker did not start; adaptive rounds are skipped\n");
+                        }
                     }
                     return true;
                 };
@@ -14738,8 +14769,26 @@ int main(int argc, char** argv) {
                 std::thread adapt_thr;   // the adaptive tier beside the commit and the draft (as in generate)
                 bool adapt_ok = true;
                 // (--adapt-async 1: the asynchronous tier above instead, ticked before the window)
-                if (!drive.d.usage.empty() && !ajob && ((rounds + 1) % o.adapt_iv(rounds)) == 0)
-                    adapt_thr = std::thread([&] { strata::platform::name_this_thread("strata-adapt"); strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
+                if (!drive.d.usage.empty() && !ajob && ((rounds + 1) % o.adapt_iv(rounds)) == 0) {
+                    try {
+                        adapt_thr = std::thread([&] {
+                            strata::platform::name_this_thread("strata-adapt");
+                            strata::aux_cpus::pin_current_thread();
+                            adapt_ok = adapt();
+                        });
+                    } catch (const std::exception& e) {
+                        static bool said = false;
+                        if (!said) std::fprintf(stderr,
+                                                "strata serve: pipeline adaptive helper did not start (%s); skipping\n",
+                                                e.what());
+                        said = true;
+                    } catch (...) {
+                        static bool said = false;
+                        if (!said) std::fprintf(stderr,
+                                                "strata serve: pipeline adaptive helper did not start; skipping\n");
+                        said = true;
+                    }
+                }
                 if (!ver.commit(a + 1, err)) {
                     if (adapt_thr.joinable()) adapt_thr.join();
                     std::printf("ERR %s\n", err.c_str());
@@ -16373,8 +16422,24 @@ int main(int argc, char** argv) {
             // GPU commits and drafts; it touches only the residency tables, which nothing reads until the next window
             std::thread adapt_thr;
             bool adapt_ok = true;
-            if (!drive.d.usage.empty() && ((rounds + 1) % o.adapt_iv(rounds)) == 0)
-                adapt_thr = std::thread([&] { strata::platform::name_this_thread("strata-adapt"); strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
+            if (!drive.d.usage.empty() && ((rounds + 1) % o.adapt_iv(rounds)) == 0) {
+                try {
+                    adapt_thr = std::thread([&] {
+                        strata::platform::name_this_thread("strata-adapt");
+                        strata::aux_cpus::pin_current_thread();
+                        adapt_ok = adapt();
+                    });
+                } catch (const std::exception& e) {
+                    static bool said = false;
+                    if (!said) std::fprintf(stderr, "strata generate: adaptive helper did not start (%s); skipping\n",
+                                            e.what());
+                    said = true;
+                } catch (...) {
+                    static bool said = false;
+                    if (!said) std::fprintf(stderr, "strata generate: adaptive helper did not start; skipping\n");
+                    said = true;
+                }
+            }
             strata::core::progress_at("spec loop: commit", (int64_t) T);
             if (!ver.commit(a + 1, err)) {
                 if (adapt_thr.joinable()) adapt_thr.join();

@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-58 · spec adaptive helper 线程失败跳过本轮
+
+- 目标 / 指标：batch/serial/pipelined spec 路径的 adaptive tier helper 被系统拒绝时，生成与 commit 必须继续；不能因一个
+  可选的专家驻留调整异常中止请求。
+- 假设与预期：四处 `std::thread` 直接构造在 decode 热路径内。`adapt()` 只更新驻留表和排队复制，不决定当前窗口数值；
+  构造异常会越过原有 join/`adapt_ok` 检查。
+- 为什么选这条路线：跳过该轮自适应比在 commit/draft 旁同步执行更保守，保持当前窗口、输出和已排队复制不动。pipeline
+  维护一次性的 `pl_adapt_unavailable`，不在后续 round 重复尝试；其余路径记录一次并继续。
+- 改动与实验：batch、pipeline、serve serial 和 generate serial 四处均捕获线程构造异常；失败时线程保持 nonjoinable，
+  `adapt_ok/done` 保持可继续状态。成功路径线程体、join、commit、draft 和 pending 应用不变。
+- 结果：`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；跳过该配置原有的未使用
+  变量告警）。`git diff --check` 通过。未运行真实线程配额失败、spec decode、adaptive swap 或 RTX 2080 Ti。
+- 判决：采纳。可选自适应 helper 失败只减少驻留调整频率，不影响生成正确性或请求寿命。
+- 生产状态与回滚：未改成功路径和 adaptive 数据；单提交可回退。
+- 学到什么：热路径中的可选线程必须明确“未启动”是允许状态，相关 join 与完成标志要按 nonjoinable 分支保持自洽。
+- 下一步与理由：继续审查剩余的 detach/短生命周期线程，并等待全量 serve 回归结果。
+
 ## I-20261027-57 · 并发 prompt reader 线程失败同步读取
 
 - 目标 / 指标：`STRATA_PIPED_CONCURRENT` 的 prompt reader 线程被拒绝时，当前 prompt 仍须通过同一 `sp.run()` 完成；
