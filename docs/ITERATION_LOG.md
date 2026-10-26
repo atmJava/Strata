@@ -3,6 +3,18 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-131 · 移除伪 DFlash2 测试
+
+- 目标 / 指标：常规 pytest 收集不得执行无断言、绑定开发机 Windows 路径的 DFlash2 脚本。
+- 假设与预期：`tools/dflash2/test_port.py` 只有打印，没有 `test_` 或断言；它在导入时读取 `C:\dflash2-work`，并依赖
+  `torch`/`transformers`。这既不是自动测试，也不能在目标 Linux 环境复现。
+- 改动与实验：删除该脚本及 README 中的“检查它”描述；保留有实际打包断言的 `tools/test_dflash2_pack.py`。
+  排除外部 `gguf-py` 用例后可收集 1548 项，不再出现项目内导入错误。
+- 判决：采纳。历史打印脚本不再伪装成测试入口。
+- 生产状态与回滚：不改变运行时代码；单提交可回退。
+- 未验证：DFlash2 真实权重对照仍需要原始模型包、PyTorch 环境和目标 GPU，本阶段没有执行。
+- 下一步与理由：最终复核完整测试结果、提交 SHA 和未验证硬件项。
+
 ## I-20261027-130 · 清理已删除入口的孤儿测试与夹具
 
 - 目标 / 指标：工具测试必须只覆盖仍存在的 CLI/server 代码；不得因 `setup.py`、Docker entrypoint、SYCL launcher
