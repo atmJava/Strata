@@ -52,12 +52,12 @@ extern "C" cudaError_t __wrap_cudaFreeHost(void* pointer) {
 
 extern "C" cudaError_t __wrap_cudaEventCreateWithFlags(cudaEvent_t* event, unsigned) {
     Event* made = new Event{current_device};
-    *event = made;
+    *event = reinterpret_cast<cudaEvent_t>(made);
     return cudaSuccess;
 }
 
 extern "C" cudaError_t __wrap_cudaEventDestroy(cudaEvent_t event) {
-    Event* made = static_cast<Event*>(event);
+    Event* made = reinterpret_cast<Event*>(event);
     check(made != nullptr && made->device == current_device,
           "an event was destroyed outside the device that created it");
     ++event_destroys;

@@ -18,6 +18,20 @@
 - 未验证：当前无 CUDA 工具链或驱动，free failure 由 link wrapper 注入；未测试真实 WDDM 下 reserve free 失败。
 - 下一步与理由：完成最终回归、远端 SHA 复核和 08:00 截止报告。
 
+## I-20261027-120 · PinnedRing 事件测试兼容真实 CUDA 句柄类型
+
+- 目标 / 指标：主机侧 `pinned_ring_test` 用 stub event 验证设备归属时，转换必须兼容真实 CUDA
+  `cudaEvent_t` 的不透明指针定义。
+- 假设与预期：测试把 `Event*` 与 `cudaEvent_t` 直接 `static_cast`，只在当前 shim 将两者都定义成兼容指针时成立；
+  在真实 CUDA 头文件下可能直接编译失败。
+- 为什么选这条路线：只改测试桩的指针往返转换，不改被测生产代码或运行时语义，风险最低且可直接由主机测试验证。
+- 改动与实验：`cudaEvent_t` 的创建与销毁改用 `reinterpret_cast` 在 stub `Event*` 和不透明句柄之间转换；
+  `pinned_ring_test` 普通构建以及 ASan/UBSan 构建均通过，验证 release 在 ring 自有 device 上执行并恢复调用者 device。
+- 判决：采纳。测试桩不再依赖当前临时 CUDA shim 的句柄可转换性假设。
+- 生产状态与回滚：不修改生产路径；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 GPU，因此尚未用真实 CUDA 头文件编译该测试。
+- 下一步与理由：继续检查 peer/remote expert 与 prefill 的多块 pinned host 分配、失败清理和跨设备释放。
+
 ## I-20261027-118 · PinnedRing 在自有 device 上释放
 
 - 目标 / 指标：PinnedRing 的 event 与 pinned slots 必须在其首次使用的 CUDA device 上释放；成员析构发生在调用者的
