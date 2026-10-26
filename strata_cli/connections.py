@@ -170,19 +170,10 @@ def create(name: str, url: str, *, prefix: str = "",
                       expected_name=name)
     data = _bytes(value)
     path = _path(name, create_dir=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags, 0o600)
+        _atomic_mod.write_new(path, data)
     except FileExistsError:
         raise ConnectionError(f"connection {name!r} already exists") from None
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
     return value, _revision(data)
 
 

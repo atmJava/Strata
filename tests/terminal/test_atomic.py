@@ -35,6 +35,33 @@ class AtomicWriteTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o600)
         self.assertEqual(list(self.root.glob(".*.tmp")), [])
 
+    def test_exclusive_create_sets_owner_only_mode_and_never_overwrites(self):
+        target = self.root / "new.json"
+        atomic.write_new(target, b"new")
+        self.assertEqual(target.read_bytes(), b"new")
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        with self.assertRaises(FileExistsError):
+            atomic.write_new(target, b"replacement")
+        self.assertEqual(target.read_bytes(), b"new")
+
+    def test_exclusive_create_fdopen_failure_leaves_no_file_or_descriptor(self):
+        target = self.root / "new.json"
+        descriptors = []
+        real_open = os.open
+
+        def record_open(*args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(atomic.os, "open", side_effect=record_open), \
+                mock.patch.object(atomic.os, "fdopen", side_effect=OSError("fdopen failed")):
+            with self.assertRaisesRegex(OSError, "fdopen failed"):
+                atomic.write_new(target, b"new")
+        with self.assertRaises(OSError):
+            os.fstat(descriptors[-1])
+        self.assertFalse(target.exists())
+
     def test_fdopen_failure_closes_the_descriptor_and_removes_the_temp(self):
         created = []
         with mock.patch.object(atomic.tempfile, "mkstemp", side_effect=self._capture_mkstemp(created)), \

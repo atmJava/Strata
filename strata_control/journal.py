@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from strata_control import profiles
+from strata_control import atomic, profiles
 from strata_control.profiles import ProfileError
 from strata_control import posix_owner
 
@@ -254,18 +254,7 @@ def _save_new(profile: str, record: dict) -> dict:
     path = _path(profile, record["operation_id"])
     with profiles._lock(_lock_name(profile)):
         _prune(directory, profile)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(path, flags, 0o600)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(_bytes(record))
-                stream.flush()
-                os.fsync(stream.fileno())
-        except BaseException:
-            path.unlink(missing_ok=True)
-            raise
+        atomic.write_new(path, _bytes(record))
     return record
 
 

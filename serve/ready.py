@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 
+from strata_control import atomic
+
 
 def preflight(path: str) -> Path:
     target = Path(path)
@@ -26,15 +28,7 @@ def preflight(path: str) -> Path:
 
 def publish(path: Path, payload: dict) -> None:
     data = (json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True) + "\n").encode("utf-8")
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
+    atomic.write_new(path, data)
 
 
 def remove_if_owned(path: Path, instance_id: str) -> None:

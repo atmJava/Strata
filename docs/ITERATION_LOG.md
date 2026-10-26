@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-13 · Exclusive-create 记录统一走不泄漏 fd 的原子创建
+
+- 目标 / 指标：connections、operation journal 和 ready file 的新建路径必须使用同一套 owner-only、
+  `O_EXCL`/`O_NOFOLLOW` 语义；`fdopen` 或写入失败时不能留下文件描述符或半成品记录。
+- 假设与预期：三处此前各自 `os.open` 后直接 `with os.fdopen`，而 `fdopen` 自身抛错时原 fd 不在上下文
+  管理范围内；三处也有重复的 flags、权限和清理代码。
+- 为什么选这条路线：这些文件分别承载连接配置、操作审计和 readiness 证明，失败语义必须一致，且能用
+  真实 fd 检查和 mock 故障验证。
+- 改动与实验：新增 `atomic.write_new()`，集中处理 `O_EXCL`、可用的 `O_NOFOLLOW`、0600、flush/fsync、
+  父目录同步和失败删除；connections、journal、`serve.ready.publish()` 全部委托该实现。共享的
+  descriptor 写入 helper 无论 `fdopen` 是否成功都会关闭 fd。新增 owner-only、不覆盖已有文件、fdopen
+  失败无文件/fd 残留测试。
+- 结果：atomic、connections、profiles、ready、ready-timeout 和 runconfig 合计
+  `48 passed / 30 subtests passed`；ready 的真实 mock server SIGTERM 集成测试也通过，
+  `compileall` 与 `git diff --check` 通过。
+- 判决：采纳。exclusive-create 的创建和失败清理只有一个实现。
+- 生产状态与回滚：未改生产；可用单个提交回退，既有记录格式与权限不变。
+- 学到什么：`fdopen` 是资源所有权转移点，失败时仍由调用方负责关闭；把转移封装在 helper 内最容易证明。
+- 下一步与理由：继续处理需要保留锁 fd 的 runtime state 写入，以及重启回滚中的错误边界。
+
 ## I-20261027-12 · 原子记录写入统一，失败路径关闭描述符并删除临时文件
 
 - 目标 / 指标：profile、connection 和 Web run config 的整文件替换必须共用同一实现；写临时文件、

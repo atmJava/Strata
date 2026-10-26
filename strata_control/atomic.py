@@ -14,32 +14,55 @@ def replace(src: PathLike, dst: PathLike) -> None:
     os.replace(src, dst)
 
 
+def _sync_parent(path: Path) -> None:
+    try:
+        parent_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except OSError:
+        # The record already reached its committed name; a parent sync failure must not report the save as failed.
+        pass
+
+
+def _write_owned_descriptor(descriptor: int, data: bytes) -> None:
+    try:
+        stream = os.fdopen(descriptor, "wb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def write_bytes(path: PathLike, data: bytes) -> None:
     """Durably replace `path` without exposing a partial record or a temporary file on failure."""
     target = Path(path)
     descriptor, temp_name = tempfile.mkstemp(prefix=f".{target.stem}-", suffix=".tmp", dir=target.parent)
-    open_descriptor = descriptor
     try:
-        stream = os.fdopen(open_descriptor, "wb")
-        open_descriptor = -1
-        with stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
+        _write_owned_descriptor(descriptor, data)
         replace(temp_name, target)
-        try:
-            parent_fd = os.open(target.parent, os.O_RDONLY)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
-        except OSError:
-            # The replacement already succeeded; do not report a failed save after changing the record.
-            pass
+        _sync_parent(target)
     finally:
-        if open_descriptor >= 0:
-            os.close(open_descriptor)
         Path(temp_name).unlink(missing_ok=True)
+
+
+def write_new(path: PathLike, data: bytes) -> None:
+    """Create a new owner-only record; on any failure, no path or descriptor is left behind."""
+    target = Path(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        _write_owned_descriptor(descriptor, data)
+        _sync_parent(target)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
 
 
 def write_text(path: PathLike, text: str, *, encoding: str = "utf-8") -> None:
