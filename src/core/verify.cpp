@@ -3246,8 +3246,16 @@ bool Verifier::wait_commit(std::string& err) {
 bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& err) {
     const OnDevice on_device(device_);
     if (g_ == nullptr || ss_ == nullptr) { err = "verify: init_slots before init"; return false; }
+    if (!slots_.empty() || arena_b_ != nullptr || h_commitb_ != nullptr) {
+        err = "verify: batch windows are already initialized";
+        return false;
+    }
     if (slots.empty()) {
         err = "verify: init_slots needs at least one session";
+        return false;
+    }
+    if (slots.size() > (size_t) max_t_) {
+        err = "verify: init_slots has more sessions than the batch window can hold";
         return false;
     }
     for (SessionState* x : slots) {
@@ -3260,21 +3268,29 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
     const strata::kernels::QsaShapes s = shapes_of(*g_);
     const int64_t S = (int64_t) slots.size(), CB = 2 + max_t_;
     const int64_t TS = (s.idx_block - 1) * g_->idx_key_dim, nQ = g_->n_qsa_layers();
-    void* d = nullptr;
-    if (!mapped((size_t) (S * CB * 4 + 16), (void**) &h_commitb_, (void**) &m_commitb_)) {
+    std::vector<SessionState*> new_slots = slots;
+    std::vector<strata::kernels::SamplerParams> new_slot_sp(
+        slots.size(), sampling_);   // greedy until set_slot_sampling
+    void* host = nullptr;
+    void* mapped_host = nullptr;
+    if (!mapped((size_t) (S * CB * 4 + 16), &host, &mapped_host)) {
         err = "verify: the batch commit staging failed";
         return false;
     }
+    void* d = nullptr;
     const uint64_t a = ((uint64_t) S * CB * 4 + 255) & ~255ull;
     if (cudaMalloc(&d, a + (uint64_t) S * std::max<int64_t>(nQ, 1) * TS * 4) != cudaSuccess) {
+        strata::core::host_free_guarded(host);
         err = "verify: the batch buffers do not fit";
         return false;
     }
+    h_commitb_ = (int32_t*) host;
+    m_commitb_ = (int32_t*) mapped_host;
     arena_b_ = d;
     commitb_ = (int32_t*) d;
     tail_snap_b_ = (float*) ((uint8_t*) d + a);
-    slots_ = slots;
-    slot_sp_.assign(slots.size(), sampling_);   // greedy until set_slot_sampling
+    slots_ = std::move(new_slots);
+    slot_sp_ = std::move(new_slot_sp);
     std::fprintf(stderr, "strata verify: batch windows of up to %lld sequences (layers [%lld, %lld))%s\n", (long long) S,
                  (long long) lb_, (long long) le_, g_batch_self_commit ? ", one-row windows keep their rows" : "");
     return true;

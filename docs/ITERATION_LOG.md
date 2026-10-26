@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-99 · Batch 初始化资源事务化
+
+- 目标 / 指标：Verifier 的 `init_slots()` 必须先验证 slot 数、session 形状和重复初始化，再一次性发布 mapped
+  commit staging、device arena、slot 指针与 sampling 状态。device arena 分配失败时，已取得的 mapped host 块必须
+  释放；任何失败都不能留下可被后续调用覆盖的半初始化字段。
+- 假设与预期：旧实现把 `h_commitb_/m_commitb_` 直接作为 mapped 输出，随后才 `cudaMalloc` device arena。后者失败
+  会留下 host 块；重复调用会把两块已有资源覆盖，导致旧对象不可追踪。文档要求每个 batch window 最多
+  `max_t` 个 slot，但入口没有验证。
+- 为什么选这条路线：先拒绝已初始化对象和超过 window 容量的 slot 集；在分配前构造新的 slot/sampling 向量，避免
+  GPU 资源取得后发生 vector 分配异常。mapped host 与 device arena 先写局部变量，`cudaMalloc` 失败调用 guarded
+  host free；全部成功后再一次性发布。成功路径的 arena 对齐、布局、stride、采样初值和日志保持不变。
+- 改动与实验：`verify.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；共享 mapped 分配器
+  的普通/ASan/UBSan 故障测试继续通过；Terminal/Control 全量通过（200 passed、46 skipped、93 subtests passed）。
+- 判决：采纳。batch 初始化的资源可见性收敛到最后一个成功点，失败不会丢弃已取得 host 块的唯一地址。
+- 生产状态与回滚：未改 batch graph、commit 顺序、slot 布局或推理数值；正常单次初始化行为不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动和 RTX 2080 Ti，未在真实 batch serve 中注入 device arena 分配失败，也未运行
+  `init_slots` 级的 link-wrap 测试。现有 mapped 分配器测试不覆盖 Verifier 成员发布，GPU batch 行为仍是静态审查。
+- 下一步与理由：继续检查 MTP/DFlash2 加载中的多块资源发布与 CUDA copy/sync 返回值，优先修复会“报告成功但数据
+  未完整上传”的路径。
+
 ## I-20261027-98 · Native embedding 加载事务化
 
 - 目标 / 指标：`NativeEmbed::load()` 只能在模型检查、payload 边界检查、mapped-pinned 分配、device alias 和内容
