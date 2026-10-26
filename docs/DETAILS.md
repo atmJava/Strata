@@ -522,6 +522,21 @@ applies at the next start. Network, key, MCP and program keys are not editable t
   `native_arithmetic_parity` checks every group width from 1 to 8 for the supported formats, bit for bit. Comparing other
   decode modes against each other still needs one target evaluator; `STRATA_IQ_MT_MIN=1` selects the grouped IQ arithmetic
   at every width and also changes prefill, so keep it the same in both arms.
+- **logprobs: how likely each token was (CUDA/HIP).** `"logprobs": true` with `"top_logprobs": 0..20` on
+  `/v1/chat/completions`, streamed or not, adds `choices[0].logprobs.content[]` to the reply (`token`, `logprob`,
+  `bytes`, `top_logprobs`); with thinking on, the thinking's entries come under `reasoning_content` instead. The
+  tokens, joined, spell the reply exactly (a character split across two tokens lands in the one that finishes it).
+  A reply is bounded by `max_tokens` -- or by the rest of the context when it is not sent -- and by no cap of our
+  own, as on OpenAI and vLLM, neither of which ties a length limit to logprobs. A reply that is not streamed, or
+  that answers a `json_schema` (buffered to be validated), does hold every entry until it ends, so a long one holds
+  a lot of them; a streamed reply hands each entry out with its chunk and keeps none. `"allowed_token_ids": [ids]`
+  keeps only those ids in `top_logprobs`, most likely first, renormalised to sum to 1; the chosen token is one of
+  them when it was named (vLLM's field, but vLLM masks generation with it, while here it filters what is reported,
+  so a token outside the named ids keeps its own `logprob` and an empty list). An id past the model's vocabulary is
+  a 400. A token whose probability could not be read gets no entry, and the reply goes on. On a server started with
+  `--parallel`, only a `max_tokens` 1 request gets them: it is the one a batch slot decodes through the single-token
+  path, which writes an LP line. A longer reply there is a 400, since the slot's `BT` lines carry none -- entries for
+  a prefix only, which a client cannot tell from the model's own answer.
 - **Non-finite logits end the request and drop the cached state (on by default).** If a verify window's logits are NaN, the
   window emits no tokens, the request ends, and the next request drops the live session, checkpoints and parked
   conversations and reads its prompt from token 0. The server retries a request that had sent nothing once, transparently.
