@@ -5627,6 +5627,22 @@ class VisionShutdown(unittest.TestCase):
             v.shutdown()
             self.assertFalse(d.exists())
 
+    def test_shutdown_closes_a_log_it_owns(self):
+        import serve.server as server
+        with tempfile.TemporaryDirectory() as t:
+            owned, borrowed = io.StringIO(), io.StringIO()
+            for log, close_log, expected in ((owned, True, True), (borrowed, False, False)):
+                with self.subTest(close_log=close_log):
+                    v = server.Vision.__new__(server.Vision)
+                    v.dir = Path(t) / f"vision-{close_log}"
+                    v.dir.mkdir()
+                    v.proc = None
+                    v.log = log
+                    v._close_log = close_log
+                    v.close()
+                    v.shutdown()
+                    self.assertEqual(log.closed, expected)
+
 
 class ClaudeCodeBillingStamp(unittest.TestCase):
     """Claude Code starts its system prompt with `x-anthropic-billing-header: cc_version=2.1.170.bf4;

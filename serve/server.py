@@ -2636,10 +2636,10 @@ class Vision:
     def work_dir() -> Path:
         """#480: the directory for the encoder's files.  The engine reads the embeddings file named in a `GENI` line
         and the encoder the output named in an `ENC <image> <out>` line, both split at spaces, so a space in the path
-        (a %TEMP% under a user name with a space) broke every image.  The system temp directory is used while its path
-        has no space, then the working directory, then the system drive's root; the plain temp directory is the last
-        resort (the encoder's own files are then named relative to it, see `_start`)."""
-        for parent in (None, Path.cwd(), Path(os.environ.get("SystemDrive", "C:") + os.sep)):
+        (a TMPDIR under a user name with a space) broke every image.  The system temp directory is used while its path
+        has no space, then the working directory and Linux's shared temporary directories; the plain temp directory is
+        the last resort (the encoder's own files are then named relative to it, see `_start`)."""
+        for parent in (None, Path.cwd(), Path("/tmp"), Path("/var/tmp")):
             try:
                 d = Path(tempfile.mkdtemp(prefix="strata-vision-", dir=parent))
             except OSError:
@@ -2652,9 +2652,12 @@ class Vision:
                 pass
         return Path(tempfile.mkdtemp(prefix="strata-vision-"))
 
-    def __init__(self, cfg: dict, log=None, env: dict | None = None, lazy: bool = False):
+    def __init__(self, cfg: dict, log=None, env: dict | None = None, lazy: bool = False,
+                 close_log: bool = False):
         args = self.reader_args(cfg)
         self.dir = self.work_dir()
+        self.log = log
+        self._close_log = close_log
         self.spawn = (args, log, env)                   # to start it again after an unload
         # The CUDA-capable reader has a CPU mode in the same executable; _start switches to it by itself when
         # CUDA cannot start.
@@ -2958,6 +2961,11 @@ class Vision:
         /tmp that is RAM) goes with it instead of piling up with every start.  unload() keeps it for the restart."""
         self.close()
         shutil.rmtree(self.dir, ignore_errors=True)
+        if getattr(self, "_close_log", False):
+            log, self.log = self.log, None
+            if log is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    log.close()
 
 
 def gpu_list(cfg: dict) -> list[int]:
@@ -8023,8 +8031,14 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                 print('[strata] the vision section\'s "elastic" needs "vram_elastic": true (the expert cache gives the '
                       "encoder its VRAM): the encoder starts with the model instead", flush=True)
                 vcfg["elastic"] = False
-            vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
-                            env=vision_env(cfg, env), lazy=lazy)
+            vision_log = open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None
+            try:
+                vision = Vision(vcfg, log=vision_log, env=vision_env(cfg, env), lazy=lazy,
+                                close_log=vision_log is not None)
+            except BaseException:
+                if vision_log is not None:
+                    vision_log.close()
+                raise
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         warn_budget_over_ram(engine_args(cfg) if "args" in cfg else [])      # #1080
@@ -8103,9 +8117,12 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                     if k in ("exe", "diffusion_model", "vae", "llm", "out_dir") and isinstance(v, str)
                     and not os.path.isabs(v) else v)
                 for k, v in cfg["images"].items()}
+        images_log = open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None
         try:
-            svc.images = images_api.ImageGen(icfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None)
+            svc.images = images_api.ImageGen(icfg, log=images_log)
         except ValueError as e:
+            if images_log is not None:
+                images_log.close()
             raise SystemExit(f"[strata] config: {e}")
         gone = svc.images.missing()
         if gone:
@@ -8282,7 +8299,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         except OSError as e:
             print(f"[strata] could not write ready file ({type(e).__name__})", file=sys.stderr)
             for close in (httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
-                          hub.close if hub is not None else None):
+                          getattr(svc.images, "shutdown", None), hub.close if hub is not None else None):
                 if close:
                     close()
             return 6
