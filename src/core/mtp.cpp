@@ -136,6 +136,7 @@ MtpDrafter::~MtpDrafter() {
     if (side_) cudaStreamDestroy(side_);
     if (sh_fork_) cudaEventDestroy(sh_fork_);
     if (sh_join_) cudaEventDestroy(sh_join_);
+    qsa_state_release(st_);
     if (owns_weights_ && dense_) cudaFree(dense_);
     if (owns_weights_ && experts_) cudaFree(experts_);
     if (state_arena_) cudaFree(state_arena_);
@@ -326,10 +327,21 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     const bool kv_int8_was = qsa_kv_int8();
     qsa_set_kv_hybrid(false);
     if (kv_hybrid_was) qsa_set_kv_int8(true);   // the drafter under --kv k8v4: plain INT8
+    struct RestoreKvModes {
+        bool hybrid;
+        bool int8;
+        bool active = true;
+        ~RestoreKvModes() {
+            if (active) {
+                qsa_set_kv_int8(int8);
+                qsa_set_kv_hybrid(hybrid);
+            }
+        }
+    } restore_kv_modes{kv_hybrid_was, kv_int8_was};
     uint64_t sb = qsa_state_bytes(g, max_cells, false, ring);
     if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
     if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring) == 0) {
-        if (st_.kv_mode == 0) { err = "mtp: state init failed"; return false; }
+        if (ring <= 0) { err = "mtp: state init failed"; return false; }
         std::fprintf(stderr, "strata mtp: no pinned RAM left for the draft layer's K/V copy; keeping it in VRAM\n");
         cudaGetLastError();
         cudaFree(state_arena_);
@@ -339,6 +351,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
         if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring) == 0) { err = "mtp: state init failed"; return false; }
     }
+    restore_kv_modes.active = false;
     qsa_set_kv_int8(kv_int8_was);
     qsa_set_kv_hybrid(kv_hybrid_was);
     qsa_state_zero(st_, g, nullptr);

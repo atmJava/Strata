@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-94 · MTP drafter 跟随 QSA 事务所有权
+
+- 目标 / 指标：`qsa_state_init` 改为失败不发布后，MTP 的 streaming-to-resident 回退仍须在 host K/V 初始化失败时
+  启动；drafter 析构必须释放自己的 `QsaState` host 资源；为 drafter 临时切换的 KV 格式全局开关必须在任一
+  早退或异常路径恢复，并且成功路径原来的恢复时点不变。
+- 假设与预期：旧 MTP 用 `st_.kv_mode` 区分 streaming 失败和普通失败；事务化初始化不再写这个 out 参数，因此
+  会把本应回退到全 VRAM 的失败误报为终止。`MtpDrafter` 还只释放 `state_arena_`，新增的 host staging/KV owner
+  需要显式 release。KV 格式开关在后续分配失败时会留在 drafter 的临时模式。
+- 为什么选这条路线：首次 QSA init 仅在计划了 ring (`ring > 0`) 时才允许重试 fully-resident；普通失败直接返回。
+  `MtpDrafter` 析构在所属设备内调用 `qsa_state_release(st_)` 后再释放 arena。KV 模式使用一个仅负责早退恢复的
+  guard，成功后立即按原位置恢复并关闭 guard，因此后续 load 代码看到的全局状态与旧版本一致。
+- 改动与实验：成功路径的 ring 大小、回退条件、K/V 格式、state arena 布局、恢复时点和初始化顺序不变。
+  `mtp.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；仅跳过源码既有未使用/缩进告警）。
+- 判决：采纳。MTP 回退与新 QSA 所有权语义一致，临时全局配置不会因早退泄漏到后续加载。
+- 生产状态与回滚：未改 draft token、窗口、graph、权重或采样；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、MTP pack 或 RTX 2080 Ti，未真实触发 drafts 的 pinned-host 耗尽和
+  fully-resident 重试，也未测量销毁后的驱动资源计数。
+- 下一步与理由：继续检查同一 QsaState 事务语义的其他调用方，并收尾未验证项与最终验证报告。
+
 ## I-20261027-93 · QSA host 资源有明确所有者并随 Session 释放
 
 - 目标 / 指标：每个 QSA 状态的 `host_step`、`host_pos` 和 KV streaming 的 pinned host 副本必须有可匹配的
