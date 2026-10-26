@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-126 · 新增设备与远端初始化测试注册到 CTest
+
+- 目标 / 指标：`on_device_test` 与 `remote_expert_opt_init_test` 除手工主机编译外，也应进入 Linux CUDA 构建的
+  CTest 测试清单。
+- 假设与预期：两个测试都通过 link wrapper 替换所需 CUDA 调用，可在 `CUDA_VISIBLE_DEVICES=-1` 下运行；Python 或
+  独立主机二进制通过不等于标准构建会执行它们。
+- 为什么选这条路线：复用现有 `STRATA_BUILD_TESTS`、GNU/Clang 主机测试分组和 wrapper 模式，不新增构建系统分支。
+- 改动与实验：`on_device_test` 仅链接 `strata_warnings`；`remote_expert_opt_init_test` 链接 `strata_engine` 以取得
+  `RemoteExpertOpt` 实现，并注册相同的 CUDA failure wrappers、环境与 30 秒超时。两个测试的独立普通及 ASan/UBSan
+  构建已通过。
+- 判决：采纳。新增回归可由 `ctest` 发现。
+- 生产状态与回滚：仅改测试构建，不影响发行二进制；单提交可回退。
+- 未验证：本机没有 CUDA toolkit，无法重新 configure/build CTest；CMake 变更只按现有同类 target 模式做静态核对。
+- 下一步与理由：网络恢复后推送待发提交，再做最终全量测试和截止报告。
+
 ## I-20261027-125 · Peer 轮询不把 NotReady 留成后续操作的错误
 
 - 目标 / 指标：`cudaStreamQuery` / `cudaEventQuery` 返回期望的 `cudaErrorNotReady` 后，不得让它作为 sticky last error

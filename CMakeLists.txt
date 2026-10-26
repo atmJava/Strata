@@ -445,6 +445,28 @@ if(STRATA_ENABLE_CUDA)
       add_test(NAME scoped_value_restore_test COMMAND scoped_value_restore_test)
       set_tests_properties(scoped_value_restore_test PROPERTIES
         ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+      add_executable(on_device_test tests/core/on_device_test.cpp)
+      target_include_directories(on_device_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      target_link_options(on_device_test PRIVATE
+        -Wl,--wrap=cudaGetDevice -Wl,--wrap=cudaSetDevice)
+      target_link_libraries(on_device_test PRIVATE strata_warnings)
+      add_test(NAME on_device_test COMMAND on_device_test)
+      set_tests_properties(on_device_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+      add_executable(remote_expert_opt_init_test tests/core/remote_expert_opt_init_test.cpp)
+      target_include_directories(remote_expert_opt_init_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      target_link_options(remote_expert_opt_init_test PRIVATE
+        -Wl,--wrap=cudaGetDevice -Wl,--wrap=cudaSetDevice
+        -Wl,--wrap=cudaHostAlloc -Wl,--wrap=cudaHostGetDevicePointer
+        -Wl,--wrap=cudaMalloc -Wl,--wrap=cudaFree -Wl,--wrap=cudaFreeHost
+        -Wl,--wrap=cudaStreamSynchronize -Wl,--wrap=cudaGetLastError
+        -Wl,--wrap=cudaGetErrorString)
+      target_link_libraries(remote_expert_opt_init_test PRIVATE strata_engine strata_warnings)
+      add_test(NAME remote_expert_opt_init_test COMMAND remote_expert_opt_init_test)
+      set_tests_properties(remote_expert_opt_init_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
       add_executable(mapped_host_test tests/core/mapped_host_test.cpp)
       target_include_directories(mapped_host_test PRIVATE
         include ${_strata_gpu_include_directories})
