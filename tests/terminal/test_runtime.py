@@ -148,6 +148,29 @@ class RuntimeTests(unittest.TestCase):
             host._kill_child_tree()
         killpg.assert_not_called()
 
+    def test_stop_treats_exit_before_sigterm_as_stopped(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock()
+        child.poll.return_value = None
+        child.send_signal.side_effect = ProcessLookupError
+        child.wait.return_value = 0
+        host.child = child
+        self.assertEqual(host._stop_child(),
+                         {"ok": True, "state": "stopped", "exit_code": 0, "error": None})
+
+    def test_stop_bounds_wait_after_kill(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock()
+        child.poll.return_value = None
+        child.wait.side_effect = [subprocess.TimeoutExpired("server", 10),
+                                  subprocess.TimeoutExpired("server", 10)]
+        host.child = child
+        with mock.patch.object(host, "_kill_child_tree") as kill:
+            result = host._stop_child()
+        kill.assert_called_once_with()
+        self.assertEqual((result["ok"], result["error"], result["exit_code"]),
+                         (False, "server_stop_deadline_expired", 8))
+
     def test_local_management_bridge_and_cli_share_owner_and_journal(self):
         command = [sys.executable, "-m", "strata_control.management"]
         root = Path(__file__).resolve().parents[2]

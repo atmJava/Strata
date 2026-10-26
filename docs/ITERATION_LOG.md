@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-11 · Runtime stop 正确处理 SIGTERM 前 fast-exit，强杀等待保持有界
+
+- 目标 / 指标：`Host._stop_child()` 不能在 `poll()` 与 `send_signal(SIGTERM)` 之间子进程自行退出时误报失败；
+  SIGKILL 之后的第二次 `wait()` 也必须有界，且任何失败结果都先关闭 owner pipe。
+- 假设与预期：`poll()` 返回活动只代表检查瞬间；`send_signal()` 可合法抛出 `ProcessLookupError`。旧代码让
+  这个正常竞争冒泡成 `invalid_control_request`，并使调用方看不到真实停止状态。
+- 为什么选这条路线：这是 stop/restart 的真实竞争窗口，可用假 child 精确覆盖；不需要模型或真实服务。
+- 改动与实验：将 `ProcessLookupError` 视为“已经退出”，仍由随后的 `wait()` 回收退出码；SIGKILL 后的
+  `wait(timeout=10)` 若仍超时则关闭 owner pipe、返回 `server_stop_deadline_expired`，不再向控制循环抛异常。
+  新增 fast-exit 与双重超时两个回归。
+- 结果：新增用例 `2 passed`；完整 `tests/terminal/test_runtime.py` 为
+  `46 passed / 11 subtests passed`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。stop 竞争被归一为 stopped 或有明确错误码的 failed，不再变成协议解析错误。
+- 生产状态与回滚：未改生产；只影响 supervisor 的停止边界，可用单个提交回退。
+- 学到什么：进程状态是随时间变化的外部状态；每次基于 `pid` 的操作都必须准备目标刚刚消失。
+- 下一步与理由：继续检查 restart 回滚和 server 持久化写入的失败原子性。
+
 ## I-20261027-10 · Runtime supervisor 启动失败不泄漏日志、管道或服务器子进程
 
 - 目标 / 指标：`Host._launch()` 在打开日志、创建 owner pipe、启动 `Popen`、写入进程记录或 child marker

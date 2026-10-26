@@ -854,12 +854,19 @@ class Host:
             if self.ready_path is not None:
                 self.ready_path.unlink(missing_ok=True)
             return {"ok": True, "state": "stopped", "exit_code": child.returncode if child else 0}
-        child.send_signal(signal.SIGTERM)
+        try:
+            child.send_signal(signal.SIGTERM)
+        except ProcessLookupError:
+            pass        # it exited between poll() and the signal; wait() below still collects the code
         try:
             code = child.wait(timeout=self.shutdown_timeout + 8)
         except subprocess.TimeoutExpired:
             self._kill_child_tree()
-            child.wait(timeout=10)
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._close_owner_pipe()
+                return {"ok": False, "state": "failed", "error": "server_stop_deadline_expired", "exit_code": 8}
             self._close_owner_pipe()
             return {"ok": False, "state": "failed", "error": "server_stop_deadline_expired", "exit_code": 8}
         self._close_owner_pipe()
