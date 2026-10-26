@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-124 · Peer adapt 只发布完整完成的复制批次
+
+- 目标 / 指标：`PeerExperts::adapt()` 的 copy + event 批次只有全部成功并等到 event 成功后才能更新 residency；
+  copy、event record 或 event wait 失败时，`pending_` 不得在后续 `apply_pending()` 中被误发布。
+- 假设与预期：旧代码在批次中途 copy 失败后保留此前 pending；event record 失败也保留 pending。若调用者没有立即退出，
+  后续 apply 可能把尚未确认完成的副本标成 resident。wait 返回错误时旧实现同样继续发布。
+- 为什么选这条路线：目的地已经先标为 non-resident，失败后丢弃 pending 最多浪费本轮 slot，不会让后续 token 读取未确认
+  的 expert 字节；这是故障路径上优先保证正确性的最小改动。
+- 改动与实验：cudaMemcpyAsync 或 cudaEventRecord 失败时清空本批 pending；`apply_pending()` 只有 event 成功才发布，
+  NotReady 保持等待，其他错误清空 pending 并消费 driver error。严格主机语法检查与 clang analyzer 通过。
+- 判决：采纳。residency 只跟随完整完成的复制批次。
+- 生产状态与回滚：成功路径不变；只改变 CUDA 故障后的状态处理，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 GPU；copy/event 故障路径由静态控制流审查验证，尚无真实驱动故障注入。
+- 下一步与理由：继续检查 close 中逐个 free/destroy 失败后的所有权记录，并运行最终全量回归。
+
 ## I-20261027-119 · Pin reserve 释放失败不丢所有权
 
 - 目标 / 指标：soft/hard pin reserves 只有 `cudaFreeHost` 成功后才能清空指针、字节数和预算；失败后保留原记录，

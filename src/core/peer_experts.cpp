@@ -394,13 +394,21 @@ bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, 
         const uint8_t* b = src_->blob(s.layer, s.in);
         if (slot < 0 || b == nullptr) continue;
         if (!ck(cudaMemcpyAsync(cache_.device_slot(slot), b, (size_t) lay.blob_bytes(s.layer), cudaMemcpyHostToDevice,
-                                refill_), "refill", err))
+                                refill_), "refill", err)) {
+            // No event describes the earlier copies in this batch. Keep every destination evicted rather than
+            // letting a later apply_pending() publish a mixture of old and new bytes.
+            pending_.clear();
             return false;
+        }
         res_[out] = kNotResident;              // evicted now: the CPU computes it meanwhile
         pending_.emplace_back((int32_t) in, slot);
         ++swaps_;
     }
-    return ck(cudaEventRecord(refill_ev_, refill_), "refill event", err);
+    if (!ck(cudaEventRecord(refill_ev_, refill_), "refill event", err)) {
+        pending_.clear();
+        return false;
+    }
+    return true;
 }
 
 void PeerExperts::apply_pending(bool wait) {
@@ -408,8 +416,15 @@ void PeerExperts::apply_pending(bool wait) {
     {
         OnDevice on(device_);
         if (!on.ok) return;
-        if (wait) cudaEventSynchronize(refill_ev_);
-        else if (cudaEventQuery(refill_ev_) != cudaSuccess) return;
+        const cudaError_t status = wait ? cudaEventSynchronize(refill_ev_) : cudaEventQuery(refill_ev_);
+        if (!wait && status == cudaErrorNotReady) return;
+        if (status != cudaSuccess) {
+            // The copies did not complete as one batch. Their old destinations were already declared evicted;
+            // dropping the pending list wastes those slots for this run but never advertises bytes that did not arrive.
+            pending_.clear();
+            cudaGetLastError();
+            return;
+        }
     }
     for (const auto& [i, slot] : pending_) res_[(size_t) i] = slot;
     pending_.clear();
