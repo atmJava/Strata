@@ -113,6 +113,9 @@ bool read_file(const std::string& path, std::vector<uint8_t>& out) {
 }  // namespace
 
 MtpDrafter::~MtpDrafter() {
+    // The drafter and a layer split's later stage may live on a device other than the one current on the
+    // destroying thread. Every handle below belongs to `device_`, so release it in that device's context.
+    const OnDevice on_device(device_);
     if (cs_) cudaStreamSynchronize(cs_);
     for (auto& e : prefill_exec_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : prefill_dev_exec_) if (e) cudaGraphExecDestroy(e);

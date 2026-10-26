@@ -3,6 +3,27 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-79 · 多卡对象在自己的 CUDA 设备上释放资源
+
+- 目标 / 指标：层切分中分配在 CUDA1..3 的 drafter、verifier、prefill、dense、head 和 expert cache，
+  必须由其所属设备上下文同步、销毁 stream/event/graph 并释放内存；调用方销毁对象时的当前设备不能影响清理。
+- 假设与预期：这些对象大多把 `device_` 或 stage 设备用于运行期切换，却没有在析构和 `close()`/`release()`
+  中切回该设备。主线程完成一次 stage 调用后通常已恢复 CUDA0，因此后续 stage 的 teardown 可能对错误设备执行
+  CUDA destroy/free，留下句柄或让释放失败。
+- 为什么选这条路线：复用现有 `OnDevice`，只在资源所有者的同步和释放作用域进入分配设备；不给每个句柄引入
+  新包装，也不改变运行期调用、分配顺序、算法或数值。
+- 改动与实验：`MtpDrafter`、`Verifier`、`NativeHead`、`NativeDense`、`ExpertCache` 和 `Prefill` 记录或复用
+  自己的设备，并在析构、`close()` 或 `release()` 中切换；prefill 的 tap 清理也使用同一设备。
+- 结果：六个实现文件通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；仅跳过源码原有
+  未使用变量告警）。`expert_cache_per_layer_test` 用模拟 CUDA 重建并运行通过，
+  `expert_cache_segmented_test` 因驱动 shim 不支持 VMM 按原约定跳过，`mtp_logits_width_test` 的 116 项检查
+  通过；Terminal/Control 全量回归 `216 passed, 46 skipped, 93 subtests passed`。
+- 判决：采纳。多卡对象的资源生命周期与分配设备绑定，正常调用路径不变。
+- 生产状态与回滚：未改 CUDA 工作、内存布局、请求行为或默认配置；单提交可回退。
+- 未验证：当前没有 CUDA 工具链、驱动和 RTX 2080 Ti，未真实销毁 CUDA1..3 上的 stage、未执行阻塞运行中的
+  `cudaStreamSynchronize` 或验证 VMM 路径；shim 仅验证主机侧接口和控制流。
+- 下一步与理由：继续检查失败分支中“分配后尚未交给所有者”的裸设备或 pinned 指针。
+
 ## I-20261027-78 · NativeDense 发布失败不丢设备内存
 
 - 目标 / 指标：`NativeDense::load()` 在 HC scratch 的 vector 扩容、packed Q8 注册或后续所有权转移失败时，

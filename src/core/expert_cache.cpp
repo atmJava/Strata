@@ -1,5 +1,6 @@
 // src/core/expert_cache.cpp - R4's slot storage and residency table.  Read the header first.
 #include "strata/core/expert_cache.hpp"
+#include "strata/core/on_device.hpp"
 
 #include <thread>
 #include <mutex>
@@ -457,6 +458,7 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int6
         err = "ExpertCache: n_layers, n_expert and blob_bytes must all be positive";
         return false;
     }
+    cudaGetDevice(&device_);
 
     const uint64_t want = (uint64_t) n_slots * (uint64_t) blob_bytes;
 
@@ -560,6 +562,7 @@ bool ExpertCache::open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_l
 }
 
 void ExpertCache::close() {
+    const strata::core::OnDevice on_device(device_);
     off_.clear();
     if (!segs_.empty()) {
         release_segmented();
@@ -580,6 +583,7 @@ void ExpertCache::close() {
     fills_ = 0;
     admitted_ = 0;
     layer_next_.clear();
+    device_ = -1;
 }
 
 /// R4.2g.  Layer `l` owns `[l*q, (l+1)*q)` with `q = slots_ / n_layers_`; the LAST layer takes whatever is

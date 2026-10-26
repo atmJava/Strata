@@ -1,5 +1,6 @@
 #include "strata/core/native_dense.hpp"
 #include <cstdlib>
+#include "strata/core/on_device.hpp"
 #include "strata/core/weights.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/fused_gr.hpp"
@@ -241,6 +242,7 @@ static cudaEvent_t g_hc_ev[64][2] = {};        // [device][slot]: the prompt pat
 static bool g_hc_ev_set[64][2] = {};
 
 NativeDense::~NativeDense() {
+    const strata::core::OnDevice on_device(device_);
     for (auto& dev : g_hc_scratch)
         for (auto& cl : dev)
             for (void*& b : cl)
@@ -252,6 +254,7 @@ NativeDense::~NativeDense() {
 
 bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& table, std::string& err,
                        bool include_ple_key, int64_t layer_lo, int64_t layer_hi) {
+    cudaGetDevice(&device_);
     auto outside = [&](const std::string& name) {   // a blk.<l>. tensor of another stage's layers
         if (layer_hi < 0 || name.rfind("blk.", 0) != 0) return false;
         const long l = std::strtol(name.c_str() + 4, nullptr, 10);

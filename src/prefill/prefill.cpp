@@ -1060,6 +1060,7 @@ Prefill::~Prefill() {
 }
 
 void Prefill::clear_taps() {
+    const core::OnDevice on_device(impl_ ? impl_->device : -1);
     if (tap_dev_ != nullptr) {
         cudaFree(tap_dev_);
         tap_dev_ = nullptr;
@@ -1076,6 +1077,7 @@ void Prefill::reset() {
 
 void Prefill::release() {
     if (!impl_) return;
+    const core::OnDevice on_device(impl_->device);
     impl_->hand_worker.reset();   // idle here (run drains the chain before it returns); joins its thread
     if (impl_->cs) cudaStreamSynchronize(impl_->cs);
     if (impl_->copy) cudaStreamSynchronize(impl_->copy);
@@ -1107,6 +1109,7 @@ void Prefill::release() {
     for (cudaEvent_t e : impl_->cpu_wall)
         if (e) cudaEventDestroy(e);
     for (void* p : impl_->owned) cudaFree(p);
+    impl_->device = -1;
 }
 
 namespace {

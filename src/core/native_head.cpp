@@ -1,4 +1,5 @@
 #include "strata/core/native_head.hpp"
+#include "strata/core/on_device.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -17,6 +18,7 @@ NativeHead::~NativeHead() {
 }
 
 void NativeHead::unload() {
+    const strata::core::OnDevice on_device(device_);
     if (weights_) strata::kernels::native_q6_k_unpack(weights_);
     if (scratch_) cudaFree(scratch_);
     if (weights_) cudaFree(weights_);
