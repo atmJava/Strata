@@ -6,6 +6,7 @@
 #include "strata/core/host_graph_launch.hpp"
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/dma_batch.hpp"
+#include "strata/core/graph_capture.hpp"
 #include "strata/core/spec_prob.hpp"
 #include "strata/platform/worker_guard.hpp"
 
@@ -2336,6 +2337,7 @@ bool Verifier::capture(int T, std::string& err) {
         return false;
     }
     if (ce != cudaSuccess) {
+        if (graph) cudaGraphDestroy(graph);
         err = std::string("verify: end capture: ") + cudaGetErrorString(ce);
         return false;
     }
@@ -2371,10 +2373,8 @@ bool Verifier::capture(int T, std::string& err) {
     const bool made = instantiate_evicting(exec_t, graph, {}, "verify: instantiate: ", err);
     cudaGraphDestroy(graph);
     if (!made) return false;
-    const cudaError_t ue = cudaGraphUpload(exec_t, cs_);
-    const cudaError_t us = cudaStreamSynchronize(cs_);
-    std::fprintf(stderr, "strata verify: captured the %d-token window (upload %s, sync %s)\n", T,
-                 cudaGetErrorString(ue), cudaGetErrorString(us));
+    if (!upload_graph_exec(exec_t, cs_, "verify: window capture", err)) return false;
+    std::fprintf(stderr, "strata verify: captured the %d-token window\n", T);
     return true;
 }
 
@@ -2494,13 +2494,12 @@ bool Verifier::capture_commit(std::string& err) {
         if (graph) cudaGraphDestroy(graph);
         return false;
     }
-    if (ce != cudaSuccess || cudaGraphInstantiate(&commit_exec_, graph, 0) != cudaSuccess) {
+    if (ce != cudaSuccess) {
         if (graph) cudaGraphDestroy(graph);
         err = std::string("verify: commit capture: ") + cudaGetErrorString(ce);
         return false;
     }
-    cudaGraphDestroy(graph);
-    return true;
+    return instantiate_graph_exec(graph, commit_exec_, "verify: commit capture", err);
 }
 
 void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {
@@ -3293,8 +3292,7 @@ bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err
     const bool made = instantiate_evicting(ex, graph, bkey(rows, S, hbase), "verify: batch instantiate: ", err);
     cudaGraphDestroy(graph);
     if (!made) return false;
-    cudaGraphUpload(ex, cs_);
-    cudaStreamSynchronize(cs_);
+    if (!upload_graph_exec(ex, cs_, "verify: batch capture", err)) return false;
     std::string list;
     for (int t = 0; t < S; ++t) list += (t ? "," : "") + std::to_string(rows[t]);
     std::fprintf(stderr, "strata verify: captured the batch window over slots %s\n", list.c_str());
@@ -3449,14 +3447,16 @@ bool Verifier::instantiate_evicting(cudaGraphExec_t& ex, cudaGraph_t graph, cons
     // #997: every layout of active slots keeps its own graph pair (20-30 MiB each on an L40S), and with an expert cache
     // sized to the reserve the next window graph - a batch layout or a one-request window captured on first use - can
     // find no VRAM left: free the least recently used layouts until it fits (they are captured again when needed)
-    cudaError_t ie = cudaGraphInstantiate(&ex, graph, 0);
+    cudaGraphExec_t made = nullptr;
+    cudaError_t ie = cudaGraphInstantiate(&made, graph, 0);
     int freed = 0;
     for (bool evicted = true; ie == cudaErrorMemoryAllocation && evicted;) {
         (void) cudaGetLastError();
         if (!evict_batch_graph(key, evicted, err)) return false;
         if (evicted) {
             ++freed;
-            ie = cudaGraphInstantiate(&ex, graph, 0);
+            made = nullptr;
+            ie = cudaGraphInstantiate(&made, graph, 0);
         }
     }
     if (freed > 0)
@@ -3466,6 +3466,11 @@ bool Verifier::instantiate_evicting(cudaGraphExec_t& ex, cudaGraph_t graph, cons
         err = std::string(what) + cudaGetErrorString(ie);
         return false;
     }
+    if (made == nullptr) {
+        err = std::string(what) + "the driver returned an empty executable";
+        return false;
+    }
+    ex = made;
     return true;
 }
 

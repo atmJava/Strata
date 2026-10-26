@@ -1,5 +1,6 @@
 // src/core/mtp.cpp - see include/strata/core/mtp.hpp.
 #include "strata/core/mtp.hpp"
+#include "strata/core/graph_capture.hpp"
 #include "strata/core/pin_budget.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
 #include "strata/core/coupled_draft.hpp"
@@ -1165,24 +1166,45 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
 }
 
 namespace {
+template <typename T>
+class RestoreValue {
+public:
+    explicit RestoreValue(T& value) : value_(value), saved_(value) {}
+    ~RestoreValue() { if (active_) value_ = saved_; }
+    void restore() {
+        if (!active_) return;
+        value_ = saved_;
+        active_ = false;
+    }
+
+private:
+    T& value_;
+    T saved_;
+    bool active_ = true;
+};
+
 bool finish_capture(cudaStream_t cs, bool ok, cudaGraphExec_t& exec, const char* what, std::string& err) {
     cudaGraph_t graph = nullptr;
     const cudaError_t ce = cudaStreamEndCapture(cs, &graph);
     if (!ok) {
         if (graph) cudaGraphDestroy(graph);
+        if (err.empty()) err = std::string("mtp: ") + what + " capture recording failed";
+        if (ce != cudaSuccess)
+            err += std::string(" (end capture: ") + cudaGetErrorString(ce) + ")";
         return false;
     }
-    if (ce != cudaSuccess || cudaGraphInstantiate(&exec, graph, 0) != cudaSuccess) {
+    if (ce != cudaSuccess) {
         if (graph) cudaGraphDestroy(graph);
         err = std::string("mtp: ") + what + " capture: " + cudaGetErrorString(ce);
         return false;
     }
     mtp_list_nodes(graph, what);
-    cudaGraphDestroy(graph);
+    if (!strata::core::instantiate_graph_exec(
+            graph, exec, std::string("mtp: ") + what + " capture", err))
+        return false;
     // an explicit upload: the first launch's implicit one blocked behind a device-side spin (verify.cpp)
-    cudaGraphUpload(exec, cs);
-    cudaStreamSynchronize(cs);
-    return true;
+    return strata::core::upload_graph_exec(
+        exec, cs, std::string("mtp: ") + what + " capture", err);
 }
 }  // namespace
 
@@ -1211,34 +1233,43 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
     const int64_t HCN = g_->hc * g_->n_embd;
     g_mp.init();   // (its allocation before the capture)
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
+    RestoreValue<int> restore_base(g_mp.base);
+    RestoreValue<bool> restore_coupled(coupled_rec_);
+    RestoreValue<int> restore_j(coupled_j_);
     g_mp.base = 0;
     bool ok = true;
-    // coupled: the request's chain and the penalty history's base, for this round's drafts
-    if (coupled) coupled_draft_stage(m_cparams_, m_chist_, cparams_, cring_, kCoupledHistCap, cs_);
-    // the catch-up: the layer's front for the window's T cells (their K/V), then its rest for row a only, on row
-    // a's intermediates copied to row 0, at the cell the host staged in step row 2*max_t - 1; the draft chain is
-    // one graph per step (`capture_step`) so the host can stop it when a draft is unlikely
-    const int ra = 2 * max_t_ - 1;
-    const int64_t N = g_->n_embd, NH = g_->n_head;
-    const MappedCopy in[7] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * T * 4}, {pos_, m_pos_, 2 * T * NH},
-                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + ra * 4, m_step_ + ra * 4, 4},
-                              {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
-    copy_from_mapped_multi(in, 7, cs_);
-    ok = record_front(T, 0, cs_, err);
-    if (ok) {
-        if (T > 1) {
-            copy_row_to_first(row_, R_, HCN, inj_, g_->hc, mixed_, N, cs_);
-            native_quantize_q8_1(mixed_, xq_, (int) N, 1, cs_);
+    try {
+        // coupled: the request's chain and the penalty history's base, for this round's drafts
+        if (coupled) coupled_draft_stage(m_cparams_, m_chist_, cparams_, cring_, kCoupledHistCap, cs_);
+        // the catch-up: the layer's front for the window's T cells (their K/V), then its rest for row a only, on row
+        // a's intermediates copied to row 0, at the cell the host staged in step row 2*max_t - 1; the draft chain is
+        // one graph per step (`capture_step`) so the host can stop it when a draft is unlikely
+        const int ra = 2 * max_t_ - 1;
+        const int64_t N = g_->n_embd, NH = g_->n_head;
+        const MappedCopy in[7] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * T * 4}, {pos_, m_pos_, 2 * T * NH},
+                                  {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + ra * 4, m_step_ + ra * 4, 4},
+                                  {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
+        copy_from_mapped_multi(in, 7, cs_);
+        ok = record_front(T, 0, cs_, err);
+        if (ok) {
+            if (T > 1) {
+                copy_row_to_first(row_, R_, HCN, inj_, g_->hc, mixed_, N, cs_);
+                native_quantize_q8_1(mixed_, xq_, (int) N, 1, cs_);
+            }
+            coupled_rec_ = coupled;
+            coupled_j_ = 0;
+            ok = record_rest(ra, cs_, err);
+            restore_coupled.restore();
+            restore_j.restore();
         }
-        coupled_rec_ = coupled;
-        coupled_j_ = 0;
-        ok = record_rest(ra, cs_, err);
-        coupled_rec_ = false;
+        if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
+        if (ok) g_mp.stamp(16, cs_);
+        restore_base.restore();
+        if (ok && force_on_ && !coupled) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
+    } catch (const std::exception& e) {
+        err = std::string("mtp: round capture: ") + e.what();
+        ok = false;
     }
-    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
-    if (ok) g_mp.stamp(16, cs_);
-    g_mp.base = -1;
-    if (ok && force_on_ && !coupled) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
 }
 
@@ -1254,16 +1285,26 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
     const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
                               {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
-    copy_from_mapped_multi(in, 2, cs_);
-    coupled_rec_ = coupled;
-    coupled_j_ = j;
+    RestoreValue<int> restore_base(g_mp.base);
+    RestoreValue<bool> restore_coupled(coupled_rec_);
+    RestoreValue<int> restore_j(coupled_j_);
+    bool ok = true;
     g_mp.base = j < kMpGraphs ? j : -1;
-    bool ok = record_forward(1, row, cs_, err);
-    coupled_rec_ = false;
-    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
-    if (ok) g_mp.stamp(16, cs_);
-    g_mp.base = -1;
-    if (ok && force_on_ && !coupled) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
+    try {
+        copy_from_mapped_multi(in, 2, cs_);
+        coupled_rec_ = coupled;
+        coupled_j_ = j;
+        ok = record_forward(1, row, cs_, err);
+        restore_coupled.restore();
+        restore_j.restore();
+        if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
+        if (ok) g_mp.stamp(16, cs_);
+        restore_base.restore();
+        if (ok && force_on_ && !coupled) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
+    } catch (const std::exception& e) {
+        err = std::string("mtp: step capture: ") + e.what();
+        ok = false;
+    }
     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);
 }
 

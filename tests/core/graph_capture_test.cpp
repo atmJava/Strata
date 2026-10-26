@@ -15,12 +15,18 @@ int stream_destroys = 0;
 int begin_captures = 0;
 int end_captures = 0;
 int graph_destroys = 0;
+int graph_exec_destroys = 0;
 int instantiate_calls = 0;
+int upload_calls = 0;
+int sync_calls = 0;
 bool capturing = false;
 int fail_stream_create = 0;
 int fail_begin = 0;
 int fail_end = 0;
 int fail_instantiate = 0;
+int return_empty_instantiate = 0;
+int fail_upload = 0;
+int fail_sync = 0;
 
 void check(bool condition, const char* message) {
     if (condition) return;
@@ -30,9 +36,11 @@ void check(bool condition, const char* message) {
 
 void reset_counts() {
     stream_creates = stream_destroys = begin_captures = end_captures = 0;
-    graph_destroys = instantiate_calls = 0;
+    graph_destroys = graph_exec_destroys = instantiate_calls = 0;
+    upload_calls = sync_calls = 0;
     capturing = false;
     fail_stream_create = fail_begin = fail_end = fail_instantiate = 0;
+    return_empty_instantiate = fail_upload = fail_sync = 0;
 }
 
 } // namespace
@@ -78,6 +86,10 @@ extern "C" cudaError_t __wrap_cudaGraphInstantiate(cudaGraphExec_t* exec, cudaGr
         *exec = nullptr;
         return cudaErrorMemoryAllocation;
     }
+    if (return_empty_instantiate) {
+        *exec = nullptr;
+        return cudaSuccess;
+    }
     *exec = (cudaGraphExec_t) 0x4000;
     return cudaSuccess;
 }
@@ -88,12 +100,32 @@ extern "C" cudaError_t __wrap_cudaGraphDestroy(cudaGraph_t graph) {
     return cudaSuccess;
 }
 
+extern "C" cudaError_t __wrap_cudaGraphExecDestroy(cudaGraphExec_t exec) {
+    check(exec != nullptr, "a null executable graph reached cudaGraphExecDestroy");
+    ++graph_exec_destroys;
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t __wrap_cudaGraphUpload(cudaGraphExec_t exec, cudaStream_t stream) {
+    check(exec != nullptr && stream != nullptr, "graph upload received a null handle");
+    ++upload_calls;
+    return fail_upload ? cudaErrorInvalidValue : cudaSuccess;
+}
+
+extern "C" cudaError_t __wrap_cudaStreamSynchronize(cudaStream_t stream) {
+    check(stream != nullptr, "stream synchronization received a null stream");
+    ++sync_calls;
+    return fail_sync ? cudaErrorInvalidValue : cudaSuccess;
+}
+
 extern "C" const char* __wrap_cudaGetErrorString(cudaError_t) {
     return "stub CUDA error";
 }
 
 int main() {
     using strata::core::capture_graph_exec;
+    using strata::core::instantiate_graph_exec;
+    using strata::core::upload_graph_exec;
     cudaGraphExec_t old_exec = (cudaGraphExec_t) 0x9000;
     cudaGraphExec_t exec = old_exec;
     std::string err;
@@ -179,6 +211,57 @@ int main() {
     check(exec == old_exec && graph_destroys == 1 && stream_destroys == 1 && !capturing,
           "a graph instantiation failure retained a resource or published its executable");
 
-    std::printf("graph_capture_test: capture failures close every owned resource\n");
+    reset_counts();
+    exec = old_exec;
+    err.clear();
+    check(!instantiate_graph_exec(nullptr, exec, "null graph", err), "a null graph was instantiated");
+    check(exec == old_exec && instantiate_calls == 0 && graph_destroys == 0,
+          "a null graph changed resources or the executable");
+
+    reset_counts();
+    return_empty_instantiate = 1;
+    exec = old_exec;
+    err.clear();
+    check(!instantiate_graph_exec((cudaGraph_t) 0x2000, exec, "empty executable", err),
+          "an empty executable was published");
+    check(exec == old_exec && graph_destroys == 1 && graph_exec_destroys == 0,
+          "an empty executable was not consumed safely");
+
+    reset_counts();
+    exec = old_exec;
+    err.clear();
+    check(instantiate_graph_exec((cudaGraph_t) 0x2000, exec, "successful graph", err),
+          "a successful direct instantiation was rejected");
+    check(exec == (cudaGraphExec_t) 0x4000 && graph_destroys == 1,
+          "a successful direct instantiation did not publish or consume exactly once");
+
+    reset_counts();
+    exec = (cudaGraphExec_t) 0x5000;
+    err.clear();
+    check(upload_graph_exec(exec, (cudaStream_t) 0x1000, "successful upload", err),
+          "a successful graph upload was rejected");
+    check(exec == (cudaGraphExec_t) 0x5000 && upload_calls == 1 && sync_calls == 1 &&
+              graph_exec_destroys == 0,
+          "a successful graph upload changed or released its executable");
+
+    reset_counts();
+    fail_upload = 1;
+    exec = (cudaGraphExec_t) 0x5000;
+    err.clear();
+    check(!upload_graph_exec(exec, (cudaStream_t) 0x1000, "upload failure", err),
+          "a graph upload failure was accepted");
+    check(exec == nullptr && upload_calls == 1 && sync_calls == 0 && graph_exec_destroys == 1,
+          "a graph upload failure retained a published executable");
+
+    reset_counts();
+    fail_sync = 1;
+    exec = (cudaGraphExec_t) 0x5000;
+    err.clear();
+    check(!upload_graph_exec(exec, (cudaStream_t) 0x1000, "sync failure", err),
+          "a graph upload synchronization failure was accepted");
+    check(exec == nullptr && upload_calls == 1 && sync_calls == 1 && graph_exec_destroys == 1,
+          "a graph upload synchronization failure retained a published executable");
+
+    std::printf("graph_capture_test: capture, instantiate and upload failures own every resource\n");
     return 0;
 }

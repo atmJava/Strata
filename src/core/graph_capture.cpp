@@ -4,6 +4,41 @@
 
 namespace strata::core {
 
+bool instantiate_graph_exec(cudaGraph_t graph, cudaGraphExec_t& exec, const std::string& label, std::string& err) {
+    if (graph == nullptr) {
+        err = label + ": no graph to instantiate";
+        return false;
+    }
+    cudaGraphExec_t instantiated = nullptr;
+    const cudaError_t instantiate = cudaGraphInstantiate(&instantiated, graph, 0);
+    (void) cudaGraphDestroy(graph);
+    if (instantiate != cudaSuccess) {
+        err = label + ": instantiate: " + cudaGetErrorString(instantiate);
+        return false;
+    }
+    if (instantiated == nullptr) {
+        err = label + ": instantiate returned an empty executable";
+        return false;
+    }
+    exec = instantiated;
+    return true;
+}
+
+bool upload_graph_exec(cudaGraphExec_t& exec, cudaStream_t stream, const std::string& label, std::string& err) {
+    if (exec == nullptr) {
+        err = label + ": no executable graph to upload";
+        return false;
+    }
+    const cudaError_t upload = cudaGraphUpload(exec, stream);
+    const cudaError_t sync = upload == cudaSuccess ? cudaStreamSynchronize(stream) : upload;
+    if (upload == cudaSuccess && sync == cudaSuccess) return true;
+
+    err = label + ": graph upload: " + cudaGetErrorString(upload != cudaSuccess ? upload : sync);
+    (void) cudaGraphExecDestroy(exec);
+    exec = nullptr;
+    return false;
+}
+
 bool capture_graph_exec(const std::string& label, const GraphCaptureBody& body, cudaGraphExec_t& exec,
                         std::string& err) {
     cudaStream_t stream = nullptr;
@@ -46,24 +81,7 @@ bool capture_graph_exec(const std::string& label, const GraphCaptureBody& body, 
         err = label + ": end capture: " + cudaGetErrorString(end);
         return false;
     }
-    if (graph == nullptr) {
-        err = label + ": capture produced no graph";
-        return false;
-    }
-
-    cudaGraphExec_t instantiated = nullptr;
-    const cudaError_t instantiate = cudaGraphInstantiate(&instantiated, graph, 0);
-    (void) cudaGraphDestroy(graph);
-    if (instantiate != cudaSuccess) {
-        err = label + ": instantiate: " + cudaGetErrorString(instantiate);
-        return false;
-    }
-    if (instantiated == nullptr) {
-        err = label + ": instantiate returned an empty executable";
-        return false;
-    }
-    exec = instantiated;
-    return true;
+    return instantiate_graph_exec(graph, exec, label, err);
 }
 
 } // namespace strata::core

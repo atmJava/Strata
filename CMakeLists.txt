@@ -432,7 +432,8 @@ if(STRATA_ENABLE_CUDA)
       target_link_options(graph_capture_test PRIVATE
         -Wl,--wrap=cudaStreamCreate -Wl,--wrap=cudaStreamDestroy
         -Wl,--wrap=cudaStreamBeginCapture -Wl,--wrap=cudaStreamEndCapture
-        -Wl,--wrap=cudaGraphInstantiate -Wl,--wrap=cudaGraphDestroy
+        -Wl,--wrap=cudaGraphInstantiate -Wl,--wrap=cudaGraphDestroy -Wl,--wrap=cudaGraphExecDestroy
+        -Wl,--wrap=cudaGraphUpload -Wl,--wrap=cudaStreamSynchronize
         -Wl,--wrap=cudaGetErrorString)
       target_link_libraries(graph_capture_test PRIVATE strata_warnings)
       add_test(NAME graph_capture_test COMMAND graph_capture_test)

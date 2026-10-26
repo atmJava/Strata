@@ -1,5 +1,6 @@
 // src/core/dflash2.cpp - see include/strata/core/dflash2.hpp.
 #include "strata/core/dflash2.hpp"
+#include "strata/core/graph_capture.hpp"
 
 #include "strata/core/native_head.hpp"
 #include "strata/core/on_device.hpp"
@@ -644,28 +645,49 @@ bool Dflash2Drafter::capture(int n, const float* taps, std::string& err) {
     // measured: -0.3 ms a round on an RTX 3060, +0.0..0.7 on a Strix Halo (gfx1151), so the HIP builds keep one stream (STRATA_DF2_FORK=1 / 0 overrides)
     static const bool fork_default = true;
     static const bool fork_on = [] { const char* e = std::getenv("STRATA_DF2_FORK"); return e && e[0] ? e[0] == '1' : fork_default; }();
+    const bool fork_was = fork_;
     fork_ = fork_on && prof_ == nullptr && cs2_ != nullptr;
-    if (fork_) {
-        cudaEventRecord(ev_fork_, cs_);
-        cudaStreamWaitEvent(cs2_, ev_fork_, 0);
+    bool ok = false;
+    try {
+        if (fork_) {
+            cudaEventRecord(ev_fork_, cs_);
+            cudaStreamWaitEvent(cs2_, ev_fork_, 0);
+        }
+        ok = record_context(taps, n, fork_ ? cs2_ : cs_, err);
+    } catch (const std::exception& e) {
+        err = std::string("dflash2: capture: ") + e.what();
+        ok = false;
     }
-    bool ok = record_context(taps, n, fork_ ? cs2_ : cs_, err);
-    if (fork_) cudaEventRecord(ev_join_, cs2_);
-    if (ok) ok = record_block(cs_, err);
-    if (fork_) cudaStreamWaitEvent(cs_, ev_join_, 0);
-    fork_ = false;
+    if (fork_) {
+        const cudaError_t record = cudaEventRecord(ev_join_, cs2_);
+        const cudaError_t wait = record == cudaSuccess ? cudaStreamWaitEvent(cs_, ev_join_, 0) : record;
+        if (record != cudaSuccess || wait != cudaSuccess) {
+            err = std::string("dflash2: capture fork join: ") +
+                  cudaGetErrorString(record != cudaSuccess ? record : wait);
+            ok = false;
+        }
+    }
+    if (ok) {
+        try {
+            ok = record_block(cs_, err);
+        } catch (const std::exception& e) {
+            err = std::string("dflash2: capture: ") + e.what();
+            ok = false;
+        }
+    }
+    fork_ = fork_was;
     cudaGraph_t graph = nullptr;
     const cudaError_t ce = cudaStreamEndCapture(cs_, &graph);
     if (!ok) { if (graph) cudaGraphDestroy(graph); return false; }
-    if (ce != cudaSuccess || cudaGraphInstantiate(&exec_[n], graph, 0) != cudaSuccess) {
+    if (ce != cudaSuccess) {
         if (graph) cudaGraphDestroy(graph);
         err = std::string("dflash2: capture: ") + cudaGetErrorString(ce);
         return false;
     }
-    cudaGraphDestroy(graph);
-    cudaGraphUpload(exec_[n], cs_);
-    cudaStreamSynchronize(cs_);
-    return true;
+    if (!strata::core::instantiate_graph_exec(
+            graph, exec_[n], "dflash2: capture", err))
+        return false;
+    return strata::core::upload_graph_exec(exec_[n], cs_, "dflash2: capture", err);
 }
 
 bool Dflash2Drafter::prepare(const float* taps, std::string& err) {

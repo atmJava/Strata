@@ -3,6 +3,33 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-95 · Graph 实例化与上传事务化
+
+- 目标 / 指标：CUDA graph 的 instantiate 与 upload/sync 必须遵循同一发布规则。失败时不能覆盖调用者已有的
+  executable，不能留下已发布但未上传成功的 executable，并须销毁已经取得的 graph/exec；MTP、DFlash2 与 Verifier
+  的 capture 临时录制标志在早退或异常后必须恢复。
+- 假设与预期：直接调用 `cudaGraphInstantiate(&field, ...)` 时，驱动失败可能修改输出参数；upload 或同步失败后，
+  调用者若仍看到非空 handle，会把未就绪 graph 当作可用。MTP 的 `coupled_rec_`/`coupled_j_`、profiler graph
+  base 以及 DFlash2 的 `fork_` 只在正常路径恢复，异常会污染后续 capture。
+- 为什么选这条路线：新增 `instantiate_graph_exec()` 先在局部 handle 中实例化并始终消费输入 graph，只在成功且
+  handle 非空时发布；新增 `upload_graph_exec()` 在 upload/sync 失败时销毁并清空 executable。MTP/DFlash2 和
+  Verifier 的普通窗口复用这两个事务器；Verifier 的显存不足 LRU 重试保留 graph 到成功，但每次调用仍只写局部
+  handle，最终成功才替换目标。capture 期间的标志和 profiler base 使用作用域恢复器。
+- 改动与实验：batch commit capture 改为事务实例化；batch/window capture 的 upload 错误不再被忽略；MTP 的
+  recording 失败会保留 body 错误并附带 end-capture 错误，DFlash2/ MTP 的异常路径仍会结束 stream capture。
+  `graph_capture_test` 增加 null graph、空 executable、upload 失败和 sync 失败故障注入，并检查旧 handle、
+  graph 与 executable 的销毁次数。普通及 ASan/UBSan 构建通过；`graph_capture.cpp`、`mtp.cpp`、
+  `dflash2.cpp`、`verify.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）。
+  `python3 -m pytest tests/terminal -q` 通过：200 passed、46 skipped、93 subtests passed。
+- 判决：采纳。graph executable 的可见性与可执行性现在一致，失败不会留下半发布的句柄。
+- 生产状态与回滚：成功路径的 graph 节点、instantiate 参数、capture 顺序、upload stream 和推理数值不变；只在
+  失败路径增加销毁与错误传播；单提交可回退。
+- 未验证：当前无 CUDA 工具链、CUDA 驱动和 RTX 2080 Ti，未在真实驱动上注入 `cudaGraphInstantiate`、
+  `cudaGraphUpload` 或 stream synchronization 故障，也未量测 LRU 驱逐重试时的真实 VRAM 回收。主机侧 link-wrap
+  测试验证控制流与所有权，不替代真实 CUDA capture/upload 状态检查。
+- 下一步与理由：继续检查 Verifier batch 录制标志在异常路径的恢复，以及其他 graph-only 入口是否仍有直接写字段的
+  实例化和未检查上传。
+
 ## I-20261027-94 · MTP drafter 跟随 QSA 事务所有权
 
 - 目标 / 指标：`qsa_state_init` 改为失败不发布后，MTP 的 streaming-to-resident 回退仍须在 host K/V 初始化失败时
