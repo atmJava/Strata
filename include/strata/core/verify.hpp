@@ -27,6 +27,7 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/platform/gpu_event_pairs.hpp"
 
 #include <cuda_runtime.h>
 
@@ -463,6 +464,12 @@ private:
     const int32_t* spec_q_ = nullptr;   ///< set_spec_q: the drafter's q rows for the next window (host)
     int spec_nq_ = 0;
     int32_t* d_spec_ = nullptr;          ///< device: kVerifyMaxT draft ids, then kVerifyMaxT q rows
+    bool commit_timing_configured_ = false;
+    bool commit_timing_on_ = false;
+    bool commit_timing_pending_ = false;
+    double commit_timing_ms_ = 0;
+    int64_t commit_timing_n_ = 0;
+    strata::platform::GpuEventPairs commit_timing_events_;
     int hist_len_ = 0;
     bool head_sampling_ = true;          ///< set_head_sampling
     std::vector<float> logit_bias_host_;

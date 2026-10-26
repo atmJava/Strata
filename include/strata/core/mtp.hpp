@@ -23,6 +23,7 @@
 #include "strata/core/pinned_ring.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/platform/gpu_event_pairs.hpp"
 
 #include <cuda_runtime.h>
 
@@ -237,6 +238,16 @@ private:
     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
+    struct DraftTiming {
+        bool on = false;
+        double round_ms = 0, step_ms = 0, gap_ms = 0, wall_ms = 0, tail_ms = 0;
+        double pre_ms = 0, launch_ms = 0, ple_ms = 0, wait0_ms = 0, waitj_ms = 0;
+        int64_t rounds = 0, steps = 0;
+        strata::platform::GpuEventPairs events;
+        DraftTiming();
+        void init(int device);
+        void report() const;
+    } draft_timing_;
     int64_t n_vocab_ = 0;
     uint64_t vram_ = 0;
     cudaStream_t cs_ = nullptr;

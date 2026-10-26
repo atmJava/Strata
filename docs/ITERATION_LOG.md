@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-86 · MTP 与 commit 计时 event 归实例和所属设备所有
+
+- 目标 / 指标：`STRATA_DRAFT_TIMING` 与 `STRATA_COMMIT_TIMING` 的 CUDA event 必须使用可计时事件，按所属设备
+  创建、记录、同步和销毁；多 drafter/verifier 不能共享全局计时单例，创建中途失败也不得留下句柄。
+- 假设与预期：两个诊断原来把 event 放在函数静态或匿名命名空间单例中，生命周期只到进程退出；分层运行时
+  event 可能在错误设备销毁。MTP 的共享单例还会把并发实例的计数混在一起。初次抽取 owner 时又误用了
+  `cudaEventDisableTiming`，会让 `cudaEventElapsedTime` 在真实 CUDA 上失败。
+- 为什么选这条路线：新增 `GpuEventPairs`，一次事务式创建 N 个计时 event 对，析构在创建设备释放；
+  drafter 与 verifier 各持一个实例。无效容量请求先校验、不破坏已有 owner；设备恢复失败时销毁本次新事件
+  且不发布半成品。计时关闭时仍不创建 event，恢复时点、采样公式和报告频率不变。
+- 改动与实验：MTP 的 16 对和 commit 的 1 对改用同一 owner；owner 测试覆盖成功/失败创建、无效请求保留
+  现有资源、析构和恢复失败清理。用 CUDA runtime link-wrap 在无 GPU 环境运行；普通和 ASan/UBSan 构建均
+  通过。`mtp.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）；`verify.cpp`
+  通过同一检查，仅跳过源码原有的 `raise_flag` 未使用变量告警。
+- 判决：采纳。两个诊断不再共享跨实例状态，计时 event 按设备事务式创建和释放，且使用可测时事件。
+- 生产状态与回滚：两个开关默认关闭，不影响推理路径；单提交可回退。
+- 未验证：当前环境没有 CUDA 工具链、驱动或 RTX 2080 Ti，不能执行真实 sm_75 计时。
+- 下一步与理由：批量编译当前改动，检查真实 CUDA 事件语义不能由 link-wrap 覆盖的部分，再继续审计诊断单例。
+
 ## I-20261027-85 · 会话复制的线程私有 CUDA 资源在退出时释放
 
 - 目标 / 指标：`conversation_copy.hpp` 为每个调用线程、每张 CUDA 卡延迟创建的非阻塞复制 stream 和排序 event，

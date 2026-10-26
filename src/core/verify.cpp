@@ -3159,27 +3159,43 @@ bool Verifier::commit(int n_keep, std::string& err) {
     } else {
         std::atomic_thread_fence(std::memory_order_seq_cst);
         // STRATA_COMMIT_TIMING=1 (measurement only): the commit graph's GPU time, from an event pair around it (read at the
-        // next commit, when the pair has long completed); printed every 300 commits
-        static struct CommitTiming {
-            bool on = false, pending = false;
-            cudaEvent_t b = nullptr, e = nullptr;
-            double ms = 0;
-            int64_t n = 0;
-            CommitTiming() { const char* v = std::getenv("STRATA_COMMIT_TIMING"); on = v != nullptr && v[0] == '1'; }
-        } ct;
-        if (ct.on && ct.b == nullptr &&
-            (cudaEventCreate(&ct.b) != cudaSuccess || cudaEventCreate(&ct.e) != cudaSuccess)) { ct.on = false; (void) cudaGetLastError(); }
-        if (ct.on && ct.pending) {
-            float ms = 0;
-            if (cudaEventSynchronize(ct.e) == cudaSuccess && cudaEventElapsedTime(&ms, ct.b, ct.e) == cudaSuccess) { ct.ms += ms; ++ct.n; }
-            ct.pending = false;
-            if (ct.n > 0 && ct.n % 300 == 0)
-                std::fprintf(stderr, "strata verify: commit graph %.3f ms GPU on average over %lld commits\n", ct.ms / (double) ct.n,
-                             (long long) ct.n);
+        // next commit, when the pair has long completed); printed every 300 commits.  The pair belongs to this verifier's
+        // device: a layer split has one verifier per stage, and CUDA events cannot be reused across devices.
+        if (!commit_timing_configured_) {
+            const char* value = std::getenv("STRATA_COMMIT_TIMING");
+            commit_timing_on_ = value != nullptr && value[0] == '1';
+            commit_timing_configured_ = true;
         }
-        if (ct.on) cudaEventRecord(ct.b, cs_);
+        if (commit_timing_on_ && !commit_timing_events_.ensure(device_, 1)) {
+            commit_timing_on_ = false;
+            commit_timing_pending_ = false;
+            (void) cudaGetLastError();
+        }
+        if (commit_timing_on_ && commit_timing_pending_) {
+            float ms = 0;
+            if (commit_timing_events_.synchronize_end(0) == cudaSuccess &&
+                commit_timing_events_.elapsed_ms(0, ms) == cudaSuccess) {
+                commit_timing_ms_ += ms;
+                ++commit_timing_n_;
+            }
+            commit_timing_pending_ = false;
+            if (commit_timing_n_ > 0 && commit_timing_n_ % 300 == 0)
+                std::fprintf(stderr, "strata verify: commit graph %.3f ms GPU on average over %lld commits\n",
+                             commit_timing_ms_ / (double) commit_timing_n_, (long long) commit_timing_n_);
+        }
+        if (commit_timing_on_ &&
+            commit_timing_events_.record_start(0, cs_) != cudaSuccess) {
+            commit_timing_on_ = false;
+            (void) cudaGetLastError();
+        }
         const cudaError_t le = cudaGraphLaunch(commit_exec_, cs_);
-        if (ct.on) { cudaEventRecord(ct.e, cs_); ct.pending = true; }
+        if (commit_timing_on_ &&
+            commit_timing_events_.record_end(0, cs_) != cudaSuccess) {
+            commit_timing_on_ = false;
+            (void) cudaGetLastError();
+        } else if (commit_timing_on_) {
+            commit_timing_pending_ = true;
+        }
         if (le != cudaSuccess) { err = std::string("verify: commit launch: ") + cudaGetErrorString(le); return false; }
         // set_commit_async: no wait here - the next window runs on the same stream after it, and the drafter (its own
         // stream) reads only this window's final rows and its own K/V. h_commit_ is next written after the next window's

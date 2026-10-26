@@ -158,7 +158,8 @@ target_link_libraries(strata-plan PRIVATE strata_plan)
 # ---- strata_core (GPU runtime) ---------------------------------------------
 # Only built when a GPU backend is on, so the Phase 1 targets keep working without a toolkit.
 if(STRATA_ENABLE_CUDA)
-  add_library(strata_core STATIC src/core/device.cu src/core/pinned.cu src/platform/memory.cpp src/core/graph.cpp src/core/weights.cpp
+  add_library(strata_core STATIC src/core/device.cu src/core/pinned.cu src/platform/memory.cpp
+                               src/platform/gpu_event_pairs.cpp src/core/graph.cpp src/core/weights.cpp
                                src/core/layout.cpp)
   target_include_directories(strata_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   # DFlash2 remains part of this CUDA server build.
@@ -371,6 +372,21 @@ if(STRATA_ENABLE_CUDA)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
   if(STRATA_BUILD_TESTS)
+    if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      add_executable(gpu_event_pairs_test
+        tests/platform/gpu_event_pairs_test.cpp src/platform/gpu_event_pairs.cpp)
+      target_include_directories(gpu_event_pairs_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      target_link_options(gpu_event_pairs_test PRIVATE
+        -Wl,--wrap=cudaGetDevice -Wl,--wrap=cudaSetDevice
+        -Wl,--wrap=cudaEventCreateWithFlags -Wl,--wrap=cudaEventDestroy
+        -Wl,--wrap=cudaEventRecord -Wl,--wrap=cudaEventSynchronize -Wl,--wrap=cudaEventElapsedTime
+        -Wl,--wrap=cudaGetLastError)
+      target_link_libraries(gpu_event_pairs_test PRIVATE strata_warnings)
+      add_test(NAME gpu_event_pairs_test COMMAND gpu_event_pairs_test)
+      set_tests_properties(gpu_event_pairs_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+    endif()
     add_executable(host_graph_launch_test tests/core/host_graph_launch_test.cu)
     target_include_directories(host_graph_launch_test PRIVATE include)
     target_link_libraries(host_graph_launch_test PRIVATE CUDA::cudart Threads::Threads)
