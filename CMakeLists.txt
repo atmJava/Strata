@@ -450,6 +450,7 @@ if(STRATA_ENABLE_CUDA)
         include ${_strata_gpu_include_directories})
       target_link_options(mapped_host_test PRIVATE
         -Wl,--wrap=cudaHostAlloc -Wl,--wrap=cudaHostGetDevicePointer
+        -Wl,--wrap=cudaHostRegister -Wl,--wrap=cudaHostUnregister
         -Wl,--wrap=cudaFreeHost -Wl,--wrap=cudaGetLastError)
       target_link_libraries(mapped_host_test PRIVATE strata_warnings)
       add_test(NAME mapped_host_test COMMAND mapped_host_test)

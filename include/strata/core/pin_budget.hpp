@@ -66,14 +66,6 @@ inline bool sim_charge(State& s, const void* p, uint64_t bytes) {
     if (p != nullptr) s.sim_ptrs[p] = bytes;
     return true;
 }
-inline void sim_uncharge(State& s, const void* p) {
-    if (s.sim_budget == 0) return;
-    auto it = s.sim_ptrs.find(p);
-    if (it == s.sim_ptrs.end()) return;
-    s.sim_used -= it->second;
-    s.sim_ptrs.erase(it);
-}
-
 inline cudaError_t alloc_locked(State& s, void** p, size_t bytes, unsigned flags) {
     if (s.sim_budget != 0 && s.sim_used + bytes > s.sim_budget) return cudaErrorMemoryAllocation;
     const cudaError_t e = cudaHostAlloc(p, bytes, flags);
@@ -110,11 +102,16 @@ inline cudaError_t pin_register(void* p, size_t bytes, unsigned flags) {
 }
 inline cudaError_t pin_unregister(void* p) {
     auto& s = pin_detail::st();
-    if (s.sim_budget != 0) {
-        std::lock_guard<std::mutex> g(s.mu);
-        pin_detail::sim_uncharge(s, p);
+    if (s.sim_budget == 0) return cudaHostUnregister(p);
+    std::lock_guard<std::mutex> g(s.mu);
+    const auto it = s.sim_ptrs.find(p);
+    const uint64_t bytes = it == s.sim_ptrs.end() ? 0 : it->second;
+    const cudaError_t result = cudaHostUnregister(p);
+    if (result == cudaSuccess && it != s.sim_ptrs.end()) {
+        s.sim_used -= bytes;
+        s.sim_ptrs.erase(it);
     }
-    return cudaHostUnregister(p);
+    return result;
 }
 
 /// Take the reserves (call before the expert arena pins).  Never fails.

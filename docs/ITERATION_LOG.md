@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-116 · 注销失败保留 pin 预算
+
+- 目标 / 指标：`pin_unregister()` 只有 `cudaHostUnregister` 成功后才归还模拟 pin 预算；失败时必须保留原记录，后续
+  重试仍能看到同一笔占用。
+- 假设与预期：旧实现先在 map 中 uncharge，再调用 unregister。驱动注销失败时内存仍在 pin 状态，但测试预算已经
+  归还，后续分配会错误地超过真实上限。
+- 为什么选这条路线：与 free 路径统一成“先找记录、调用驱动、成功后按 iterator 扣账并 erase”。同时删除已不再使用的
+  `sim_uncharge()`，把扣账收敛到两个实际驱动操作旁边。
+- 改动与实验：`mapped_host_test` 新增 host-register 预算、注入 unregister 失败、失败后预算不变、重试成功归零的
+  检查；CMake link-wrap 增加 register/unregister。普通及 ASan/UBSan 通过。
+- 判决：采纳。注册与注销失败都不会伪造预算归还。
+- 生产状态与回滚：模拟预算关闭时直接调用 `cudaHostUnregister`，生产成功路径与返回值不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 RTX 2080 Ti，未用真实驱动拒绝 unregister；主机 link-wrap 覆盖失败分支和
+  模拟预算。
+- 下一步与理由：完成剩余全量回归并重试推送；若无网络则整理本地领先提交和明确风险。
+
 ## I-20261027-115 · Pin 预算释放避免 free 后地址查表
 
 - 目标 / 指标：`host_free_guarded()` 必须在 `cudaFreeHost` 成功后准确归还模拟 pin 预算；释放失败时预算计数不能提前

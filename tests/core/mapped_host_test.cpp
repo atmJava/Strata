@@ -14,6 +14,7 @@ int host_frees = 0;
 int device_aliases = 0;
 bool fail_host_alloc = false;
 bool fail_device_alias = false;
+bool fail_host_unregister = false;
 unsigned last_flags = 0;
 
 void check(bool condition, const char* message) {
@@ -24,7 +25,7 @@ void check(bool condition, const char* message) {
 
 void reset_counts() {
     host_allocs = host_frees = device_aliases = 0;
-    fail_host_alloc = fail_device_alias = false;
+    fail_host_alloc = fail_device_alias = fail_host_unregister = false;
     last_flags = 0;
 }
 
@@ -49,6 +50,14 @@ extern "C" cudaError_t __wrap_cudaFreeHost(void* host) {
     ++host_frees;
     std::free(host);
     return cudaSuccess;
+}
+
+extern "C" cudaError_t __wrap_cudaHostRegister(void*, std::size_t, unsigned) {
+    return cudaSuccess;
+}
+
+extern "C" cudaError_t __wrap_cudaHostUnregister(void*) {
+    return fail_host_unregister ? cudaErrorInvalidValue : cudaSuccess;
 }
 
 extern "C" cudaError_t __wrap_cudaGetLastError() {
@@ -114,6 +123,21 @@ int main() {
           "a failed host allocation changed the caller's outputs");
     check(host_allocs == 1 && device_aliases == 0 && host_frees == 0,
           "a failed host allocation touched a resource it never acquired");
+
+    reset_counts();
+    void* registered = std::malloc(32);
+    check(strata::core::pin_register(registered, 32, cudaHostRegisterPortable) == cudaSuccess,
+          "a successful host registration was rejected");
+    check(pin.sim_used == 32, "the registered allocation was not charged to the pin budget");
+    fail_host_unregister = true;
+    check(strata::core::pin_unregister(registered) != cudaSuccess,
+          "a failed host unregistration was reported as success");
+    check(pin.sim_used == 32, "a failed host unregistration returned its pin budget");
+    fail_host_unregister = false;
+    check(strata::core::pin_unregister(registered) == cudaSuccess,
+          "host unregistration did not succeed after the injected failure");
+    check(pin.sim_used == 0, "a successful host unregistration did not return its pin budget");
+    std::free(registered);
 
     std::puts("mapped_host_test: mapped host ownership and failure rollback pass");
     return 0;
