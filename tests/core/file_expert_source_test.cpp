@@ -732,6 +732,22 @@ void test_io_prefetch() {
     source.close();
 }
 
+void test_foresight_init_validation() {
+    using namespace strata::core;
+    ForesightSwap swap;
+    std::string err;
+    require(!swap.init(0, 1, 1, {0}, {0}, err), "foresight accepted zero slots");
+    require(!swap.init(1, 0, 1, {}, {0}, err), "foresight accepted zero layers");
+    require(!swap.init(1, 1, 1, {}, {0}, err), "foresight accepted a missing layer card");
+    require(!swap.init(1, 1, 1, {1}, {0}, err), "foresight accepted an unknown card");
+    require(!swap.init(1, 1, 1, {0}, {}, err), "foresight accepted no device");
+    require(!swap.init(1, std::numeric_limits<int64_t>::max(), 2, {}, {0}, err),
+            "foresight accepted overflowing layer geometry");
+    unsigned long long ptr = 0;
+    require(!swap.take(0, 0, ptr), "uninitialised foresight served an expert");
+    std::cout << "foresight init validation: PASS\n";
+}
+
 void test_rotating_source(bool rotate, bool pin) {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
@@ -1004,6 +1020,7 @@ int main(int argc, char** argv) {
         test_canonical_layout();
         test_unbuffered_reads();
         test_io_prefetch();
+        test_foresight_init_validation();
 #if defined(STRATA_NATIVE_EXPERTS)
         test_native_variable_layout();
 #endif

@@ -5578,6 +5578,30 @@ namespace strata::core {
 
 bool ForesightSwap::init(int slots_per_layer, int64_t layers, int64_t experts, const std::vector<int>& card_of_layer,
                          const std::vector<int>& devices, std::string& err) {
+    err.clear();
+    if (init_started_) {
+        err = "foresight swap: init was already attempted";
+        return false;
+    }
+    if (slots_per_layer <= 0 || layers <= 0 || experts <= 0) {
+        err = "foresight swap: invalid empty geometry";
+        return false;
+    }
+    if ((uint64_t) layers > std::numeric_limits<size_t>::max() / (uint64_t) slots_per_layer ||
+        (uint64_t) layers > std::numeric_limits<size_t>::max() / (uint64_t) experts) {
+        err = "foresight swap: geometry is too large";
+        return false;
+    }
+    if (card_of_layer.size() != (size_t) layers || devices.empty()) {
+        err = "foresight swap: a layer has no device card";
+        return false;
+    }
+    for (int card : card_of_layer)
+        if (card < 0 || (size_t) card >= devices.size()) {
+            err = "foresight swap: a layer names an unknown device card";
+            return false;
+        }
+    init_started_ = true;
     slots = slots_per_layer;
     n_layers = layers;
     n_expert = experts;
@@ -5596,8 +5620,16 @@ bool ForesightSwap::init(int slots_per_layer, int64_t layers, int64_t experts, c
     const auto& lay = strata::kernels::cpu::expert_layout();
     for (size_t c = 0; c < devices.size(); ++c) {
         uint64_t bytes = 0;
-        for (int64_t l = 0; l < layers; ++l)
-            if (card_of_layer[(size_t) l] == (int) c) bytes += (uint64_t) slots * (uint64_t) lay.blob_bytes(l);
+        for (int64_t l = 0; l < layers; ++l) {
+            if (card_of_layer[(size_t) l] != (int) c) continue;
+            const uint64_t blob = lay.blob_bytes(l);
+            if (blob > std::numeric_limits<uint64_t>::max() / (uint64_t) slots ||
+                bytes > std::numeric_limits<uint64_t>::max() - blob * (uint64_t) slots) {
+                err = "foresight swap: device allocation size overflows";
+                return false;
+            }
+            bytes += blob * (uint64_t) slots;
+        }
         if (bytes == 0) continue;
         const OnDevice on(devices[c]);
         cudaStream_t s = nullptr;
@@ -5629,7 +5661,12 @@ bool ForesightSwap::init(int slots_per_layer, int64_t layers, int64_t experts, c
             }
         }
     }
-    filler_ = std::thread([this] { fill_loop(); });
+    try {
+        filler_ = std::thread([this] { fill_loop(); });
+    } catch (const std::exception& e) {
+        err = std::string("foresight swap: cannot start the copy thread: ") + e.what();
+        return false;
+    }
     return true;
 }
 
@@ -5679,6 +5716,7 @@ void ForesightSwap::fill_loop() {
 }
 
 bool ForesightSwap::take(int64_t layer, int32_t expert, unsigned long long& ptr) {
+    if (layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return false;
     std::lock_guard<std::mutex> smu_lk(smu_);
     const int s = where[(size_t) (layer * n_expert + expert)];
     if (s < 0) return false;
@@ -5736,6 +5774,7 @@ void ForesightSwap::unhold(int64_t layer, int32_t expert) {
 }
 
 void ForesightSwap::note_miss(ExpertSource* src, int64_t layer, int32_t expert) {
+    if (src == nullptr || layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return;
     std::lock_guard<std::mutex> smu_lk(smu_);
     request_locked(src, layer, expert, false);
 }
@@ -5748,6 +5787,7 @@ void ForesightSwap::predict(ExpertSource* src, int64_t layer, int32_t expert) {
 
 void ForesightSwap::request_locked(ExpertSource* src, int64_t layer, int32_t expert, bool predicted_copy) {
     if (failed.load(std::memory_order_relaxed)) return;
+    if (src == nullptr || layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return;
     const size_t key = (size_t) (layer * n_expert + expert);
     if (where[key] != -1) return;                       // already on its way, or held by an exchange (#2134)
     const uint64_t now = completed.load(std::memory_order_acquire);
@@ -5760,7 +5800,7 @@ void ForesightSwap::request_locked(ExpertSource* src, int64_t layer, int32_t exp
     const int c = layer_card[(size_t) layer];
     if (card_round[(size_t) c] != now) { card_round[(size_t) c] = now; card_used[(size_t) c] = 0; }
     if (card_used[(size_t) c] >= budget) { ++over_budget; return; }
-    if (src == nullptr || !src->pinned(layer, expert)) return;   // async copies need the pinned arena
+    if (!src->pinned(layer, expert)) return;   // async copies need the pinned arena
     const uint8_t* b = src->blob(layer, expert);
     if (b == nullptr) return;
     int best = -1;
@@ -5780,6 +5820,11 @@ void ForesightSwap::request_locked(ExpertSource* src, int64_t layer, int32_t exp
     }
     if (best < 0) { ++busy; return; }
     Slot& sl = slot[(size_t) (layer * slots + best)];
+    const int32_t displaced = sl.expert;
+    const bool old_ready = sl.ready, old_loading = sl.loading;
+    const bool old_issued = sl.issued.load(std::memory_order_relaxed);
+    const uint64_t old_last_ref = sl.last_ref;
+    const uint8_t* old_src = sl.src;
     if (sl.expert >= 0) where[(size_t) (layer * n_expert + sl.expert)] = -1;
     sl.expert = expert;
     sl.ready = false;
@@ -5793,7 +5838,23 @@ void ForesightSwap::request_locked(ExpertSource* src, int64_t layer, int32_t exp
     if (predicted_copy) ++predicted;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        queue_.push_back(layer * slots + best);
+        try {
+            queue_.push_back(layer * slots + best);
+        } catch (...) {
+            where[key] = -1;
+            sl.expert = displaced;
+            sl.ready = old_ready;
+            sl.loading = old_loading;
+            sl.issued.store(old_issued, std::memory_order_relaxed);
+            sl.last_ref = old_last_ref;
+            sl.src = old_src;
+            if (displaced >= 0) where[(size_t) (layer * n_expert + displaced)] = (int16_t) best;
+            --card_used[(size_t) c];
+            --copies;
+            if (predicted_copy) --predicted;
+            ++busy;
+            return;
+        }
     }
     cv_.notify_one();
 }

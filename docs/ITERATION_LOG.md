@@ -3,6 +3,30 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-25 · ForesightSwap 初始化校验与 copy 队列提交边界
+
+- 目标 / 指标：`ForesightSwap::init()` 拒绝空几何、层/专家表乘法溢出、缺少或越界的 card 映射，并只允许一次初始化；
+  filler 线程创建失败时返回错误而非抛穿；`take/note_miss` 的越界参数不能索引 `where`；copy 队列分配失败不能留下
+  指向尚未入队 job 的 slot 或泄漏预算计数。
+- 假设与预期：旧 init 在验证 `card_of_layer` 长度前就用 layer 索引它，并把 `layers * slots/experts` 转成 `size_t`，
+  错误输入可越界或溢出。`request_locked()` 先将 `where`、slot 和预算计数改成 loading，再向 deque 入队；若入队分配失败，
+  该 slot 永远等不到 filler，容量与计数也已被占用。
+- 为什么选这条路线：初始化几何和队列提交都是主机侧控制流，可在没有 GPU 的路径上验证错误输入；成功路径的 slot
+  状态恢复可由代码审查确认，不改变正常 copy 顺序或 device 地址。
+- 改动与实验：init 在任何资源分配前校验正整数、两处 size 乘法、card 映射和重复初始化；每个 device 的字节数检查
+  乘法/加法溢出；filler `std::thread` 创建异常转成 `err`。`take`、`note_miss` 和内部 request 统一校验参数。copy
+  queue 入队失败时恢复旧 expert 的 `where`、slot 状态、source 和计数，并计为 busy。新增 6 类非法 init 和未初始化
+  `take` 断言。
+- 结果：主机侧 `file_expert_source_test`（合成 pack、CPU 库和同步 CUDA shim）`PASS`，其中
+  `foresight init validation: PASS`；ASan/UBSan（泄漏检测开启、遇错停止）同样 `PASS`；`-Wall -Wextra -Werror`
+  与 `git diff --check` 通过。
+- 判决：采纳。非法几何在访问 vector 或分配显存前失败，queue 分配失败可回滚 slot 所有权；线程启动失败有明确错误。
+- 生产状态与回滚：未改生产；合法初始化的 device 分配、copy 顺序和 slot 选择未变，单提交可回退。没有真实 CUDA，
+  因此未运行 filler 成功路径、真实 copy queue OOM 注入、foresight 命中或双卡交换。
+- 学到什么：`push_back` 是 slot 状态提交的一部分，不是 slot 改变后的附属通知；若 job 没有可靠进入队列，必须撤销
+  slot 与预算的所有权。
+- 下一步与理由：检查 `HostGraphLaunch` 的 join/release 约定与 `prefill` 的异步链，再做一轮 Python 全量回归并重试推送。
+
 ## I-20261027-24 · FileExpertSource 的 I/O 启停与 stage 缓冲区异常安全
 
 - 目标 / 指标：I/O 预取关闭后不得残留 `io_pf/io_sched/io_stats/gate` 状态；worker 或相关表部分创建失败时不得泄漏
