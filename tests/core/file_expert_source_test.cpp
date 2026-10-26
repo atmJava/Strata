@@ -676,6 +676,29 @@ void test_unbuffered_reads() {
     source.close();
 }
 
+void test_expert_load_thread_fallback() {
+    TempDirectory dir;
+    constexpr uint64_t chunk = 8;
+    std::vector<uint8_t> expected((size_t) (3 * chunk));
+    for (size_t i = 0; i < expected.size(); ++i) expected[i] = (uint8_t) (i * 17 + 3);
+    {
+        std::ofstream out(dir.path / "expert-ranges.bin", std::ios::binary | std::ios::trunc);
+        out.write((const char*) expected.data(), (std::streamsize) expected.size());
+        require((bool) out, "could not write synthetic expert ranges");
+    }
+    const std::vector<uint64_t> offsets{0, chunk, 2 * chunk};
+    const std::vector<uint64_t> lengths{chunk, chunk, chunk};
+    std::vector<uint8_t> actual(expected.size(), 0);
+    set_env("STRATA_TEST_EXPERT_LOAD_THREAD_FAIL", "1");
+    const strata::core::LoadStats stats = strata::core::load_experts_ranges(
+        (dir.path / "expert-ranges.bin").string(), actual.data(), offsets, lengths, 4, chunk);
+    set_env("STRATA_TEST_EXPERT_LOAD_THREAD_FAIL", nullptr);
+    require(stats.ok, "expert range load failed during thread fallback: " + stats.error);
+    require(stats.bytes == expected.size(), "expert range fallback reported the wrong byte count");
+    require(std::memcmp(actual.data(), expected.data(), expected.size()) == 0,
+            "expert range fallback changed the destination bytes");
+}
+
 // #633: the host RAM probe with fake /proc and cgroup trees: v2 (a limit, "max", a missing or malformed limit), v1
 // (a limit, unlimited), and no cgroup line at all.  Elsewhere than Linux it reads the machine's RAM.
 void test_host_memory() {
@@ -1094,6 +1117,7 @@ int main(int argc, char** argv) {
         test_host_memory();
         test_canonical_layout();
         test_fill_thread_fallback();
+        test_expert_load_thread_fallback();
         test_unbuffered_reads();
         test_io_prefetch();
         test_foresight_init_validation();

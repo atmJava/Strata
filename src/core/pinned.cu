@@ -16,6 +16,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 
 // Loader fix: `fseek`/`ftell` are 32-bit on Windows by default (and the pack is 42.9 GB), and the 64-bit
@@ -693,7 +694,24 @@ LoadStats load_experts_ranges(const std::string& path, uint8_t* dst, const std::
     };
 
     std::vector<std::thread> pool;
-    for (int i = 1; i < threads; ++i) pool.emplace_back(worker);
+    int forced_failures = 0;
+    if (const char* value = std::getenv("STRATA_TEST_EXPERT_LOAD_THREAD_FAIL"))
+        forced_failures = std::max(0, std::atoi(value));
+    try {
+        pool.reserve((size_t) (threads - 1));
+        for (int i = 1; i < threads; ++i) {
+            if (forced_failures-- > 0)
+                throw std::runtime_error("injected thread start failure");
+            pool.emplace_back(worker);
+        }
+    } catch (const std::exception& error) {
+        // The load is the critical work; extra readers are only a
+        // throughput optimisation. The caller joins any started workers
+        // and shares their atomic layer queue.
+        std::fprintf(stderr, "load_experts: readers fall back to the caller (%s)\n", error.what());
+    } catch (...) {
+        std::fprintf(stderr, "load_experts: readers fall back to the caller\n");
+    }
     worker();
     for (auto& t : pool) t.join();
 

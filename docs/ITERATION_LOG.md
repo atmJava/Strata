@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-44 · expert 区间加载线程失败回退调用线程
+
+- 目标 / 指标：`load_experts_ranges()` 启动额外 reader 失败时，调用线程必须继续消费共享 layer 队列，join 已启动线程，读取全部
+  字节且内容不变；不能让局部 `std::thread` 析构触发 `std::terminate()`。
+- 假设与预期：该函数是 arena expert 和 GGUF expert 装载共用入口。旧实现直接循环 `pool.emplace_back(worker)`，线程创建在中途
+  失败后，已成功线程仍 joinable，栈展开时进程终止。
+- 为什么选这条路线：读取器只增加吞吐，不改变字段布局；共享 atomic layer 队列允许调用线程无缝接管。使用小文件、短 chunk 和
+  合成环境变量可精确注入首个 helper 启动失败，不依赖 GPU。
+- 改动与实验：先 reserve，再启动 helper；捕获线程启动异常后记录诊断，由调用线程执行同一 worker，并 join 已启动线程。新增
+  三区间合成文件在 4 个请求 reader、首个 helper 失败时仍完整读出预期字节的断言。
+- 结果：主机侧 `file_expert_source_test` 通过；`-Wall -Wextra -Werror`、ASan/UBSan 与 `git diff --check` 通过。
+- 判决：采纳。线程配额耗尽只降低装载并行度，不会因 joinable thread 析构终止进程或损坏加载结果。
+- 生产状态与回滚：未改成功路径的线程数、chunk、seek、hash、pad 映射或错误文本；单提交可回退。同步 CUDA shim 只验证主机侧
+  控制流，未验证真实 `nvcc`、CUDA sm_75、双 RTX 2080 Ti 数据路径或真实专家 pack。
+- 学到什么：局部线程池必须先 reserve 并把启动失败纳入同一接管/join 边界；正常读写逻辑应继续复用同一个 worker。
+- 下一步与理由：继续排查真实模型装载路径中剩余的裸局部线程组，再做一次 CPU 合成回归。
+
 ## I-20261027-43 · HTTP 循环线程失败时关闭已绑定端口
 
 - 目标 / 指标：`serve()` 先构造并绑定 `ThreadingHTTPServer`，再启动 `serve_forever` 线程；线程创建失败时必须关闭监听 socket
