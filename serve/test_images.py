@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -142,6 +143,40 @@ class Command(unittest.TestCase):
             with mock.patch("serve.lifeline.popen", side_effect=OSError("cannot start")):
                 with self.assertRaisesRegex(images_api.ImageJobFailed, "cannot start"):
                     gen.run(job)
+            self.assertEqual(list(gen.dir.glob("job-*")), [])
+            self.assertIsNone(gen.progress)
+
+    def test_a_reader_start_failure_stops_the_child_and_removes_the_job(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d))
+            job = images_api.parse_request({"prompt": "x"}, gen.cfg)
+            proc = mock.Mock()
+            proc.stdout = io.StringIO()
+            with mock.patch("serve.lifeline.popen", return_value=proc), \
+                    mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("no thread")):
+                with self.assertRaisesRegex(images_api.ImageJobFailed, "output reader did not start"):
+                    gen.run(job)
+            proc.kill.assert_called_once_with()
+            proc.wait.assert_called_once_with(timeout=5)
+            self.assertTrue(proc.stdout.closed)
+            self.assertEqual(list(gen.dir.glob("job-*")), [])
+            self.assertIsNone(gen.progress)
+
+    def test_a_child_that_survives_kill_closes_its_pipe_and_removes_the_job(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d, timeout_s=0.001))
+            job = images_api.parse_request({"prompt": "x"}, gen.cfg)
+            proc = mock.Mock()
+            proc.poll.return_value = None
+            proc.wait.side_effect = [subprocess.TimeoutExpired("sd-cli", 30),
+                                     subprocess.TimeoutExpired("sd-cli", 5)]
+            proc.returncode = -9
+            proc.stdout = io.StringIO()
+            with mock.patch("serve.lifeline.popen", return_value=proc):
+                with self.assertRaisesRegex(images_api.ImageJobFailed, "after being killed"):
+                    gen.run(job)
+            self.assertEqual(proc.kill.call_count, 2)
+            self.assertTrue(proc.stdout.closed)
             self.assertEqual(list(gen.dir.glob("job-*")), [])
             self.assertIsNone(gen.progress)
 

@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-17 · 图片任务的读线程、子进程和临时目录统一收尾
+
+- 目标 / 指标：`sd-cli` 创建成功后，读线程启动失败、进程不退出或 kill 后仍等待超时时，必须终止并等待子进程、
+  关闭 stdout，且只在输出排空或管道已关闭后删除 job 目录；后台 pump 不得因日志写入失败留下未处理异常。
+- 假设与预期：旧实现直接 `reader.start()`，线程创建失败会逃出并遗留子进程；`reader.join(10)` 后无论线程是否
+  仍存活，`run()` 的 `finally` 都会删除工作目录，日志句柄也可能在 pump 仍写入时关闭。
+- 为什么选这条路线：这是单请求进程生命周期的集中边界，可用 mock `Thread.start`、`Popen.wait` 故障注入验证，
+  不需要 GPU、模型或 sd-cli 二进制。
+- 改动与实验：pump 改为使用 `select` 和原始管道 fd 排空输出，日志写入失败后继续 drain 以防子进程阻塞；读线程
+  启动失败时 kill/wait、关闭 stdout 并转成 `ImageJobFailed`；正常和双重超时路径都在 cleanup 前关闭管道。
+  新增读线程启动失败与 kill 后仍等待超时测试。
+- 结果：`serve/test_images.py` 为 `24 passed / 20 subtests`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。读线程启动、子进程结束、管道关闭和 job 删除现在有统一失败收尾。
+- 生产状态与回滚：未改生产；正常 HTTP 请求和图片字节不变，单提交可回退。未运行真实 CUDA sd-cli 或图片生成。
+- 学到什么：进程已创建不等于启动事务已完成；附属读线程失败与进程等待超时都必须经过同一资源回收路径。
+- 下一步与理由：检查 `lifeline.popen()` 在所有权记录或 reaper 线程注册失败时是否仍能由统一退出路径回收 child。
+
 ## I-20261027-16 · MCP 启动线程失败回滚子进程，Hub 批量启动不留半活服务器
 
 - 目标 / 指标：stdio MCP 子进程启动后，stderr 或 stdout 读线程任一创建失败时，必须终止子进程、关闭三条管道并

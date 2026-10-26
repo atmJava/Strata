@@ -31,6 +31,7 @@ import os
 import random
 import re
 import secrets
+import select
 import shutil
 import subprocess
 import tempfile
@@ -259,13 +260,49 @@ class ImageGen:
                 why = None
 
                 def pump():
-                    for line in proc.stdout:
-                        lf.write(line)
-                        m = STEP_LINE.search(line)
-                        if m:
-                            self.progress = (int(m.group(1)), int(m.group(2)))
+                    """Drain the pipe without letting a full log or a late write leave an unhandled thread."""
+                    pending = ""
+                    can_log = True
+                    try:
+                        while True:
+                            ready, _, _ = select.select([proc.stdout.fileno()], [], [], 0.2)
+                            if not ready:
+                                continue
+                            data = os.read(proc.stdout.fileno(), 65536)
+                            if not data:
+                                break
+                            pending += data.decode("utf-8", "replace")
+                            while "\n" in pending:
+                                line, pending = pending.split("\n", 1)
+                                line += "\n"
+                                if can_log:
+                                    try:
+                                        lf.write(line)
+                                    except (OSError, ValueError):
+                                        can_log = False
+                                m = STEP_LINE.search(line)
+                                if m:
+                                    self.progress = (int(m.group(1)), int(m.group(2)))
+                        if pending and can_log:
+                            try:
+                                lf.write(pending)
+                            except (OSError, ValueError):
+                                pass
+                    except (OSError, ValueError):
+                        pass
                 reader = threading.Thread(target=pump, daemon=True)
-                reader.start()
+                try:
+                    reader.start()
+                except Exception as e:
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass
+                    with contextlib.suppress(OSError, ValueError):
+                        proc.stdout.close()
+                    raise ImageJobFailed(f"sd-cli output reader did not start: {e}") from e
                 while proc.poll() is None:
                     if cancel is not None and cancel.is_set():
                         why = "cancelled (the client left)"
@@ -287,6 +324,12 @@ class ImageGen:
                     except subprocess.TimeoutExpired:
                         why = "sd-cli did not stop after being killed"
                 reader.join(timeout=10)
+                if reader.is_alive():
+                    with contextlib.suppress(OSError, ValueError):
+                        proc.stdout.close()
+                    reader.join(timeout=1)
+                with contextlib.suppress(OSError, ValueError):
+                    proc.stdout.close()
         secs = time.monotonic() - t0
         log = logf.read_text(encoding="utf-8", errors="replace")
         outs = [work / f"img_{i}.png" for i in range(job["n"])]
