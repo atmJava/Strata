@@ -222,6 +222,15 @@ void test_fill_thread_fallback() {
     }
     std::vector<int64_t> ids(experts);
     for (int64_t e = 0; e < experts; ++e) ids[(size_t) e] = e;
+    set_env("STRATA_TEST_PARALLEL_WORK_FAIL", "1");
+    bool work_failure_propagated = false;
+    try {
+        source.prefetch(0, ids.data(), experts);
+    } catch (const std::runtime_error&) {
+        work_failure_propagated = true;
+    }
+    set_env("STRATA_TEST_PARALLEL_WORK_FAIL", nullptr);
+    require(work_failure_propagated, "a parallel-work exception was lost after its workers joined");
     set_env("STRATA_TEST_FILL_THREAD_FAIL", "1");
     source.prefetch(0, ids.data(), experts);
     set_env("STRATA_TEST_FILL_THREAD_FAIL", nullptr);

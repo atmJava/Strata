@@ -3,6 +3,28 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-70 · 并行辅助 worker 异常后始终 join 再传播
+
+- 目标 / 指标：由 `run_parallel_workers()` 启动的装载、填充和 checksum 辅助线程，只要 `work` 在任一线程或
+  调用线程抛出异常，所有已启动线程都必须先 join，再把首个异常交回调用方；不能因局部 `std::thread` 仍
+  joinable 而触发 `std::terminate()`。
+- 假设与预期：此前只限制了“线程构造失败”，随后直接在线程中运行 `work`、再在调用线程运行同一 `work`。
+  后者若抛异常会跳过 join；任一线程体抛异常则直接终止进程。
+- 为什么选这条路线：所有调用者共享同一个原子工作队列，单个 worker 异常退出后其余 worker 和调用线程仍能
+  完成各自尚未领取的工作。统一 `guarded()` 边界在互斥量下保存首个 `exception_ptr`，无条件 join 后再
+  `rethrow_exception`；成功路径线程数、抢取顺序与副作用不变。
+- 改动与实验：并行 worker 与调用线程使用同一异常边界；新增确定性 work 异常注入。fill-thread 回归先确认
+  异常在 join 后传回，再运行原有线程启动失败同步回退并校验 blob 字节。
+- 结果：`expert_source.cpp` 与 `file_expert_source_test.cpp` 通过 C++20 主机侧
+  `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）。独立 helper 回归以 `-O2 -Wall -Wextra -Werror`
+  构建并重复 50 次通过；ASan/UBSan 通过；ThreadSanitizer 通过，仅输出源码原有 fence 不受 TSan 跟踪提示。
+  `git diff --check` 通过。
+- 判决：采纳。辅助线程内部错误不再终止进程，调用方仍能看到真实失败。
+- 生产状态与回滚：未改成功路径 job、队列、数据顺序、线程数或日志；单提交可回退。
+- 未验证：当前无 CUDA 工具链，未链接运行完整 `file_expert_source_test`，也未在真实装载、NVMe、双卡或
+  RTX 2080 Ti 上注入异常。
+- 下一步与理由：继续清理其余“线程体/线程组异常后跳过 join”的模式，并检查可选路径是否应吞掉错误。
+
 ## I-20261027-69 · I/O 预取排队失败退化为同步读取
 
 - 目标 / 指标：`FileExpertSource` 的可选 I/O 预取队列在 deque 分配失败或内部入队异常时，不得把异常抛入

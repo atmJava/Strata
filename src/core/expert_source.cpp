@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <filesystem>
 #include <sstream>
@@ -70,19 +71,32 @@ void run_parallel_workers(int total, Work work, const char* label, const char* i
         if (const char* value = std::getenv(inject_env))
             forced_failures = std::max(0, std::atoi(value));
     std::vector<std::thread> threads;
+    std::exception_ptr failure;
+    std::mutex failure_mu;
+    auto guarded = [&] {
+        try {
+            work();
+            if (std::getenv("STRATA_TEST_PARALLEL_WORK_FAIL") != nullptr)
+                throw std::runtime_error("injected parallel work failure");
+        } catch (...) {
+            std::lock_guard<std::mutex> lk(failure_mu);
+            if (!failure) failure = std::current_exception();
+        }
+    };
     try {
         threads.reserve((size_t) (total - 1));
         for (int i = 1; i < total; ++i) {
             if (forced_failures-- > 0) throw std::runtime_error("injected thread start failure");
-            threads.emplace_back(work);
+            threads.emplace_back(guarded);
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FileExpertSource: %s fall back to the caller (%s)\n", label, e.what());
     } catch (...) {
         std::fprintf(stderr, "FileExpertSource: %s fall back to the caller\n", label);
     }
-    work();
+    guarded();
     for (std::thread& thread : threads) thread.join();
+    if (failure) std::rethrow_exception(failure);
 }
 
 }  // namespace
