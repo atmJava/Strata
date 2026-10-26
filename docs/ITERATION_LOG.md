@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-71 · 路由统计分配失败只关闭可选诊断
+
+- 目标 / 指标：`STRATA_LOOKAHEAD_STATS` 的三组原子统计数组无法分配时，不得让启动路径收到半初始化状态
+  或抛出内存异常；前瞻仍可工作，统计明确关闭，之后内存恢复仍可重新启用。
+- 假设与预期：`enable_stats()` 依次重置 `pmask_/pstamp_/pvote_`；第二或第三次分配失败会留下部分成员，
+  且调用方在启动成功后才调用它，没有覆盖该异常的本地边界。
+- 为什么选这条路线：统计不参与预测或输出。先在局部 `unique_ptr` 中完整分配和清零，再一次性转移成员；
+  任何异常只保持或关闭 `stats_on_`，不会暴露部分表。几何溢出也在分配前拒绝。
+- 改动与实验：增加确定性统计分配失败注入；前瞻 worker 失败回归随后验证注入后 `stats_on()==false`，
+  解除注入后再次启用成功。
+- 结果：`expert_source.cpp` 与 `file_expert_source_test.cpp` 通过 C++20 主机侧
+  `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）。独立失败用例以 `-O2 -Wall -Wextra -Werror`
+  构建并重复 20 次通过；ASan/UBSan 通过；ThreadSanitizer 通过，仅输出原有 fence 提示；`git diff --check`
+  通过。
+- 判决：采纳。可选统计失败不影响前瞻、解码、路由或输出。
+- 生产状态与回滚：未改统计成功路径的索引、清零、评分或输出；单提交可回退。
+- 未验证：当前无 CUDA 工具链，未链接运行完整测试，也未在真实 Qwen pack 上启用统计复测。
+- 下一步与理由：继续审查启动阶段的可选诊断与持久线程资源，优先处理会导致半初始化状态的路径。
+
 ## I-20261027-70 · 并行辅助 worker 异常后始终 join 再传播
 
 - 目标 / 指标：由 `run_parallel_workers()` 启动的装载、填充和 checksum 辅助线程，只要 `work` 在任一线程或

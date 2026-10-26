@@ -273,6 +273,12 @@ void test_lookahead_worker_failure() {
     const float x[8] = {};
     lookahead.submit(0, x, 1, nullptr);
     require(lookahead.skipped() == skipped + 1, "a failed look-ahead worker accepted another prediction");
+    set_env("STRATA_TEST_LOOKAHEAD_STATS_FAIL", "1");
+    lookahead.enable_stats(2);
+    set_env("STRATA_TEST_LOOKAHEAD_STATS_FAIL", nullptr);
+    require(!lookahead.stats_on(), "a failed statistics allocation left the optional mode enabled");
+    lookahead.enable_stats(2);
+    require(lookahead.stats_on(), "prediction statistics did not start after the injected failure");
 }
 
 #if defined(STRATA_NATIVE_EXPERTS)

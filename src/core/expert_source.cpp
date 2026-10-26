@@ -2810,14 +2810,40 @@ void RouterLookahead::submit(int64_t layer, const float* x, int64_t n_tok, const
 }
 
 void RouterLookahead::enable_stats(int64_t n_layers) {
-    words_ = (n_expert_ + 63) / 64;
-    pmask_.reset(new std::atomic<uint64_t>[(size_t) (n_layers * 3 * words_)]);
-    pstamp_.reset(new std::atomic<uint64_t>[(size_t) n_layers]);
-    for (int64_t i = 0; i < n_layers * 3 * words_; ++i) pmask_[(size_t) i].store(0, std::memory_order_relaxed);
-    for (int64_t i = 0; i < n_layers; ++i) pstamp_[(size_t) i].store(0, std::memory_order_relaxed);
-    pvote_.reset(new std::atomic<int32_t>[(size_t) (n_layers * kVoteN)]);
-    for (int64_t i = 0; i < n_layers * kVoteN; ++i) pvote_[(size_t) i].store(0, std::memory_order_relaxed);
-    stats_on_ = true;
+    if (n_layers <= 0 || n_expert_ <= 0) {
+        stats_on_ = false;
+        return;
+    }
+    const uint64_t words = ((uint64_t) n_expert_ + 63) / 64;
+    const uint64_t max = std::numeric_limits<size_t>::max();
+    if ((uint64_t) n_layers > max / 3 / words || (uint64_t) n_layers > max / (uint64_t) kVoteN) {
+        std::fprintf(stderr, "RouterLookahead: prediction statistics are too large; statistics off\n");
+        stats_on_ = false;
+        return;
+    }
+    const size_t pmask_n = (size_t) n_layers * 3 * (size_t) words;
+    const size_t stamp_n = (size_t) n_layers;
+    const size_t vote_n = (size_t) n_layers * kVoteN;
+    try {
+        if (std::getenv("STRATA_TEST_LOOKAHEAD_STATS_FAIL") != nullptr) throw std::bad_alloc();
+        auto pmask = std::make_unique<std::atomic<uint64_t>[]>(pmask_n);
+        auto pstamp = std::make_unique<std::atomic<uint64_t>[]>(stamp_n);
+        auto pvote = std::make_unique<std::atomic<int32_t>[]>(vote_n);
+        for (size_t i = 0; i < pmask_n; ++i) pmask[i].store(0, std::memory_order_relaxed);
+        for (size_t i = 0; i < stamp_n; ++i) pstamp[i].store(0, std::memory_order_relaxed);
+        for (size_t i = 0; i < vote_n; ++i) pvote[i].store(0, std::memory_order_relaxed);
+        words_ = (int64_t) words;
+        pmask_ = std::move(pmask);
+        pstamp_ = std::move(pstamp);
+        pvote_ = std::move(pvote);
+        stats_on_ = true;
+    } catch (const std::exception& e) {
+        stats_on_ = false;
+        std::fprintf(stderr, "RouterLookahead: cannot enable prediction statistics (%s); statistics off\n", e.what());
+    } catch (...) {
+        stats_on_ = false;
+        std::fprintf(stderr, "RouterLookahead: cannot enable prediction statistics; statistics off\n");
+    }
 }
 
 // the dispatch thread: score the prediction made for `layer` against the experts it routes outside the GPU cache
