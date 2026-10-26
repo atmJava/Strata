@@ -10,6 +10,7 @@
 #include <exception>
 #include <mutex>
 #include <new>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 
@@ -132,6 +133,15 @@ struct PleReader::Impl {
 
     uint8_t* slot_buf(uint32_t s) { return slab + (size_t) s * 2 * PAGE; }
     bool busy() const { return outstanding > 0; }
+
+    void fail_worker(const char* why) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (error.empty()) error = why;
+        stop = true;
+        cancel_queued();
+        for (auto& [_, ticket] : tickets) ticket.pending = 0;
+        cv_done.notify_all();
+    }
 
     void cancel_queued() {
         for (const Job& job : queue) {
@@ -304,6 +314,8 @@ struct PleReader::Impl {
     }
 
     void worker_loop() {
+        if (const char* fail = std::getenv("STRATA_TEST_PLE_WORKER_FAIL"); fail != nullptr && std::atoi(fail) > 0)
+            throw std::runtime_error("injected PLE worker failure");
         std::unique_lock<std::mutex> lk(mu);
         for (;;) {
             // Idle: wait for work. While rows are being asked for, the wait ends in time for a keep-alive read.
@@ -384,7 +396,14 @@ bool PleReader::open(const std::string& path, uint64_t table_offset, uint64_t n_
     impl_->threaded = io_thread;
     if (io_thread) {
         try {
-            impl_->worker = std::thread([this] { strata::aux_cpus::pin_current_thread(); impl_->worker_loop(); });
+            impl_->worker = std::thread([this] {
+                strata::aux_cpus::pin_current_thread();
+                try {
+                    impl_->worker_loop();
+                } catch (...) {
+                    impl_->fail_worker("PleReader: the I/O worker stopped unexpectedly");
+                }
+            });
         } catch (const std::exception& e) {
             err = std::string("PleReader: cannot create I/O worker: ") + e.what();
             close();
@@ -453,6 +472,10 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
     if (m.threaded) lk.lock();
     const uint32_t id = m.next_ticket++;
     if (m.next_ticket == 0) m.next_ticket = 1;
+    if (!m.error.empty()) {
+        m.tickets.emplace(id, TicketState{0});
+        return Ticket{id};
+    }
     const double now = now_us();
     const bool rearm = m.keep_us > 0 && (m.last_issue_us <= 0 || now - m.last_issue_us > m.keep_window_us);
     m.last_issue_us = now;

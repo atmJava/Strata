@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-63 · PLE I/O worker 异常结束全部等待 ticket
+
+- 目标 / 指标：PLE persistent I/O worker 若在运行中抛出未预期异常，`collect()` 不能永久等待；所有已存在和新提交的 ticket
+  都应看到同一 worker 错误，随后 `close()` 仍要 drain DirectFile 中已发出的读并释放缓冲区。
+- 假设与预期：线程启动失败已有处理，但线程体没有异常边界。worker 若在提交/收割中展开，异常会终止进程；即使捕获，只写
+  `error` 也不会唤醒等待 `pending == 0` 的 collector。
+- 为什么选这条路线：worker 停止后不能安全继续服务。`fail_worker()` 在锁内记录首个错误、停止循环、取消未提交队列，并把
+  所有 ticket 的 pending 清零；`issue()` 在错误已存在时返回 ready ticket。collector 沿既有错误路径失败，close 沿既有
+  outstanding drain 路径回收 DirectFile 读。
+- 改动与实验：worker 外层捕获全部异常并执行 `fail_worker()`；增加 `STRATA_TEST_PLE_WORKER_FAIL=1` 注入。新增无 GPU 的
+  `ple_reader_worker_failure_test`，验证 worker 异常后一个 pending ticket 在 30 秒上限内返回错误而非挂起。
+- 结果：新测试以 C++20 `-O2 -Wall -Wextra -Werror` 编译，实际运行输出
+  `ple_reader_worker_failure: pending ticket completed with the worker error`；`git diff --check` 通过。未运行真实 NVMe 掉盘、
+  线程栈耗尽或多个并发 ticket 同时受 worker 异常影响的实测。
+- 判决：采纳。worker 的内部致命异常变为可诊断的 reader 错误，等待者与资源清理都有确定出口。
+- 生产状态与回滚：未改成功路径 worker、DirectFile 读顺序、行缓存或 completion 数据；CMake 仅新增测试目标，单提交可回退。
+- 学到什么：后台线程的异常边界必须同时更新“任务完成”条件，而不只是记录错误字符串。
+- 下一步与理由：等待完整 `serve` 回归，并继续审查仍有裸线程构造的持久 worker。
+
 ## I-20261027-62 · DirectFile 排队失败可报告，wake 不再分配
 
 - 目标 / 指标：`DirectFile::submit()` 在队列分配失败时必须返回 false 并留下可诊断错误；`wake()` 不能因 `deque` 分配失败丢失

@@ -1368,6 +1368,12 @@ if(STRATA_BUILD_TESTS)
     target_include_directories(direct_file_async_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(direct_file_async_test PRIVATE Threads::Threads)
     add_test(NAME direct_file_async_test COMMAND direct_file_async_test)
+    add_executable(ple_reader_worker_failure_test tests/platform/ple_reader_worker_failure.cpp
+                   src/ngram/ple_reader.cpp src/platform/direct_file.cpp)
+    target_include_directories(ple_reader_worker_failure_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(ple_reader_worker_failure_test PRIVATE Threads::Threads)
+    add_test(NAME ple_reader_worker_failure_test COMMAND ple_reader_worker_failure_test)
+    set_tests_properties(ple_reader_worker_failure_test PROPERTIES TIMEOUT 30)
   endif()
   # --aux-cpus: the CPU-set derivation (pure) and the placement of live threads; header-only, no GPU
   add_executable(aux_cpus_test tests/platform/aux_cpus_test.cpp)
