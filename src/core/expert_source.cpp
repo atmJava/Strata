@@ -35,6 +35,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -56,6 +57,35 @@
 #endif
 
 namespace strata::core {
+
+namespace {
+
+/// Helpers and the caller drain one atomic work queue. A refused thread start makes the callers finish the remaining
+/// work, so an auxiliary pool can never leave joinable local threads or turn an optimisation into a load failure.
+template <typename Work>
+void run_parallel_workers(int total, Work work, const char* label, const char* inject_env = nullptr) {
+    total = std::max(1, total);
+    int forced_failures = 0;
+    if (inject_env != nullptr)
+        if (const char* value = std::getenv(inject_env))
+            forced_failures = std::max(0, std::atoi(value));
+    std::vector<std::thread> threads;
+    try {
+        threads.reserve((size_t) (total - 1));
+        for (int i = 1; i < total; ++i) {
+            if (forced_failures-- > 0) throw std::runtime_error("injected thread start failure");
+            threads.emplace_back(work);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FileExpertSource: %s fall back to the caller (%s)\n", label, e.what());
+    } catch (...) {
+        std::fprintf(stderr, "FileExpertSource: %s fall back to the caller\n", label);
+    }
+    work();
+    for (std::thread& thread : threads) thread.join();
+}
+
+}  // namespace
 
 namespace detail {
 
@@ -773,27 +803,23 @@ bool file_tier_probe(const std::vector<std::string>& paths, double& direct_bps, 
             std::atomic<int> failed{0};
             const auto t0 = std::chrono::steady_clock::now();
             const auto deadline = t0 + std::chrono::milliseconds(1500);
-            std::vector<std::thread> th;
             const int nthreads = mode == 0 ? kDirectThreads : kCachedThreads;
-            for (int t = 0; t < nthreads; ++t) {
-                th.emplace_back([&] {
-                    void* buf = nullptr;
-                    if (mode == 0 && posix_memalign(&buf, 4096, kRegion) != 0) { failed = 1; return; }
-                    volatile uint8_t sink = 0;
-                    for (;;) {
-                        const size_t i = next.fetch_add(1);
-                        if (i >= offs.size() || std::chrono::steady_clock::now() > deadline) break;
-                        if (mode == 0) {
-                            if (!preadn((uint8_t*) buf, offs[i])) { failed = 1; break; }
-                        } else {
-                            for (uint64_t pg = 0; pg < kRegion; pg += 4096) sink = (uint8_t) (sink + base[offs[i] + pg]);
-                        }
-                        bytes.fetch_add(kRegion);
+            run_parallel_workers(nthreads, [&] {
+                void* buf = nullptr;
+                if (mode == 0 && posix_memalign(&buf, 4096, kRegion) != 0) { failed = 1; return; }
+                volatile uint8_t sink = 0;
+                for (;;) {
+                    const size_t i = next.fetch_add(1);
+                    if (i >= offs.size() || std::chrono::steady_clock::now() > deadline) break;
+                    if (mode == 0) {
+                        if (!preadn((uint8_t*) buf, offs[i])) { failed = 1; break; }
+                    } else {
+                        for (uint64_t pg = 0; pg < kRegion; pg += 4096) sink = (uint8_t) (sink + base[offs[i] + pg]);
                     }
-                    std::free(buf);
-                });
-            }
-            for (std::thread& x : th) x.join();
+                    bytes.fetch_add(kRegion);
+                }
+                std::free(buf);
+            }, "file-tier probe readers");
             const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (failed.load() != 0 || bytes.load() == 0 || secs <= 0) { ok = false; break; }
             const double bps = (double) bytes.load() / secs;
@@ -2269,10 +2295,6 @@ bool FileExpertSource::advise_pairs(const std::pair<int32_t, int32_t>* pairs, in
 
 void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
     if (todo.empty()) return;
-    int forced_failures = [&] {
-        const char* v = std::getenv("STRATA_TEST_FILL_THREAD_FAIL");
-        return v != nullptr ? std::max(0, std::atoi(v)) : 0;
-    }();
     if (!direct_.empty()) {
         // #286: overlapped batches - every role window of 16 blobs in flight at once; a big batch (the profile
         // fill) on up to 4 threads, a decode layer's few misses on this one
@@ -2292,20 +2314,7 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
             }
         };
         const size_t nt = std::min<size_t>(4, (todo.size() + 15) / 16);
-        std::vector<std::thread> th;
-        try {
-            th.reserve(nt - 1);
-            for (size_t t = 1; t < nt; ++t) {
-                if (forced_failures-- > 0) throw std::runtime_error("injected thread start failure");
-                th.emplace_back(work);
-            }
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "FileExpertSource: batch readers fall back to the caller (%s)\n", e.what());
-        } catch (...) {
-            std::fprintf(stderr, "FileExpertSource: batch readers fall back to the caller\n");
-        }
-        work();
-        for (auto& t : th) t.join();
+        run_parallel_workers((int) nt, work, "batch readers", "STRATA_TEST_FILL_THREAD_FAIL");
         return;
     }
     // the page faults of a mapped read are one outstanding request each: several threads keep the SSD's queue full
@@ -2317,20 +2326,7 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
             (void) fill_stage(todo[i].v, todo[i].layer, todo[i].e, todo[i].dst);
     };
     const size_t nt = std::min<size_t>(todo.size(), (size_t) fetch_threads_);
-    std::vector<std::thread> th;
-    try {
-        th.reserve(nt - 1);
-        for (size_t t = 1; t < nt; ++t) {
-            if (forced_failures-- > 0) throw std::runtime_error("injected thread start failure");
-            th.emplace_back(work);
-        }
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "FileExpertSource: mapped readers fall back to the caller (%s)\n", e.what());
-    } catch (...) {
-        std::fprintf(stderr, "FileExpertSource: mapped readers fall back to the caller\n");
-    }
-    work();
-    for (auto& t : th) t.join();
+    run_parallel_workers((int) nt, work, "mapped readers", "STRATA_TEST_FILL_THREAD_FAIL");
 }
 
 uint64_t FileExpertSource::expert_bytes() const {
@@ -3673,10 +3669,7 @@ bool FileExpertSource::pin_cache_complement(
     };
     {
         const int threads = (int) std::max<int64_t>(1, std::min<int64_t>(6, n_layers_));
-        std::vector<std::thread> pool;
-        for (int i = 1; i < threads; ++i) pool.emplace_back(worker);
-        worker();
-        for (auto& t : pool) t.join();
+        run_parallel_workers(threads, worker, "cache-complement readers");
     }
     std::fflush(stderr);
     if (failed.load()) {
@@ -3694,10 +3687,7 @@ bool FileExpertSource::pin_cache_complement(
             for (size_t i; (i = next_piece.fetch_add(1)) < pieces;)
                 ph[i] = fnv1a64(host + (size_t) (i * kPiece), std::min<uint64_t>(kPiece, bytes - i * kPiece));
         };
-        std::vector<std::thread> hth;
-        for (int t = 1; t < 8; ++t) hth.emplace_back(hash_work);
-        hash_work();
-        for (auto& t : hth) t.join();
+        run_parallel_workers(8, hash_work, "cache-complement hashers");
         uint64_t h = fnv1a64((const uint8_t*) offsets.data(), (uint64_t) (offsets.size() * sizeof(uint64_t)));
         h = fnv1a64((const uint8_t*) ph.data(), (uint64_t) (ph.size() * sizeof(uint64_t)), h);
         std::fprintf(stderr, "FileExpertSource: cache complement checksum %016llx (%.2f GiB, its offsets included)\n",
@@ -5191,10 +5181,7 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
             }
         }
     };
-    std::vector<std::thread> pool;
-    for (int i = 1; i < threads; ++i) pool.emplace_back(worker);
-    worker();
-    for (auto& t : pool) t.join();
+    run_parallel_workers(threads, worker, "GGUF expert readers");
     if (bad) {
         st.seconds = -1.0;
         st.ok = false;

@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-35 · 统一 expert source 辅助线程的失败与回收
+
+- 目标 / 指标：`expert_source.cpp` 中共享 atomic 工作队列的批读、缓存补集构建、补集校验、GGUF 专装载、Arena 读取和
+  Linux 文件层探测，都要在辅助线程创建/预留失败时由调用线程完成剩余工作，并 join 已启动线程。
+- 假设与预期：这些路径各自重复“启动 N-1 个线程、调用线程也工作、逐项 join”。部分路径仍直接 `emplace_back`，失败时
+  局部线程组析构终止进程；其余路径通过复制异常处理维持正确性，但失败语义容易再次漂移。
+- 为什么选这条路线：这是纯代码精简与异常安全收敛，不改变工作队列、批次、线程数量或正常并发；已有 34 专家填充注入
+  可直接验证共享 helper，CPU 合成测试覆盖模型加载主适配器。
+- 改动与实验：新增 `run_parallel_workers(total, work, label, inject_env)`；先 reserve，再启动 helper，失败时记录并让
+  调用线程执行同一工作，最后 join 已有线程。六个使用点统一迁入 helper；测试注入环境仍驱动批量填充的失败分支。
+- 结果：主机侧 `file_expert_source_test`（合成 pack、CPU 库和同步 CUDA shim）`PASS`，实际输出
+  `batch readers fall back to the caller (injected thread start failure)`；ASan/UBSan（泄漏检测开启、遇错停止）同样
+  `PASS`；`-Wall -Wextra -Werror` 与 `git diff --check` 通过。
+- 判决：采纳。六条辅助线程路径共享同一失败语义和回收边界，代码减少重复，正常 work queue 与字节路径不变。
+- 生产状态与回滚：未改正常装载、补集、探测或读取策略；单提交可回退。未验证真实线程配额耗尽、真实 GGUF 双卡装载、
+  RTX 2080 Ti 或 CUDA sm_75。
+- 学到什么：可并行且调用线程能接管的工作，应由一个 RAII/统一 helper 管理线程表；否则每个复制点都会重新引入 terminate 或漏 join。
+- 下一步与理由：继续把相同原则集中到仍有局部线程组的加载和测试工具，并审查 Python 配置文件与响应本体的生命周期。
+
 ## I-20261027-34 · 服务端辅助线程失败时保持请求与副本可用
 
 - 目标 / 指标：MCP 工具心跳线程、客户端断开监视线程、副本并行重启/启动及后台自愈线程都是辅助设施；系统拒绝新线程时，
