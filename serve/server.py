@@ -956,87 +956,104 @@ class StrataEngine:
         self.unloaded = False            # `ended` stays True until READY (below): not alive while starting (#344)
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
-        log_start = os.path.getsize(log) if log else 0  # where this start's lines begin (start_failure_hint)
-        self.log_start = log_start                      # #596: the Monitor's conversation cache reads from here
-        if log:
-            threading.Thread(target=narrate_start, args=(log, os.path.getsize(log), args, loading),
-                             daemon=True).start()
-            # once per log: the follower keeps reading the same (appended) log across restarts and reloads
-            if os.environ.get("STRATA_REQUEST_LINES") and os.path.abspath(log) not in _echoing:
-                _echoing.add(os.path.abspath(log))
-                threading.Thread(target=echo_requests, args=(log, os.path.getsize(log)), daemon=True).start()
-        if log:                                          # #779: when an engine started (a crash report has the time)
-            try:
-                self.log.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
-                               f"{' '.join(args)}\n")
-                self.log.flush()
-            except OSError:
-                pass
-        self.max_context = 0                             # before the new process is visible: never its predecessor's
-        pin = {}
-        if cpus and hasattr(os, "sched_setaffinity"):    # replicas: this engine's own physical cores (serve/replicas.py)
-            pin["preexec_fn"] = lambda: os.sched_setaffinity(0, cpus)
-        nice = engine_nice(env)                          # optional operator-selected CPU priority
-        if nice:
-            say_nice = pin.get("preexec_fn")
-            pin["preexec_fn"] = lambda: (say_nice() if say_nice else None, os.nice(nice))[0]
-            print(f"[strata] engine priority: nice +{nice} (STRATA_ENGINE_NICE=0 turns it off)", flush=True)
-        end_leftover_engines(exe)                        # one an earlier run lost still holds the GPU and the memory
-        spawned_at = time.monotonic()
+        narrator = None
+        echo_key = None
         try:
+            log_start = os.path.getsize(log) if log else 0  # where this start's lines begin (start_failure_hint)
+            self.log_start = log_start                      # #596: the Monitor's conversation cache reads from here
+            if log:
+                narrator = threading.Thread(
+                    target=narrate_start, args=(log, log_start, args, loading),
+                    name="strata-engine-narrator", daemon=True,
+                )
+                narrator.start()
+                # once per log: the follower keeps reading the same (appended) log across restarts and reloads
+                if os.environ.get("STRATA_REQUEST_LINES") and os.path.abspath(log) not in _echoing:
+                    echo_key = os.path.abspath(log)
+                    _echoing.add(echo_key)
+                    try:
+                        threading.Thread(
+                            target=echo_requests, args=(log, log_start),
+                            name="strata-engine-echo", daemon=True,
+                        ).start()
+                    except Exception:
+                        _echoing.discard(echo_key)
+                        raise
+            if log:                                      # #779: when an engine started (a crash report has the time)
+                try:
+                    self.log.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
+                                   f"{' '.join(args)}\n")
+                    self.log.flush()
+                except OSError:
+                    pass
+            self.max_context = 0                         # before the new process is visible: never its predecessor's
+            pin = {}
+            if cpus and hasattr(os, "sched_setaffinity"):    # replicas: this engine's own physical cores (serve/replicas.py)
+                pin["preexec_fn"] = lambda: os.sched_setaffinity(0, cpus)
+            nice = engine_nice(env)                          # optional operator-selected CPU priority
+            if nice:
+                say_nice = pin.get("preexec_fn")
+                pin["preexec_fn"] = lambda: (say_nice() if say_nice else None, os.nice(nice))[0]
+                print(f"[strata] engine priority: nice +{nice} (STRATA_ENGINE_NICE=0 turns it off)", flush=True)
+            end_leftover_engines(exe)                    # one an earlier run lost still holds the GPU and the memory
+            spawned_at = time.monotonic()
             self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env,
                               **pin)
-        except OSError:                                  # nothing started: the narrator stops, the log handle goes back
+        except BaseException:                            # nothing started: no narrator or log handle is retained
             loading.set()
-            if log:
-                self.log.close()
+            if narrator is not None and narrator.ident is not None:
+                narrator.join(timeout=1)
+            if self.log not in (None, subprocess.DEVNULL):
+                with contextlib.suppress(OSError, ValueError):
+                    self.log.close()
+            self.log = None
             raise
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
         ready_q: queue.Queue = queue.Queue()
-        threading.Thread(target=self._ready_pump, args=(self.proc, ready_q), daemon=True).start()
+        ready_reader = threading.Thread(
+            target=self._ready_pump, args=(self.proc, ready_q),
+            name="strata-engine-ready", daemon=True,
+        )
+        try:
+            ready_reader.start()
+        except Exception as e:
+            self._abort_start(loading, ready_reader)
+            raise EngineDied(f"the engine's READY reader did not start: {e}") from e
         ready_deadline = None if ENGINE_READY_S is None else time.monotonic() + ENGINE_READY_S
         timed_out = False
-        while True:
-            left = None if ready_deadline is None else ready_deadline - time.monotonic()
-            if left is not None and left <= 0:
-                timed_out = True
-                break
-            try:
-                line = ready_q.get(timeout=left)
-            except queue.Empty:
-                continue
-            if line is None:
-                break
-            if line.startswith("INFO "):
-                for kv in line.split()[1:]:
-                    k, _, v = kv.partition("=")
-                    self.info[k] = int(v) if v.lstrip("-").isdigit() else v
-            if line.startswith("READY"):
-                f = line.split()
-                self.max_context = int(f[1])
-                self.can_stop = "stop" in f[2:]
-                break
+        try:
+            while True:
+                left = None if ready_deadline is None else ready_deadline - time.monotonic()
+                if left is not None and left <= 0:
+                    timed_out = True
+                    break
+                try:
+                    line = ready_q.get(timeout=left)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                if line.startswith("INFO "):
+                    for kv in line.split()[1:]:
+                        k, _, v = kv.partition("=")
+                        self.info[k] = int(v) if v.lstrip("-").isdigit() else v
+                if line.startswith("READY"):
+                    f = line.split()
+                    self.max_context = int(f[1])
+                    self.can_stop = "stop" in f[2:]
+                    break
+        except BaseException:
+            self._abort_start(loading, ready_reader)
+            raise
         loading.set()
         if self.max_context <= 0:
-            if timed_out:                               # still loading, or hung: end it, so the turn is not held for good
-                try:
-                    self.proc.kill()
-                except OSError:
-                    pass
-            try:                                        # its pipes and our handle on its log (the log stays)
-                self.proc.wait(timeout=5)
-                self.proc.stdin.close()
-                self.proc.stdout.close()
-                if log:
-                    self.log.close()
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+            returncode = self._abort_start(loading, ready_reader)
             if not timed_out and _attempt < START_RETRIES and \
-                    transient_start_failure(log, log_start, time.monotonic() - spawned_at, self.proc.returncode):
+                    transient_start_failure(log, log_start, time.monotonic() - spawned_at, returncode):
                 wait_s = 2.0 * (2 ** _attempt)              # 2, 4, 8 s: the previous process's GPU queues go away
-                exit_words = engine_exit_words(self.proc.returncode)
+                exit_words = engine_exit_words(returncode)
                 print(f"[strata] the engine exited before it wrote anything to its log"
                       f"{' (' + exit_words + ')' if exit_words else ''}; it may be a GPU runtime that was not "
                       f"ready yet: starting it again in {wait_s:.0f} s (try {_attempt + 2} of {START_RETRIES + 1})",
@@ -1048,13 +1065,52 @@ class StrataEngine:
                    "the engine exited before it was ready")
             # EngineDied, not bare RuntimeError: a request waiting on this load must end with a 503
             # through the request path's handler - a RuntimeError there left the turn with no answer (#1527)
-            note = "" if timed_out else start_exit_note(self.proc.returncode, exe)
+            note = "" if timed_out else start_exit_note(returncode, exe)
             tail = start_log_tail(log, log_start)
             lines = [x for x in tail.split("\n")[2:] if x.strip()]
             if tail and lines and all(x.strip().startswith("[strata]") for x in lines):
                 tail += "\n  (those are the launcher's own lines: the engine itself wrote nothing)"
             raise EngineDied(why + (f" (see {log})" if log else "") + note +
                              start_failure_hint(log, log_start) + tail)
+        try:
+            self._start_after_ready(args, log, log_start)
+        except BaseException:
+            self._abort_start(loading, ready_reader)
+            raise
+
+    def _abort_start(self, loading: threading.Event, ready_reader=None) -> int | None:
+        """End every resource acquired by a failed READY or post-READY start and return the child's exit status."""
+        loading.set()
+        proc = self.proc
+        if proc is None:
+            if self.log not in (None, subprocess.DEVNULL):
+                with contextlib.suppress(OSError, ValueError):
+                    self.log.close()
+            self.log = None
+            return None
+        with contextlib.suppress(OSError):
+            if proc.poll() is None:
+                proc.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+        if ready_reader is not None and ready_reader.ident is not None:
+            ready_reader.join(timeout=1)
+        for stream in (getattr(proc, "stdin", None), getattr(proc, "stdout", None)):
+            if stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
+        if ready_reader is not None and ready_reader.is_alive():
+            ready_reader.join(timeout=1)
+        if self.log not in (None, subprocess.DEVNULL):
+            with contextlib.suppress(OSError, ValueError):
+                self.log.close()
+        self.log = None
+        self.proc = None
+        self.ended = True
+        return proc.poll()
+
+    def _start_after_ready(self, args: list[str], log: str | None, log_start: int) -> None:
+        """Build slot state and start the main output reader once READY has made the process live."""
         self.known_ctx = self.max_context   # survives a failed restart: requests keep their limit and restart it
         # (from PR #41, midhatn) a locally built engine can sit next to another release's BUILD.json: engines that
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
@@ -1120,7 +1176,7 @@ class StrataEngine:
         self._ctl_erred = False                         # #1059: the control lines ended on an ERR
         self._yielded = None                            # (slot, tokens read): the last request on them gave way
         self.wlock = threading.Lock()                   # stdin writes from several request threads
-        self.pump = threading.Thread(target=self._pump, daemon=True)
+        self.pump = threading.Thread(target=self._pump, name="strata-engine-output", daemon=True)
         self.pump.start()
 
     def _pump(self):
@@ -1253,10 +1309,11 @@ class StrataEngine:
                     self.__init__(*self.spawn)
                     break
                 except RuntimeError:
-                    try:
-                        self.proc.wait(timeout=60)
-                    except (subprocess.TimeoutExpired, OSError):
-                        pass
+                    if self.proc is not None:
+                        try:
+                            self.proc.wait(timeout=60)
+                        except (subprocess.TimeoutExpired, OSError):
+                            pass
                     if i == tries - 1:
                         raise
                     print(f"[strata] the engine did not start (try {i + 1} of {tries}); again in "

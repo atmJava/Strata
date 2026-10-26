@@ -182,15 +182,15 @@ def popen(args, role: str = "engine", **kw) -> subprocess.Popen:
         with _children_lock:
             _children.add(child)
             _child_tokens[child] = token
-    try:
-        threading.Thread(
-            target=_after_exit,
-            args=(child,),
-            name="strata-lifeline-reaper",
-            daemon=True,
-        ).start()
-    except Exception:  # noqa: BLE001 - ownership records are best-effort
-        pass
+        try:
+            threading.Thread(
+                target=_after_exit,
+                args=(child,),
+                name="strata-lifeline-reaper",
+                daemon=True,
+            ).start()
+        except Exception:  # noqa: BLE001 - ownership records are best-effort
+            pass
     return child
 
 

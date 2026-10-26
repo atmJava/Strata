@@ -5855,6 +5855,122 @@ class UntimedReads(unittest.TestCase):
         self.assertEqual(v._readline(5.0, "x"), "OK 7 1 1 1\n")
 
 
+class EngineStartRollback(unittest.TestCase):
+    """A failure in one of the engine start's helper threads or slot allocations releases the child and log."""
+
+    @staticmethod
+    def reject_thread(name):
+        real_start = threading.Thread.start
+
+        def start(thread):
+            if thread.name == name:
+                raise RuntimeError(f"no {name} thread")
+            return real_start(thread)
+
+        return mock.patch.object(threading.Thread, "start", autospec=True, side_effect=start)
+
+    def test_a_narrator_thread_failure_closes_the_log_before_spawning(self):
+        import serve.server as server
+
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "engine.log"
+            engine = object.__new__(StrataEngine)
+            with mock.patch.dict(os.environ, {"STRATA_REQUEST_LINES": ""}), \
+                    self.reject_thread("strata-engine-narrator"):
+                with self.assertRaisesRegex(RuntimeError, "narrator"):
+                    StrataEngine.__init__(engine, "strata", [], log=str(log))
+            self.assertIsNone(engine.proc)
+            self.assertIsNone(engine.log)
+
+    def test_an_echo_thread_failure_rolls_back_its_log_registration(self):
+        import serve.server as server
+
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "engine.log"
+            log.write_text("", encoding="utf-8")
+            key = os.path.abspath(str(log))
+            engine = object.__new__(StrataEngine)
+            with mock.patch.dict(os.environ, {"STRATA_REQUEST_LINES": "1"}), \
+                    mock.patch.object(server, "narrate_start", lambda *a, **k: None), \
+                    self.reject_thread("strata-engine-echo"):
+                with self.assertRaisesRegex(RuntimeError, "echo"):
+                    StrataEngine.__init__(engine, "strata", [], log=str(log))
+            self.assertNotIn(key, server._echoing)
+            self.assertIsNone(engine.log)
+
+    def fake_engine(self, code):
+        """Start a real child through Popen, returning its command replacement and the captured processes."""
+        import serve.server as server
+        temp = tempfile.TemporaryDirectory(prefix="strata-start-rollback-")
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "fake_strata.py"
+        script.write_text(code, encoding="utf-8")
+        real = server.subprocess.Popen
+        children = []
+
+        def popen(cmd, **kw):
+            child = real([sys.executable, str(script), *cmd[1:]], **kw)
+            children.append(child)
+            return child
+
+        return mock.patch.object(server.subprocess, "Popen", popen), children
+
+    def assert_reaped(self, engine, child):
+        child.wait(timeout=5)
+        self.assertIsNotNone(child.poll())
+        self.assertIsNone(engine.proc)
+        self.assertIsNone(engine.log)
+        self.assertTrue(child.stdin.closed)
+        self.assertTrue(child.stdout.closed)
+
+    def test_a_ready_reader_thread_failure_kills_and_reaps_the_child(self):
+        popen, children = self.fake_engine(
+            "import time\nprint('INFO engine=0.0.0', flush=True)\ntime.sleep(60)\n")
+        with tempfile.TemporaryDirectory() as d, popen, \
+                self.reject_thread("strata-engine-ready"):
+            engine = object.__new__(StrataEngine)
+            with self.assertRaisesRegex(EngineDied, "READY reader"):
+                StrataEngine.__init__(engine, "strata", [], log=str(Path(d) / "engine.log"))
+            self.assertEqual(len(children), 1)
+            self.assert_reaped(engine, children[0])
+
+    def test_an_output_thread_failure_kills_and_reaps_the_child(self):
+        popen, children = self.fake_engine(
+            "import time\nprint('READY 4096 stop', flush=True)\ntime.sleep(60)\n")
+        with tempfile.TemporaryDirectory() as d, popen, \
+                self.reject_thread("strata-engine-output"):
+            engine = object.__new__(StrataEngine)
+            with self.assertRaisesRegex(RuntimeError, "output"):
+                StrataEngine.__init__(engine, "strata", [], log=str(Path(d) / "engine.log"))
+            self.assertEqual(len(children), 1)
+            self.assert_reaped(engine, children[0])
+
+    def test_a_slot_queue_allocation_failure_kills_and_reaps_the_child(self):
+        import queue as queue_module
+        import serve.server as server
+
+        popen, children = self.fake_engine(
+            "import time\nprint('INFO batch_slots=1', flush=True)\n"
+            "print('READY 4096 stop', flush=True)\ntime.sleep(60)\n")
+        real_queue = queue_module.Queue
+        calls = 0
+
+        def make_queue(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:                         # ready queue, stdout lines, then the first slot
+                raise MemoryError("no slot queue")
+            return real_queue(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as d, popen, \
+                mock.patch.object(server.queue, "Queue", side_effect=make_queue):
+            engine = object.__new__(StrataEngine)
+            with self.assertRaisesRegex(MemoryError, "slot queue"):
+                StrataEngine.__init__(engine, "strata", [], log=str(Path(d) / "engine.log"))
+            self.assertEqual(len(children), 1)
+            self.assert_reaped(engine, children[0])
+
+
 if __name__ == "__main__":
     unittest.main()
 

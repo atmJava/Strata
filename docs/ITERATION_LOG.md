@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-19 · 引擎启动的旁路线程和槽位初始化纳入统一回滚
+
+- 目标 / 指标：日志 narrator/echo、READY reader、槽位队列或主 stdout pump 任一启动失败时，不能遗留引擎进程、
+  stdin/stdout、日志句柄或错误的 echo 注册；READY 前失败与 READY 后初始化失败必须走同一清理边界。
+- 假设与预期：旧实现只处理 READY 超时后的部分关闭，且 wait 超时会跳过 stdin/stdout/log 的后续关闭；READY pump
+  和主 pump 的 `Thread.start()` 失败则直接抛穿，已创建的大模型引擎仍占用 GPU/RAM。
+- 为什么选这条路线：这些是同一启动事务的附属资源，可用真实短命假引擎、定向线程启动失败和队列分配失败复现，
+  不需要 GPU 或模型。
+- 改动与实验：启动前把日志旁白与 echo 线程纳入回滚，echo 注册失败会撤销；READY reader 和后续槽位/pump 初始化
+  统一调用 `_abort_start()`，kill/wait 子进程并分别关闭 stdin、stdout、日志。READY 后的批量槽初始化移入
+  `_start_after_ready()`，使异常能被同一事务捕获。新增 narrator、echo、READY reader、主输出 pump 和槽队列
+  `MemoryError` 五类故障测试；`restart()` 允许清理后 `proc is None`。
+- 结果：启动回滚目标 `9 passed`；完整 `serve/test_server.py` 为 `338 passed / 502 subtests`；lifecycle、lifeline、
+  images、MCP 合计 `69 passed / 30 subtests`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。READY 前、READY 后和重试路径共享进程、管道、日志与辅助线程的清理契约。
+- 生产状态与回滚：未改生产；正常 READY、槽位布局、stdout 路由和重启行为由完整测试保持，单提交可回退。
+- 学到什么：构造函数的正常返回点就是启动事务提交点；在其前创建的任何进程或线程都应由同一个 rollback 负责。
+- 下一步与理由：继续做跨模块 Python 资源审查，优先找仍用“单次 try 包多个 close”导致首错跳过后续释放的路径。
+
 ## I-20261027-18 · 子进程所有权记录与 reaper 线程失败保持同一回收边界
 
 - 目标 / 指标：`lifeline.popen()` 已创建 child 后，若所有权记录失败或 reaper 线程无法启动，正常推理启动不得失败；
