@@ -134,6 +134,12 @@ void PeerExperts::close() {
     stream_ = refill_ = nullptr;
     refill_ev_ = nullptr;
     device_ = -1;
+    pending_.clear();
+    row_of_.clear();
+    res_.clear();
+    resident_ = 0;
+    launched_rows_ = 0;
+    launched_direct_ = false;
 }
 
 bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>>& ranked, const ExpertCache& primary,

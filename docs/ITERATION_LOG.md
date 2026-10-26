@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-127 · Peer close 清空旧 pending 与 resident 视图
+
+- 目标 / 指标：`PeerExperts::close()` 成功后，旧 tier 的 pending swap、上次 launch 和 resident 计数不得泄漏到下一次
+  `open()` 或对外状态查询。
+- 假设与预期：旧 close 同步并释放 stream/cache，但保留 `pending_`、`row_of_` 与 `resident_`。同一对象重开新 tier 时，
+  旧 pending 可能在 apply 阶段写入新 residency 表；`resident()` 在已 close 状态也仍报告旧数量。
+- 为什么选这条路线：close 已经确认设备与 stream 可用并完成同步，此时清空纯 host 状态无需额外驱动调用，也不改变首次
+  open 的生命周期。
+- 改动与实验：close 清空 pending/row/res，重置 `resident_`、`launched_rows_` 与 direct 标志；peer 严格主机语法检查和
+  clang analyzer 通过。
+- 判决：采纳。关闭后的对象不再保留旧 tier 的可发布状态。
+- 生产状态与回滚：正常运行只在销毁或显式 close 时执行；单提交可回退。
+- 未验证：当前无真实 CUDA 环境，无法执行同一 object 的多轮成功 open/close；该路径由状态审查和严格编译检查覆盖。
+- 下一步与理由：完成最终 C++ 主机回归、Python 全量与文档一致性检查，07:50 后停止新改动。
+
 ## I-20261027-126 · 新增设备与远端初始化测试注册到 CTest
 
 - 目标 / 指标：`on_device_test` 与 `remote_expert_opt_init_test` 除手工主机编译外，也应进入 Linux CUDA 构建的
