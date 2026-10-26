@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-57 · 并发 prompt reader 线程失败同步读取
+
+- 目标 / 指标：`STRATA_PIPED_CONCURRENT` 的 prompt reader 线程被拒绝时，当前 prompt 仍须通过同一 `sp.run()` 完成；
+  不能遗漏 `ReadEnd` 清理，也不能让 `in_prompt_read` 或 `stop_at_chunk` 保持悬挂。
+- 假设与预期：reader 的直接构造位于 `in_prompt_read=true` 和 stop hook 设置之后；线程创建异常会在 `ReadEnd` 构造前展开，
+  可能绕过本轮请求状态的成对复位。
+- 为什么选这条路线：读取与窗口 overlap 是调度优化，而读取本身可以同步执行。抽出同一 `read_prompt` lambda，线程创建成功时
+  保持并发；失败时立即在调用线程执行同一 lambda，随后现有 `ReadEnd`、drain 和错误处理照常运行。
+- 改动与实验：reader 先默认构造，再在异常边界内启动；失败记录后同步调用原 lambda。job 内容、done 发布、`sp.run()`
+  参数、窗口 pump 和后续提交路径不变。
+- 结果：`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；跳过该配置原有的未使用
+  变量告警）。`git diff --check` 通过。未运行真实线程配额失败、并发长 prompt、双卡 stage 或 CUDA sm_75。
+- 判决：采纳。并发 reader 失败退化为同步读取，prompt 不丢失，状态仍成对清理。
+- 生产状态与回滚：未改成功路径线程、读取或 pipeline gate；单提交可回退。
+- 学到什么：在线程启动前提交的任务状态必须能被同步兜底复用，任务体应是可调用的 lambda 而不是线程构造函数里的重复逻辑。
+- 下一步与理由：处理 spec adaptive helper 的直接线程构造并继续全量 serve 回归。
+
 ## I-20261027-56 · 并发读 doorbell 线程失败交还 pump
 
 - 目标 / 指标：`STRATA_PIPED_CONCURRENT` 的 prompt reader 把各 stage doorbell 交给独立线程服务；该线程被拒绝时，

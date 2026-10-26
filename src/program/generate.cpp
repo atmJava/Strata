@@ -13335,7 +13335,7 @@ int main(int argc, char** argv) {
                         std::string read_err;
                         in_prompt_read = true;
                         sp.stop_at_chunk = [&] { return want_yield.load(std::memory_order_acquire) >= 0; };
-                        std::thread reader([&] {
+                        auto read_prompt = [&] {
                             conc_thread_cpus();
                             try {   // (an exception leaving a std::thread ends the process: a failed read instead)
                                 if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
@@ -13350,7 +13350,20 @@ int main(int argc, char** argv) {
                             done.store(true, std::memory_order_release);
                             { std::lock_guard<std::mutex> lk(in_mu); }   // (the loop below may be waiting on in_cv)
                             in_cv.notify_all();
-                        });
+                        };
+                        std::thread reader;
+                        try {
+                            reader = std::thread(read_prompt);
+                        } catch (const std::exception& x) {
+                            std::fprintf(stderr,
+                                         "strata batch: the prompt reader thread did not start (%s); reading inline\n",
+                                         x.what());
+                            read_prompt();
+                        } catch (...) {
+                            std::fprintf(stderr,
+                                         "strata batch: the prompt reader thread did not start; reading inline\n");
+                            read_prompt();
+                        }
                         struct ReadEnd {   // on every way out of this round (an exception too): the reader joined first
                             std::thread& t;
                             std::function<bool()>& hook;
