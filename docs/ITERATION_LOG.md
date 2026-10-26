@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-21 · MCP stdio 进程组升级终止并有界回收，HTTPError 显式关闭
+
+- 目标 / 指标：stdio MCP 忽略 QUIT/SIGTERM 时，close 必须升级到 SIGKILL、再次有界 wait，并分别关闭 stdin/stdout/stderr；
+  HTTP MCP 的 4xx/5xx 响应读取错误正文后必须关闭 `HTTPError`。
+- 假设与预期：旧 `_kill_tree()` 只对进程组发送 SIGKILL，不再 wait；`HTTPError` 的正文被读取但没有关闭，连接和底层
+  socket 依赖垃圾回收。close 的首次 wait 只捕获 TimeoutExpired，发生 OSError 时会跳过终止和管道释放。
+- 为什么选这条路线：两者都是可由 mock 精确复现的资源所有权缺口，不依赖真实 MCP 服务或网络。
+- 改动与实验：reader 线程显式命名；close 对 stdin 与两条输出管道逐项关闭；`_kill_tree()` 在 SIGTERM 后等待，超时再
+  SIGKILL 进程组并直接 kill child，最后再次有界 wait；HTTPError 使用上下文管理关闭。新增 SIGTERM→SIGKILL→reap
+  和 HTTPError.close 断言。
+- 结果：`serve/test_mcp.py` 为 `31 passed / 8 subtests`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。MCP 子进程组和失败 HTTP 响应在正常关闭、超时和强制终止路径上都有明确释放。
+- 生产状态与回滚：未改生产；正常 MCP initialize/tools/call 行为和配置格式未变，单提交可回退。
+- 学到什么：发送 SIGKILL 不等于回收完成；HTTPError 也是拥有底层连接的响应对象，也必须显式关闭。
+- 下一步与理由：继续审查 runtime host 启动和控制通道，查找子进程启动、ready 文件和控制 socket 的部分失败路径。
+
 ## I-20261027-20 · 视觉编码器超时、非 READY 与 unload 统一关闭管道
 
 - 目标 / 指标：视觉编码器 READY/ENC 读取超时、回答非 READY、读取线程启动失败或 unload 时，都必须 kill/wait 进程并

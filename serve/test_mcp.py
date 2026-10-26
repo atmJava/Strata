@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -112,6 +113,38 @@ class StartupCleanup(unittest.TestCase):
         self.assertTrue(second.closed)
         self.assertFalse(hub.threads[0].is_alive())
         self.assertIsNone(hub.threads[1].ident)
+
+    def test_close_escalates_to_sigkill_and_reaps_the_stdio_group(self):
+        import signal
+        from serve import mcp
+
+        transport = mcp.StdioTransport("fake", stdio())
+        proc = self._process()
+        proc.wait.side_effect = [subprocess.TimeoutExpired("mcp", 2),
+                                 subprocess.TimeoutExpired("mcp", 2), 0]
+        transport.proc = proc
+        with mock.patch.object(mcp.os, "killpg") as killpg:
+            transport.close()
+        self.assertEqual(killpg.call_args_list, [
+            mock.call(proc.pid, signal.SIGTERM),
+            mock.call(proc.pid, signal.SIGKILL),
+        ])
+        proc.kill.assert_called_once_with()
+        self.assertEqual(proc.wait.call_count, 3)
+        self.assertTrue(proc.stdin.closed)
+        self.assertTrue(proc.stdout.closed)
+        self.assertTrue(proc.stderr.closed)
+
+    def test_an_http_error_response_is_closed_after_reading_its_detail(self):
+        from serve import mcp
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        error = urllib.error.HTTPError(transport.url, 500, "bad", {}, io.BytesIO(b"detail"))
+        error.close = mock.Mock()
+        with mock.patch.object(mcp.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(mcp.McpError, "HTTP 500 bad: detail"):
+                transport._post({"jsonrpc": "2.0", "method": "ping"}, None, 5, None)
+        error.close.assert_called_once_with()
 
 
 class ScriptedEngine(MockEngine):

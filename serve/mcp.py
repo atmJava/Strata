@@ -19,6 +19,7 @@ breaking.
 from __future__ import annotations
 
 import collections
+import contextlib
 import json
 import os
 import re
@@ -101,8 +102,12 @@ class StdioTransport:
                                        env=env, start_new_session=True)
         except OSError as e:
             raise McpError(f"could not start {command!r}: {e}") from None
-        self._err_reader = threading.Thread(target=self._read_stderr, daemon=True)
-        self._read_thread = threading.Thread(target=self._read, daemon=True)
+        self._err_reader = threading.Thread(
+            target=self._read_stderr, daemon=True, name=f"mcp-{self.name}-stderr",
+        )
+        self._read_thread = threading.Thread(
+            target=self._read, daemon=True, name=f"mcp-{self.name}-stdout",
+        )
         try:
             self._err_reader.start()
             self._read_thread.start()
@@ -217,17 +222,15 @@ class StdioTransport:
         self.ended = True
         try:
             p.stdin.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
         try:
             p.wait(timeout=2)
-        except subprocess.TimeoutExpired:
+        except (OSError, subprocess.TimeoutExpired):
             self._kill_tree(p)
         for f in (p.stdout, p.stderr):
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 f.close()
-            except OSError:
-                pass
         threads = [getattr(self, "_read_thread", None), getattr(self, "_err_reader", None)]
         for thread in threads:
             if (thread is not None and thread.ident is not None and
@@ -236,18 +239,28 @@ class StdioTransport:
 
     @staticmethod
     def _kill_tree(p):
+        def wait(timeout):
+            try:
+                p.wait(timeout=timeout)
+                return True
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+
         try:
             os.killpg(p.pid, signal.SIGTERM)
-            try:
-                p.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                os.killpg(p.pid, signal.SIGKILL)
-        except (OSError, subprocess.SubprocessError):
+        except OSError:
+            pass
+        if wait(2):
+            return
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
             pass
         try:
             p.kill()
         except OSError:
             pass
+        wait(2)
 
 
 class HttpTransport:
@@ -310,10 +323,11 @@ class HttpTransport:
                 slot.msg = found
         except urllib.error.HTTPError as e:
             detail = ""
-            try:
-                detail = e.read().decode("utf-8", "replace")[:300]
-            except OSError:
-                pass
+            with e:
+                try:
+                    detail = e.read().decode("utf-8", "replace")[:300]
+                except OSError:
+                    pass
             if e.code == 404 and self.session:           # the session expired: a restart starts a new one
                 self.broken = McpError("the server ended the session")
             err = McpError(f"HTTP {e.code} {e.reason}{': ' + detail if detail else ''}")
