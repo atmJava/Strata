@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-115 · Pin 预算释放避免 free 后地址查表
+
+- 目标 / 指标：`host_free_guarded()` 必须在 `cudaFreeHost` 成功后准确归还模拟 pin 预算；释放失败时预算计数不能提前
+  扣减，释放后的指针值也不能再用于 map 查找。
+- 假设与预期：旧 `free_locked()` 先 free，再把同一个地址传给 `sim_uncharge()` 查 map。clang 静态分析在 MTP、
+  DFlash2 和 Verifier 上都报告 `unix.Malloc` use-after-free；即使只比较地址值，也把记账绑在失效指针上。
+- 为什么选这条路线：free 前保存 map iterator 和字节数，free 成功后才按 iterator 扣计数并 erase。map 节点与 CUDA
+  分配生命周期独立，迭代器不依赖已释放地址；失败则保留原记录。
+- 改动与实验：`mapped_host_test` 增加真实模拟预算检查：分配后 `sim_used == 64`，guarded free 后归零，普通及
+  ASan/UBSan 均通过；`mtp.cpp` 的 clang static analyzer 不再报告该路径。测试通过 declaration-only CUDA shim 运行
+  link-wrap，避免 inline stub 绕过 wrap。
+- 判决：采纳。pin 预算记账不再使用已释放指针，并覆盖 free 失败时的一致性。
+- 生产状态与回滚：未启用 `STRATA_TEST_PIN_BUDGET_MIB` 时仍只调用原生 `cudaFreeHost`；正常分配/释放行为不变，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 RTX 2080 Ti，未真实注入 `cudaFreeHost` 失败；当前验证覆盖模拟预算与
+  link-wrap 释放路径。
+- 下一步与理由：重新跑 clang 静态分析和全量回归，确认没有新的 owner/生命周期告警。
+
 ## I-20261027-114 · DFlash2 bind 状态与 vocab 所有权事务化
 
 - 目标 / 指标：DFlash2 `bind_raw()` 只能在 vocab 上传、宽高检查和 logits 分配全部成功后发布 embed/head/宽度；

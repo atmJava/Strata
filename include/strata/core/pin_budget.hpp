@@ -82,8 +82,13 @@ inline cudaError_t alloc_locked(State& s, void** p, size_t bytes, unsigned flags
 }
 inline void free_locked(State& s, void* p) {
     if (p == nullptr) return;
-    (void) cudaFreeHost(p);
-    sim_uncharge(s, p);
+    const auto it = s.sim_ptrs.find(p);
+    const uint64_t bytes = it == s.sim_ptrs.end() ? 0 : it->second;
+    const cudaError_t result = cudaFreeHost(p);
+    if (result == cudaSuccess && it != s.sim_ptrs.end()) {
+        s.sim_used -= bytes;
+        s.sim_ptrs.erase(it);
+    }
 }
 
 inline uint64_t soft_reserve_default_mib() {

@@ -57,6 +57,12 @@ extern "C" cudaError_t __wrap_cudaGetLastError() {
 
 int main() {
     using strata::core::alloc_mapped_pinned;
+#if defined(_WIN32)
+    _putenv_s("STRATA_TEST_PIN_BUDGET_MIB", "1");
+#else
+    setenv("STRATA_TEST_PIN_BUDGET_MIB", "1", 1);
+#endif
+    auto& pin = strata::core::pin_detail::st();
     void* old_host = (void*) 0x1000;
     void* old_device = (void*) 0x2000;
     void* host = old_host;
@@ -70,8 +76,10 @@ int main() {
           "the mapped allocation lost its flags");
     check(((unsigned char*) host)[0] == 0 && ((unsigned char*) host)[63] == 0,
           "the mapped allocation was not zeroed");
+    check(pin.sim_used == 64, "the mapped allocation was not charged to the pin budget");
     strata::core::host_free_guarded(host);
     check(host_frees == 1, "the successful allocation did not free exactly once");
+    check(pin.sim_used == 0, "the successful allocation did not return its pin budget");
 
     reset_counts();
     host = old_host;
@@ -83,6 +91,7 @@ int main() {
           "an allocation that skips initialization was overwritten");
     strata::core::host_free_guarded(host);
     check(host_frees == 1, "the uninitialized allocation did not free exactly once");
+    check(pin.sim_used == 0, "the uninitialized allocation did not return its pin budget");
 
     reset_counts();
     fail_device_alias = true;
