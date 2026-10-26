@@ -34,14 +34,16 @@ public:
     static constexpr uint32_t alignment() { return 4096; }
 
     /// Queue one read. Returns false (and sets `err`) if the handle is closed or the request could not be queued;
-    /// a queued request always produces exactly one completion.
+    /// a queued request always produces exactly one completion, including when the completion queue cannot allocate.
     bool submit(uint64_t offset, void* buffer, uint32_t length, uint64_t tag, std::string& err);
 
     /// Wait for up to `max` completions; returns how many were written to `out`. `timeout_ms` < 0 waits
-    /// forever; 0 polls. A `wake()` shows up as one completion with tag `WAKE_TAG`.
+    /// forever; 0 polls. A `wake()` shows up as one completion with tag `WAKE_TAG`. A close also ends a blocked
+    /// wait with zero results.
     int wait(Completion* out, int max, int timeout_ms);
 
-    /// Make a thread blocked in `wait` return (thread-safe). Used to hand it newly queued work.
+    /// Make a thread blocked in `wait` return (thread-safe). Used to hand it newly queued work. A wake sent to a
+    /// closed handle is ignored, so it cannot leak into a later `open`.
     static constexpr uint64_t WAKE_TAG = ~0ull;
     void wake();
 

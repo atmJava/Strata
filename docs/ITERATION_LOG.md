@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-67 · DirectFile 完成队列失败不再终止 worker
+
+- 目标 / 指标：已由 `submit()` 接受的无缓冲读取，即使完成队列或 `std::deque` 节点分配失败，也必须恰好产生一个
+  可消费 completion，不能从 worker 抛出 `std::bad_alloc` 触发进程终止；`close()` 必须唤醒永久等待者，
+  `wake()` 也不能从已关闭句柄泄漏到下一次 `open()`。
+- 假设与预期：`submit()` 已为排队分配失败建立错误路径，但读取完成后的 `done.push_back()` 仍位于无异常边界的
+  worker 中。分配失败会跳过 `cv_done` 通知并结束进程；没有请求时，`wait(...,-1)` 也没有观察关闭状态。
+- 为什么选这条路线：读已经完成，结果只差一个可分配容器槽。每个 worker 保留一个内联 completion 后备槽，
+  分配失败时发布该槽并等待调用方取走；成功路径仍使用原 deque、锁和 FIFO completion 集合。关闭把 `fd=-1`
+  加入等待条件并通知，已关闭句柄上的 `wake()` 直接忽略。
+- 改动与实验：worker 改为携带固定 id 的内联后备槽；新增仅测试用的确定性完成分配失败注入。回归覆盖后备结果、
+  数据完整性、阻塞等待被 close 唤醒、关闭后 wake 不污染 reopen，以及原队列失败、EOF、双 wake 和并发 close。
+- 结果：C++20 `-O2 -Wall -Wextra -Werror` 编译和运行通过；ASan/UBSan 通过；ThreadSanitizer 通过。
+  普通构建重复 50 次、TSan 构建重复 5 次均通过。`git diff --check` 通过。
+- 判决：采纳。排队后的完成结果在内存压力下仍可交付，等待者与句柄生命周期有确定出口。
+- 生产状态与回滚：未改 `pread`、I/O 线程数、成功完成队列顺序或请求格式；新增的固定后备存储为每句柄
+  64 个 completion。未运行真实 NVMe、CUDA sm_75 或 RTX 2080 Ti。
+- 下一步与理由：继续审查其余持久后台 worker 的结果发布与停机唤醒；网络恢复后批量推送本地提交。
+
 ## I-20261027-66 · 后台线程失败改动通过 Python 全量回归
 
 - 目标 / 指标：确认本轮引擎异常边界、DirectFile/PLE 失败路径和 server 启动回滚没有破坏既有 Python 行为；

@@ -3,6 +3,8 @@
 #include "strata/platform/aux_cpus.hpp"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -71,8 +73,15 @@ struct DirectFile::Impl {
     uint32_t wake_pending = 0;
     bool stop = false;
     std::vector<std::thread> pool;
+    // A worker cannot allocate after a read has completed without another failure path.  If the completion deque
+    // cannot grow, the worker keeps its one result here until `wait` consumes it.  One slot per worker is enough:
+    // a worker parks on that slot until the result is taken or the handle closes.
+    std::array<Completion, 64> fallback{};
+    std::array<bool, 64> fallback_ready{};
+    std::atomic<int> injected_done_failures{0};
+    std::condition_variable cv_space;
 
-    void worker() {
+    void worker(size_t worker_id) {
         std::unique_lock<std::mutex> lk(mu);
         for (;;) {
             cv_work.wait(lk, [&] { return stop || !queue.empty(); });
@@ -82,7 +91,20 @@ struct DirectFile::Impl {
             lk.unlock();
             const ssize_t got = pread(fd, p.buffer, p.length, (off_t) p.offset);
             lk.lock();
-            done.push_back(Completion{p.tag, got < 0 ? 0u : (uint32_t) got, got >= 0});
+            const Completion completion{p.tag, got < 0 ? 0u : (uint32_t) got, got >= 0};
+            int remaining = injected_done_failures.load(std::memory_order_relaxed);
+            while (remaining > 0 &&
+                   !injected_done_failures.compare_exchange_weak(remaining, remaining - 1,
+                                                                 std::memory_order_relaxed)) {}
+            try {
+                if (remaining > 0) throw std::bad_alloc();
+                done.push_back(completion);
+            } catch (...) {
+                fallback[worker_id] = completion;
+                fallback_ready[worker_id] = true;
+                cv_done.notify_all();
+                cv_space.wait(lk, [&] { return !fallback_ready[worker_id] || stop; });
+            }
             cv_done.notify_all();
         }
     }
@@ -93,6 +115,7 @@ struct DirectFile::Impl {
             stop = true;
         }
         cv_work.notify_all();
+        cv_space.notify_all();
         for (std::thread& t : pool) t.join();
         pool.clear();
         stop = false;
@@ -111,6 +134,9 @@ struct DirectFile::Impl {
         done.clear();
         queue.clear();
         wake_pending = 0;
+        fallback_ready.fill(false);
+        injected_done_failures.store(0, std::memory_order_relaxed);
+        cv_done.notify_all();
     }
 };
 
@@ -132,13 +158,15 @@ bool DirectFile::open(const std::string& path, std::string& err) {
         std::lock_guard<std::mutex> lk(impl_->mu);
         impl_->fd = fd;
         impl_->size = (uint64_t) st.st_size;
+        if (const char* value = std::getenv("STRATA_TEST_DIRECT_DONE_FAIL"))
+            impl_->injected_done_failures.store(std::max(0, std::atoi(value)), std::memory_order_relaxed);
     }
     const int n = io_threads(16);
     try {
         for (int i = 0; i < n; ++i)
-            impl_->pool.emplace_back([this] {
+            impl_->pool.emplace_back([this, i] {
                 strata::aux_cpus::pin_current_thread();
-                impl_->worker();
+                impl_->worker((size_t) i);
             });
     } catch (const std::exception& e) {
         impl_->close_locked();
@@ -200,18 +228,30 @@ bool DirectFile::submit(uint64_t offset, void* buffer, uint32_t length, uint64_t
 
 void DirectFile::wake() {
     std::lock_guard<std::mutex> lk(impl_->mu);
+    if (impl_->fd < 0) return;
     if (impl_->wake_pending != std::numeric_limits<uint32_t>::max()) ++impl_->wake_pending;
     impl_->cv_done.notify_all();
 }
 
 int DirectFile::wait(Completion* out, int max, int timeout_ms) {
     std::unique_lock<std::mutex> lk(impl_->mu);
-    if (impl_->done.empty() && impl_->wake_pending == 0 && timeout_ms != 0) {
-        auto ready = [&] { return !impl_->done.empty() || impl_->wake_pending != 0; };
+    auto fallback_count = [&] {
+        return (int) std::count(impl_->fallback_ready.begin(), impl_->fallback_ready.end(), true);
+    };
+    auto ready = [&] {
+        return !impl_->done.empty() || impl_->wake_pending != 0 || fallback_count() != 0 || impl_->fd < 0;
+    };
+    if (!ready() && timeout_ms != 0) {
         if (timeout_ms < 0) impl_->cv_done.wait(lk, ready);
         else impl_->cv_done.wait_for(lk, std::chrono::milliseconds(timeout_ms), ready);
     }
     int n = 0;
+    for (size_t i = 0; i < impl_->fallback_ready.size() && n < max; ++i) {
+        if (!impl_->fallback_ready[i]) continue;
+        out[n++] = impl_->fallback[i];
+        impl_->fallback_ready[i] = false;
+    }
+    if (n != 0) impl_->cv_space.notify_all();
     while (n < max && impl_->wake_pending > 0) {
         out[n++] = Completion{WAKE_TAG, 0, true};
         --impl_->wake_pending;

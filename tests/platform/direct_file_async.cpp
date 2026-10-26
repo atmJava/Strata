@@ -25,10 +25,17 @@ int main() {
         DirectFile f;
         std::string error;
         setenv("STRATA_IO_THREADS", "4", 1);   // the pool's size (out-of-range values are clamped to 1..64)
+        setenv("STRATA_TEST_DIRECT_DONE_FAIL", "1", 1);
         check(!f.is_open(), "new handle reports open");
         check(!f.submit(0, memory, 4096, 0, error) && error.find("not open") != std::string::npos,
               "closed handle accepted a request");
         check(f.open(name, error), error.c_str());
+        unsetenv("STRATA_TEST_DIRECT_DONE_FAIL");
+        check(f.submit(0, memory, 4096, 200, error), error.c_str());
+        Completion fallback;
+        check(f.wait(&fallback, 1, 5000) == 1 && fallback.tag == 200 && fallback.ok &&
+                  fallback.bytes == 4096 && static_cast<char*>(memory)[0] == 'x',
+              "completion-queue allocation fallback lost or changed the read result");
         check(!f.submit(1, memory, 4096, 0, error), "unaligned request accepted");
         setenv("STRATA_TEST_DIRECT_QUEUE_FAIL", "1", 1);
         check(!f.submit(0, memory, 4096, 0, error) && error.find("cannot queue") != std::string::npos,
@@ -89,8 +96,27 @@ int main() {
 
         check(!f.open("/tmp/strata-direct-test-no-such-file", error), "missing file opened");
         check(!f.is_open() && !f.submit(0, memory, 4096, 102, error), "failed open left the handle usable");
+
+        DirectFile closing;
+        check(closing.open(name, error), error.c_str());
+        std::atomic<int> blocked_result{-1};
+        std::atomic<bool> waiter_started{false};
+        std::thread blocked([&] {
+            Completion c;
+            waiter_started.store(true, std::memory_order_release);
+            blocked_result.store(closing.wait(&c, 1, -1), std::memory_order_release);
+        });
+        while (!waiter_started.load(std::memory_order_acquire)) std::this_thread::yield();
+        closing.close();
+        blocked.join();
+        check(blocked_result.load(std::memory_order_acquire) == 0, "close did not wake a blocked wait");
+        closing.wake();
+        check(closing.open(name, error), error.c_str());
+        check(closing.wait(&fallback, 1, 0) == 0, "wake after close leaked into the reopened handle");
+        closing.close();
+
         DirectFile::free_aligned(memory); unlink(name);
-        std::cout << "direct_file_async: passed queue failure, queued reads, short EOF, wakes, close drain, reopen\n";
+        std::cout << "direct_file_async: passed queue/completion fallback, reads, short EOF, wakes, close drain, reopen\n";
         return 0;
     } catch (const std::exception& e) {
         DirectFile::free_aligned(race_memory);
