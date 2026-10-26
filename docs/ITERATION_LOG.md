@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-104 · DFlash2 load 失败整体回滚
+
+- 目标 / 指标：DFlash2 `load()` 从 pack 解析、blob 上传、streams/events、profiler 到 private buffer 分配，任一步失败都
+  必须回收本次已取得资源并恢复为空闲实例；重复加载必须拒绝，不能覆盖已有 blob/stream。
+- 假设与预期：旧 `load()` 在解析早期就写 `device_`，之后分配 blob、streams、events、profiler 和 buffers；每个
+  early return 只返回错误，资源保留到外层析构。若对象仍存活或再次 load，后续分配会覆盖旧句柄。
+- 为什么选这条路线：进入 load 前拒绝已加载实例；取得 `device_` 后立即建立 load scope rollback。所有失败路径由
+  析构调用已有幂等 `release()`，它会同步并释放 graph、device/mapped buffers、shared owners、streams/events 和
+  profiler，最后设 `device_=-1`。最后一个成功点显式 commit，正常路径不触发回滚；返回错误字符串由调用者保留。
+- 改动与实验：成功路径的 pack 内容、tensor 上传顺序、stream priority、event flags、profiler/timing 与 private buffer
+  状态不变。`dflash2.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；
+  `python3 -m pytest tests/terminal -q` 通过（200 passed、46 skipped、93 subtests passed）。
+- 判决：采纳。DFlash2 的 load 失败边界现在也是资源所有权边界，重复加载不会覆盖已有对象。
+- 生产状态与回滚：未改 pack 格式、推理数据和 graph；仅增加失败回滚与重复加载拒绝；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、DFlash2 pack 或 RTX 2080 Ti，未真实注入 pack 截断、stream/event 创建失败、
+  alloc 失败或 profiler 异常。没有 `Dflash2Drafter::load` 的 link-wrap 回归；本阶段是严格静态审查和全量 Python 回归。
+- 下一步与理由：对 MTP load 采用同类整体回滚，再进行最终资源扫描、全套可运行测试和远端 SHA 核验。
+
 ## I-20261027-103 · DFlash2 private buffers 事务分配
 
 - 目标 / 指标：DFlash2 的三十余块 private device buffer、每层 K/V ring、两块 mapped staging/output 必须整体成功

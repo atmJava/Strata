@@ -235,8 +235,17 @@ static std::vector<uint8_t> sample_pack(const std::string& path) {
 
 bool Dflash2Drafter::load(const std::string& path, int device, std::string& err, const Dflash2Drafter* shared) {
     if (shared == this) { err = "dflash2: an instance cannot share its own pack"; return false; }
+    if (device_ >= 0 || blob_ != nullptr || cs_ != nullptr) {
+        err = "dflash2: this drafter is already loaded";
+        return false;
+    }
     device_ = device;
     const OnDevice on_device(device_);
+    struct Rollback {
+        Dflash2Drafter& self;
+        bool commit = false;
+        ~Rollback() { if (!commit) self.release(); }
+    } rollback{*this};
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) { err = "dflash2: cannot open " + path; return false; }
     struct Closer { std::FILE* f; ~Closer() { std::fclose(f); } } closer{f};
@@ -366,6 +375,7 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
     if (shared != nullptr)
         std::fprintf(stderr, "strata dflash2: shared pack weights, %.0f MiB of private buffers (ring, logits and graphs stay this slot's)\n",
                      (double) vram_ / 1048576.0);
+    rollback.commit = true;
     return true;
 }
 
