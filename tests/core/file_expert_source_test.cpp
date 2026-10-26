@@ -279,6 +279,21 @@ void test_lookahead_worker_failure() {
     require(!lookahead.stats_on(), "a failed statistics allocation left the optional mode enabled");
     lookahead.enable_stats(2);
     require(lookahead.stats_on(), "prediction statistics did not start after the injected failure");
+
+    RouterLookahead normal;
+    err.clear();
+    std::vector<std::vector<uint16_t>> normal_routers(2, std::vector<uint16_t>(16, 0));
+    require(normal.start(std::move(normal_routers), 8, 2, 1, &source, err, true), err);
+    normal.enable_stats(2);
+    require(normal.stats_on(), "prediction statistics did not start for the score path");
+    normal.stats_window_start();
+    normal.submit(0, x, 1, nullptr);
+    for (int i = 0; i < 5000 && normal.predicted() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const int32_t ids[1] = {0};
+    const int32_t host_res[4] = {-1, -1, -1, -1};
+    normal.stats_score(1, ids, 1, host_res);
+    require(normal.stats_on(), "the preallocated statistics score path disabled itself");
 }
 
 #if defined(STRATA_NATIVE_EXPERTS)

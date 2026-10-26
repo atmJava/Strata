@@ -356,6 +356,8 @@ private:
     std::unique_ptr<std::atomic<uint64_t>[]> pmask_;   // [layer][3 sizes][words]
     std::unique_ptr<std::atomic<uint64_t>[]> pstamp_;  // [layer]: gen + 1 of the prediction (0 = none)
     std::unique_ptr<std::atomic<int32_t>[]> pvote_;    // [layer][kVoteN]: experts by votes, expert + 1 (0 = none)
+    std::vector<uint64_t> stat_act_;                   ///< dispatch-thread scratch, allocated by enable_stats
+    std::vector<int32_t> stat_order_;                  ///< the same, for misses in first-seen order
     std::atomic<uint64_t> gen_{0};
     uint64_t st_layers_ = 0, st_nopred_ = 0, st_actual_ = 0, st_hit_[3] = {0, 0, 0}, st_pred_[3] = {0, 0, 0},
              st_predhit_[3] = {0, 0, 0};

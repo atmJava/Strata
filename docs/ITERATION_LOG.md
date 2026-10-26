@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-72 · 路由统计评分热路径零分配
+
+- 目标 / 指标：启用 `STRATA_LOOKAHEAD_STATS` 后，每层 `stats_score()` 不再进行 vector 分配，避免可选诊断在
+  解码路径抛出内存异常；启用失败仍是可诊断的“statistics off”，成功路径统计值不变。
+- 假设与预期：现有统计在每次评分时构造 `act` 和 `order_miss`。它们的最大尺寸由已经固定的 `words_` 和
+  `n_expert_` 决定，可以随统计表一起分配；保留在局部会导致热路径分配，也可能留下半初始化状态。
+- 为什么选这条路线：`stats_score()` 由单一 dispatch 线程调用。`enable_stats()` 在局部完成全部原子表和两块
+  scratch 的分配后才一次性发布；评分只清零并清除已有缓冲，保留原 bitmask、首次出现顺序和统计公式。
+- 改动与实验：新增 dispatch scratch 成员；启用统计时一并预留，之后 `stats_score()` 只做 `fill/clear`。回归覆盖
+  统计分配失败后关闭、解除失败后重新启用，并运行一次真实前瞻预测后的评分路径。
+- 结果：`expert_source.cpp` 与 `file_expert_source_test.cpp` 通过 C++20 主机侧
+  `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）。独立用例以 `-O2 -Wall -Wextra -Werror` 构建并重复
+  20 次通过；ASan/UBSan 通过；ThreadSanitizer 通过，仅输出源码原有 fence 提示。
+- 判决：采纳。统计成功路径去除了逐层分配，失败路径不改变前瞻或推理。
+- 生产状态与回滚：统计未启用时无行为变化；启用时统计公式与输出不变。单提交可回退。
+- 未验证：无 CUDA 工具链，未运行完整链接测试或真实 Qwen pack 的 100-window 统计输出；scratch 的单线程调用
+  约束仍由既有 dispatch 架构保证。
+- 下一步与理由：继续寻找热路径中可预分配但尚未预分配的可选诊断结构。
+
 ## I-20261027-71 · 路由统计分配失败只关闭可选诊断
 
 - 目标 / 指标：`STRATA_LOOKAHEAD_STATS` 的三组原子统计数组无法分配时，不得让启动路径收到半初始化状态

@@ -2829,6 +2829,9 @@ void RouterLookahead::enable_stats(int64_t n_layers) {
         auto pmask = std::make_unique<std::atomic<uint64_t>[]>(pmask_n);
         auto pstamp = std::make_unique<std::atomic<uint64_t>[]>(stamp_n);
         auto pvote = std::make_unique<std::atomic<int32_t>[]>(vote_n);
+        std::vector<uint64_t> stat_act((size_t) words, 0);
+        std::vector<int32_t> stat_order;
+        stat_order.reserve((size_t) n_expert_);
         for (size_t i = 0; i < pmask_n; ++i) pmask[i].store(0, std::memory_order_relaxed);
         for (size_t i = 0; i < stamp_n; ++i) pstamp[i].store(0, std::memory_order_relaxed);
         for (size_t i = 0; i < vote_n; ++i) pvote[i].store(0, std::memory_order_relaxed);
@@ -2836,6 +2839,8 @@ void RouterLookahead::enable_stats(int64_t n_layers) {
         pmask_ = std::move(pmask);
         pstamp_ = std::move(pstamp);
         pvote_ = std::move(pvote);
+        stat_act_ = std::move(stat_act);
+        stat_order_ = std::move(stat_order);
         stats_on_ = true;
     } catch (const std::exception& e) {
         stats_on_ = false;
@@ -2854,7 +2859,8 @@ void RouterLookahead::stats_score(int64_t layer, const int32_t* ids, int64_t n, 
         ++st_nopred_;
         return;
     }
-    std::vector<uint64_t> act((size_t) words_, 0);
+    std::vector<uint64_t>& act = stat_act_;
+    std::fill(act.begin(), act.end(), 0);
     for (int64_t i = 0; i < n; ++i) {
         const int32_t e = ids[i];
         if (e < 0 || e >= n_expert_) continue;
@@ -2874,7 +2880,8 @@ void RouterLookahead::stats_score(int64_t layer, const int32_t* ids, int64_t n, 
             vt[nv++] = v - 1;
         }
         // the misses in routing order (first appearance), the PCIe share = the last (n_miss * pcie_num / 256) of them
-        std::vector<int32_t> order_miss;
+        std::vector<int32_t>& order_miss = stat_order_;
+        order_miss.clear();
         for (int64_t i = 0; i < n; ++i) {
             const int32_t e = ids[i];
             if (e < 0 || e >= n_expert_) continue;
