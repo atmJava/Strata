@@ -4727,6 +4727,7 @@ class NvidiaTelemetry(unittest.TestCase):
                 self.assertEqual([gpu["index"] for gpu in sample["gpus"]], [0, 1])
             finally:
                 t.close()
+            self.assertFalse(t._thread.is_alive())
 
 
 class TelemetryNoDisks(unittest.TestCase):
