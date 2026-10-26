@@ -183,6 +183,7 @@ bool MtpDrafter::make_q4_dense(const std::vector<uint8_t>& blob, std::string& er
         total += ((uint64_t) t.rows * (uint64_t) (t.cols / 32) * 18 + 255) & ~255ull;
     }
     std::vector<uint8_t> host((size_t) total);
+    std::vector<std::pair<std::string, uint64_t>> q4_off;
     std::vector<float> row;
     const auto* q8t = ggml_get_type_traits(GGML_TYPE_Q8_0);
     for (const auto& [t, off] : plan) {
@@ -193,10 +194,20 @@ bool MtpDrafter::make_q4_dense(const std::vector<uint8_t>& blob, std::string& er
             ggml_quantize_chunk(GGML_TYPE_Q4_0, row.data(), host.data() + off + (uint64_t) r * out_row, 0, 1, t->cols,
                                 nullptr);
         }
-        q4_off_.push_back({t->name, off});
+        q4_off.push_back({t->name, off});
     }
-    if (cudaMalloc((void**) &dense4_, (size_t) total) != cudaSuccess) { err = "mtp: the Q4_0 projections do not fit"; return false; }
-    cudaMemcpy(dense4_, host.data(), (size_t) total, cudaMemcpyHostToDevice);
+    uint8_t* made = nullptr;
+    if (cudaMalloc((void**) &made, (size_t) total) != cudaSuccess) {
+        err = "mtp: the Q4_0 projections do not fit";
+        return false;
+    }
+    if (cudaMemcpy(made, host.data(), (size_t) total, cudaMemcpyHostToDevice) != cudaSuccess) {
+        cudaFree(made);
+        err = "mtp: the Q4_0 projections upload failed";
+        return false;
+    }
+    dense4_ = made;
+    q4_off_ = std::move(q4_off);
     vram_ += total;
     std::fprintf(stderr, "strata mtp: --mtp-q4: %zu projections as Q4_0 (%.1f MiB)\n", plan.size(), (double) total / 1048576.0);
     return true;
@@ -276,7 +287,8 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         }
         std::vector<uint8_t> blob;
         if (!read_file(rt_dir + "/dense.bin", blob)) { err = "mtp: cannot read dense.bin"; return false; }
-        const cudaError_t alloc = cudaMalloc((void**) &dense_, blob.size());
+        void* dense = nullptr;
+        const cudaError_t alloc = cudaMalloc(&dense, blob.size());
         if (alloc != cudaSuccess) {
             size_t free_bytes = 0, total_bytes = 0;
             const cudaError_t info = cudaMemGetInfo(&free_bytes, &total_bytes);
@@ -285,7 +297,12 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
                   (info == cudaSuccess ? std::to_string(free_bytes >> 20) + " MiB" : "unknown");
             return false;
         }
-        cudaMemcpy(dense_, blob.data(), blob.size(), cudaMemcpyHostToDevice);
+        if (cudaMemcpy(dense, blob.data(), blob.size(), cudaMemcpyHostToDevice) != cudaSuccess) {
+            cudaFree(dense);
+            err = "mtp: the dense weights upload failed";
+            return false;
+        }
+        dense_ = (uint8_t*) dense;
         vram_ += blob.size();
         if (q4_ && !make_q4_dense(blob, err)) return false;
     }
@@ -300,15 +317,25 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
             FILE* f;
             ~Closer() { if (f != nullptr) std::fclose(f); }
         } closer{f};
-        if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
+        uint8_t* experts = nullptr;
+        if (cudaMalloc((void**) &experts, bytes) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
+        struct ExpertsFree {
+            uint8_t* p;
+            ~ExpertsFree() { if (p != nullptr) cudaFree(p); }
+        } experts_free{experts};
         strata::platform::advise_willneed(fileno(f), 0, bytes);
         std::vector<uint8_t> chunk(64u << 20);
         for (uint64_t off = 0; off < bytes;) {
             const uint64_t n = std::min<uint64_t>(chunk.size(), bytes - off);
             if (std::fread(chunk.data(), 1, (size_t) n, f) != (size_t) n) { err = "mtp: experts.bin is truncated"; return false; }
-            cudaMemcpy(experts_ + off, chunk.data(), n, cudaMemcpyHostToDevice);
+            if (cudaMemcpy(experts + off, chunk.data(), n, cudaMemcpyHostToDevice) != cudaSuccess) {
+                err = "mtp: the experts upload failed";
+                return false;
+            }
             off += n;
         }
+        experts_ = experts;
+        experts_free.p = nullptr;
         vram_ += bytes;
     }
     const char* required[] = {"fc_embedding.weight", "fc_hidden.weight", "self_attn.q_proj.weight", "self_attn.k_proj.weight",
@@ -357,7 +384,11 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     qsa_set_kv_int8(kv_int8_was);
     qsa_set_kv_hybrid(kv_hybrid_was);
     qsa_state_zero(st_, g, nullptr);
-    cudaDeviceSynchronize();
+    const cudaError_t state_sync = cudaDeviceSynchronize();
+    if (state_sync != cudaSuccess) {
+        err = std::string("mtp: K/V state initialization: ") + cudaGetErrorString(state_sync);
+        return false;
+    }
     vram_ += sb;
 
     // ---- buffers
@@ -414,7 +445,10 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     Bump count;
     carve(count);
     if (cudaMalloc(&arena_, count.used) != cudaSuccess) { err = "mtp: buffers do not fit"; return false; }
-    cudaMemset(arena_, 0, count.used);
+    if (cudaMemset(arena_, 0, count.used) != cudaSuccess) {
+        err = "mtp: the buffer initialization failed";
+        return false;
+    }
     Bump real;
     real.base = (uint8_t*) arena_;
     carve(real);
@@ -423,7 +457,10 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         std::vector<int32_t> id((size_t) (T * (uint64_t) cap_));
         for (uint64_t t = 0; t < T; ++t)
             for (int64_t i = 0; i < cap_; ++i) id[(size_t) (t * (uint64_t) cap_ + (uint64_t) i)] = (int32_t) i;
-        cudaMemcpy(ident_, id.data(), id.size() * 4, cudaMemcpyHostToDevice);
+        if (cudaMemcpy(ident_, id.data(), id.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = "mtp: the identity table upload failed";
+            return false;
+        }
     }
     // --pipeline-windows 2 (the forcing graphs): the chain shares its card with stage 1's windows and the next launch
     // on stage 0 waits for it, so its stream gets the highest priority there (STRATA_MTP_PRIORITY=0: the default)
@@ -539,23 +576,35 @@ bool MtpDrafter::setup_coupled(std::string& err) {
         err = "mtp: the draft distributions' buffer does not fit";
         return false;
     }
-    cudaMemset(cring_, 0xff, ring);   // -1: no token
+    if (cudaMemset(cring_, 0xff, ring) != cudaSuccess) {   // -1: no token
+        err = "mtp: could not initialize the coupled draft ring";
+        return false;
+    }
     std::fill(h_chist_, h_chist_ + kCoupledHistCap, -1);
     vram_ += sizeof(strata::kernels::SamplerParams) + ring + scratch;
     if (dhead_ != nullptr) {   // token id -> subset index (-1: not in the draft head), for the penalties
         std::vector<int32_t> sub((size_t) n_dvocab_), inv((size_t) n_vocab_, -1);
-        cudaMemcpy(sub.data(), dvocab_, sub.size() * sizeof(int32_t), cudaMemcpyDeviceToHost);
+        if (cudaMemcpy(sub.data(), dvocab_, sub.size() * sizeof(int32_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
+            err = "mtp: could not read the coupled draft vocabulary";
+            return false;
+        }
         for (size_t i = 0; i < sub.size(); ++i)
             if (sub[i] >= 0 && sub[i] < n_vocab_ && inv[(size_t) sub[i]] < 0) inv[(size_t) sub[i]] = (int32_t) i;
         if (cudaMalloc((void**) &dinv_, inv.size() * sizeof(int32_t)) != cudaSuccess) {
             err = "mtp: the coupled draft sampler's token map does not fit";
             return false;
         }
-        cudaMemcpy(dinv_, inv.data(), inv.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+        if (cudaMemcpy(dinv_, inv.data(), inv.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
+            cudaFree(dinv_);
+            dinv_ = nullptr;
+            err = "mtp: the coupled draft token map upload failed";
+            return false;
+        }
         vram_ += inv.size() * sizeof(int32_t);
     }
-    if (cudaDeviceSynchronize() != cudaSuccess) {
-        err = std::string("mtp: coupled setup: ") + cudaGetErrorString(cudaGetLastError());
+    const cudaError_t sync = cudaDeviceSynchronize();
+    if (sync != cudaSuccess) {
+        err = std::string("mtp: coupled setup: ") + cudaGetErrorString(sync);
         return false;
     }
     coupled_ok_ = true;

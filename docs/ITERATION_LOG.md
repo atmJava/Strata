@@ -3,6 +3,28 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-102 · MTP bulk 加载检查上传完成
+
+- 目标 / 指标：MTP 的 Q4 dense、dense、experts、K/V zero、arena、identity table 和 coupled sampling 初始化必须
+  检查 H2D、memset 与 synchronize 结果。临时 device buffer 在复制成功前不能作为成员发布；失败要释放本轮已取得的
+  buffer，并阻止加载报告成功。
+- 假设与预期：旧实现忽略 dense/expert/Q4 dense 的上传、K/V zero 后同步、arena memset、identity 上传和 coupled
+  ring/token-map 拷贝结果。驱动或显存错误可能让权重内容不完整，但 `load()`/`bind()` 仍返回 true；专家读取中途
+  截断时，已分配的大块 experts 也只取决于后续对象析构。
+- 为什么选这条路线：Q4 dense/offsets、dense 和 experts 先用局部 device buffer，复制成功后才写成员；experts
+  使用作用域 owner 并在完整读取后移交。所有关键 CUDA 返回值现在转换成具体加载错误。K/V zero 同步失败、arena
+  memset 失败、identity 上传失败和 coupled ring/map 失败都会停止初始化。成功路径的权重字节、偏移、布局、图表和
+  推理顺序不变。
+- 改动与实验：`mtp.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；
+  `python3 -m pytest tests/terminal -q` 通过（200 passed、46 skipped、93 subtests passed）。
+- 判决：采纳。MTP 的 bulk 数据加载现在以复制/初始化完成为成功边界，失败不会静默使用不完整权重。
+- 生产状态与回滚：未改量化格式、tensor 顺序、expert 布局、dense/Q4 数值、K/V 模式或采样参数；正常成功路径行为
+  不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、MTP pack 或 RTX 2080 Ti，未真实注入 dense/expert/Q4 H2D、K/V sync、arena
+  memset 或 coupled setup 故障。主机侧没有 MTP pack 级测试；本阶段是生产控制流静态审查加全量 Terminal/Control
+  回归。
+- 下一步与理由：继续检查 DFlash2 bulk upload/alloc 的失败所有权与同步，再做一次全仓资源模式扫描，准备最终验证。
+
 ## I-20261027-101 · DFlash2 bind 只发布完整权重
 
 - 目标 / 指标：DFlash2 的 draft vocabulary、gathered draft-head rows、`bind_raw` 元数据和 logits 必须全部成功后
