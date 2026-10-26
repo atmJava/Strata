@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-82 · foresight event 与 embedding 回退按设备释放
+
+- 目标 / 指标：`ForesightSwap` 在每张 helper 卡申请的 copy event 必须在该卡上下文销毁；`NativeEmbed` 因
+  pinned 分配失败而落到 VRAM 时，析构必须在分配该表的设备释放。
+- 假设与预期：foresight 析构先逐卡同步、释放 arena 和 stream，随后才统一销毁 event；此时当前设备只等于最后
+  一张卡，前面卡的 event 可能销毁失败。`NativeEmbed` 保存 VRAM 指针却不保存其设备，后续 teardown 可能落在
+  CUDA0。
+- 为什么选这条路线：把 event 销毁移入每张卡原有的 `OnDevice` 作用域，放在同步后、arena/stream 释放前；
+  给 `NativeEmbed` 记录 load 时的设备，并在析构进入同一上下文。不改变 swap 队列、拷贝或 embedding 数据。
+- 改动与实验：初始化部分失败留下的非空 arena/stream/event 仍由析构逐卡回收；成功路径的所有对象归属一致。
+  `expert_source.cpp` 与 `native_head.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`
+  （CUDA shim）。
+- 判决：采纳。多卡 foresight 资源和 embedding VRAM 回退现在都能在所属设备完成 teardown。
+- 生产状态与回滚：未改 swap 策略、复制线程、embedding 布局或内存大小；单提交可回退。
+- 未验证：当前无多卡 CUDA 驱动，未真实构造 event 跨设备、注入 foresight 初始化失败或运行 VRAM-fallback
+  embedding；shim 不校验 event/设备的真实绑定。
+- 下一步与理由：继续核对全局诊断对象和一次性初始化失败时的 event/device memory 所有权。
+
 ## I-20261027-81 · CLI 放弃 DFlash2 时真正释放显存并回退
 
 - 目标 / 指标：CLI 在 verifier 不保留 DFlash2 taps，或 round graph 捕获失败时，必须关闭 `use_df2`，

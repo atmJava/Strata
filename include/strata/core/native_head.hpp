@@ -61,6 +61,7 @@ public:
 private:
     void* host_ = nullptr;
     const void* dev_ = nullptr;
+    int device_ = -1;                    ///< allocation context for the VRAM fallback
     uint64_t bytes_ = 0;
     size_t row_ = 0;
     int64_t n_embd_ = 0, n_vocab_ = 0;

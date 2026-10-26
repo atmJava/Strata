@@ -5842,12 +5842,20 @@ ForesightSwap::~ForesightSwap() {
     for (size_t c = 0; c < card_dev.size(); ++c) {
         const OnDevice on(card_dev[c]);
         if (card_stream[c]) cudaStreamSynchronize((cudaStream_t) card_stream[c]);
+        // Events belong to the card that created them. Destroy them before leaving its context and before the
+        // arena/stream they were recorded on disappears.
+        if (slot)
+            for (int64_t l = 0; l < n_layers; ++l) {
+                if (layer_card[(size_t) l] != (int) c) continue;
+                for (int s2 = 0; s2 < slots; ++s2) {
+                    Slot& sl = slot[(size_t) (l * slots + s2)];
+                    if (sl.ev) cudaEventDestroy((cudaEvent_t) sl.ev);
+                    sl.ev = nullptr;
+                }
+            }
         if (card_mem[c]) cudaFree(card_mem[c]);
         if (card_stream[c]) cudaStreamDestroy((cudaStream_t) card_stream[c]);
     }
-    if (slot)
-        for (int64_t i = 0; i < n_layers * slots; ++i)
-            if (slot[(size_t) i].ev) cudaEventDestroy((cudaEvent_t) slot[(size_t) i].ev);
 }
 
 void ForesightSwap::fill_loop() {
