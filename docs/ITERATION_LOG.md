@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-114 · DFlash2 bind 状态与 vocab 所有权事务化
+
+- 目标 / 指标：DFlash2 `bind_raw()` 只能在 vocab 上传、宽高检查和 logits 分配全部成功后发布 embed/head/宽度；
+  rebind 从 subset 切到 whole head（或反向）必须释放旧的自有缓冲，`vram_bytes()` 只统计本实例真实持有的字节。
+- 假设与预期：旧实现先写 `embed_/head_w_/head_type_/n_dvocab_` 再分配，失败会留下与 `bound_` 不一致的字段；
+  rebind 到 whole head 时旧 `dvocab_/dhead_` 也不会清空，可能继续把旧 subset 映射传给 kernel，VRAM 计数则会重复。
+- 为什么选这条路线：`alloc_logits()` 改为显式接收目标宽度，先把所有候选资源建好，再一次性发布；新增
+  `dvocab_bytes_/dhead_bytes_` 记录本实例自有（而非 shared alias）的字节。单卡 subset、whole head、shared slot 和
+  两种重绑都在同一路径更新 owner、指针、host 副本和 VRAM。`release()` 同时清掉 owner 字节与 embed callback。
+- 改动与实验：保持首次 bind 的 head row 内容、vocab 顺序、logits 宽度和 graph 输入不变；补齐 rebind 的旧资源释放与
+  count 调整。`dflash2.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；
+  `tools/test_dflash2_pack.py` 通过（3 passed、1 skipped）。
+- 判决：采纳。DFlash2 的绑定状态、vocab/head 指针、所有权和显存统计现在同进同退。
+- 生产状态与回滚：不改 pack 格式、选择算法或默认首次绑定；只影响 rebind/shared 组合，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、真实 DFlash2 pack 或 RTX 2080 Ti，未在 GPU 上执行 own/shared/whole/subset
+  四种 rebind 组合，也未注入 logits 分配失败。
+- 下一步与理由：继续检查 MTP/DFlash2 的 opt-in profiler 和共享 slot 生命周期，寻找跨设备的释放与并发捕捉窗口。
+
 ## I-20261027-113 · quant format 测试支持直接执行
 
 - 目标 / 指标：`python3 tools/test_quant_formats.py` 与 `python3 -m tools.test_quant_formats` 都应运行同一 2 个测试。

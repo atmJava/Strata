@@ -104,7 +104,7 @@ private:
     const float* f32(const std::string& name) const { return reinterpret_cast<const float*>(blob_ + find(name).off); }
     /// planar Q8 matrices (1..3 of them, same input width) times the planar activations in xqp_ / xdp_ (ncols columns)
     void gemm(std::initializer_list<const char*> names, std::initializer_list<float*> outs, int ncols, cudaStream_t cs, const uint8_t* xq, const float* xd);
-    bool alloc_logits(std::string& err);
+    bool alloc_logits(int64_t n_dvocab, std::string& err);
     bool record_context(const float* taps, int n, cudaStream_t cs, std::string& err);
     bool record_block(cudaStream_t cs, std::string& err);
     bool capture(int n, const float* taps, std::string& err);
@@ -136,6 +136,7 @@ private:
     int32_t* dvocab_ = nullptr;
     uint8_t* dhead_ = nullptr;      ///< the draft vocabulary's head rows (owned), or null with head_w_ the whole head
     std::shared_ptr<void> dvocab_owner_, dhead_owner_;   ///< the same lifetime rule as blob_owner_
+    size_t dvocab_bytes_ = 0, dhead_bytes_ = 0;           ///< bytes this instance owns through the two owners
     size_t logits_cap_ = 0;                 ///< bytes in logits_ (a wider re-bind replaces it; vram_bytes counts it once)
     int64_t head_row_bytes_ = 0;    ///< the draft head's row width, for the shared compatibility check
     std::string pack_path_;         ///< the file this instance loaded (a shared load compares a byte sample with it)

@@ -91,7 +91,13 @@ void Dflash2Drafter::release() {
     blob_ = nullptr;
     dvocab_ = nullptr;
     dhead_ = nullptr;
+    dvocab_bytes_ = 0;
+    dhead_bytes_ = 0;
+    dvocab_host_.clear();
+    embed_ = {};
     head_w_ = nullptr;
+    head_src_ = nullptr;
+    head_row_bytes_ = 0;
     shared_ = nullptr;
     m_meta_ = nullptr;
     hp_out_ = nullptr;
@@ -482,15 +488,19 @@ bool Dflash2Drafter::alloc(std::string& err) {
 
 bool Dflash2Drafter::bind_raw(EmbedFn embed, const void* head_w, int head_type, int64_t head_rows, const std::vector<int32_t>& vocab, std::string& err) {
     const OnDevice on_device(device_);
-    embed_ = std::move(embed);
-    head_w_ = head_w;
-    head_type_ = head_type;
-    n_dvocab_ = head_rows;
+    const int64_t n_rows = vocab.empty() ? head_rows : (int64_t) vocab.size();
+    if (n_rows <= 0) {
+        err = "dflash2: the draft head has no rows";
+        return false;
+    }
+    if ((n_rows + kernels::kDf2TopBlocks - 1) / kernels::kDf2TopBlocks > 4096) {
+        err = "dflash2: the head has too many rows for the top-k";
+        return false;
+    }
     CudaPtr dvocab_pending;
     int32_t* dvocab_new = nullptr;
     std::vector<int32_t> dvocab_host_new;
     if (!vocab.empty()) {
-        n_dvocab_ = (int64_t) vocab.size();
         if (cudaMalloc((void**) &dvocab_new, vocab.size() * 4) != cudaSuccess) {
             err = "dflash2: draft vocabulary";
             return false;
@@ -502,20 +512,29 @@ bool Dflash2Drafter::bind_raw(EmbedFn embed, const void* head_w, int head_type, 
         }
         dvocab_host_new = vocab;
     }
-    if ((n_dvocab_ + kernels::kDf2TopBlocks - 1) / kernels::kDf2TopBlocks > 4096) { err = "dflash2: the head has too many rows for the top-k"; return false; }
-    if (!alloc_logits(err)) return false;
+    if (!alloc_logits(n_rows, err)) return false;
+    embed_ = std::move(embed);
+    head_w_ = head_w;
+    head_type_ = head_type;
+    n_dvocab_ = n_rows;
+    vram_ -= dvocab_bytes_;
+    dvocab_owner_.reset();
+    dvocab_ = nullptr;
+    dvocab_host_.clear();
+    dvocab_bytes_ = 0;
     if (dvocab_pending) {
         dvocab_owner_ = std::move(dvocab_pending);
         dvocab_ = dvocab_new;
         dvocab_host_ = std::move(dvocab_host_new);
-        vram_ += vocab.size() * 4;
+        dvocab_bytes_ = vocab.size() * 4;
+        vram_ += dvocab_bytes_;
     }
     bound_ = true;
     return true;
 }
 
-bool Dflash2Drafter::alloc_logits(std::string& err) {
-    const size_t need = (size_t) kDrafts * (size_t) n_dvocab_ * sizeof(float);
+bool Dflash2Drafter::alloc_logits(int64_t n_dvocab, std::string& err) {
+    const size_t need = (size_t) kDrafts * (size_t) n_dvocab * sizeof(float);
     if (logits_ != nullptr && logits_cap_ >= need) return true;      // a re-bind at the same (or a narrower) width
     float* replacement = nullptr;
     if (cudaMalloc((void**) &replacement, need) != cudaSuccess) {
@@ -565,8 +584,6 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
     const void* hw = head->weights();
     const int64_t row_bytes = (int64_t) head->row_bytes();
     int64_t head_rows = row_bytes > 0 ? (int64_t) (head->weight_bytes() / (uint64_t) row_bytes) : 0;
-    head_src_ = head;
-    head_row_bytes_ = row_bytes;
     if (shared_ != nullptr) {
         // same head object and row width; when the pack's draft vocabulary was bound, the same token subset (the mapping has to match:
         // rows gathered for a different list would be silently wrong); otherwise the same whole-head row count.
@@ -574,6 +591,11 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
                     shared_->head_row_bytes_ == row_bytes;
         if (same) same = shared_->dvocab_ != nullptr ? (vocab == shared_->dvocab_host_) : (vocab.empty() && shared_->n_dvocab_ == head_rows);
         if (!same) { err = "dflash2: incompatible shared draft head (a different head, row width or draft vocabulary)"; return false; }
+        if (!alloc_logits(shared_->n_dvocab_, err)) return false;
+        vram_ -= dvocab_bytes_;
+        vram_ -= dhead_bytes_;
+        dvocab_owner_.reset();
+        dhead_owner_.reset();
         embed_ = std::move(embed);
         head_w_ = shared_->head_w_;
         head_type_ = head->type();
@@ -583,7 +605,10 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
         dvocab_host_ = shared_->dvocab_host_;
         dhead_ = shared_->dhead_;
         dhead_owner_ = shared_->dhead_owner_;
-        if (!alloc_logits(err)) return false;
+        dvocab_bytes_ = 0;   // shared owners keep the rows alive; this instance did not allocate them
+        dhead_bytes_ = 0;
+        head_src_ = head;
+        head_row_bytes_ = row_bytes;
         bound_ = true;
         std::fprintf(stderr, "strata dflash2: shared %lld-token draft head, %.0f MiB of private buffers\n", (long long) n_dvocab_,
                      (double) vram_ / 1048576.0);
@@ -616,12 +641,21 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
         hw = dh;
         head_rows = (int64_t) vocab.size();
         if (!bind_raw(embed, hw, head->type(), head_rows, vocab, err)) return false;
+        vram_ -= dhead_bytes_;
+        dhead_owner_.reset();
         dhead_owner_ = std::move(dhead_pending);
         dhead_ = dh;
-        vram_ += (uint64_t) ((int64_t) vocab.size() * row_bytes);
+        dhead_bytes_ = (size_t) ((int64_t) vocab.size() * row_bytes);
+        vram_ += dhead_bytes_;
     } else {
         if (!bind_raw(embed, hw, head->type(), head_rows, vocab, err)) return false;
+        vram_ -= dhead_bytes_;
+        dhead_owner_.reset();
+        dhead_ = nullptr;
+        dhead_bytes_ = 0;
     }
+    head_src_ = head;
+    head_row_bytes_ = row_bytes;
     std::fprintf(stderr, "strata dflash2: %lld-token draft head (%.1f MiB), drafter %.0f MiB of VRAM\n", (long long) n_dvocab_,
                  (double) (n_dvocab_ * row_bytes) / 1048576.0, (double) vram_ / 1048576.0);
     return true;
