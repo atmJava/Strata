@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-49 · prefill 与 native dense 辅助线程失败保持装载可用
+
+- 目标 / 指标：prefill stager 的复制 worker、expert issuer 以及 native dense 的 BF16→Q8_0 转换 helper 在系统拒绝新线程时，
+  必须 join 已启动线程并由调用线程完成所需工作；不能留下 joinable 局部线程导致 `std::terminate()`，也不能让 issuer 失败跳过
+  expert 拷贝。
+- 假设与预期：三处均直接构造线程。stager/转换线程中途失败会让局部线程析构终止；issuer 失败会让 `threaded_issue` 保持为真，
+  后续消费者等待一个从未启动的生产者。
+- 为什么选这条路线：三者都是并行加速，调用线程能执行同一不可变输入/工作队列。成功路径的线程数、分区、ring 顺序和输出字节不变。
+- 改动与实验：stager 先 reserve 并记录成功数量，部分成功继续、全失败明确返回；issuer 创建失败切回内联 `issue_until`；native
+  Q8 helper 失败时先 join 已启动者，再由调用线程转换全部块。新增注释明确接管边界。
+- 结果：`native_dense.cpp` 与 `prefill.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror` 检查；CUDA 调用由临时
+  同步 shim 模拟，且 DFlash2 未启用、跳过了该构建配置原有的未使用变量告警。`git diff --check` 通过。未运行线程创建失败注入、
+  `nvcc`、CUDA toolkit、RTX 2080 Ti、真实 prefill 或模型装载。
+- 判决：采纳。辅助并发失败只降低吞吐或启动速度，不损坏请求、装载字节或进程寿命。
+- 生产状态与回滚：未改成功路径的分区、stream/event、expert 顺序、量化结果或缓存；单提交可回退。当前没有真实 `nvcc`、CUDA
+  toolkit、RTX 2080 Ti、真实 prefill 或 native Qwen pack，静态结论仍需目标机确认。
+- 学到什么：等待者与生产者之间的“已启用”标志必须在生产者真正启动后才保持为真。
+- 下一步与理由：继续审查 verify 的异步下一窗口启动，随后转入综合测试与目标机未验证风险整理。
+
 ## I-20261027-48 · NUMA toucher 线程失败回退调用线程
 
 - 目标 / 指标：complement 的两次 NUMA slice 触碰分别启动 pinned toucher；任一线程创建失败时，另一个已启动线程必须 join，

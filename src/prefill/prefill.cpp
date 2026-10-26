@@ -530,16 +530,28 @@ struct Stager {
                                                                       : cudaEventDisableTiming) != cudaSuccess) return false;
         }
         cudaGetDevice(&device);
-        for (int t = 0; t < nthreads; ++t)
-            threads.emplace_back([this] {
-                // --aux-cpus: the copy threads go to the spare CPUs with the other helpers; STRATA_AUX_STAGER=0 leaves them where
-                // they were created (a small spare set would then hold all of them: it limits the copy rate of a long read)
-                strata::platform::name_this_thread("strata-stage");
-                static const bool keep = [] { const char* v = std::getenv("STRATA_AUX_STAGER"); return v != nullptr && std::atoi(v) == 0; }();
-                if (keep) strata::aux_cpus::note_owned_thread();
-                else strata::aux_cpus::pin_current_thread();
-                work();
-            });
+        int started = 0;
+        try {
+            threads.reserve((size_t) nthreads);
+            for (int t = 0; t < nthreads; ++t) {
+                threads.emplace_back([this] {
+                    // --aux-cpus: the copy threads go to the spare CPUs with the other helpers; STRATA_AUX_STAGER=0 leaves them where
+                    // they were created (a small spare set would then hold all of them: it limits the copy rate of a long read)
+                    strata::platform::name_this_thread("strata-stage");
+                    static const bool keep = [] { const char* v = std::getenv("STRATA_AUX_STAGER"); return v != nullptr && std::atoi(v) == 0; }();
+                    if (keep) strata::aux_cpus::note_owned_thread();
+                    else strata::aux_cpus::pin_current_thread();
+                    work();
+                });
+                ++started;
+            }
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "prefill: stager workers fell back to %d running thread(s) (%s)\n",
+                         started, error.what());
+        } catch (...) {
+            std::fprintf(stderr, "prefill: stager workers fell back to %d running thread(s)\n", started);
+        }
+        if (started == 0) return false;
         return true;
     }
     ~Stager() {
@@ -2783,38 +2795,47 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             std::thread* t;
             ~IssuerJoin() { if (t->joinable()) { stop->store(true); t->join(); } }
         } issuer_join{&a_stop, &issuer};
-        const bool threaded_issue = stream_all && issuer_on;
+        bool threaded_issue = stream_all && issuer_on;
         if (threaded_issue) {
-            issuer = std::thread([&] {
-                strata::platform::name_this_thread("strata-issue");
-                strata::aux_cpus::pin_current_thread();
-                const core::OnDevice od(m.device);
-                for (size_t idx = 0; idx < seq.size(); ++idx) {
-                    while (idx >= a_consumed.load(std::memory_order_acquire) + (size_t) m.ring) {
-                        if (a_stop.load(std::memory_order_acquire)) return;
-                        std::this_thread::yield();
+            try {
+                issuer = std::thread([&] {
+                    strata::platform::name_this_thread("strata-issue");
+                    strata::aux_cpus::pin_current_thread();
+                    const core::OnDevice od(m.device);
+                    for (size_t idx = 0; idx < seq.size(); ++idx) {
+                        while (idx >= a_consumed.load(std::memory_order_acquire) + (size_t) m.ring) {
+                            if (a_stop.load(std::memory_order_acquire)) return;
+                            std::this_thread::yield();
+                        }
+                        const StreamEntry& en = seq[idx];
+                        const int sl = (int) (idx % (size_t) m.ring);
+                        const auto th = Clock::now();
+                        const size_t bytes = (size_t) lay0.blob_bytes(en.l);
+                        if (m.stage_live[sl]) cudaStreamWaitEvent(m.copy, m.used[m.used_of[sl]], 0);
+                        if (en.job < 0) {
+                            cudaMemcpyAsync(m.stage_dev[sl], en.blob, bytes, cudaMemcpyHostToDevice, m.copy);
+                            ++iss_dma;
+                        } else {
+                            const uint8_t* hb = m.stager->wait(en.job);
+                            cudaMemcpyAsync(m.stage_dev[sl], hb, bytes, cudaMemcpyHostToDevice, m.copy);
+                            m.stager->issued_one(en.job, m.copy);
+                        }
+                        cudaEventRecord(m.copied[sl], m.copy);
+                        m.stage_live[sl] = true;
+                        iss_ms += ms_since(th);
+                        ++iss_streamed;
+                        a_issued.store(idx + 1, std::memory_order_release);
                     }
-                    const StreamEntry& en = seq[idx];
-                    const int sl = (int) (idx % (size_t) m.ring);
-                    const auto th = Clock::now();
-                    const size_t bytes = (size_t) lay0.blob_bytes(en.l);
-                    if (m.stage_live[sl]) cudaStreamWaitEvent(m.copy, m.used[m.used_of[sl]], 0);
-                    if (en.job < 0) {
-                        cudaMemcpyAsync(m.stage_dev[sl], en.blob, bytes, cudaMemcpyHostToDevice, m.copy);
-                        ++iss_dma;
-                    } else {
-                        const uint8_t* hb = m.stager->wait(en.job);
-                        cudaMemcpyAsync(m.stage_dev[sl], hb, bytes, cudaMemcpyHostToDevice, m.copy);
-                        m.stager->issued_one(en.job, m.copy);
-                    }
-                    cudaEventRecord(m.copied[sl], m.copy);
-                    m.stage_live[sl] = true;
-                    iss_ms += ms_since(th);
-                    ++iss_streamed;
-                    a_issued.store(idx + 1, std::memory_order_release);
-                }
-            });
-        } else if (stream_all) {
+                });
+            } catch (const std::exception& error) {
+                threaded_issue = false;
+                std::fprintf(stderr, "prefill: expert issuer did not start (%s); issuing inline\n", error.what());
+            } catch (...) {
+                threaded_issue = false;
+                std::fprintf(stderr, "prefill: expert issuer did not start; issuing inline\n");
+            }
+        }
+        if (!threaded_issue && stream_all) {
             issue_until((size_t) m.ring);   // layer 0's first experts, behind the embedding and the PLE
         }
         // the consumer's side: entry k's copy is on the copy stream (the thread issued it), then k is given back

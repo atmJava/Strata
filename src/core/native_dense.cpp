@@ -119,7 +119,23 @@ std::vector<uint8_t> q8_0_of_bf16(const uint16_t* x, uint64_t n) {
     };
     const unsigned nt = (std::min)(8u, (std::max)(1u, std::thread::hardware_concurrency()));
     std::vector<std::thread> pool;
-    for (unsigned i = 0; i < nt; ++i) pool.emplace_back(work, nb * i / nt, nb * (i + 1) / nt);
+    bool fallback = false;
+    try {
+        pool.reserve((size_t) (nt - 1));
+        for (unsigned i = 1; i < nt; ++i) pool.emplace_back(work, nb * i / nt, nb * (i + 1) / nt);
+    } catch (const std::exception& error) {
+        fallback = true;
+        std::fprintf(stderr, "native dense: Q8 conversion helpers fell back to the caller (%s)\n", error.what());
+    } catch (...) {
+        fallback = true;
+        std::fprintf(stderr, "native dense: Q8 conversion helpers fell back to the caller\n");
+    }
+    if (fallback) {
+        for (auto& th : pool) th.join();
+        work(0, nb);
+    } else {
+        work(0, nb / nt);
+    }
     for (auto& th : pool) th.join();
     return out;
 }
