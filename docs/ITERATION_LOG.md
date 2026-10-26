@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-76 · prefill 与窗口辅助线程失败不再挂死
+
+- 目标 / 指标：可选 prefill 专家 issuer 和 verifier 下一窗口预启动线程发生任意异常时，进程不能触发
+  `std::terminate()`；消费者必须从无限等待中醒来，返回可诊断错误，并由现有 RAII 路径 join 线程。
+- 假设与预期：两个线程此前只保护构造，线程体中的命名/亲和性设置、源等待、预启动和错误字符串分配仍可能
+  抛异常。issuer 抛异常后 `a_issued` 永不推进，专家消费者会永久自旋；verifier helper 抛异常则会直接结束进程。
+- 为什么选这条路线：新增 `worker_guard` 在线程体边界内捕获全部异常并原子发布失败；新增 `progress_wait`
+  同时观察计数与失败位。成功路径仍按原顺序发布计数、拷贝和预启动，停止时仍由既有 RAII 对象 join。
+- 改动与实验：prefill issuer 的每个完成项仍以 release 发布；等待方看到失败即返回
+  `"prefill: the expert issuer stopped"`。verifier 预启动失败保持 `ok=false`，join 后转换为明确错误；线程启动
+  失败仍按原路径在调用线程同步预启动。新增成功/失败等待与线程异常回归。
+- 结果：`progress_wait_test`、`worker_guard_test` 以 C++20、`-O2 -Wall -Wextra -Werror` 和 10 秒超时运行
+  通过；ASan/UBSan、ThreadSanitizer 均通过。`prefill.cpp` 与 `verify.cpp` 通过主机侧
+  `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；仅跳过两处源码原有未使用变量告警）。
+- 判决：采纳。并发优化内部失败退化为受控请求错误，不终止进程，也不让消费者永久等待。
+- 生产状态与回滚：未改 GPU 指令、拷贝顺序、窗口数值、预启动成功路径或线程数；单提交可回退。
+- 未验证：当前无 CUDA 工具链，未运行真实 issuer 异常注入、双卡窗口重叠、RTX 2080 Ti 或
+  Qwen3.8-Flash-Next 请求；CUDA shim 不能替代 sm_75 链接和 GPU 执行。
+- 下一步与理由：继续检查其余普通 worker 的线程体异常、失败可见性和 join 路径。
+
 ## I-20261027-75 · PLE 统计读取不再与 worker 竞争
 
 - 目标 / 指标：线程模式下的 `PleReader` 允许 I/O worker 更新读延迟、读量和 keep-alive 计数；任何公开统计读取

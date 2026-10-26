@@ -14,6 +14,8 @@
 #include "strata/core/progress.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/platform/aux_cpus.hpp"
+#include "strata/platform/progress_wait.hpp"
+#include "strata/platform/worker_guard.hpp"
 
 #include "strata/core/layout.hpp"
 #include "strata/kernels/cpu/expert.hpp"
@@ -2830,6 +2832,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         }();
         std::atomic<size_t> a_issued{0}, a_consumed{0};
         std::atomic<bool> a_stop{false};
+        std::atomic<bool> a_failed{false};
         double iss_ms = 0;
         int64_t iss_streamed = 0, iss_dma = 0;
         std::thread issuer;
@@ -2842,33 +2845,37 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         if (threaded_issue) {
             try {
                 issuer = std::thread([&] {
-                    strata::platform::name_this_thread("strata-issue");
-                    strata::aux_cpus::pin_current_thread();
-                    const core::OnDevice od(m.device);
-                    for (size_t idx = 0; idx < seq.size(); ++idx) {
-                        while (idx >= a_consumed.load(std::memory_order_acquire) + (size_t) m.ring) {
-                            if (a_stop.load(std::memory_order_acquire)) return;
-                            std::this_thread::yield();
+                    strata::platform::run_worker_nothrow("prefill: expert issuer", [&] {
+                        strata::platform::name_this_thread("strata-issue");
+                        strata::aux_cpus::pin_current_thread();
+                        const core::OnDevice od(m.device);
+                        for (size_t idx = 0; idx < seq.size(); ++idx) {
+                            while (idx >= a_consumed.load(std::memory_order_acquire) + (size_t) m.ring) {
+                                if (a_stop.load(std::memory_order_acquire)) return;
+                                std::this_thread::yield();
+                            }
+                            const StreamEntry& en = seq[idx];
+                            const int sl = (int) (idx % (size_t) m.ring);
+                            const auto th = Clock::now();
+                            const size_t bytes = (size_t) lay0.blob_bytes(en.l);
+                            if (m.stage_live[sl]) cudaStreamWaitEvent(m.copy, m.used[m.used_of[sl]], 0);
+                            if (en.job < 0) {
+                                cudaMemcpyAsync(m.stage_dev[sl], en.blob, bytes, cudaMemcpyHostToDevice, m.copy);
+                                ++iss_dma;
+                            } else {
+                                const uint8_t* hb = m.stager->wait(en.job);
+                                cudaMemcpyAsync(m.stage_dev[sl], hb, bytes, cudaMemcpyHostToDevice, m.copy);
+                                m.stager->issued_one(en.job, m.copy);
+                            }
+                            cudaEventRecord(m.copied[sl], m.copy);
+                            m.stage_live[sl] = true;
+                            iss_ms += ms_since(th);
+                            ++iss_streamed;
+                            a_issued.store(idx + 1, std::memory_order_release);
                         }
-                        const StreamEntry& en = seq[idx];
-                        const int sl = (int) (idx % (size_t) m.ring);
-                        const auto th = Clock::now();
-                        const size_t bytes = (size_t) lay0.blob_bytes(en.l);
-                        if (m.stage_live[sl]) cudaStreamWaitEvent(m.copy, m.used[m.used_of[sl]], 0);
-                        if (en.job < 0) {
-                            cudaMemcpyAsync(m.stage_dev[sl], en.blob, bytes, cudaMemcpyHostToDevice, m.copy);
-                            ++iss_dma;
-                        } else {
-                            const uint8_t* hb = m.stager->wait(en.job);
-                            cudaMemcpyAsync(m.stage_dev[sl], hb, bytes, cudaMemcpyHostToDevice, m.copy);
-                            m.stager->issued_one(en.job, m.copy);
-                        }
-                        cudaEventRecord(m.copied[sl], m.copy);
-                        m.stage_live[sl] = true;
-                        iss_ms += ms_since(th);
-                        ++iss_streamed;
-                        a_issued.store(idx + 1, std::memory_order_release);
-                    }
+                    }, a_failed);
+                    if (a_failed.load(std::memory_order_acquire))
+                        a_stop.store(true, std::memory_order_release);
                 });
             } catch (const std::exception& error) {
                 threaded_issue = false;
@@ -2883,8 +2890,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         }
         // the consumer's side: entry k's copy is on the copy stream (the thread issued it), then k is given back
         auto wait_issued = [&](size_t k) {
-            if (!threaded_issue) return;
-            while (a_issued.load(std::memory_order_acquire) <= k) std::this_thread::yield();
+            if (!threaded_issue) return true;
+            return strata::platform::wait_for_progress(a_issued, k, a_failed);
         };
         auto give_back = [&](size_t upto) {
             if (threaded_issue) a_consumed.store(upto, std::memory_order_release);
@@ -3458,7 +3465,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             if (k > k0) {
                                 // one copy stream, in order: the batch's last blob covers the others
                                 pt.mark(kPfWaitCopy, cs);
-                                wait_issued(k - 1);
+                                if (!wait_issued(k - 1)) {
+                                    err = "prefill: the expert issuer stopped";
+                                    return false;
+                                }
                                 cudaStreamWaitEvent(m.cs, m.copied[(k - 1) % (size_t) m.ring], 0);
                             }
                             pt.mark(kPfGemmGU, cs);
@@ -4349,7 +4359,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 release_to(e);
                                 if (k < kend && seq[k].e == e) {
                                     const int sl = (int) (k % (size_t) m.ring);
-                                    wait_issued(k);
+                                    if (!wait_issued(k)) {
+                                        err = "prefill: the expert issuer stopped";
+                                        return false;
+                                    }
                                     if (!group_gather) {
                                         pt.mark(kPfWaitCopy, cs);
                                         cudaStreamWaitEvent(m.cs, m.copied[sl], 0);

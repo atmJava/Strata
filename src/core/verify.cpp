@@ -7,6 +7,7 @@
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/spec_prob.hpp"
+#include "strata/platform/worker_guard.hpp"
 
 #include "strata/core/native_head.hpp"
 #include "strata/core/on_device.hpp"
@@ -2734,11 +2735,14 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         Verifier* next = nullptr;
         std::thread th;
         bool ok = true;
+        std::atomic<bool> failed{false};
         bool handed = false;
         std::string err;
         bool join(std::string& e) {
             if (th.joinable()) th.join();
-            if (!ok) e = err;
+            if (!ok) e = failed.load(std::memory_order_acquire) || err.empty()
+                              ? "verify: the next-window helper stopped"
+                              : err;
             return ok;
         }
         ~NextLaunch() {
@@ -2749,7 +2753,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     if (chain) {
         nl.next = next_;
         try {
-            nl.th = std::thread([&nl, T, tokens, pos0] { nl.ok = nl.next->prelaunch(T, tokens, pos0, nl.err); });
+            nl.th = std::thread([&nl, T, tokens, pos0] {
+                nl.ok = false;
+                strata::platform::run_worker_nothrow("verify: next-window helper", [&] {
+                    nl.ok = nl.next->prelaunch(T, tokens, pos0, nl.err);
+                }, nl.failed);
+            });
         } catch (const std::exception& error) {
             std::fprintf(stderr, "verify: next-window helper did not start (%s); prelaunching inline\n", error.what());
             nl.ok = nl.next->prelaunch(T, tokens, pos0, nl.err);
