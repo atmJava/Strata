@@ -32,3 +32,13 @@ def test_busy_slots_counts_non_idle_and_decoding_separately():
         {"state": "decoding"},
         {"state": "decoding"},
     ]) == (3, 2)
+
+
+def test_large_reader_prompt_is_unique_and_scales_with_the_requested_size():
+    small = PROBE.reader_prompt("first", 512)
+    large = PROBE.reader_prompt("second", 2048)
+
+    assert "first" in small
+    assert "second" in large
+    assert large.count("\n") > small.count("\n")
+    assert large != small

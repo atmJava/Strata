@@ -5,7 +5,7 @@
 
 ---
 
-## 台账索引（78 条：L-000…L-077，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
+## 台账索引（80 条：L-000…L-081，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
 
 | 编号 | 日期 | 一句话结论 | 判决 |
 |---|---|---|---|
@@ -84,6 +84,10 @@
 | L-075 | 10-26 02:5x | 合并后生产丢失 `STRATA_HC_Q8=1`；恢复后 4 路中位 130.6 对 A 组 115.25（+13.3%），两轮质量 11/11，采纳 | **采纳** |
 | L-076 | 10-26 03:0x | 已采纳 env 进入运行态部署门禁：缺键或值不符即失败；现网 7 个关键开关精确匹配、0 problems | **采纳** |
 | L-077 | 10-26 04:0x | 1 小时 HC_Q8/RoPE 混合 soak：622 请求、0 错误、0 意外 length；26 次 98K prompt 中位 40.96 s，4 路后置合成中位 129.7 | **结论** |
+| L-078 | 10-26 05:2x | P3：400 ms lead-in + 750 ms 等待把 96K 邻居下短 JSON wall 从 40.21 s 降到 3.40 s，96K 只 +2.2% | **采纳** |
+| L-079 | 10-26 06:1x | P4-2000 ms：首次代码响应 5.25 s，重复 A-B-A 回到 41.80 s；固定加长窗口不是稳定机制 | **否决** |
+| L-080 | 10-26 07:2x | P4-1600 ms + 短请求准入优先的一小时 soak：606 请求零错误，代码 4.42 s；wave 门限过，单请求 96K 中位 +4.14% 仍越界 | **候选** |
+| L-081 | 10-26 08:2x | `STRATA_QSA_SLOTS=1` 在 4/6 路交错 A-B 中未稳定复现收益，最终相邻臂还慢 0.49% | **否决** |
 | L-056 | 10-25 20:4x | V0 准备批：现网四件实测（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）；现网 server 是 hybrid 且 `52b84d54` 是 patch 树 hash；harness 2 红转绿、补丁追平 `46d12fa9`；S2 探针代价 1.36–1.40 µs/请求；回滚包字节核对（停机级未演练）；0 构建 0 重启 | **参考** |
 | L-055 | 10-25 02:2x | R11 开关修复部署（引擎 `383b426a`）：短读 40.68 s 不暂存、长读首 17.89 s；**邻居窗口停顿 3.43 s**（>1 s，新发现）；S0 完成 | **参考** |
 | L-054 | 10-25 01:3x | A-B-A 闭环：回滚 A 实测（短 42.3 s / 长 36.3 s，G4 ✓）→ 再启用 B（短 35.9 s / 长 **17.7 s**）；3 流冷读首 token 8.0 s（唯一提示词，修正缓存假象） | **参考** |
@@ -2747,8 +2751,136 @@ F 的日志显示窗口从约 29 行增到约 51 行，但 41-token 代码请求
 - `/opt/ai/logs/P3-F-leadin1200-20261025T214652Z.jsonl`
   （sha256 `2d9ada9f1dda10673db88fc0b143ecfb4f5e70b1dc2ff79810fc940e00a87dd4`）；
 - `/opt/ai/logs/T-probe-P3-adopted-final.json`
-  （sha256 `e8a71ec12b54f02c26ae5735e297466b68e9fc459cb0f375e7bc4d663553b23a`）；
+  （复验版本，sha256 `b3c9a5a51f060ed34249f0de1b79b9879656cf7da1b267bd48b19cca47b44688`）；
 - `tools/server/patches/p3-concurrent-leadin-0.1.49.1.patch`
   （sha256 `3caaafb2c01a8e6b19bfe67f5697ad6b72b2ad82de16f59579459640516abefd`）；
 - `tools/server/mixed-soak.py`
   （sha256 `cca24e564507353afdf7ecf3be1947556fcff3ae690d22e4b1744bacff8f0861`）。
+
+## L-079 P4：2000 ms lead-in 只有一次 5.3 s 代码响应，重复 A-B-A 回到 41.8 s
+
+**判定**：**否决**把 `STRATA_PIPED_DECODE_LEADIN_MS` 从 400 ms 提高到 2000 ms。单次 B 运行中
+41-token 代码请求为 5.254 s，但在同 boot、同 5-wave 形状的 A-B-A 重复中 B2 中位为 41.800 s；
+收益随请求取得可解码槽的顺序变化，不是稳定机制收益。
+
+**实验形状**：2×2080 Ti、生产 6×192K、groups=2、split24，`parallel=6`。每波并发发送两条
+73-token JSON、一条 1,850-token 代码和一条约 98.4K-token 冷 needle，波间等待全部完成。
+A3 为已采纳的 400 ms / 750 ms；B2 仅将 lead-in 改为 2000 ms。
+
+| 指标 | A3，400 ms | B2，2000 ms |
+|---|---:|---:|
+| 短 JSON wall 中位 | 3.431 s | 3.670 s |
+| 短 JSON TTFT 中位 | 749 ms | 984 ms |
+| 代码 wall 中位 | 41.411 s | 41.800 s |
+| 代码 TTFT 中位 | 2.933 s | 40.954 s |
+| 代码 `slot_wait_ms` 中位 | 882 ms | 38.902 s |
+| 96K wall 中位 | 41.272 s | 41.749 s |
+| 96K TTFT 中位 | 40.084 s | 38.029 s |
+
+B2 共 20 请求：HTTP/执行错误 0、意外 `length` 0、needle 5/5；5/5 wave 的 lead-in 均触发。
+首轮单独运行的 2000 ms B 臂中代码为 5.254 s、短 JSON 4.033 s、96K 42.218 s，整轮 20/20 成功。
+B2 的第 0 波代码 5.288 s，但第 1/2/3/4 波约 41.8–42.1 s；这些请求的 TTFT 与 slot wait
+同时接近 96K 读时长，证明问题包含准入竞争而非只有 lead-in 行数不足。
+
+**生产与回滚**：实验后恢复 400 ms E 配置；health 200，T-probe 复核 engine `8d680c69`、
+server `de09cffd`、launcher `0eeee160`、config `f82d1cfd` 与 11 项 env。2000 ms 候选仍保留在
+`/opt/ai/tmp/P4-leadin-2000-20261025T215650Z.json`，未进入生产默认。
+
+**没测什么**：没有覆盖真实外部流量下的随机到达顺序、多长读、32K/64K 邻居、取消和 192K
+满上下文。不能由一次 5.3 s 外推“2000 ms 可让中等请求完成”。
+
+**原始证据**：
+
+- `/opt/ai/logs/P4-leadin2000-20261025T215925Z.jsonl`
+  （sha256 `b748d5750ee0037f5b0ced88dc3205682cbabf9419494d167511db9056b4767f`）；
+- `/opt/ai/logs/P4-leadin2000-20261025T215925Z.summary.json`
+  （sha256 `d870cbd08672936f21dc5b0ab8390b0f04508c055036bf83ed01cc74a6a4e6c0`）；
+- `/opt/ai/logs/P4-ABA-A3-leadin400-20261025T220554Z.jsonl`
+  （sha256 `8ec21b170403fe03439da049fc31c2fcbe80d07860d1d2385464ee9773434daf`）；
+- `/opt/ai/logs/P4-ABA-A3-leadin400-20261025T220554Z.summary.json`
+  （sha256 `c4396ea4341888dad4f72349a411ca42e988ec1144a9c8076ec113ac312d60f9`）；
+- `/opt/ai/logs/P4-ABA-B2-leadin2000-20261025T221245Z.jsonl`
+  （sha256 `1b47c6ef69da21b42af54c7a9eaf7624e66260f0d56234cc9f1c5be659c38eeb`）；
+- `/opt/ai/logs/P4-ABA-B2-leadin2000-20261025T221245Z.summary.json`
+  （sha256 `8929ee052ce3824c35df9efad1c1823e9027b9bcab8b3d62f65f566c33834bca`）；
+- `/opt/ai/logs/T-probe-P3-adopted-final.json`
+  （复验版本，sha256 `b3c9a5a51f060ed34249f0de1b79b9879656cf7da1b267bd48b19cca47b44688`）。
+
+## L-080 P4 候选：一小时 soak 让代码与短 JSON 变快，但 96K 单请求门限仍有争议
+
+**判定**：**生产候选，不是无争议采纳**。`STRATA_ADMIT_SHORT_FIRST=2048` 加
+`STRATA_PIPED_DECODE_LEADIN_MS=1600` 在 1 小时混合 soak 中把 96K 邻居下的代码与短 JSON
+从约 41 秒降到数秒，606 个请求零错误；按 wave 判长档在 3% 内，但按 `by_kind` 的单请求中位
+和相邻 400 ms 对照又越过 3%。在边界复测完成前，不能把 P4 写成“已完成”或“无条件胜出”。
+
+**实验形状**：2×RTX 2080 Ti 22 GB、6×192K、groups=2、split24、`parallel=6`。混合流量交替
+2/3/4 路，包含短 JSON、约 1.85K-token 代码、agent tool turn 和 32K/64K/96K 冷 needle；
+候选臂同时启用短请求首准入 2048 tokens 与 1600 ms lead-in。P2 的 622 请求一小时 soak 是
+相邻基线，P3/P4 的 400 ms 五波 fairness arms 是边界对照。
+
+**核心结果**：
+
+| 指标 | P2 / 400 ms 相邻基线 | P4 候选 | 变化 |
+|---|---:|---:|---:|
+| 96K 邻居下 41-token 代码 wall | 41.61 s | **4.424 s** | 大幅下降 |
+| 96K 邻居下短 JSON wall | 40.83 s | **3.370 s** | 大幅下降 |
+| 32K 四路 wave | 22.188 s | 22.804 s | +2.78% |
+| 96K 四路 wave | 41.613 s | 42.666 s | +2.53% |
+| 96K `by_kind` 单请求中位 | 40.96 s | 42.658 s | **+4.14%** |
+| 相邻 400 ms D2 对照 | — | — | **约 +3.21%** |
+
+候选 soak 共 606 请求、202 waves，HTTP/执行错误 0、意外 `finish_reason=length` 0、96K needle
+25/25 正确，swap 未使用。按预先的 wave 门限（96K 四路 +2.53% ≤3%）通过；按单请求中位或
+相邻 D2 的同一 3% 门限则超出约 0.2–1.1 个百分点。这不是“绝对安全”的证据，也不能用一次
+混合流量结果替代同 boot 边界 A-B-A。
+
+**生产状态**：候选已部署。T-probe 最终记录 engine `8d680c695f1a6a3d9d202c61d17879f2`、
+server `de09cffdac39ff150a689bd3a44cc242`、launcher
+`0eeee1603ab6008261700fa183d20a79`、config `05c9d2539cd92b6c8e0b93ff8a48ce0e`。
+`STRATA_ADMIT_SHORT_FIRST` 必须放在 systemd service 环境；只写 config 的 `env` 只会传给引擎子进程。
+
+**没测什么**：没有在同一个 boot 对 1500/1550/1600 ms 做交错边界 A-B-A；没有覆盖随机到达顺序、
+多长读、32K/64K 同形复测、取消、192K 满上下文或真实外部多租户。单请求门限尚未定义成固定、
+无歧义的验收口径，后续必须先固定判据再决定候选去留。
+
+**原始证据**：
+
+- `/opt/ai/logs/P4-candidate-mixed-soak-20261025T2320Z.jsonl`
+  （sha256 `27a5d6f2efda807c49fb3480b155b0f256b95c9ef7df653a22545d1af1285f15`）；
+- `/opt/ai/logs/P4-candidate-mixed-soak-20261025T2320Z.summary.json`
+  （sha256 `c46339838e17f9734ee645afbf02ef226480715a5c70a735ee95fb01262dc72d`）；
+- `/opt/ai/logs/T-probe-handoff-20261026T0102Z.json`
+  （sha256 `945903f5a735e80f005afb84f21af4726109b3cdb9b0f34c7bd7e4053a89cb19`）；
+- `/opt/ai/tmp/pre-P3-ABA-20261025T213040Z/strata-022.json`
+  （400 ms 完整回滚快照）。
+
+## L-081 `STRATA_QSA_SLOTS=1`：首次 6 路看似更快，交错复测不复现，否决
+
+**判定**：**否决**在当前双卡生产形状中默认开启 `STRATA_QSA_SLOTS=1`。4 路两组 A-B 都没有收益；
+6 路第一对 `on/off` 看似 +3.5%，但后续交错臂没有复现，最终相邻 `on` 臂还比 `off` 慢 0.49%。
+
+**实验形状**：同一机器 boot、2×2080 Ti、生产 6×192K、固定 4 路或 6 路 bench，A 为 off，
+B 为 QSA slots on；臂按 A-B-A 与 B-A-B-A 交错，用相邻与合并结果共同判断。
+
+| 并发 | 臂与结果（聚合 tok/s） |
+|---:|---|
+| 4 路 | A1 off **125.7**；B1 on **114.6**；A2 off **115.5** |
+| 6 路 | B2 on **151.9**；A3 off **146.8**；B3 on **149.1**；A4 off **143.5**；B4 on **142.8** |
+
+只有 B2 对 A3 的方向支持该开关；B3 对 A4 已收窄，B4 对 A4 反向。4 路则两轮均不支持。
+因此不能从首次 6 路 +3.5% 得出采纳结论，也不应再重复同配置实验。
+
+**生产与回滚**：实验后已恢复 A（off）配置，QSA 未留在生产路径。配置快照为
+`strata-022-A.json` 与 `strata-022-B-qsa.json`。
+
+**没测什么**：没有测 8 槽、192K 满上下文、真实混合流量或其它 QSA kernel 组合；结论只适用于
+本机当前双卡、6×192K、groups=2 形状。
+
+**原始证据**：
+
+- `/opt/ai/logs/bench-results.jsonl`
+  （sha256 `22cd1164f4e171aa3cc260c0bcd1b85362339105be88d2c0f15c096a42da8804`）；
+- `/opt/ai/tmp/QSA-SLOTS-20261026T0023Z/strata-022-A.json`
+  （sha256 `3d18619836798b91ecc6a83ba4c726f5aae77a0ac9c3c6b790fffe1fc7fbaebb`）；
+- `/opt/ai/tmp/QSA-SLOTS-20261026T0023Z/strata-022-B-qsa.json`
+  （sha256 `89f97a283816e6c9d7de13cad6a59799c6449fea9654ed949837b29237356b58`）。

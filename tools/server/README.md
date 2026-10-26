@@ -82,6 +82,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `prefill_phase_timing.sh` | `STRATA_PREFILL_TIMING=1`: the read as 21 GPU phases | L-030 |
 | `mmq_direct_ab.sh` | MMQ pointer-table build, `STRATA_MMQ_DIRECT=1` on/off | L-031 |
 | `park_gain_ab.sh` | `--conversation-cache-park-gain`, is parking on the hot path | L-032 |
+| `experiments/` | P4 short-admission + 1600 ms lead-in candidate: service drop-in, evidence, reproduce and rollback | L-080 |
 
 ### batch — one batch, one matrix run
 | file | what it does | notes |

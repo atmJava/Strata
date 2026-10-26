@@ -6,21 +6,25 @@
 - 目标：持续优化用户可感知的推理性能、稳定性和资源效率。
 - 当前项：P4
 - 当前迭代：**长 prefill 下 1.85K 代码请求的 decode 公平性**。
-- 下一动作：保留已采纳的 400 ms concurrent-read lead-in，审计能否按在途请求剩余 token 或
-  可完成性选择 yield 点；目标是不用整段固定等待，让 41-token 代码请求也尽早完成。
-- 默认候选：400 ms lead-in + 750 ms 等待槽进入可解码状态的 E 臂；1200 ms 已否决。
+- 下一动作：先从合并后 HEAD 独立构建并验证 sm_75 引擎；随后同 boot 做 1500/1550/1600 ms
+  边界 A-B-A，并固定 96K wave 与单请求中位两种门限，再决定 P4 候选去留。
+- 当前候选：`STRATA_ADMIT_SHORT_FIRST=2048` + 1600 ms lead-in + 750 ms 等待 + ≥4096-token
+  冷读；400 ms 的 P3 E 臂和 `pre-P3-ABA.../strata-022.json` 是回滚基线。
 - 未完成采纳项：14。
 - 阻塞：DFlash2 drafter 权重缺失；该路线搁置，不阻塞主线。
 
 ## 生产
 
 - `strata.service` 在 `192.168.3.14:8080`，health 200（2026-10-26 HC_Q8 恢复后实测）。
-- 引擎 0.1.49.1 + 共享 RoPE + concurrent-read lead-in / `8d680c69`；server `de09cffd`；
-  launcher `0eeee160`；config `f82d1cfd`。
+- **源码已合并上游 v0.2.6，但现产引擎仍是从旧代码构建的 0.1.49.1**：共享 RoPE +
+  concurrent-read lead-in / `8d680c69`；server `de09cffd`；launcher `0eeee160`；
+  config `05c9d253`。不能把这枚旧二进制当作合并结果。
 - 生产配置：`parallel=6`、`max_context=192000`、`STRATA_HC_Q8=1`，W3 staged read 开启，阈值 4096；
-  lead-in 400 ms、等待 750 ms、只处理 ≥4096-token 的冷读。
+  lead-in 1600 ms、等待 750 ms、只处理 ≥4096-token 的冷读，短请求首准入阈值 2048。
+- `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 config 的 `env` 只会传给引擎子进程。
 - 回滚快照：`/opt/ai/tmp/pre-S0b-20261025T161013Z/`（原始 engine `84a0d410`）与
-  `/opt/ai/tmp/pre-rope-share-20261025T164500Z/`。
+  `/opt/ai/tmp/pre-rope-share-20261025T164500Z/`；400 ms 完整配置为
+  `/opt/ai/tmp/pre-P3-ABA-20261025T213040Z/strata-022.json`。
 
 ## 已知结果
 
@@ -51,10 +55,17 @@
   +15.6%/+7.3% 被否决；1200 ms lead-in 也因代码请求未改善且长档超门被否决。
 - P3 未覆盖：41-token 的 1.85K 代码请求仍为 41.51 s；当前机制只释放了 14-token 短响应，
   不能把“长读期间所有请求都公平”写成已解决。
+- P4-2000 ms 已否决：首次代码请求 5.254 s，但同 boot B2 中位回到 41.800 s，且第 1/2/3/4 波
+  TTFT 约 41 s。收益取决于准入顺序，不是稳定的窗口收益；生产已恢复 400 ms。
+- P4 候选已部署但未完全收口：1 小时 soak 为 606 请求、202 waves、0 错误、25/25 needle；
+  96K 邻居下代码 4.424 s、短 JSON 3.370 s。32K/96K 四路 wave 分别 +2.78%/+2.53%，
+  但 96K `by_kind` 单请求中位 42.658 对 P2 40.96 s（+4.14%），相邻 400 ms D2 约 +3.21%。
+- QSA slots 已否决：4 路 off/on/off 为 125.7/114.6/115.5 tok/s；6 路首次 on/off
+  151.9/146.8 的 +3.5% 未在交错臂复现，最终 B4 对 A4 反向 0.49%。生产保持 off。
 - S2 已完成：流式最终块与非流式响应都有 per-request metrics，mock regression 2/2 通过。
 - T-probe 已完成：版本戳从 `/proc/<pid>/cmdline` 解析实际 engine/server；现网 server hash 为
   port-v1 的 `de09cffd`，不再误读生产目录里的旧副本。
-- 配置漂移门禁已采纳：`--expect-env-file production-env-2080ti.json` 精确核对 7 个关键运行态 env；
+- 配置漂移门禁已采纳：`--expect-env-file production-env-2080ti.json` 精确核对 12 个关键运行态 env；
   缺键或错值会失败。现网一次实测 0 problems。
 - 当前最大用户可感知短板是长读期间中等输出请求仍被压到约 41.5 s，以及满槽准入约
   11.4–13.9 s。
@@ -75,6 +86,9 @@
 - 满槽请求仍没有配置固定准入超时；6/8 槽上界只覆盖受控的 400-token 邻居负载。
 - P3 的 lead-in 只针对 `piped && !STRATA_PIPED_READ_PIECE` 的并发冷读；读到新的长请求时
   仍会增加一次有界解码窗口。1200 ms 已证明超过旧长档门限，后续不能用任意加长代替调度。
+- 短/中请求可能在冷读已占流水线前仍未取得控制行或槽；仅延长 lead-in 无法覆盖这类准入竞争。
+- P4 的 wave 与单请求门限给出不同裁决；在固定判据并完成边界 A-B-A 前，1600 ms 只能算候选，
+  不能把 4.424 s 的用户收益写成“方案已验收”。
 - 当前公平性测试只覆盖 14/41-token 输出和 96K 冷读；32K/64K、多长读、取消与真实外部流量未覆盖。
 
-- 最后更新：2026-10-26T05:54+08:00（P3 A-B-A 采纳；转入中请求公平性 P4）
+- 最后更新：2026-10-26T09:06+08:00（P4 候选 soak 与 QSA 否决入档；下一步验证合并后 HEAD 引擎）

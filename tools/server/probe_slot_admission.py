@@ -9,8 +9,10 @@ It reports both clocks:
 * client time to first and second content token;
 * the longest silence in each neighbour stream while the reader is waiting and running.
 
-The reader prompt is deliberately below production's 4096-token staged-read threshold:
-this measures the ordinary wait-for-a-slot path, not the long-read path.
+By default the reader prompt is below production's 4096-token staged-read
+threshold: this measures the ordinary wait-for-a-slot path.  A non-zero
+``--reader-prompt-tokens`` approximates that length instead, so the same probe
+can compare the staged-read threshold itself.
 """
 from __future__ import annotations
 
@@ -47,6 +49,22 @@ def busy_slots(states: list[dict]) -> tuple[int, int]:
     busy = sum(1 for state in states if state.get("state", "idle") != "idle")
     decoding = sum(1 for state in states if state.get("state") == "decoding")
     return busy, decoding
+
+
+def reader_prompt(marker: str, target_tokens: int) -> str:
+    """A unique reader prompt of roughly target_tokens for staged-read threshold tests."""
+    if target_tokens <= 0:
+        return (
+            f"Cold admission probe {marker}. Count from 1 to 12, separated by spaces. "
+            "Do not explain."
+        )
+    lines = [f"Cold admission probe {marker}."]
+    lines.extend(
+        "alpha bravo charlie delta echo foxtrot golf hotel kilo lima mike november."
+        for _ in range(max(32, int(target_tokens / 12)))
+    )
+    lines.append("Count from 1 to 12, separated by spaces. Do not explain.")
+    return "\n".join(lines)
 
 
 class Client:
@@ -214,7 +232,7 @@ def monitor_reader_slot(client: Client, reader: dict, target: int, stop: threadi
 
 
 def run_round(client: Client, target: int, neighbour_tokens: int, reader_tokens: int,
-              timeout: float, round_number: int) -> dict:
+              reader_prompt_tokens: int, timeout: float, round_number: int) -> dict:
     marker = uuid.uuid4().hex
     neighbours = [{} for _ in range(target)]
     threads = []
@@ -258,9 +276,7 @@ def run_round(client: Client, target: int, neighbour_tokens: int, reader_tokens:
     states = live.get("slots", [])
 
     reader = {}
-    prompt = (
-        f"Cold admission probe {marker}. Count from 1 to 12, separated by spaces. Do not explain."
-    )
+    prompt = reader_prompt(marker, reader_prompt_tokens)
     admission: dict = {}
     admission_stop = threading.Event()
     reader_thread = threading.Thread(
@@ -323,6 +339,7 @@ def run_round(client: Client, target: int, neighbour_tokens: int, reader_tokens:
         "reader_max_running": admission.get("max_running"),
         "reader_max_outside_slots": admission.get("max_outside"),
         "reader_metrics": reader.get("metrics"),
+        "reader_prompt_tokens": int((reader.get("usage") or {}).get("prompt_tokens") or 0),
         "reader_chars": reader.get("chars"),
         "reader_finish": reader.get("finish"),
         "neighbour_silence_until_reader_ttft_max_s": round(max(silence_waits, default=0.0), 3),
@@ -342,6 +359,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--neighbour-tokens", type=int, default=400)
     parser.add_argument("--reader-tokens", type=int, default=16)
+    parser.add_argument(
+        "--reader-prompt-tokens", type=int, default=0,
+        help="approximate cold prompt size for the late reader (0 keeps the short prompt)",
+    )
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--out")
     args = parser.parse_args(argv)
@@ -356,11 +377,15 @@ def main(argv: list[str]) -> int:
     wait_for_idle(client, args.timeout)
     rows = []
     for number in range(1, args.rounds + 1):
-        row = run_round(client, args.slots, args.neighbour_tokens, args.reader_tokens, args.timeout, number)
+        row = run_round(
+            client, args.slots, args.neighbour_tokens, args.reader_tokens,
+            args.reader_prompt_tokens, args.timeout, number,
+        )
         rows.append(row)
         metrics = row.get("reader_metrics") or {}
         print(
-            f"round {number}: slot-wait={row['reader_slot_wait_s']} s, "
+            f"round {number}: prompt={row['reader_prompt_tokens']} tokens, "
+            f"slot-wait={row['reader_slot_wait_s']} s, "
             f"metrics-queue={metrics.get('queue_ms')} ms, ttft={metrics.get('ttft_ms')} ms, "
             f"wall={metrics.get('wall_ms')} ms, second-token stall={row['reader_client_stall_s']} s, "
             f"neighbour silence={row['neighbour_silence_in_reader_window_max_s']} s",
@@ -373,6 +398,7 @@ def main(argv: list[str]) -> int:
 
     summary = {
         "rows": rows,
+        "median_reader_prompt_tokens": median("reader_prompt_tokens"),
         "median_queue_ms": median_metric(rows, "queue_ms"),
         "median_slot_wait_s": median("reader_slot_wait_s"),
         "median_ttft_ms": median_metric(rows, "ttft_ms"),

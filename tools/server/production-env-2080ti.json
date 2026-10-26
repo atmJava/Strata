@@ -1,13 +1,15 @@
 {
-  "_note": "Critical runtime switches for the 2x RTX 2080 Ti, 6x192K production profile. No secrets.",
+  "_note": "Critical runtime switches for the 2x RTX 2080 Ti, 6x192K production profile. No secrets. STRATA_ADMIT_SHORT_FIRST is read by the Python server and must be set in the service environment; the engine config's env map only reaches the engine child.",
   "env": {
+    "STRATA_ADMIT_SHORT_FIRST": "2048",
     "STRATA_BATCH_STAGED_READ": "1",
     "STRATA_EXP_MODE": "8",
     "STRATA_HC_Q8": "1",
     "STRATA_MP_STAGED_READ": "1",
+    "STRATA_MP_STAGED_READ_MIN_TOKENS": "4096",
     "STRATA_PIPED_CONCURRENT": "1",
     "STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS": "4096",
-    "STRATA_PIPED_DECODE_LEADIN_MS": "400",
+    "STRATA_PIPED_DECODE_LEADIN_MS": "1600",
     "STRATA_PIPED_DECODE_LEADIN_WAIT_MS": "750",
     "STRATA_SHARED_SLOT_ROPE": "1",
     "STRATA_SM75_PERF": "1"

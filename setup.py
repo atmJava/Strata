@@ -8901,7 +8901,7 @@ def main() -> int:
            f"{gpu['arch']} (AMD: docs/{'STRIX_HALO' if is_strix_halo(gpu) else 'AMD_HIP'}.md)")
         if WIN and str(gpu.get("arch") or "").startswith("gfx12"):   # only a pointer; no default changes
             say("  If Windows resets the AMD driver (VIDEO_ENGINE_TIMEOUT_DETECTED, flicker, the engine dies mid-answer): "
-                "docs/TROUBLESHOOTING.md, \"Windows AMD: the driver resets\"")
+                "see docs/TROUBLESHOOTING.md and docs/AMD_HIP.md")
         if gpu.get("uma"):
             for line in igpu_notes(gpu, ram_gb()):
                 (warn if line.startswith("!") else say)(line.lstrip("!"))
