@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-60 · generate 剩余短生命周期线程失败可诊断降级
+
+- 目标 / 指标：profile fill 的 64 对预读、cache checksum helper、serve stdin reader 和两个 watchdog 在系统拒绝新线程时，
+  不能让异常越过主流程触发 `std::terminate()`；可选诊断应降级，必需输入线程应明确结束启动并释放已有资源。
+- 假设与预期：预读 `std::async(std::launch::async)` 和 checksum `emplace_back` 都位于无异常边界；部分 checksum worker
+  启动后若 vector 析构，joinable 线程会直接终止进程。stdin reader 和 watchdog 的直接 `.detach()` 同样会让构造异常逃出。
+- 为什么选这条路线：预读失败后可让下一批在调用线程同步读取；checksum worker 失败后由调用线程消费同一原子工作队列，并 join
+  已启动者；watchdog 是可选诊断，记录后继续；stdin 是 serve 必需输入，启动失败时返回 1 让上层得到干净退出而非崩溃。
+- 改动与实验：覆盖上述五处线程启动；checksum 先 `reserve(7)`，异常后调用线程完成剩余索引。成功路径的线程数、预读批次、
+  checksum 顺序、watchdog 参数和 stdin 读取逻辑保持不变。
+- 结果：`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；跳过该配置原有的未使用变量
+  告警）。`git diff --check` 通过。未运行真实线程配额耗尽、CUDA sm_75、RTX 2080 Ti、真实 profile fill、serve stdin 或
+  watchdog 注入。
+- 判决：采纳。可选并发失败只降低预读/诊断/哈希并行度；必需 stdin reader 无法启动时 fail-closed，避免半启动服务器。
+- 生产状态与回滚：未改正常线程体、prompt/模型字节、GPU 顺序或 watchdog 触发条件；单提交可回退。
+- 学到什么：detached 线程的启动错误与线程体内的错误是两个边界；可选服务应捕获构造失败，必需服务应把失败转成受控退出。
+- 下一步与理由：重跑完整 `serve` 套件确认启动失败日志修复，并继续静态审查 prefill 中剩余的 `std::async`。
+
 ## I-20261027-59 · 启动失败的日志句柄保持可观察且已关闭
 
 - 目标 / 指标：引擎程序无法启动时，请求仍返回 503；同时关闭服务器持有的 engine log 句柄，并保留已关闭对象的可观察状态，

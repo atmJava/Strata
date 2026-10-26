@@ -5842,11 +5842,27 @@ int main(int argc, char** argv) {
         }
         const auto fill_t0 = std::chrono::steady_clock::now();
         uint64_t fill_bytes = 0;
+        bool async_read_unavailable = false;
         for (int64_t i = 0; i < want; ++i) {
             if (!per_layer && srcp == &src && src.unbuffered() && i % 64 == 0) {
                 if (ahead.valid()) ahead.get();
                 else read_batch(i);
-                if (i + 64 < want) ahead = std::async(std::launch::async, [&read_batch](int64_t b) { strata::aux_cpus::pin_current_thread(); read_batch(b); }, i + 64);
+                if (i + 64 < want && !async_read_unavailable) {
+                    try {
+                        ahead = std::async(std::launch::async, [&read_batch](int64_t b) {
+                            strata::aux_cpus::pin_current_thread();
+                            read_batch(b);
+                        }, i + 64);
+                    } catch (const std::exception& e) {
+                        async_read_unavailable = true;
+                        std::fprintf(stderr, "strata generate: the profile fill's read-ahead thread did not start (%s); "
+                                             "the next batches are read on this thread\n", e.what());
+                    } catch (...) {
+                        async_read_unavailable = true;
+                        std::fprintf(stderr, "strata generate: the profile fill's read-ahead thread did not start; "
+                                             "the next batches are read on this thread\n");
+                    }
+                }
             }
             if (fill_ahead > 0 && i + fill_ahead < want) (void) src.advise_pairs(profile.data() + i + fill_ahead, 1);
             const int32_t slot = xcache.admit(profile[(size_t) i].first, profile[(size_t) i].second);
@@ -5900,7 +5916,16 @@ int main(int argc, char** argv) {
                 }
             };
             std::vector<std::thread> hth;
-            for (int t = 1; t < 8; ++t) hth.emplace_back(hash_work);
+            try {
+                hth.reserve(7);
+                for (int t = 1; t < 8; ++t) hth.emplace_back(hash_work);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "strata generate: a cache-checksum helper did not start (%s); the caller hashes "
+                                     "the remaining slots\n", e.what());
+            } catch (...) {
+                std::fprintf(stderr, "strata generate: a cache-checksum helper did not start; the caller hashes the "
+                                     "remaining slots\n");
+            }
             hash_work();
             for (auto& t : hth) t.join();
             uint64_t h = strata::core::fnv1a64(nullptr, 0);
@@ -10339,44 +10364,52 @@ int main(int argc, char** argv) {
         std::condition_variable& in_cv = in_shared->cv;
         std::deque<std::string>& in_lines = in_shared->lines;
         bool& in_eof = in_shared->eof;
-        std::thread([st = in_shared] {
-            strata::platform::name_this_thread("strata-stdin");
-            strata::aux_cpus::pin_current_thread();
-            // read(2) on the descriptor, not std::cin: glibc's exit() flushes every stdio stream and waits for
-            // stdin's lock, which getline holds while it waits for input - an engine ending on an error (every
-            // std::exit) would hang in exit() on Linux, and the server would wait for it forever
-            std::string l, buf;
-            char chunk[4096];
-            auto getline_fd = [&](std::string& out) -> bool {
-                for (;;) {
-                    const size_t nlpos = buf.find('\n');
-                    if (nlpos != std::string::npos) {
-                        out.assign(buf, 0, nlpos);
-                        buf.erase(0, nlpos + 1);
-                        return true;
+        try {
+            std::thread([st = in_shared] {
+                strata::platform::name_this_thread("strata-stdin");
+                strata::aux_cpus::pin_current_thread();
+                // read(2) on the descriptor, not std::cin: glibc's exit() flushes every stdio stream and waits for
+                // stdin's lock, which getline holds while it waits for input - an engine ending on an error (every
+                // std::exit) would hang in exit() on Linux, and the server would wait for it forever
+                std::string l, buf;
+                char chunk[4096];
+                auto getline_fd = [&](std::string& out) -> bool {
+                    for (;;) {
+                        const size_t nlpos = buf.find('\n');
+                        if (nlpos != std::string::npos) {
+                            out.assign(buf, 0, nlpos);
+                            buf.erase(0, nlpos + 1);
+                            return true;
+                        }
+                        const ssize_t n = ::read(0, chunk, sizeof chunk);
+                        if (n < 0 && errno == EINTR) continue;
+                        if (n <= 0) {
+                            if (buf.empty()) return false;
+                            out.swap(buf);
+                            buf.clear();
+                            return true;
+                        }
+                        buf.append(chunk, (size_t) n);
                     }
-                    const ssize_t n = ::read(0, chunk, sizeof chunk);
-                    if (n < 0 && errno == EINTR) continue;
-                    if (n <= 0) {
-                        if (buf.empty()) return false;
-                        out.swap(buf);
-                        buf.clear();
-                        return true;
-                    }
-                    buf.append(chunk, (size_t) n);
+                };
+                while (getline_fd(l)) {
+                    if (!l.empty() && l.back() == '\r') l.pop_back();
+                    if (l == "STOP") { st->stop_req.store(true); continue; }
+                    std::lock_guard<std::mutex> lk(st->mu);
+                    st->lines.push_back(l);
+                    st->cv.notify_one();
                 }
-            };
-            while (getline_fd(l)) {
-                if (!l.empty() && l.back() == '\r') l.pop_back();
-                if (l == "STOP") { st->stop_req.store(true); continue; }
                 std::lock_guard<std::mutex> lk(st->mu);
-                st->lines.push_back(l);
+                st->eof = true;
                 st->cv.notify_one();
-            }
-            std::lock_guard<std::mutex> lk(st->mu);
-            st->eof = true;
-            st->cv.notify_one();
-        }).detach();
+            }).detach();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "strata serve: the stdin reader did not start (%s); ending the engine\n", e.what());
+            return 1;
+        } catch (...) {
+            std::fprintf(stderr, "strata serve: the stdin reader did not start; ending the engine\n");
+            return 1;
+        }
         auto next_line = [&](std::string& out) -> bool {
             std::unique_lock<std::mutex> lk(in_mu);
             in_cv.wait(lk, [&] { return !in_lines.empty() || in_eof; });
@@ -10517,8 +10550,9 @@ int main(int argc, char** argv) {
             // slow, not stuck; it gets up to STRATA_WATCHDOG_IO_S (default 10 x the limit) of such time. 0 = no allowance.
             const char* wio = std::getenv("STRATA_WATCHDOG_IO_S");
             const int io_limit = wio ? std::atoi(wio) : limit * 10;
-            if (limit > 0)
-                std::thread([limit, io_limit] {
+            if (limit > 0) {
+                try {
+                    std::thread([limit, io_limit] {
                     strata::platform::name_this_thread("strata-watchdog");
                     strata::aux_cpus::pin_current_thread();
                     strata::core::Progress& p = strata::core::progress();
@@ -10564,7 +10598,14 @@ int main(int argc, char** argv) {
                         std::fflush(stderr);
                         std::abort();
                     }
-                }).detach();
+                    }).detach();
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "strata serve: the watchdog did not start (%s); running without it\n",
+                                 e.what());
+                } catch (...) {
+                    std::fprintf(stderr, "strata serve: the watchdog did not start; running without it\n");
+                }
+            }
         }
         strata::core::pin_sim_report("at READY");
         strata::core::pin_reserve_release_hard();   // the load is over: nothing else needs the headroom
@@ -16232,23 +16273,31 @@ int main(int argc, char** argv) {
         if (const char* sw = std::getenv("STRATA_SPEC_WATCH"); sw != nullptr && std::atoi(sw) > 0) {
             const int limit = std::atoi(sw);
             strata::core::progress().busy.store(true);
-            std::thread([limit] {
-                strata::core::Progress& pr = strata::core::progress();
-                uint64_t last = pr.beats.load(), ticks_at = pr.ticks.load();
-                auto since = std::chrono::steady_clock::now();
-                for (;;) {
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                    const auto now = std::chrono::steady_clock::now();
-                    const uint64_t b = pr.beats.load();
-                    if (b != last) { last = b; ticks_at = pr.ticks.load(); since = now; continue; }
-                    if (now - since < std::chrono::seconds(limit)) continue;
-                    std::fprintf(stderr, "strata generate: no progress for %d s (%s)\n", limit, stage_text().c_str());
-                    stall_report(stderr, pr.ticks.load() - ticks_at);
-                    strata::core::release_gpu_waits(stderr);
-                    std::fflush(stderr);
-                    std::abort();
-                }
-            }).detach();
+            try {
+                std::thread([limit] {
+                    strata::core::Progress& pr = strata::core::progress();
+                    uint64_t last = pr.beats.load(), ticks_at = pr.ticks.load();
+                    auto since = std::chrono::steady_clock::now();
+                    for (;;) {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        const auto now = std::chrono::steady_clock::now();
+                        const uint64_t b = pr.beats.load();
+                        if (b != last) { last = b; ticks_at = pr.ticks.load(); since = now; continue; }
+                        if (now - since < std::chrono::seconds(limit)) continue;
+                        std::fprintf(stderr, "strata generate: no progress for %d s (%s)\n", limit, stage_text().c_str());
+                        stall_report(stderr, pr.ticks.load() - ticks_at);
+                        strata::core::release_gpu_waits(stderr);
+                        std::fflush(stderr);
+                        std::abort();
+                    }
+                }).detach();
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "strata generate: the STRATA_SPEC_WATCH watchdog did not start (%s); "
+                                     "running without it\n", e.what());
+            } catch (...) {
+                std::fprintf(stderr, "strata generate: the STRATA_SPEC_WATCH watchdog did not start; "
+                                     "running without it\n");
+            }
         }
         // the next round's drafts after a commit: the MTP chain, or the DFlash2 block from the committed rows' taps
         auto draft_next = [&](int T_, int a_) -> bool {
