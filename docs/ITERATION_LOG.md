@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-81 · CLI 放弃 DFlash2 时真正释放显存并回退
+
+- 目标 / 指标：CLI 在 verifier 不保留 DFlash2 taps，或 round graph 捕获失败时，必须关闭 `use_df2`，
+  同时释放已加载的 pack、ring、draft head 和已捕获 graph，之后才由 MTP 接管。
+- 假设与预期：这两条 CLI 分支只设置 `use_df2 = false`，没有调用 `df2.release()`；serve 的同类分支已经释放。
+  因此 CLI 虽改用 MTP，DFlash2 的约 1.2 GiB 仍占用到对象析构，可能让本应成功的回退缺少预分配空间。
+- 为什么选这条路线：与 serve 已验证的清理顺序对齐，在关闭标志后立即释放；不改变 DFlash2 成功路径、MTP
+  回退行为或任何模型输出。
+- 改动与实验：两个 CLI 放弃 DFlash2 的早退分支补 `df2.release()`；静态核对所有 `use_df2 = false` 回退点都有
+  对应释放。`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；仅跳过源码
+  原有未使用变量告警）。
+- 判决：采纳。CLI 与 serve 的资源回退语义一致，放弃 DFlash2 后不会继续占用其显存。
+- 生产状态与回滚：未改成功绑定、graph 捕获、tap 顺序或 draft 算法；单提交可回退。
+- 未验证：当前无 CUDA 驱动和真实 DFlash2 pack，未实际触发 graph 捕获失败或测量回退后 VRAM 增量；该结论
+  来自调用路径的静态审计。
+- 下一步与理由：继续对齐 CLI 与 serve 的失败清理路径，优先检查“功能已关闭但资源仍持有”的同形分支。
+
 ## I-20261027-80 · mapped 失败时立即回收未发布的 pinned 内存
 
 - 目标 / 指标：`Dflash2Drafter::alloc()` 从 pinned host memory 建立 mapped staging/output 时，如果
