@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-80 · mapped 失败时立即回收未发布的 pinned 内存
+
+- 目标 / 指标：`Dflash2Drafter::alloc()` 从 pinned host memory 建立 mapped staging/output 时，如果
+  `cudaHostGetDevicePointer` 失败，刚获得的 host 指针必须立即释放；成功时两个指针才一起发布。
+- 假设与预期：旧 helper 把 `cudaHostAlloc` 的输出直接写进调用者的局部指针，随后才请求设备别名。第二次
+  mapping 的 host 分配成功而别名查询失败时，该局部指针尚未赋给成员，析构无法看到，形成永久 pinned 泄漏。
+- 为什么选这条路线：helper 先用两个局部指针完成全部步骤，任一步失败都不修改调用者状态；失败时只释放已成功
+  分配且从未发布的 host 块。成功路径得到的 host/device 指针和分配标志保持不变。
+- 改动与实验：`dflash2.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）；
+  Terminal/Control 全量回归仍为 `216 passed, 46 skipped, 93 subtests passed`。
+- 判决：采纳。mapped 初始化现在具有提交式所有权转移，失败不会遗留未记录的 pinned 内存。
+- 生产状态与回滚：未改 mapped 标志、缓冲区大小、布局、零初始化或成功路径；单提交可回退。
+- 未验证：当前环境不能要求真实 `cudaHostGetDevicePointer` 在第二次调用返回失败，也没有 CUDA 驱动和
+  RTX 2080 Ti；该失败分支只经过代码审查和主机侧编译。
+- 下一步与理由：继续搜索“API 直接写入局部指针、失败后未加入所有者”的同形资源路径。
+
 ## I-20261027-79 · 多卡对象在自己的 CUDA 设备上释放资源
 
 - 目标 / 指标：层切分中分配在 CUDA1..3 的 drafter、verifier、prefill、dense、head 和 expert cache，

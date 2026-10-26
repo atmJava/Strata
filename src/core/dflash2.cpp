@@ -27,9 +27,18 @@ using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
 bool mapped(size_t bytes, void** h, void** d) {
-    if (cudaHostAlloc(h, bytes, cudaHostAllocMapped) != cudaSuccess) return false;
-    std::memset(*h, 0, bytes);
-    return cudaHostGetDevicePointer(d, *h, 0) == cudaSuccess;
+    void* host = nullptr;
+    void* device = nullptr;
+    if (cudaHostAlloc(&host, bytes, cudaHostAllocMapped) != cudaSuccess) return false;
+    std::memset(host, 0, bytes);
+    if (cudaHostGetDevicePointer(&device, host, 0) != cudaSuccess) {
+        // No member owns `host` until mapped() succeeds (alloc() uses locals for both pointers below).
+        cudaFreeHost(host);
+        return false;
+    }
+    *h = host;
+    *d = device;
+    return true;
 }
 
 constexpr int GGML_Q8_0 = 8;
