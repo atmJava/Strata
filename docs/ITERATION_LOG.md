@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-06 · 主机侧 C++ 解析、规划与采样测试可独立编译通过
+
+- 目标 / 指标：在没有 CUDA 编译器和 GPU 的当前机器上，实际编译并运行不依赖设备运行时的 C++ 单元测试，
+  覆盖模型族识别、GGUF 分片与几何校验、prefill/split/batch 规划、共享规则和 logit bias。
+- 假设与预期：这些测试只使用 `include/` 中的主机头文件和标准库；用同一编译器直接编译后，应能暴露
+  平台无关的编译错误和纯逻辑回归，即使不能证明 CUDA sm_75 目标可用。
+- 为什么选这条路线：当前没有 `nvcc`，但仓库同时包含主机侧纯逻辑测试；先把所有可验证项转成真实编译结果，
+  能把“静态看起来正确”和“当前机器确实通过”分开记录，成本也低。
+- 改动与实验：使用 `g++ (Debian 15.2.0-17) 15.2.0 -std=c++20 -O2 -pthread -Iinclude`，逐项编译并运行
+  `tests/core/model_family_test.cpp`、`tests/core/gguf_split_test.cpp`、`tests/core/gguf_geometry_test.cpp`、
+  `tests/program/split_rules_test.cpp`、`tests/program/prefill_plan_test.cpp`、
+  `tests/program/batch_read_test.cpp`、`tests/prefill/share_rules_test.cpp` 和
+  `src/core/logit_bias_test.cpp`。构建产物只写入 `/tmp`。
+- 结果：8 个测试全部编译并运行通过；模型族和 GGUF 测试输出 `ALL PASSED`/`all passed`，split、prefill、
+  batch-read、share-rules 输出 `ok`，logit-bias 输出 `passed, including 103215 bans`。
+- 判决：采纳为当前机器的主机侧验证证据。不得推广为 CUDA、GPU 或端到端推理验证。
+- 生产状态与回滚：未改生产；本阶段无源码变更，只记录可复现证据。
+- 学到什么：发行面收敛后仍有一组高价值的主机侧测试；它们能在无 GPU 环境中守住格式、边界和规划逻辑。
+- 下一步与理由：继续筛选同样不依赖 CUDA 运行时的测试，优先覆盖线程、存储、会话和多线程资源生命周期。
+
 ## I-20261027-05 · 关闭后的 MCP HTTP 响应不会写回旧会话
 
 - 目标 / 指标：`HttpTransport.close()` 执行时，已在 `urlopen` 中等待的响应即使随后返回，也不能更新
