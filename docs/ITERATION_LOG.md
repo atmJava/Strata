@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-87 · dense 权重加载只在完整成功后发布
+
+- 目标 / 指标：`WeightTable::load()` 在 staging 分配、文件读取、宽度转换、设备上传或最终同步任一步失败时，
+  不能留下部分 tensor 表、半更新报告或旧表被清空后的悬空状态；pinned staging 和当前文件句柄在普通返回与
+  异常展开时都必须释放。
+- 假设与预期：原实现先清空 `table_/report_/pack_dir_`，随后逐 tensor 直接发布。晚到失败会留下部分模型视图；
+  多个显式 `fopen/fclose/cudaFreeHost` 分支也无法覆盖 `std::map/std::string` 分配异常。
+- 为什么选这条路线：加载写入局部 map 和局部报告，最后一步设备同步成功后才整体移动发布；pinned staging 和
+  文件改用作用域 owner。已加载的表拒绝第二次加载，避免复用同一 arena 时旧引用被新内容覆盖。成功路径的读取
+  顺序、转换公式、字节布局、上传顺序和 arena 内容不变。
+- 改动与实验：新增无 GPU link-wrap 回归，覆盖成功发布、上传失败、第二次 staging 分配失败和最终同步失败；
+  每臂检查旧 tensor 指针/报告不变，失败 staging 全部释放。
+- 判决：采纳。失败加载不再发布部分模型视图，作用域 owner 覆盖普通返回和异常展开。
+- 生产状态与回滚：失败时不再产生部分表；成功字节和数值不变；单提交可回退。
+- 未验证：本机无 CUDA 工具链和真实模型 pack，未在 RTX 2080 Ti 上运行完整 5 GB 加载。
+- 下一步与理由：完成严格编译与故障注入，然后继续检查 NativeDense 的跨实例 scratch/event 生命周期。
+
 ## I-20261027-86 · MTP 与 commit 计时 event 归实例和所属设备所有
 
 - 目标 / 指标：`STRATA_DRAFT_TIMING` 与 `STRATA_COMMIT_TIMING` 的 CUDA event 必须使用可计时事件，按所属设备

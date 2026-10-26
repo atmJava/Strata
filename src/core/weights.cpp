@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 #include <unistd.h>
 
@@ -88,6 +89,24 @@ bool read_at(std::FILE* f, uint64_t off, void* dst, size_t n, std::string& err, 
     if (std::fread(dst, 1, n, f) != n) { err = std::string(what) + ": short read"; return false; }
     return true;
 }
+
+struct PinnedStaging {
+    void* in = nullptr;
+    void* out = nullptr;
+    ~PinnedStaging() {
+        if (in) (void) cudaFreeHost(in);
+        if (out) (void) cudaFreeHost(out);
+    }
+};
+
+struct ScopedFile {
+    std::FILE* file = nullptr;
+    ~ScopedFile() { if (file) std::fclose(file); }
+    void reset(std::FILE* next) {
+        if (file) std::fclose(file);
+        file = next;
+    }
+};
 
 }  // namespace
 
@@ -176,6 +195,10 @@ bool WeightTable::read_bf16_host(const std::string& name, std::vector<uint16_t>&
 
 bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t arena_bytes, std::string& err,
                        const std::set<std::string>* skip) {
+    if (!table_.empty()) {
+        err = "WeightTable::load: the table is already loaded";
+        return false;
+    }
     const std::string path = pack_dir + "/index.txt";
     std::FILE* idx = std::fopen(path.c_str(), "rb");
     if (!idx) { err = "cannot open " + path + " (run tools/pack_index.py)"; return false; }
@@ -253,22 +276,19 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
     // STAGE_OUT IS TWICE STAGE_IN because a conversion can now GROW: widening an fp16 scale plane to f32
     // doubles it.  Sized at CHUNK it would have written 8 MiB past the end of a pinned allocation for every
     // one of the 90 widened tensors - a heap corruption that would have been blamed on whatever ran next.
-    void* stage_in = nullptr;
-    void* stage_out = nullptr;
-    if (cudaHostAlloc(&stage_in, CHUNK, cudaHostAllocDefault) != cudaSuccess ||
-        cudaHostAlloc(&stage_out, CHUNK * 2, cudaHostAllocDefault) != cudaSuccess) {
+    PinnedStaging staging;
+    if (cudaHostAlloc(&staging.in, CHUNK, cudaHostAllocDefault) != cudaSuccess ||
+        cudaHostAlloc(&staging.out, CHUNK * 2, cudaHostAllocDefault) != cudaSuccess) {
         err = "cudaHostAlloc for the staging buffers failed";
-        if (stage_in) cudaFreeHost(stage_in);
-        if (stage_out) cudaFreeHost(stage_out);
         return false;
     }
 
     uint8_t* dst_base = (uint8_t*) arena_base;
-    std::FILE* cur = nullptr;
+    ScopedFile cur;
     int cur_file = -1;
-    table_.clear();
-    report_ = LoadReport{};
-    pack_dir_ = pack_dir;
+    std::map<std::string, WeightRef> loaded;
+    LoadReport loaded_report;
+    const std::string loaded_pack_dir = pack_dir;
 
     const double t_read0 = now_ms();
     double upload_ms = 0;
@@ -296,27 +316,25 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
             wr.file_id = r.file;
             wr.scales_fp16 = r.scales_fp16 != 0;
             wr.act_kind = r.act_kind;
-            table_[r.name] = wr;
-            ++report_.tensors;
+            loaded[r.name] = wr;
+            ++loaded_report.tensors;
             continue;
         }
         if (r.code_bits != 0 && r.dst_bytes == 0) {
             // plan v0.3 P6: a native pack's row that carries a shape only - the GGUF form must serve it
             err = r.name + ": this pack holds the tensor only in its GGUF form (run with --native SHARD1)";
-            cudaFreeHost(stage_in); cudaFreeHost(stage_out);
             return false;
         }
         if (r.file != cur_file) {
-            if (cur) std::fclose(cur);
             const char* fn = file_name(r.file);
             const std::string p = pack_dir + "/" + (fn ? fn : "?");
-            cur = std::fopen(p.c_str(), "rb");
-            if (!cur) { err = "cannot open " + p; cudaFreeHost(stage_in); cudaFreeHost(stage_out); return false; }
+            cur.reset(std::fopen(p.c_str(), "rb"));
+            if (!cur.file) { err = "cannot open " + p; return false; }
             cur_file = r.file;
             // ask for this file's remaining rows up front so their reads overlap
             for (size_t j = row_i; j < rows.size(); ++j)
                 if (rows[j].file == r.file && !skipped[j])
-                    strata::platform::advise_willneed(fileno(cur), rows[j].src_off, rows[j].src_bytes);
+                    strata::platform::advise_willneed(fileno(cur.file), rows[j].src_off, rows[j].src_bytes);
         }
 
         // ---- the segment list: what this tensor's bytes are, plane by plane, in both forms
@@ -378,14 +396,13 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
             err = buf;
             bad = true;
         }
-        if (bad) { cudaFreeHost(stage_in); cudaFreeHost(stage_out); return false; }
+        if (bad) return false;
 
         for (int si = 0; si < n_segs; ++si) {
             const Seg& s = segs[si];
             const bool widening = (s.conv == Conv::WidenF16);
             if (widening && (s.src_bytes & 1ull)) {
                 err = r.name + ": an fp16 plane with an odd source byte count";
-                cudaFreeHost(stage_in); cudaFreeHost(stage_out);
                 return false;
             }
             uint64_t done = 0;
@@ -394,14 +411,12 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
                 // WIDENING NEVER SPLITS AN ELEMENT.  CHUNK is even, so a full chunk cannot, but the tail of a
                 // plane whose length is odd would - and half an fp16 is a plausible-looking scale.
                 if (widening && (n & 1ull)) {
-                    if (n == 1) { err = r.name + ": an fp16 plane ending on a half element"; cudaFreeHost(stage_in); cudaFreeHost(stage_out); return false; }
+                    if (n == 1) { err = r.name + ": an fp16 plane ending on a half element"; return false; }
                     n -= 1;
                 }
-                if (!read_at(cur, r.src_off + s.src_off + done, stage_in, (size_t) n, err, r.name.c_str())) {
-                    cudaFreeHost(stage_in); cudaFreeHost(stage_out);
+                if (!read_at(cur.file, r.src_off + s.src_off + done, staging.in, (size_t) n, err, r.name.c_str()))
                     return false;
-                }
-                const uint8_t* src = (const uint8_t*) stage_in;
+                const uint8_t* src = (const uint8_t*) staging.in;
                 const void* host_src = src;
                 uint64_t out_bytes = n;
                 uint64_t out_at = s.dst_off + done;
@@ -415,28 +430,28 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
                         // this is a copy with a stride.
                         const uint64_t elems = n / 4;
                         out_bytes = elems * 2;
-                        uint8_t* o = (uint8_t*) stage_out;
+                        uint8_t* o = (uint8_t*) staging.out;
                         for (uint64_t i = 0; i < elems; ++i) {
                             uint32_t v;
                             std::memcpy(&v, src + i * 4, 4);
                             const uint16_t h = (uint16_t) (v >> 16);
                             std::memcpy(o + i * 2, &h, 2);
                         }
-                        host_src = stage_out;
+                        host_src = staging.out;
                         out_at = s.dst_off + done / 2;
                         break;
                     }
                     case Conv::ToF16: {
                         const uint64_t elems = n / 4;
                         out_bytes = elems * 2;
-                        uint8_t* o = (uint8_t*) stage_out;
+                        uint8_t* o = (uint8_t*) staging.out;
                         for (uint64_t i = 0; i < elems; ++i) {
                             float v;
                             std::memcpy(&v, src + i * 4, 4);
                             const uint16_t h = strata::kernels::f16_from_f32(v);
                             std::memcpy(o + i * 2, &h, 2);
                         }
-                        host_src = stage_out;
+                        host_src = staging.out;
                         out_at = s.dst_off + done / 2;
                         break;
                     }
@@ -446,13 +461,13 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
                         // it at all, and why doing it costs 10.88 MiB rather than a second kernel family.
                         const uint64_t elems = n / 2;
                         out_bytes = elems * 4;
-                        float* o = (float*) stage_out;
+                        float* o = (float*) staging.out;
                         for (uint64_t i = 0; i < elems; ++i) {
                             uint16_t h;
                             std::memcpy(&h, src + i * 2, 2);
                             o[i] = strata::kernels::f32_from_f16(h);
                         }
-                        host_src = stage_out;
+                        host_src = staging.out;
                         out_at = s.dst_off + done * 2;
                         break;
                     }
@@ -462,7 +477,6 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
                 if (cudaMemcpy(dst_base + r.dst_off + out_at, host_src, out_bytes, cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
                     err = "cudaMemcpy failed for " + r.name;
-                    cudaFreeHost(stage_in); cudaFreeHost(stage_out);
                     return false;
                 }
                 upload_ms += now_ms() - u0;
@@ -490,22 +504,22 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
         wr.file_id = r.file;
         wr.scales_fp16 = r.scales_fp16 != 0;
         wr.act_kind = r.act_kind;
-        table_[r.name] = wr;
+        loaded[r.name] = wr;
 
-        ++report_.tensors;
+        ++loaded_report.tensors;
         if ((r.kind == WeightKind::Bf16InF32 || r.kind == WeightKind::F16InF32) && !r.raw16) {
-            ++report_.re_rounded;
-            report_.bytes_saved += r.src_bytes - r.dst_bytes;
+            ++loaded_report.re_rounded;
+            loaded_report.bytes_saved += r.src_bytes - r.dst_bytes;
         }
     }
-    if (cur) std::fclose(cur);
-    cudaFreeHost(stage_in);
-    cudaFreeHost(stage_out);
 
-    report_.arena_bytes = pool;
-    report_.read_ms = now_ms() - t_read0 - upload_ms;
-    report_.upload_ms = upload_ms;
+    loaded_report.arena_bytes = pool;
+    loaded_report.read_ms = now_ms() - t_read0 - upload_ms;
+    loaded_report.upload_ms = upload_ms;
     if (cudaDeviceSynchronize() != cudaSuccess) { err = "cudaDeviceSynchronize after the load failed"; return false; }
+    table_ = std::move(loaded);
+    report_ = loaded_report;
+    pack_dir_ = loaded_pack_dir;
     return true;
 }
 

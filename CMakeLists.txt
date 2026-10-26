@@ -386,6 +386,19 @@ if(STRATA_ENABLE_CUDA)
       add_test(NAME gpu_event_pairs_test COMMAND gpu_event_pairs_test)
       set_tests_properties(gpu_event_pairs_test PROPERTIES
         ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+      add_executable(weights_load_transaction_test
+        tests/core/weights_load_transaction_test.cpp src/core/weights.cpp src/platform/memory.cpp)
+      target_include_directories(weights_load_transaction_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      target_link_options(weights_load_transaction_test PRIVATE
+        -Wl,--wrap=cudaHostAlloc -Wl,--wrap=cudaFreeHost
+        -Wl,--wrap=cudaMemcpy -Wl,--wrap=cudaDeviceSynchronize
+        -Wl,--wrap=cudaGetDevice -Wl,--wrap=cudaSetDevice
+        -Wl,--wrap=cudaFree -Wl,--wrap=cudaGetLastError)
+      target_link_libraries(weights_load_transaction_test PRIVATE strata_warnings ${_strata_gpu_runtime_target})
+      add_test(NAME weights_load_transaction_test COMMAND weights_load_transaction_test)
+      set_tests_properties(weights_load_transaction_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
     endif()
     add_executable(host_graph_launch_test tests/core/host_graph_launch_test.cu)
     target_include_directories(host_graph_launch_test PRIVATE include)
