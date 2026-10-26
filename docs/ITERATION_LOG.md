@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-111 · MTP 重绑定保留旧 logits 与 draft head
+
+- 目标 / 指标：MTP `bind()` 需要更宽的 logits 时必须先成功取得新缓冲，再释放旧缓冲；`--mtp-q4=head` 转换失败时，
+  原来的 draft-head rows 必须保持完整可用。两个失败分支都不能覆盖仍有效的成员。
+- 假设与预期：旧 logits 扩容先 `cudaFree(head_logits_)` 再向成员 `cudaMalloc`，分配失败会同时丢失旧缓冲和容量。
+  Q4 head 直接在 `dhead_` 上前半段覆盖，H2D copy 中途失败会留下 Q4/原格式混合的数据，而 `dhead_type_` 仍是旧格式。
+- 为什么选这条路线：logits 先在局部 `replacement` 分配，成功后才 free/swap；Q4 rows 先量化到 host，再上传到新的
+  private device 块，上传成功后才替换 `dhead_` 并更新类型。旧缓冲因此保留到新资源完整可用。
+- 改动与实验：成功路径的 logits 宽度、Q4 行内容、gather 输入、显存上限与保守 VRAM 记账不变；失败路径不再改动
+  旧成员。`mtp.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；`mtp_logits_width_test` 通过
+  116 checks。
+- 判决：采纳。MTP 重绑定与 Q4 转换改为“先构建、后发布”。
+- 生产状态与回滚：默认无 Q4 的路径只改变 logits 扩容失败分支；成功推理数值不变，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、MTP pack 或 RTX 2080 Ti，未真实注入 logits/Q4 allocation 与 H2D copy 失败。
+- 下一步与理由：继续查找加载阶段直接写成员后仍未统一回滚的多资源初始化，并补可主机验证的边界测试。
+
 ## I-20261027-110 · MTP profiler 初始化与设备释放补齐
 
 - 目标 / 指标：`STRATA_MTP_PROFILE` 的 device stamp 缓冲必须在分配和清零都成功后启用，读取失败后停止采样，

@@ -306,8 +306,20 @@ bool MtpDrafter::make_q4_head(std::string& err) {
         tt->to_float(src.data() + (size_t) r * in_row, row.data(), N);
         ggml_quantize_chunk(GGML_TYPE_Q4_0, row.data(), dst.data() + (size_t) r * out_row, 0, 1, N, nullptr);
     }
-    // the Q4_0 rows replace the subset in place (they are smaller)
-    if (cudaMemcpy(dhead_, dst.data(), dst.size(), cudaMemcpyHostToDevice) != cudaSuccess) { err = "mtp: writing the draft head"; return false; }
+    // Build the Q4_0 rows in a private allocation first.  Uploading over dhead_ would leave a partly overwritten head
+    // when the copy fails; replacing it only after the upload succeeds keeps the original rows usable.
+    uint8_t* q4 = nullptr;
+    if (cudaMalloc((void**) &q4, dst.size()) != cudaSuccess) {
+        err = "mtp: the Q4_0 draft head does not fit";
+        return false;
+    }
+    if (cudaMemcpy(q4, dst.data(), dst.size(), cudaMemcpyHostToDevice) != cudaSuccess) {
+        cudaFree(q4);
+        err = "mtp: writing the Q4_0 draft head";
+        return false;
+    }
+    cudaFree(dhead_);
+    dhead_ = q4;
     dhead_type_ = GGML_Q4_0;
     std::fprintf(stderr, "strata mtp: --mtp-q4: draft head over %lld tokens as Q4_0 (%.1f MiB read per step, was %.1f)\n",
                  (long long) n_dvocab_, (double) dst.size() / 1048576.0, (double) src.size() / 1048576.0);
@@ -906,13 +918,13 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
     // the graphs are captured.
     const int64_t logits_floats = (int64_t) max_t_ * n_dvocab_;
     if (head_logits_cap_ < logits_floats) {
-        if (head_logits_ != nullptr) cudaFree(head_logits_);
-        head_logits_ = nullptr;
-        head_logits_cap_ = 0;
-        if (cudaMalloc((void**) &head_logits_, (size_t) logits_floats * sizeof(float)) != cudaSuccess) {
+        float* replacement = nullptr;
+        if (cudaMalloc((void**) &replacement, (size_t) logits_floats * sizeof(float)) != cudaSuccess) {
             err = "mtp: the draft logits do not fit";
             return false;
         }
+        if (head_logits_ != nullptr) cudaFree(head_logits_);
+        head_logits_ = replacement;
         head_logits_cap_ = logits_floats;
     }
     if (coupled_draft_env() && cparams_ == nullptr && !setup_coupled(err)) return false;
