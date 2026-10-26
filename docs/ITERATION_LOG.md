@@ -3,6 +3,32 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-24 · FileExpertSource 的 I/O 启停与 stage 缓冲区异常安全
+
+- 目标 / 指标：I/O 预取关闭后不得残留 `io_pf/io_sched/io_stats/gate` 状态；worker 或相关表部分创建失败时不得泄漏
+  文件描述符或遗留可 join 线程；读缓冲和 RAM 提升分配异常不得让 worker 调用 `std::terminate`，也不能把 stage buffer
+  永久留在 busy。
+- 假设与预期：旧 `io_stop()` 只关闭线程和 fd，不重置调度与统计开关，因此关闭再启动会继承上一轮配置；worker 创建
+  失败会让异常穿过 `set_io_prefetch()`，而已启动 worker 只能在对象析构时回收。`claim_stage()` 先拿 buffer 再扩容
+  多个并行表，任何一次分配失败既可能泄漏原始缓冲区，也可能留下长度不一致的表；`copy_from_files()` 抛异常时
+  `stage_busy_` 不会清零。
+- 为什么选这条路线：这些状态都局限在 `FileExpertSource` 的预取生命周期，可用合成 `experts.bin`、CPU 侧 CUDA
+  shim 和重复启停覆盖，不需要真实模型；修复不改变正常读取字节、预取顺序或公开配置。
+- 改动与实验：`set_io_prefetch()` 将 fd 准备、辅助表分配和 worker 创建纳入回滚，失败后调用 `io_stop()`；后者重置
+  `io_pf/io_fill/io_sched/io_stats/io_ahead/gate`。`claim_stage()` 在获取原始缓冲前预留所有并行表；I/O worker 的
+  stage 选择、fill scratch 和最终 read 均捕获异常并按失败发布 buffer；RAM 提升排队失败会撤销未启动的 job，读取
+  分配错误会标记 failed 而不是终止线程。新增预取关闭、重开和重开后读取断言。
+- 结果：主机侧 `file_expert_source_test`（合成 pack、CPU 库和同步 CUDA shim）`PASS`；`-Wall -Wextra -Werror`
+  编译通过；同一测试的 ASan/UBSan（泄漏检测开启、遇错停止）`PASS`；`git diff --check` 通过。
+- 判决：采纳。I/O 预取配置在禁用后没有残留，worker 启动失败有明确回滚，stage buffer 的分配/读取异常有失败发布
+  路径。
+- 生产状态与回滚：未改生产；正常 `STRATA_IO_PREFETCH` 读取与 stage 字节不变，单提交可回退。本机没有 CUDA
+  toolkit、RTX 2080 Ti 或真实模型，未验证 CUDA sm_75、真实 page-fault/worker 竞争或实际吞吐。
+- 学到什么：禁用后台设施必须同时撤销它的调度状态；“线程可 join”不等于启动事务成功，分配失败的 stage 元数据也
+  必须与数据 buffer 同一事务提交。
+- 下一步与理由：继续检查 `ForesightSwap` 和 `HostGraphLaunch` 的队列/线程失败边界，再做主机侧 sanitizer 与完整
+  Python 回归。
+
 ## I-20261027-23 · Terminal telemetry 的 HTTPError 响应显式关闭
 
 - 目标 / 指标：只读 telemetry client 收到 401/403、重定向或不支持的状态码时，在转换成 `ClientError` 前关闭底层

@@ -720,6 +720,12 @@ void test_io_prefetch() {
     require(c.cached_bytes + c.uncached_bytes > 0, "no residency counted");
     std::cout << "io prefetch: " << c.pf_read_blobs << " read ahead, " << c.pf_used << " used, " << c.pf_resident_skips
               << " skipped, pread " << c.pread_bytes << " B: bytes PASS\n";
+    source.set_io_prefetch(false, 0);
+    require(!source.io_prefetch() && !source.io_stats() && !source.io_sched(),
+            "disabling io prefetch retained its worker configuration");
+    source.set_io_prefetch(true, 1);
+    require(source.io_prefetch() && source.io_stats(), "io prefetch did not restart");
+    require(source.blob(0, 0) != nullptr, "an io-prefetch lookup failed after restart");
 #else
     require(!source.io_prefetch(), "io prefetch on a platform without it");
 #endif

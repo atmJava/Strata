@@ -1061,48 +1061,62 @@ void FileExpertSource::set_io_prefetch(bool on, int threads) {
     if (!on) return;
     if (base_ == nullptr || paths_.empty() || !direct_.empty()) return;   // unbuffered readers batch their own reads
     std::vector<int> fds;
-    for (const std::string& path : paths_) {
-        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
-            for (int f : fds) ::close(f);
-            return;
+    try {
+        fds.reserve(paths_.size());
+        for (const std::string& path : paths_) {
+            const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fd < 0) {
+                for (int f : fds) ::close(f);
+                return;
+            }
+            (void) posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);   // read exactly the range asked for, no read-ahead beyond it
+            fds.push_back(fd);
         }
-        (void) posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);   // read exactly the range asked for, no read-ahead beyond it
-        fds.push_back(fd);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FileExpertSource: cannot prepare the I/O descriptors (%s); io prefetch off\n", e.what());
+        for (int f : fds) ::close(f);
+        return;
     }
     io_fds_ = std::move(fds);
-    {
-        std::lock_guard<std::mutex> lk(stage_mu_);
-        for (uint64_t b : layer_blob_bytes_) stage_blob_ = std::max(stage_blob_, b);
+    try {
+        {
+            std::lock_guard<std::mutex> lk(stage_mu_);
+            for (uint64_t b : layer_blob_bytes_) stage_blob_ = std::max(stage_blob_, b);
+        }
+        if (!warm_stamp_) warm_stamp_.reset(new std::atomic<uint32_t>[(size_t) (n_layers_ * n_expert_)]());
+        io_threads_ = threads > 0 ? threads : 8;
+        if (const char* v = std::getenv("STRATA_IO_PF_AHEAD")) io_ahead_ = std::atoi(v) != 0;
+        {   // experts.bin: fill the page cache from the workers and let the kernels read the mapping (STRATA_IO_PF_STAGE=1: stage)
+            const char* v = std::getenv("STRATA_IO_PF_STAGE");
+            io_fill_ = role_ptr_.empty() && !(v != nullptr && std::atoi(v) != 0);
+        }
+        io_pf_ = true;
+        io_stats_ = true;
+        io_quit_ = false;
+        {   // 149-prefetch: STRATA_IO_PF_SCHED=1 - deadlines, confidence admission and a per-window byte budget (off: as before)
+            const char* v = std::getenv("STRATA_IO_PF_SCHED");
+            io_sched_ = v != nullptr && std::atoi(v) != 0;
+            if (const char* m = std::getenv("STRATA_IO_PF_MINCONF")) io_minconf_ = (float) std::clamp(std::atof(m), 0.0, 1.0);
+            if (const char* m = std::getenv("STRATA_IO_PF_BUDGET_MB")) io_budget_fixed_ = (uint64_t) std::max(0.0, std::atof(m) * 1048576.0);
+            if (const char* m = std::getenv("STRATA_IO_PF_BUDGET_FRAC")) io_budget_frac_ = std::clamp(std::atof(m), 0.01, 4.0);
+            if (const char* m = std::getenv("STRATA_IO_PF_TARGET")) io_target_ = std::clamp(std::atof(m), 0.0, 1.0);
+            gate_on_ = true;   // 0.2.0: the decode gate comes with io prefetch; STRATA_IO_PF_GATE=0 turns it off
+            if (const char* m = std::getenv("STRATA_IO_PF_GATE"); m != nullptr && m[0] != '\0') gate_on_ = std::atoi(m) != 0;
+            if (const char* m = std::getenv("STRATA_IO_PF_GATE_LO")) gate_lo_ = std::clamp(std::atof(m), 0.0, 1.0);
+            if (const char* m = std::getenv("STRATA_IO_PF_GATE_HI")) gate_hi_ = std::clamp(std::atof(m), gate_lo_, 1.0);
+            if (const char* m = std::getenv("STRATA_IO_PF_GATE_USEFUL")) gate_min_useful_ = std::clamp(std::atof(m), 0.0, 1.0);
+        }
+        if (!pf_mark_) {
+            pf_mark_.reset(new std::atomic<uint8_t>[(size_t) (n_layers_ * n_expert_)]);
+            for (int64_t i = 0; i < n_layers_ * n_expert_; ++i) pf_mark_[(size_t) i].store(0, std::memory_order_relaxed);
+        }
+        io_workers_.reserve((size_t) io_threads_);
+        for (int i = 0; i < io_threads_; ++i) io_workers_.emplace_back([this] { io_worker(); });
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FileExpertSource: cannot start io prefetch (%s); io prefetch off\n", e.what());
+        io_stop();
+        return;
     }
-    if (!warm_stamp_) warm_stamp_.reset(new std::atomic<uint32_t>[(size_t) (n_layers_ * n_expert_)]());
-    io_threads_ = threads > 0 ? threads : 8;
-    if (const char* v = std::getenv("STRATA_IO_PF_AHEAD")) io_ahead_ = std::atoi(v) != 0;
-    {   // experts.bin: fill the page cache from the workers and let the kernels read the mapping (STRATA_IO_PF_STAGE=1: stage)
-        const char* v = std::getenv("STRATA_IO_PF_STAGE");
-        io_fill_ = role_ptr_.empty() && !(v != nullptr && std::atoi(v) != 0);
-    }
-    io_pf_ = true;
-    io_stats_ = true;
-    io_quit_ = false;
-    {   // 149-prefetch: STRATA_IO_PF_SCHED=1 - deadlines, confidence admission and a per-window byte budget (off: as before)
-        const char* v = std::getenv("STRATA_IO_PF_SCHED");
-        io_sched_ = v != nullptr && std::atoi(v) != 0;
-        if (const char* m = std::getenv("STRATA_IO_PF_MINCONF")) io_minconf_ = (float) std::clamp(std::atof(m), 0.0, 1.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_BUDGET_MB")) io_budget_fixed_ = (uint64_t) std::max(0.0, std::atof(m) * 1048576.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_BUDGET_FRAC")) io_budget_frac_ = std::clamp(std::atof(m), 0.01, 4.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_TARGET")) io_target_ = std::clamp(std::atof(m), 0.0, 1.0);
-        gate_on_ = true;   // 0.2.0: the decode gate comes with io prefetch; STRATA_IO_PF_GATE=0 turns it off
-        if (const char* m = std::getenv("STRATA_IO_PF_GATE"); m != nullptr && m[0] != '\0') gate_on_ = std::atoi(m) != 0;
-        if (const char* m = std::getenv("STRATA_IO_PF_GATE_LO")) gate_lo_ = std::clamp(std::atof(m), 0.0, 1.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_GATE_HI")) gate_hi_ = std::clamp(std::atof(m), gate_lo_, 1.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_GATE_USEFUL")) gate_min_useful_ = std::clamp(std::atof(m), 0.0, 1.0);
-    }
-    if (!pf_mark_) {
-        pf_mark_.reset(new std::atomic<uint8_t>[(size_t) (n_layers_ * n_expert_)]);
-        for (int64_t i = 0; i < n_layers_ * n_expert_; ++i) pf_mark_[(size_t) i].store(0, std::memory_order_relaxed);
-    }
-    for (int i = 0; i < io_threads_; ++i) io_workers_.emplace_back([this] { io_worker(); });
 #else
     (void) on; (void) threads;
 #endif
@@ -1125,6 +1139,12 @@ void FileExpertSource::io_stop() {
 #endif
     io_fds_.clear();
     io_pf_ = false;
+    io_fill_ = false;
+    io_sched_ = false;
+    io_stats_ = false;
+    io_ahead_ = true;
+    gate_on_ = false;
+    gate_open_.store(true, std::memory_order_relaxed);
     io_quit_ = false;
 }
 
@@ -1206,18 +1226,24 @@ void FileExpertSource::io_worker() {
             const int ns = spans(layer, expert, sp);
             bool any = false;
             uint64_t got = 0;
-            for (int i = 0; i < ns; ++i) {
-                if (sp[i].fd < 0 || resident_sampled_n(sp[i].p, sp[i].n)) continue;
-                if (scratch.size() < sp[i].n) scratch.resize((size_t) sp[i].n);
-                const auto t0 = std::chrono::steady_clock::now();
-                if (pread_full(sp[i].fd, scratch.data(), sp[i].n, sp[i].off)) {
-                    io_pread_bytes_.fetch_add(sp[i].n, std::memory_order_relaxed);
-                    io_pread_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
-                                           std::memory_order_relaxed);
-                    io_pread_n_.fetch_add(1, std::memory_order_relaxed);
-                    any = true;
-                    got += sp[i].n;
+            try {
+                for (int i = 0; i < ns; ++i) {
+                    if (sp[i].fd < 0 || resident_sampled_n(sp[i].p, sp[i].n)) continue;
+                    if (scratch.size() < sp[i].n) scratch.resize((size_t) sp[i].n);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    if (pread_full(sp[i].fd, scratch.data(), sp[i].n, sp[i].off)) {
+                        io_pread_bytes_.fetch_add(sp[i].n, std::memory_order_relaxed);
+                        io_pread_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
+                                               std::memory_order_relaxed);
+                        io_pread_n_.fetch_add(1, std::memory_order_relaxed);
+                        any = true;
+                        got += sp[i].n;
+                    }
                 }
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "FileExpertSource: an I/O worker fill failed (%s)\n", e.what());
+            } catch (...) {
+                std::fprintf(stderr, "FileExpertSource: an I/O worker fill failed\n");
             }
             if (any) {
                 io_pf_blobs_.fetch_add(1, std::memory_order_relaxed);
@@ -1236,15 +1262,28 @@ void FileExpertSource::io_worker() {
         size_t v = 0;
         bool fill = false;
         uint8_t* dst = nullptr;
-        {
+        try {
             std::lock_guard<std::mutex> lk(stage_mu_);
             if (stage_blob_ == 0) continue;
             const bool have = claim_stage((int64_t) layer * n_expert_ + expert, v, fill, /*ahead=*/true);
             if (have || !fill) continue;   // already staged or being read, or no buffer
             stage_pf_[v] = 1;
             dst = stage_buf_[v].get();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "FileExpertSource: an I/O worker could not reserve a stage buffer (%s)\n", e.what());
+            continue;
+        } catch (...) {
+            std::fprintf(stderr, "FileExpertSource: an I/O worker could not reserve a stage buffer\n");
+            continue;
         }
-        const bool ok = copy_from_files(layer, expert, dst);
+        bool ok = false;
+        try {
+            ok = copy_from_files(layer, expert, dst);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "FileExpertSource: an I/O worker read failed (%s)\n", e.what());
+        } catch (...) {
+            std::fprintf(stderr, "FileExpertSource: an I/O worker read failed\n");
+        }
         io_pf_blobs_.fetch_add(1, std::memory_order_relaxed);
         if (ok) file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
         if (ok) note_rate(layer_blob_bytes_[(size_t) layer]);
@@ -1672,6 +1711,19 @@ bool FileExpertSource::claim_stage(int64_t key, size_t& v, bool& fill, bool ahea
             v = i;
         }
     if (v == stage_buf_.size()) {
+        // Reserve every parallel table before taking the buffer.  Once `raw` exists, all of the inserts below fit
+        // without allocating, so a failed reservation cannot leak the buffer or leave the tables at different sizes.
+        const size_t want = stage_buf_.size() + 1;
+        stage_buf_.reserve(want);
+        stage_ev_.reserve(want);
+        stage_ev_live_.reserve(want);
+        stage_key_.reserve(want);
+        stage_epoch_.reserve(want);
+        stage_used_.reserve(want);
+        stage_busy_.reserve(want);
+        stage_pf_.reserve(want);
+        stage_idx_.reserve(want);
+        stage_of_.reserve(want);
         // Pinned, where the driver allows: a stage buffer is the source of the cache fill's cudaMemcpyAsync,
         // and a pageable source is staged through the driver's bounce buffer - an extra copy at a fraction of
         // the transfer rate, on the calling thread.  A failure falls back to pageable for this buffer.
@@ -1851,7 +1903,14 @@ void FileExpertSource::gate_capacity() {
 // Fills buffer `v` (reserved by claim_stage) outside the lock, then publishes it.
 bool FileExpertSource::fill_stage(size_t v, int64_t layer, int64_t expert, uint8_t* dst) {
     const auto t0 = std::chrono::steady_clock::now();
-    const bool ok = copy_from_files(layer, expert, dst);
+    bool ok = false;
+    try {
+        ok = copy_from_files(layer, expert, dst);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FileExpertSource: an I/O worker read failed (%s)\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "FileExpertSource: an I/O worker read failed\n");
+    }
     publish_stage(v, layer, ok, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
     return ok;
 }
@@ -3864,12 +3923,26 @@ bool FileExpertSource::ram_stage(int64_t layer, int64_t in, int64_t out) {
         if (ram_jobs_.size() >= cap) return false;
         for (const auto& j : ram_jobs_)
             if (j->layer == layer && (j->in == in || j->out == out || j->in == out || j->out == in)) return false;
-        auto j = std::make_unique<RamJob>();
-        j->layer = layer; j->in = in; j->out = out; j->state = 0;
-        ram_jobs_.push_back(std::move(j));
-        if (!ram_thread_.joinable()) {
+        bool queued = false;
+        try {
+            auto j = std::make_unique<RamJob>();
+            j->layer = layer; j->in = in; j->out = out; j->state = 0;
+            ram_jobs_.push_back(std::move(j));
+            queued = true;
+            if (!ram_thread_.joinable()) {
+                ram_quit_ = false;
+                ram_thread_ = std::thread([this] { ram_worker(); });
+            }
+        } catch (const std::exception& e) {
+            if (queued && !ram_thread_.joinable()) ram_jobs_.pop_back();
             ram_quit_ = false;
-            ram_thread_ = std::thread([this] { ram_worker(); });
+            std::fprintf(stderr, "FileExpertSource: cannot queue the RAM promotion (%s)\n", e.what());
+            return false;
+        } catch (...) {
+            if (queued && !ram_thread_.joinable()) ram_jobs_.pop_back();
+            ram_quit_ = false;
+            std::fprintf(stderr, "FileExpertSource: cannot queue the RAM promotion\n");
+            return false;
         }
     }
     ram_cv_.notify_one();
@@ -3901,11 +3974,18 @@ void FileExpertSource::ram_worker() {
             job->state = 1;
         }
         const uint64_t bytes = layer_blob_bytes_[(size_t) job->layer];
-        job->buf.resize((size_t) bytes);
-        const auto t0 = std::chrono::steady_clock::now();
-        const bool ok = copy_from_files(job->layer, job->in, job->buf.data());
-        file_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
-                           std::memory_order_relaxed);
+        bool ok = false;
+        try {
+            job->buf.resize((size_t) bytes);
+            const auto t0 = std::chrono::steady_clock::now();
+            ok = copy_from_files(job->layer, job->in, job->buf.data());
+            file_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
+                               std::memory_order_relaxed);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "FileExpertSource: a RAM promotion read failed (%s)\n", e.what());
+        } catch (...) {
+            std::fprintf(stderr, "FileExpertSource: a RAM promotion read failed\n");
+        }
         if (ok) {
             file_read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
             ram_staged_reads_.fetch_add(1, std::memory_order_relaxed);
