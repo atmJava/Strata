@@ -2073,6 +2073,19 @@ class AuxiliaryThreadFallback(unittest.TestCase):
         self.assertIsNone(thread)
         self.assertIn("the browser was not opened: thread limit", output.getvalue())
 
+    def test_http_loop_thread_failure_closes_the_bound_listener(self):
+        from serve import server as server_module
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "</think>\n\nOK", max_context=CTX), tok,
+                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = mock.Mock()
+        with mock.patch.object(server_module, "Server", return_value=httpd), \
+                mock.patch.object(server_module.threading.Thread, "start",
+                                  side_effect=RuntimeError("thread limit")):
+            with self.assertRaisesRegex(RuntimeError, "thread limit"):
+                serve(svc, port=0)
+        httpd.server_close.assert_called_once_with()
+
 
 class EngineDeath(unittest.TestCase):
     """Issue #27: a dead engine is an error (not "length"), and the next request starts it again."""

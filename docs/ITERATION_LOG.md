@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-43 · HTTP 循环线程失败时关闭已绑定端口
+
+- 目标 / 指标：`serve()` 先构造并绑定 `ThreadingHTTPServer`，再启动 `serve_forever` 线程；线程创建失败时必须关闭监听 socket
+  后传播原始错误，不能让端口保持绑定却没有服务循环。
+- 假设与预期：旧代码直接调用 `Thread.start()`。线程配额耗尽时函数在 `return httpd` 前抛异常，调用方没有服务器对象可关闭，
+  socket 只能等待垃圾回收或进程退出。
+- 为什么选这条路线：HTTP 监听线程是服务核心，不能降级运行；正确行为是 fail-closed 且显式释放已获取资源。用 mock HTTP server
+  和线程启动故障可确定性证明 `server_close()`，不改变正常监听地址或线程参数。
+- 改动与实验：把循环线程启动纳入 `try`，`RuntimeError` 时调用 `server_close()` 后原样抛出。新增失败时关闭监听器一次且不返回
+  半启动服务器的断言。
+- 结果：`serve/test_server.py` 为 `346 passed / 502 subtests`；相关文件 `py_compile` 与 `git diff --check` 通过。
+- 判决：采纳。核心监听能力失败时服务不发布，但已经绑定的端口和 socket 会被立即释放。
+- 生产状态与回滚：未改成功启动、监听 backlog、handler、telemetry 或关闭顺序；单提交可回退。未在真实端口耗尽或真实线程配额
+  耗尽环境运行。
+- 学到什么：资源在核心依赖启动前已经获取时，核心依赖失败必须负责释放，而不能等待调用方或 GC。
+- 下一步与理由：继续检查 C++ 模型加载中直接启动局部线程组、失败后可能 `std::terminate()` 的路径。
+
 ## I-20261027-42 · batch slot 释放线程失败不泄漏服务容量
 
 - 目标 / 指标：消费者提前离开后，释放线程必须先完成 `BSTOP`/`BDONE` 所有权收敛；若系统拒绝新线程，slot 仍应最终恢复为

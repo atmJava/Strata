@@ -7565,7 +7565,14 @@ def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     svc.start_telemetry()
     httpd = Server((host, port), make_handler(svc))
     httpd.svc = svc
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    except RuntimeError:
+        # The listening socket exists before its loop thread. If the OS
+        # refuses that thread, close the socket rather than retaining a
+        # bound port that nothing serves.
+        httpd.server_close()
+        raise
     return httpd
 
 
