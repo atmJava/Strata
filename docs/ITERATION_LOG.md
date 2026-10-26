@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-33 · 批量 expert 填充线程启动失败回退到调用线程
+
+- 目标 / 指标：`FileExpertSource::fill_many()` 的 O_DIRECT 批读和映射读取在 worker 创建或预留失败时，必须由调用线程完成
+  全部剩余 blob，join 已启动 worker，发布每个 claimed stage，且不能让局部 `std::thread` 析构调用 `std::terminate()`。
+- 假设与预期：两个分支直接对局部 `std::vector<std::thread>` 执行 `emplace_back`。线程资源耗尽、内存不足或任一 worker
+  启动失败会抛出，此时已启动线程仍 joinable；局部容器随栈展开析构，C++ 标准直接终止进程，模型加载也随之退出。
+- 为什么选这条路线：批量 expert 填充是每层和 profile load 的主路径，可在 CPU 合成 pack 上精确触发多线程分支；成功路径的
+  批次、字节与并发数无需改变。
+- 改动与实验：两条分支先预留线程表，再逐项启动；失败记录后由调用线程执行同一个 atomic work queue，最后 join 已启动
+  worker。新增 `STRATA_TEST_FILL_THREAD_FAIL` 注入和 34 个合成专家用例，检查跨批次边界与末尾专家字节。
+- 结果：主机侧 `file_expert_source_test`（合成 pack、CPU 库和同步 CUDA shim）`PASS`，实际输出
+  `batch readers fall back to the caller (injected thread start failure)`；ASan/UBSan（泄漏检测开启、遇错停止）同样
+  `PASS`；`-Wall -Wextra -Werror` 与 `git diff --check` 通过。
+- 判决：采纳。辅助 worker 只负责并行度；任一线程不能创建时，调用线程仍完成同一 work queue，stage 所有权正常发布。
+- 生产状态与回滚：未改正常批次大小、O_DIRECT 对齐或映射读取；单提交可回退。未验证真实进程线程配额耗尽、真实 NVMe、
+  RTX 2080 Ti 或 CUDA 数据路径。
+- 学到什么：局部线程组必须先有失败时 join 的 owner；`try` 包住 `emplace_back` 不足以避免 terminate，已启动线程仍需执行。
+- 下一步与理由：继续排查相同的局部线程容器启动模式，优先修产品加载/推理路径，再跑相关 CPU 回归并推送。
+
 ## I-20261027-32 · PLE 直接读表范围的溢出安全校验
 
 - 目标 / 指标：`PleReader::open()` 必须在乘法或加法前确认 `[table_offset, table_offset + n_rows * row_bytes)` 落在文件内；

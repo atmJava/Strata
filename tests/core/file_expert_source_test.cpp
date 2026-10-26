@@ -49,6 +49,8 @@ void require(bool ok, const std::string& message) {
     if (!ok) throw std::runtime_error(message);
 }
 
+void set_env(const char* name, const char* value);
+
 struct TempDirectory {
     fs::path path;
 
@@ -186,6 +188,49 @@ void test_canonical_layout() {
     require(reopened && source.reads() == 1 && reopened[0] == 'c', "reopened canonical source kept stale state");
     source.close();
     require(source.release(0, 0) == 0, "a closed file source released pages");
+}
+
+void test_fill_thread_fallback() {
+    using namespace strata::core;
+    using namespace strata::kernels::cpu;
+    constexpr int64_t layers = 1;
+    constexpr int64_t experts = 34;
+    const uint64_t total = (uint64_t) experts * BLOB;
+    TempDirectory dir;
+    std::string err;
+    require(expert_layout_load(dir.path.string(), layers, experts, err), "could not load the fill layout: " + err);
+    std::vector<uint8_t> bytes((size_t) total);
+    uint64_t x = 0xD1B54A32D192ED03ull;
+    for (uint8_t& b : bytes) {
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        b = (uint8_t) (x >> 56);
+    }
+    {
+        std::ofstream out(dir.path / "experts.bin", std::ios::binary | std::ios::trunc);
+        out.write((const char*) bytes.data(), (std::streamsize) bytes.size());
+        require((bool) out, "could not write the fill-thread experts.bin");
+    }
+    FileExpertSource source;
+    require(source.open(dir.path.string(), layers, experts, err), "could not open the fill-thread pack: " + err);
+    set_env("STRATA_UNBUFFERED_LOAD", "1");
+    std::string why;
+    const bool unbuffered = source.set_unbuffered(0, why);
+    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
+    if (!unbuffered) {
+        std::cout << "file_expert_source_test: fill-thread test skipped (" << why << ")\n";
+        return;
+    }
+    std::vector<int64_t> ids(experts);
+    for (int64_t e = 0; e < experts; ++e) ids[(size_t) e] = e;
+    set_env("STRATA_TEST_FILL_THREAD_FAIL", "1");
+    source.prefetch(0, ids.data(), experts);
+    set_env("STRATA_TEST_FILL_THREAD_FAIL", nullptr);
+    for (int64_t e : {int64_t(0), int64_t(15), int64_t(16), int64_t(33)}) {
+        const uint8_t* got = source.blob(0, e);
+        require(got != nullptr && std::memcmp(got, bytes.data() + (size_t) e * BLOB, BLOB) == 0,
+                "a fill-thread fallback left a wrong expert");
+    }
+    source.close();
 }
 
 #if defined(STRATA_NATIVE_EXPERTS)
@@ -1048,6 +1093,7 @@ int main(int argc, char** argv) {
         test_cgroup_memory_budget();
         test_host_memory();
         test_canonical_layout();
+        test_fill_thread_fallback();
         test_unbuffered_reads();
         test_io_prefetch();
         test_foresight_init_validation();

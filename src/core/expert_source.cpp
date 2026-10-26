@@ -2269,6 +2269,10 @@ bool FileExpertSource::advise_pairs(const std::pair<int32_t, int32_t>* pairs, in
 
 void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
     if (todo.empty()) return;
+    int forced_failures = [&] {
+        const char* v = std::getenv("STRATA_TEST_FILL_THREAD_FAIL");
+        return v != nullptr ? std::max(0, std::atoi(v)) : 0;
+    }();
     if (!direct_.empty()) {
         // #286: overlapped batches - every role window of 16 blobs in flight at once; a big batch (the profile
         // fill) on up to 4 threads, a decode layer's few misses on this one
@@ -2289,7 +2293,17 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
         };
         const size_t nt = std::min<size_t>(4, (todo.size() + 15) / 16);
         std::vector<std::thread> th;
-        for (size_t t = 1; t < nt; ++t) th.emplace_back(work);
+        try {
+            th.reserve(nt - 1);
+            for (size_t t = 1; t < nt; ++t) {
+                if (forced_failures-- > 0) throw std::runtime_error("injected thread start failure");
+                th.emplace_back(work);
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "FileExpertSource: batch readers fall back to the caller (%s)\n", e.what());
+        } catch (...) {
+            std::fprintf(stderr, "FileExpertSource: batch readers fall back to the caller\n");
+        }
         work();
         for (auto& t : th) t.join();
         return;
@@ -2304,7 +2318,17 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
     };
     const size_t nt = std::min<size_t>(todo.size(), (size_t) fetch_threads_);
     std::vector<std::thread> th;
-    for (size_t t = 1; t < nt; ++t) th.emplace_back(work);
+    try {
+        th.reserve(nt - 1);
+        for (size_t t = 1; t < nt; ++t) {
+            if (forced_failures-- > 0) throw std::runtime_error("injected thread start failure");
+            th.emplace_back(work);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FileExpertSource: mapped readers fall back to the caller (%s)\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "FileExpertSource: mapped readers fall back to the caller\n");
+    }
     work();
     for (auto& t : th) t.join();
 }
