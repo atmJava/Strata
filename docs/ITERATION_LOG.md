@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-45 · 视觉编码器构造失败清理临时工作目录
+
+- 目标 / 指标：`Vision.__init__` 创建私有 scratch 目录后，只要配置转换或 encoder 启动失败，构造过程必须删除该目录和其中
+  已生成的缓存/输入文件；失败对象不会返回给调用方，不能依赖之后的 `shutdown()`。
+- 假设与预期：旧实现先 `mkdtemp`，再处理 elastic 数值并调用 `_start()`。错误配置的 `int/float` 转换或 encoder 启动异常会直接
+  离开构造函数，私有目录没有所有者，服务器反复失败启动会留下空目录或半成品。
+- 为什么选这条路线：目录生命周期完全由 `Vision` 所有，且正常启动、unload 保留缓存、显式 shutdown 删除目录的规则不变；可用
+  mock `_start` 失败和一个确定路径快速覆盖。
+- 改动与实验：把构造函数中目录创建后的初始化整体纳入异常边界，任何 `BaseException` 都以 `ignore_errors` 删除本次 scratch
+  目录后原样抛出。新增构造失败后目录不存在的断言。
+- 结果：`VisionShutdown` 为 `6 passed / 2 subtests`；相关文件 `py_compile` 与 `git diff --check` 通过。
+- 判决：采纳。未发布对象的临时目录在构造失败时立即回收。
+- 生产状态与回滚：未改成功构造、缓存复用、unload、shutdown 或 encoder 参数；单提交可回退。未运行真实视觉模型或 CUDA 编码器。
+- 学到什么：构造函数获取的资源不能被构造失败的对象拥有；清理责任必须落在构造边界内。
+- 下一步与理由：继续审查其余临时目录和进程所有者在构造/启动失败时的回收，然后做服务端综合回归。
+
 ## I-20261027-44 · expert 区间加载线程失败回退调用线程
 
 - 目标 / 指标：`load_experts_ranges()` 启动额外 reader 失败时，调用线程必须继续消费共享 layer 队列，join 已启动线程，读取全部

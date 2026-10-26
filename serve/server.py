@@ -2742,26 +2742,32 @@ class Vision:
                  close_log: bool = False):
         args = self.reader_args(cfg)
         self.dir = self.work_dir()
-        self.log = log
-        self._close_log = close_log
-        self.spawn = (args, log, env)                   # to start it again after an unload
-        # The CUDA-capable reader has a CPU mode in the same executable; _start switches to it by itself when
-        # CUDA cannot start.
-        cpu = vision_reader.cpu_fallback(cfg)
-        self.fallback = (self.reader_args(cpu), log, env) if cpu else None
-        self.proc = None
-        self.stopped = True
-        self.lock = threading.Lock()
-        self.cache: dict[str, tuple[Path, int]] = {}
-        # opt-in (the vision section's "elastic": true, with the config's "vram_elastic"): the encoder starts with the
-        # first picture and stops after elastic_idle_s without one; while it runs, the engine's expert cache keeps
-        # elastic_mib of VRAM free for it (Service._vision_up / _vision_idle_down)
-        self.max_tokens = self.token_limit(cfg)
-        self.elastic = cfg.get("elastic") is True
-        self.elastic_mib = int(cfg.get("elastic_mib") or 2048)
-        self.elastic_idle_s = float(cfg.get("elastic_idle_s") or 120)
-        if not lazy and not self.elastic:
-            self._start()
+        try:
+            self.log = log
+            self._close_log = close_log
+            self.spawn = (args, log, env)                   # to start it again after an unload
+            # The CUDA-capable reader has a CPU mode in the same executable; _start switches to it by itself when
+            # CUDA cannot start.
+            cpu = vision_reader.cpu_fallback(cfg)
+            self.fallback = (self.reader_args(cpu), log, env) if cpu else None
+            self.proc = None
+            self.stopped = True
+            self.lock = threading.Lock()
+            self.cache: dict[str, tuple[Path, int]] = {}
+            # opt-in (the vision section's "elastic": true, with the config's "vram_elastic"): the encoder starts with the
+            # first picture and stops after elastic_idle_s without one; while it runs, the engine's expert cache keeps
+            # elastic_mib of VRAM free for it (Service._vision_up / _vision_idle_down)
+            self.max_tokens = self.token_limit(cfg)
+            self.elastic = cfg.get("elastic") is True
+            self.elastic_mib = int(cfg.get("elastic_mib") or 2048)
+            self.elastic_idle_s = float(cfg.get("elastic_idle_s") or 120)
+            if not lazy and not self.elastic:
+                self._start()
+        except BaseException:
+            # No object escapes a failed constructor, so its cache and
+            # scratch directory have no later shutdown() owner.
+            shutil.rmtree(self.dir, ignore_errors=True)
+            raise
 
     # What a picture may become when the config does not say (setup writes the same numbers, setup.VISION): an old, hand-edited or migrated
     # config without vision.max_tokens left the reader unclamped, and #3690 saw one picture become 93,700 image tokens (I7).  A key that is

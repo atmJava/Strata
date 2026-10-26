@@ -5708,6 +5708,19 @@ class LazyVision(unittest.TestCase):
 class VisionShutdown(unittest.TestCase):
     """#914: ending the server removes the encoder's scratch directory; unloading keeps it."""
 
+    def test_constructor_failure_removes_its_unowned_work_dir(self):
+        import serve.server as server
+        with tempfile.TemporaryDirectory() as t:
+            work = Path(t) / "strata-vision-failed"
+            work.mkdir()
+            with mock.patch.object(server.Vision, "work_dir", return_value=work), \
+                    mock.patch.object(server.Vision, "_start",
+                                      side_effect=RuntimeError("reader did not start")):
+                with self.assertRaisesRegex(RuntimeError, "reader did not start"):
+                    server.Vision({"exe": "strata-vision", "mmproj": "mmproj.gguf",
+                                   "model": "model.gguf", "gpu": False})
+            self.assertFalse(work.exists())
+
     def test_shutdown_removes_the_work_dir_but_close_keeps_it(self):
         import serve.server as server
         with tempfile.TemporaryDirectory() as t:
