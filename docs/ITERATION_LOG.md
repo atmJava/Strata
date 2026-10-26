@@ -3,6 +3,29 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-09 · CPU 池部分线程启动失败可回滚，真实任务一致性通过
+
+- 目标 / 指标：`ExpertPool` 构造期间若创建到一半的 worker 抛出异常，必须停止并 join 已启动线程、清理全局
+  NUMA/诊断状态，再向调用方传播错误；不得因 joinable `std::thread` 在栈展开中析构而触发进程终止。
+- 假设与预期：现有正常析构会停止并 join，但构造函数直接连续 `emplace_back`；后续线程创建失败时构造函数
+  尚未完成，析构函数不会运行，部分已创建线程会留在成员 vector 中。
+- 为什么选这条路线：这是 `std::thread` 资源获取失败的确定性生命周期缺口。仓库固定了完整 ggml 上游提交，
+  可在 `/tmp` 检出并真实链接 CPU 池，不需要 GPU 或模型。
+- 改动与实验：抽出幂等的 `stop_workers()`，构造与析构共用；把可能抛异常的全局指针发布和线程创建放进
+  同一回滚边界；移除 Linux 发行版永远走不到的 MSVC `UMWAIT` 分支与相关环境读取；增加
+  `STRATA_TEST_POOL_THREAD_FAIL_AT` 故障注入，先启动两个 worker、在第三个前失败，并验证 NUMA 全局状态
+  已清除、随后可以构造替代池。用固定提交
+  `3cf03257f219afbe7334045ff7c6a06ac68c627d` 的 ggml 构建静态库，只写入 `/tmp`。
+- 结果：`pool_cores_test`、`pool_affinity_test` 通过；`pool_tasks_test` 完成
+  `360` 项 bitwise 比较，其中 `192` 项走 NUMA split；故障注入路径通过。普通
+  `-Wall -Wextra -Werror`、AddressSanitizer + UndefinedBehaviorSanitizer、ThreadSanitizer 构建均通过。
+  `pool_test`、`expert_multi_test`、`pool_stress` 可编译，但当前 CPU 缺 AVX-512 VNNI/VBMI，按测试协议跳过
+  `modes 0-4` 和真实 expert pack 路径。
+- 判决：采纳。构造失败现在是“停止、join、清空全局状态、rethrow”，不再依赖正常析构。
+- 生产状态与回滚：未改生产；故障注入只在设置测试环境变量时触发，可用单个提交回退。
+- 学到什么：构造函数也必须具备失败自动清理；资源按顺序获取后，任何后续步骤抛异常都要按逆序释放。
+- 下一步与理由：继续审计其他“先创建线程/句柄，再完成剩余初始化”的构造器，并运行 CPU 池压力与真实载荷。
+
 ## I-20261027-08 · 直接文件 I/O 拒绝关闭态请求，并安全串行化打开、关闭和提交
 
 - 目标 / 指标：`DirectFile` 在未打开或关闭后不能接受请求；打开/关闭与并发提交不能留下无人处理的队列、

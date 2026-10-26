@@ -40,6 +40,28 @@ int main(int argc, char** argv) {
     if (argc != 1 && argc != 4) return 2;
     // its activation quantiser is the AVX one at least (act_quant_any): a CPU without AVX (Westmere) would stop on an illegal instruction
     if (!cpu::cpu_avx1_ok()) { std::printf("pool_tasks_test: no AVX on this CPU, skipped\n"); return 0; }
+    {
+        // Start two workers, then fail the third. A constructor that leaves joinable std::thread members behind
+        // terminates the process when construction unwinds; stale NUMA state would also leak into the next pool.
+        setenv("STRATA_NUMA_POOL", "1", 1);
+        setenv("STRATA_NUMA_SPLIT", "test", 1);
+        setenv("STRATA_TEST_POOL_THREAD_FAIL_AT", "2", 1);
+        bool failed = false;
+        try {
+            cpu::ExpertPool pool(4, false, true, cpu::PoolAffinity::All, 0);
+        } catch (const std::exception&) {
+            failed = true;
+        }
+        unsetenv("STRATA_TEST_POOL_THREAD_FAIL_AT");
+        unsetenv("STRATA_NUMA_SPLIT");
+        unsetenv("STRATA_NUMA_POOL");
+        if (!failed || cpu::active_numa_split().on) {
+            std::fprintf(stderr, "partial worker start did not clean up constructor state\n");
+            return 1;
+        }
+        cpu::ExpertPool replacement(1, false);
+        if (replacement.workers() != 1) return 1;
+    }
     cpu::NativeFmt f;
     std::string err;
     if (!cpu::native_fmt(argc == 4 ? std::atoi(argv[1]) : GGML_TYPE_IQ3_XXS,

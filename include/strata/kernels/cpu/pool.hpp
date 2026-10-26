@@ -294,6 +294,8 @@ private:
     void wait_done(int n);
     /// Bump `epoch_`, and wake the workers that went to sleep.  Every publish goes through here.
     void publish();
+    /// Idempotent shutdown used by the destructor and by constructor failure after a partial thread start.
+    void stop_workers();
 
     int n_ = 0;
     bool explicit_cores_ = false;
