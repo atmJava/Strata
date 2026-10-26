@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-66 · 后台线程失败改动通过 Python 全量回归
+
+- 目标 / 指标：确认本轮引擎异常边界、DirectFile/PLE 失败路径和 server 启动回滚没有破坏既有 Python 行为；
+  Terminal 与 Control 的独立入口保持可测试。
+- 为什么选这条路线：前 65 条迭代已分别完成定向主机侧编译或窄回归，但最近的 server 日志所有权修正尚未用全量套件
+  验证；在先提交文档前跑完三个可直接执行的 Python 边界，能把“局部通过”升级为清晰的回归门。
+- 改动与实验：未改代码。运行 `python -m pytest -q serve`、`python -m pytest -q tests/terminal strata_control` 和
+  `python -m compileall -q serve strata_cli strata_control tests/terminal`。
+- 结果：`serve` 为 `984 passed, 8 skipped, 10797 subtests passed`；Terminal/Control 为
+  `216 passed, 46 skipped, 93 subtests passed`；`compileall` 通过。
+- 判决：通过。当前 Python 回归没有暴露本轮改动造成的回归。
+- 生产状态与回滚：仅追加验证证据，不改运行时行为。
+- 未验证：当前环境没有 `nvidia-smi`/`nvcc`，未运行 CUDA sm_75 构建、GPU 单元测试、真实双卡请求或
+  Qwen3.8-Flash-Next pack；主机侧 C++ 编译结论也不能替代真实 GPU 运行。
+- 下一步与理由：继续做静态资源生命周期审查并按阶段提交；网络恢复后重试推送。
+
 ## I-20261027-65 · generate 线程体异常转成受控失败
 
 - 目标 / 指标：adaptive helper、stdin reader 和 checksum helper 的线程体即使发生分配或内部异常，也不能触发
