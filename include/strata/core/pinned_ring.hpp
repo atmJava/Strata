@@ -148,23 +148,56 @@ public:
         return true;
     }
 
-    void release() {
-        int previous = -1;
-        int current = -1;
-        if (dev_ >= 0 && cudaGetDevice(&current) == cudaSuccess && current != dev_ &&
-            cudaSetDevice(dev_) == cudaSuccess)
-            previous = current;
-        for (Slot& sl : slots_) {
-            if (sl.pending && sl.ev) cudaEventSynchronize(sl.ev);
-            if (sl.ev) cudaEventDestroy(sl.ev);
-            if (sl.p) cudaFreeHost(sl.p);
-            sl = Slot{};
+    /// False when a slot could not be drained/destroyed/freed on its owning device. Owned state is retained for retry.
+    bool release() {
+        if (dev_ < 0) {
+            acquired_ = nullptr;
+            next_ = 0;
+            return true;
         }
-        if (previous >= 0) cudaSetDevice(previous);
-        cudaGetLastError();
+        int current = -1;
+        if (cudaGetDevice(&current) != cudaSuccess) {
+            (void) cudaGetLastError();
+            return false;
+        }
+        int previous = -1;
+        if (current != dev_) {
+            if (cudaSetDevice(dev_) != cudaSuccess) {
+                (void) cudaGetLastError();
+                return false;
+            }
+            previous = current;
+        }
+        bool complete = true;
+        for (Slot& sl : slots_) {
+            if (sl.pending && sl.ev) {
+                if (cudaEventSynchronize(sl.ev) != cudaSuccess) {
+                    complete = false;
+                    continue;
+                }
+                sl.pending = false;
+            }
+            if (sl.ev) {
+                if (cudaEventDestroy(sl.ev) == cudaSuccess) sl.ev = nullptr;
+                else complete = false;
+            }
+            if (sl.p) {
+                if (cudaFreeHost(sl.p) == cudaSuccess) {
+                    sl.p = nullptr;
+                    sl.cap = 0;
+                } else {
+                    complete = false;
+                }
+            }
+        }
+        if (previous >= 0 && cudaSetDevice(previous) != cudaSuccess) complete = false;
+        (void) cudaGetLastError();
         acquired_ = nullptr;
-        dev_ = -1;
-        next_ = 0;
+        if (complete) {
+            dev_ = -1;
+            next_ = 0;
+        }
+        return complete;
     }
 
 private:

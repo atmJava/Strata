@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-129 · PinnedRing release 失败保留可重试所有权
+
+- 目标 / 指标：`PinnedRing::release()` 在无法进入 slot 所属 device，或 event/slot 清理失败时，不得把未释放资源标成已释放；
+  故障解除后同一对象应能完成清理。
+- 假设与预期：旧实现无条件清空 device 与 slot 状态；即使用户已发现跨设备风险，一次临时驱动失败仍会造成 permanent leak，
+  析构也无法重试。
+- 为什么选这条路线：在现有 `pinned_ring_test` 的两个 device 和 CUDA wrappers 上注入切换/free 失败，直接验证 owner 状态机，
+  不改变正常上传或事件路径。
+- 改动与实验：`release()` 返回清理是否完整；进入 device 失败时保持全部状态，逐项清理只在成功时清空对应句柄，并在部分失败时
+  保留剩余资源。新增 device-switch 失败、free 失败与成功重试用例。
+- 判决：采纳。release 报告的完成状态现在与资源所有权一致。
+- 生产状态与回滚：正常单卡释放只增加成功状态判断；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 GPU；故障由 link wrapper 注入，尚未在真实多卡 context 中制造。
+- 下一步与理由：完成全量回归、文档检查和远端 SHA 复核；07:50 后不再开始新改动。
+
 ## I-20261027-128 · GpuEventPairs release 失败保留事件所有权
 
 - 目标 / 指标：`GpuEventPairs::release()` 无法切回事件所属 device 时不得清空事件句柄；后续 `ensure()` 也不得覆盖旧组。
