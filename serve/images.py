@@ -303,25 +303,34 @@ class ImageGen:
                     with contextlib.suppress(OSError, ValueError):
                         proc.stdout.close()
                     raise ImageJobFailed(f"sd-cli output reader did not start: {e}") from e
-                while proc.poll() is None:
-                    if cancel is not None and cancel.is_set():
-                        why = "cancelled (the client left)"
-                    elif time.monotonic() - t0 > timeout:
-                        why = f"it ran past timeout_s ({timeout:g} s)"
-                    if why:
+                try:
+                    while proc.poll() is None:
+                        if cancel is not None and cancel.is_set():
+                            why = "cancelled (the client left)"
+                        elif time.monotonic() - t0 > timeout:
+                            why = f"it ran past timeout_s ({timeout:g} s)"
+                        if why:
+                            with contextlib.suppress(OSError):
+                                proc.kill()
+                            break
+                        time.sleep(0.2)
+                    try:
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        why = why or "sd-cli did not stop"
                         with contextlib.suppress(OSError):
                             proc.kill()
-                        break
-                    time.sleep(0.2)
-                try:
-                    proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    why = why or "sd-cli did not stop"
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            why = "sd-cli did not stop after being killed"
+                except OSError as e:
+                    why = f"sd-cli could not be waited for ({e})"
                     with contextlib.suppress(OSError):
                         proc.kill()
                     try:
                         proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
+                    except (subprocess.TimeoutExpired, OSError):
                         why = "sd-cli did not stop after being killed"
                 reader.join(timeout=10)
                 if reader.is_alive():

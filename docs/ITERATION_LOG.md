@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-39 · sd-cli 等待 OS 错误仍终止并释放子进程
+
+- 目标 / 指标：图像子进程的 `poll()`/`wait()` 抛普通 `OSError` 时，也必须 kill、做一次有界 wait、join/关闭输出 reader，
+  删除本次 job 目录，并返回 `ImageJobFailed`，不能把仍运行的 sd-cli 与管道留在后台。
+- 假设与预期：旧代码只处理第一次 `wait(timeout=30)` 的 `TimeoutExpired`。普通 `OSError` 会跳出处理块，跳过 kill、二次 wait
+  和显式 stdout 关闭；异常离开 `_run()` 后进程与 reader 的所有权无人继续处理。
+- 为什么选这条路线：图像进程生命周期已有 mock 故障测试和无 GPU fake sd-cli；修改不改变正常输出、超时文本、进度解析或
+  生成图片字节。
+- 改动与实验：把轮询与首次 wait 纳入同一个 `try`，`OSError` 分支记录原因、kill、有界 wait；若二次 wait 仍失败则保留
+  “after being killed” 语义。随后统一 join reader 并关闭 stdout。新增首次等待 OSError 的 kill/wait/close/job-dir 断言。
+- 结果：`serve/test_images.py` 为 `25 passed / 20 subtests`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。等待系统调用失败不再绕过图像子进程的终止和输出管道清理。
+- 生产状态与回滚：未改成功作业、取消、超时、输出解析或 GPU 策略；单提交可回退。未运行真实 sd-cli、Qwen Image 或 CUDA GPU。
+- 学到什么：等待错误是清理的开始，不是清理的终点；所有 wait 失败分支都必须汇入同一个进程与 pipe 释放边界。
+- 下一步与理由：继续检查长生命周期 HTTP/进程封装中的 finally 边界，并回到 C++ 主加载路径做一次静态与合成回归。
+
 ## I-20261027-38 · telemetry 采样线程失败不阻止服务启动
 
 - 目标 / 指标：硬件 telemetry 的后台采样线程无法创建时，服务仍应启动；保留静态 GPU/CPU 信息与按需 `sample()`，不得留下

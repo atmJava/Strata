@@ -180,6 +180,24 @@ class Command(unittest.TestCase):
             self.assertEqual(list(gen.dir.glob("job-*")), [])
             self.assertIsNone(gen.progress)
 
+    def test_a_wait_os_error_still_kills_and_releases_the_child(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d))
+            job = images_api.parse_request({"prompt": "x"}, gen.cfg)
+            proc = mock.Mock()
+            proc.poll.return_value = 0
+            proc.wait.side_effect = [OSError("wait failed"), 0]
+            proc.returncode = 0
+            proc.stdout = io.StringIO()
+            with mock.patch("serve.lifeline.popen", return_value=proc):
+                with self.assertRaisesRegex(images_api.ImageJobFailed, "could not be waited for"):
+                    gen.run(job)
+            proc.kill.assert_called_once_with()
+            self.assertEqual([call.kwargs["timeout"] for call in proc.wait.call_args_list], [30, 5])
+            self.assertTrue(proc.stdout.closed)
+            self.assertEqual(list(gen.dir.glob("job-*")), [])
+            self.assertIsNone(gen.progress)
+
 
 class FakeEngine:
     """An engine with the parts the GPU turn uses: alive/unload/restart, vram (elastic) and session files."""
