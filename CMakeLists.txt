@@ -363,7 +363,7 @@ if(STRATA_ENABLE_CUDA)
   # already links `strata_core` - putting `gdn_layer` in core would make the two mutually dependent.  A third
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
-  add_library(strata_engine STATIC src/core/layer.cpp src/core/doorbell.cpp src/core/graph_capture.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
+  add_library(strata_engine STATIC src/core/layer.cpp src/core/doorbell.cpp src/core/graph_capture.cpp src/core/qsa_state.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
     src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/native_dense_scratch.cpp
     src/core/verify.cpp src/core/mtp.cpp src/core/dflash2.cpp
@@ -437,6 +437,16 @@ if(STRATA_ENABLE_CUDA)
       target_link_libraries(graph_capture_test PRIVATE strata_warnings)
       add_test(NAME graph_capture_test COMMAND graph_capture_test)
       set_tests_properties(graph_capture_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+      add_executable(qsa_state_resource_test
+        tests/core/qsa_state_resource_test.cpp src/core/qsa_state.cpp)
+      target_include_directories(qsa_state_resource_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      target_link_options(qsa_state_resource_test PRIVATE
+        -Wl,--wrap=cudaFreeHost -Wl,--wrap=cudaHostUnregister)
+      target_link_libraries(qsa_state_resource_test PRIVATE strata_warnings)
+      add_test(NAME qsa_state_resource_test COMMAND qsa_state_resource_test)
+      set_tests_properties(qsa_state_resource_test PROPERTIES
         ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
     endif()
     add_executable(host_graph_launch_test tests/core/host_graph_launch_test.cu)

@@ -271,6 +271,11 @@ struct QsaState {
     /// copy and give back the overlap the doorbell protocol exists for.
     int32_t* host_step = nullptr;    ///< (kStepCount + 1,) pinned; final element is attention status
     int32_t* host_pos = nullptr;     ///< (n_head,) pinned
+    /// The original allocation behind `host`, kept because the device alias is not necessarily freeable as the
+    /// host address.  `registered` distinguishes cudaHostRegister+mmap from cudaHostAlloc.
+    uint8_t* kv_host_allocation = nullptr;
+    uint64_t kv_host_allocation_bytes = 0;
+    bool kv_host_registered = false;
 };
 
 /// Plan v0.3 P7: the RoPE cos/sin table (max_cells x n_rot/2 x 2 floats, 64 MiB at 262K) is identical in every
@@ -306,6 +311,8 @@ int64_t qsa_kv_resident();
 int64_t qsa_kv_resident_min();
 /// Pinned host bytes the streamed states hold (their host copies).
 uint64_t qsa_kv_host_bytes();
+/// Account a successful streaming KV host allocation.
+void qsa_kv_host_allocated(uint64_t bytes);
 /// Plan v0.3 P7: store K/V as INT8 with FP16 scales per 64 values (half the VRAM of FP16). Set before sizing and
 /// initializing the session; default off until gate G-C accepts it.
 void qsa_set_kv_int8(bool enabled);
@@ -325,6 +332,9 @@ inline int qsa_kv_format(const QsaState& st) {
 }
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
                         const QsaState* share_rope = nullptr, int64_t ring_cells = 0);
+/// Releases resources outside the session arena that `qsa_state_init` acquired: pinned step/position staging,
+/// the streaming KV host copy and an owned RoPE registry entry.  Safe to call twice.
+void qsa_state_release(QsaState& st);
 /// KV streaming: the pools a reader sees (the VRAM slots) and, when streamed, make the selection's blocks resident.
 strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st);
 void qsa_kv_resolve(const QsaState& st, const ModelGeometry& g, const int32_t* ids, const int32_t* steps, int64_t n_q,

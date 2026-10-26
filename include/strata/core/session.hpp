@@ -137,8 +137,9 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
 /// table built yet, or the owner has already been released.  This is the pointer `session_init` hands to
 /// `qsa_state_init`'s `share_rope`, and the only place the borrow chain is interpreted.
 const QsaState* session_rope_owner(const SessionState& s);
-/// Before the memory `session_init` carved is freed: forgets what points into it from outside the session (the
-/// rope kernels' registered angle table, #280), so a later session never rotates by freed memory.
+/// Before the memory `session_init` carved is freed: releases pinned staging, streaming KV host copies, the
+/// session's `QsaState` array and what points out of the arena (the rope kernels' registered angle table, #280),
+/// so a later session never reuses freed host memory or rotates by a freed table.
 ///
 /// Frees only what THIS session built: a session initialized with `share_rope_from` owns no table, so releasing
 /// it does nothing to the donor's.  **A donor must be released AFTER every session that borrowed from it** -

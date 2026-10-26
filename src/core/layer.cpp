@@ -530,7 +530,6 @@ struct Cursor {    uint8_t* p;    uint64_t used = 0;    template <typename T>   
 namespace {
 // KV streaming (docs/kv-streaming-design.md): 0 keeps every cell in VRAM.
 int64_t g_kv_resident = 0;
-uint64_t g_kv_host_bytes = 0;
 
 // The KV host copy: pinned and device-mapped. cudaHostAlloc is the default, but under WSL2 the driver caps what
 // cudaHostAlloc(Mapped) may pin at about 1 GiB in all, while cudaHostRegister of ordinary memory is not capped there:
@@ -538,9 +537,10 @@ uint64_t g_kv_host_bytes = 0;
 // under_wddm() does (/dev/dxg, the device its GPU goes through to the Windows driver), the copy is anonymous memory
 // registered Portable|Mapped before any page is touched, which also leaves WSL's small cudaHostAlloc budget to the
 // staging buffers. Elsewhere cudaHostAlloc stays first. Either way the other method is the fallback when the first
-// is refused. STRATA_KV_HOST_REGISTER=1/0 forces registering first or cudaHostAlloc first. Like the cudaHostAlloc
-// copy it lives as long as the process.
-uint8_t* kv_host_alloc(uint64_t bytes) {
+// is refused. STRATA_KV_HOST_REGISTER=1/0 forces registering first or cudaHostAlloc first. The returned allocation
+// and whether it used cudaHostRegister are both recorded in the QSA state for matching teardown.
+uint8_t* kv_host_alloc(uint64_t bytes, bool& registered) {
+    registered = false;
     auto host_alloc = [](uint64_t n) -> uint8_t* {
         uint8_t* h = nullptr;
         if (strata::core::host_alloc_guarded((void**) &h, n, cudaHostAllocMapped | cudaHostAllocPortable) == cudaSuccess) return h;
@@ -552,10 +552,10 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
         if (e != nullptr && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
         return std::filesystem::exists("/dev/dxg");
     }();
-    auto register_anon = [](uint64_t n) -> uint8_t* {
+    auto register_anon = [&](uint64_t n) -> uint8_t* {
         void* m = mmap(nullptr, (size_t) n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (m == MAP_FAILED) return nullptr;
-        if (cudaHostRegister(m, (size_t) n, cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
+        if (pin_register(m, (size_t) n, cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
             (void) cudaGetLastError();
             munmap(m, (size_t) n);
             return nullptr;
@@ -565,6 +565,7 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
             std::fprintf(stderr, "strata: KV streaming: the host copy is pinned with cudaHostRegister\n");
             said = true;
         }
+        registered = true;
         return (uint8_t*) m;
     };
     if (register_first) {
@@ -723,7 +724,6 @@ uint64_t kv_pool_bytes(const QsaShapes& s, int64_t pages, bool hybrid, bool int8
 void qsa_set_kv_resident(int64_t cells) { g_kv_resident = cells > 0 ? cells : 0; }
 int64_t qsa_kv_resident() { return g_kv_resident; }
 int64_t qsa_kv_resident_min() { return 20480; }
-uint64_t qsa_kv_host_bytes() { return g_kv_host_bytes; }
 
 uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_rope, int64_t ring_cells) {
     const QsaShapes s = qsa_shapes(g);
@@ -744,8 +744,18 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
     return align_up16(n) + 256;
 }
 
-uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
+uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& out,
                         const QsaState* share_rope, int64_t ring_cells) {
+    QsaState candidate;
+    QsaState& st = candidate;
+    std::unique_ptr<ElasticPool> pending_pool;
+    struct ReleaseOnFailure {
+        QsaState* state;
+        bool published = false;
+        ~ReleaseOnFailure() {
+            if (!published) qsa_state_release(*state);
+        }
+    } release_on_failure{&st};
     const QsaShapes s = qsa_shapes(g);
     const KvPlan p = kv_plan(s, max_cells, ring_cells);
     const int64_t pages = p.pages;
@@ -774,22 +784,23 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         else if (st.kv_q4) per = {slot_rows * q4_row, slot_rows * q4_row};
         else if (st.kv_int8) per = {slot_rows * s.head_dim, slot_rows * s.head_dim, slot_rows * scale_row, slot_rows * scale_row};
         else per = {slot_rows * s.head_dim * 2, slot_rows * s.head_dim * 2};
-        auto pool = std::make_unique<ElasticPool>();
+        pending_pool = std::make_unique<ElasticPool>();
         const uint64_t G = strata::core::vmm_granularity();
         uint64_t at = 0;
         for (const uint64_t b : per) {
-            pool->off.push_back(at);
+            pending_pool->off.push_back(at);
             at += ((uint64_t) p.slots * b + G - 1) / G * G;
         }
-        pool->per_slot = per;
-        pool->n_slots = p.slots;
-        pool->page_size = s.page_size;
-        if (!pool->range.reserve(at) || !pool_grow(*pool, g_kv_elastic_init, [] { return (strata::core::VmmChunk) 0; })) {
+        pending_pool->per_slot = per;
+        pending_pool->n_slots = p.slots;
+        pending_pool->page_size = s.page_size;
+        if (!pending_pool->range.reserve(at) ||
+            !pool_grow(*pending_pool, g_kv_elastic_init, [] { return (strata::core::VmmChunk) 0; })) {
             std::fprintf(stderr, "strata: the elastic K/V could not reserve or map its pools\n");
             return 0;
         }
-        uint8_t* b = pool->range.base();
-        const uint64_t* o = pool->off.data();
+        uint8_t* b = pending_pool->range.base();
+        const uint64_t* o = pending_pool->off.data();
         if (st.kv_hybrid) { st.k_q = (int8_t*) (b + o[0]); st.k_scale = (uint16_t*) (b + o[1]); st.v_q4 = b + o[2]; }
         else if (st.kv_q4) { st.k_q4 = b + o[0]; st.v_q4 = b + o[1]; }
         else if (st.kv_int8) {
@@ -798,8 +809,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
             st.k_scale = (uint16_t*) (b + o[2]);
             st.v_scale = (uint16_t*) (b + o[3]);
         } else { st.k_pool = (uint16_t*) (b + o[0]); st.v_pool = (uint16_t*) (b + o[1]); }
-        st.kv_elastic = (int32_t) g_pools.size();
-        g_pools.push_back(std::move(pool));
+        // Publish the registry entry only after every fallible host/upload step below has succeeded.
+        st.kv_elastic = -1;
     } else if (st.kv_hybrid) {
         st.k_q = c.take<int8_t>(rows * s.head_dim);
         st.k_scale = c.take<uint16_t>(rows * (s.head_dim / strata::kernels::KV_Q8_GROUP));
@@ -861,16 +872,21 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         const uint64_t bytes = (uint64_t) pages * strata::kernels::kv_block_bytes(s, qsa_kv_format(st)) + 4 * 256;
         uint8_t* h = nullptr;
         uint8_t* d = nullptr;
-        if ((h = kv_host_alloc(bytes)) == nullptr ||
+        bool registered = false;
+        h = kv_host_alloc(bytes, registered);
+        st.kv_host_allocation = h;
+        st.kv_host_allocation_bytes = bytes;
+        st.kv_host_registered = registered;
+        if (h == nullptr ||
             cudaHostGetDevicePointer((void**) &d, h, 0) != cudaSuccess) {
             // both cudaHostRegister and cudaHostAlloc were refused (kv_host_alloc): usually not enough free RAM
             if (p.mode == 1) std::fprintf(stderr, "strata: KV streaming: cannot pin %.2f GiB of RAM for a layer's KV copy "
                                  "(%.2f GiB pinned so far): RAM or the driver refused to pin it - lower the context, "
                                  "or run without --kv-resident\n", (double) bytes / 1073741824.0,
-                                 (double) g_kv_host_bytes / 1073741824.0);
+                                 (double) qsa_kv_host_bytes() / 1073741824.0);
             return 0;
         }
-        g_kv_host_bytes += bytes;
+        qsa_kv_host_allocated(bytes);
         Cursor hc{d};
         if (st.kv_hybrid) {
             st.host.k_q = hc.take<int8_t>(hrows * s.head_dim);
@@ -897,8 +913,11 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         std::vector<float> hc((size_t) max_cells * (s.n_rot / 2)), hs((size_t) max_cells * (s.n_rot / 2));
         strata::kernels::build_rope_table((int) s.n_rot, strata::kernels::rope_scaling(), (int) max_cells,
                                           hc.data(), hs.data());
-        cudaMemcpy(st.cos_tab, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice);
-        cudaMemcpy(st.sin_tab, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice);
+        if (cudaMemcpy(st.cos_tab, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(st.sin_tab, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
+            std::fprintf(stderr, "strata: the RoPE table upload failed\n");
+            return 0;
+        }
         st.owns_rope = true;
         if (s.n_rot == 64)   // the native and prompt-path rope kernels read it (mrope.hpp, STRATA_ROPE_TABLE=1)
             strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
@@ -908,13 +927,25 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     if (p.mode == 0) {
         std::vector<int32_t> tab((size_t) pages);
         for (int64_t i = 0; i < pages; ++i) tab[(size_t) i] = (int32_t) i;
-        cudaMemcpy(st.page_table, tab.data(), tab.size() * 4, cudaMemcpyHostToDevice);
+        if (cudaMemcpy(st.page_table, tab.data(), tab.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
+            std::fprintf(stderr, "strata: the identity K/V page table upload failed\n");
+            return 0;
+        }
     } else if (p.mode == 1) {
         strata::kernels::kv_stream_reset(st.map, nullptr);
     } else {
         strata::kernels::kv_ring_table(st.page_table, pages, p.slots, nullptr);
     }
-    cudaDeviceSynchronize();
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr, "strata: QSA state initialization synchronization failed\n");
+        return 0;
+    }
+    if (pending_pool != nullptr) {
+        st.kv_elastic = (int32_t) g_pools.size();
+        g_pools.push_back(std::move(pending_pool));
+    }
+    release_on_failure.published = true;
+    out = st;
     return c.used;
 }
 

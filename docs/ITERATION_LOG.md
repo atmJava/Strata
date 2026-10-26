@@ -3,6 +3,33 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-93 · QSA host 资源有明确所有者并随 Session 释放
+
+- 目标 / 指标：每个 QSA 状态的 `host_step`、`host_pos` 和 KV streaming 的 pinned host 副本必须有可匹配的
+  释放路径；`qsa_state_init` 的第二次 host 分配、device mapping、RoPE/page-table 上传或最终同步失败时，不能
+  发布部分状态；`session_init` 中途失败也不能留下前面已初始化的状态或 `QsaState` 数组。
+- 假设与预期：旧成功路径只释放 RoPE registry，`QsaState[]`、两块 pinned staging 和 streaming KV host 副本都
+  依赖进程退出。KV 分配只保留 device alias，不保存可 free 的原始 host 地址；第二个 `cudaHostAlloc` 失败会丢掉
+  第一块。初始化中的多个 `cudaMemcpy` 与最终 `cudaDeviceSynchronize` 也没有检查结果。
+- 为什么选这条路线：`QsaState` 保存原始 KV host allocation、字节数和是否经 `cudaHostRegister` 创建；
+  新增 `qsa_state_release()` 按分配类型调用 `cudaFreeHost` 或 `pin_unregister + munmap`，同时释放两块固定地址
+  staging、已拥有的 RoPE registry 并更新 host-byte 计数。`qsa_state_init` 在局部 candidate 上构建，guard 负责
+  失败清理，全部步骤成功后才赋值；elastic pool 也延后到最终成功才进入全局 registry。Session 初始化失败调用
+  `session_release()`，正常释放路径现在释放状态数组本身。
+- 改动与实验：成功路径的 arena 布局、KV 格式和大小、RoPE 内容、page table 内容、host 指针和 graph 可见地址
+  不变；只增加失败检查和 teardown。新增 `qsa_state_resource_test`，覆盖 registered 与 allocated 两种 KV host
+  分配、两块 staging、host-byte 计数、重复 release、借用/拥有 RoPE 两种情况。普通及 ASan/UBSan 构建通过；
+  `layer.cpp` 与 `session.cpp` 通过严格的 C++20 主机侧语法检查（仅跳过既有告警）。CLI 的 graph-only 与正常
+  退出路径先释放 batch borrower，再释放 stage session，最后释放主 session，保持共享 RoPE 的 donor 后释放。
+- 判决：采纳。QSA 的 arena 外资源由状态显式拥有，初始化晚失败和 Session 退出都有确定释放路径。
+- 生产状态与回滚：默认不启用 KV streaming 时只释放两块 staging 和状态数组；启用时释放真实 host 副本；未改
+  推理数值、KV 布局、streaming 策略或 graph 内容；单提交可回退。
+- 未验证：当前没有 CUDA 工具链、CUDA 驱动或 RTX 2080 Ti，未在真实 pinned 内存、`cudaHostRegister` 或 VMM
+  elastic K/V 上测量释放后的资源计数，也未注入真实 `cudaMemcpy`/`cudaDeviceSynchronize` 失败。主机侧测试只
+  验证释放分支和计数，不替代驱动级故障注入。
+- 下一步与理由：核对生产入口是否在成功与失败退出时调用 `session_release()`，并继续清理仍只靠进程退出兜底的
+  多 session/batch 资源。
+
 ## I-20261027-92 · CUDA graph capture 失败不遗留 capture 状态或半成品
 
 - 目标 / 指标：`session_capture()` 为每层记录 pre/post 及可选的 stage graph。capture body、end-capture 或

@@ -6687,6 +6687,10 @@ int main(int argc, char** argv) {
         std::printf("  three sum slightly above it because each launch carries the driver's gap.\n");
         strata::core::session_graphs_free(gr);
         strata::core::doorbell_free(db);
+        for (auto& slots : bslot_ss)
+            for (auto& slot : slots) strata::core::session_release(*slot);
+        for (const auto& stage : stages) strata::core::session_release(stage->ss);
+        strata::core::session_release(ss);
         cudaFree(d_next);
         return 0;
     }
@@ -6770,6 +6774,10 @@ int main(int argc, char** argv) {
         std::printf("                  %8.3f ms layers (%lld x pre+post)\n", ms_layers, (long long) g.n_layers);
         std::printf("                  %8.3f ms per layer\n", ms_layers / (double) g.n_layers);
         std::printf("                  %8.3f ms LM head\n", ms_head);
+        for (auto& slots : bslot_ss)
+            for (auto& slot : slots) strata::core::session_release(*slot);
+        for (const auto& stage : stages) strata::core::session_release(stage->ss);
+        strata::core::session_release(ss);
         return 0;
     }
 
@@ -16861,6 +16869,10 @@ int main(int argc, char** argv) {
 
     strata::core::session_graphs_free(gr);
     strata::core::doorbell_free(db);
+    for (auto& slots : bslot_ss)
+        for (auto& slot : slots) strata::core::session_release(*slot);
+    for (const auto& stage : stages) strata::core::session_release(stage->ss);
+    strata::core::session_release(ss);
     cudaFree(d_next);
     cudaFree(d_logits);
     cudaFree(d_emb);

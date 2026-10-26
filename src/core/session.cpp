@@ -172,7 +172,11 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     const uint64_t first = qsa_state_bytes(g, max_cells, rope == nullptr),
                    rest = qsa_state_bytes(g, max_cells, false);
     s.qsa_state_arena = take(g.n_qsa_layers() > 0 ? first + (uint64_t) (s.qsa_alloc - 1) * rest : 0);
-    s.qsa_states = new QsaState[(size_t) g.n_qsa_layers()]();
+    try {
+        s.qsa_states = new QsaState[(size_t) g.n_qsa_layers()]();
+    } catch (const std::bad_alloc&) {
+        return 0;
+    }
     s.qsa_buf_arena = take(qsa_buffers_bytes(g, max_cells));
 
     uint8_t* qp = (uint8_t*) s.qsa_state_arena;
@@ -180,8 +184,10 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     // attention read null host pointers at the first request ("illegal memory access"), so the session fails here
     for (int64_t j = 0; j < s.qsa_alloc; ++j)
         if (qsa_state_init(g, max_cells, qp + (j == 0 ? 0 : first + (uint64_t) (j - 1) * rest),
-                           s.qsa_states[s.qsa_ord0 + j], j == 0 ? rope : &s.qsa_states[s.qsa_ord0]) == 0)
+                           s.qsa_states[s.qsa_ord0 + j], j == 0 ? rope : &s.qsa_states[s.qsa_ord0]) == 0) {
+            session_release(s);
             return 0;
+        }
 #ifndef NDEBUG
     // THE OWNERSHIP INVARIANT THE RELEASE PATH DEPENDS ON (P2 item 1): one owner when this session built the
     // table, NONE when it borrowed one - so releasing a borrower can never free the donor's memory, and
@@ -221,13 +227,14 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
 }
 
 void session_release(SessionState& s) {
-    // the ALLOCATED ordinals start at qsa_ord0: a split range (layer_lo > 0) that owned its table used to be skipped
-    // here, leaking the table and leaving its #280 registry entry behind
+    // The allocated ordinals start at qsa_ord0: a split range (layer_lo > 0) that owned its table used to be skipped
+    // here.  Each state also owns pinned staging and, under KV streaming, a pinned host copy that is outside the
+    // arena; the same loop releases those resources before the state array itself disappears.
     for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
-        if (s.qsa_states[s.qsa_ord0 + j].owns_rope) {
-            strata::kernels::rope_table_release(s.qsa_states[s.qsa_ord0 + j].cos_tab);
-            s.qsa_states[s.qsa_ord0 + j].owns_rope = false;
-        }
+        qsa_state_release(s.qsa_states[s.qsa_ord0 + j]);
+    delete[] s.qsa_states;
+    s.qsa_states = nullptr;
+    s.qsa_alloc = 0;
 }
 
 void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, void* stream) {
