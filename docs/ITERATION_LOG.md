@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-101 · DFlash2 bind 只发布完整权重
+
+- 目标 / 指标：DFlash2 的 draft vocabulary、gathered draft-head rows、`bind_raw` 元数据和 logits 必须全部成功后
+  才向 drafter 发布 owner。vocab H2D、gather 后的 device synchronize 或 `bind_raw` 失败时，本轮临时 vocab/head-row
+  device buffer 必须自动释放；不能把未上传完成或仅部分有效的 head 报告为可用。
+- 假设与预期：旧 `bind()` 在 gather 前就发布 `dhead_owner_/dhead_`，随后忽略 vocab 上传与 device synchronize
+  的结果；`bind_raw()` 也在 logits 分配结果尚不确定时提前发布 dvocab，并忽略其 H2D 结果。同对象重试或失败回退会
+  留下成员，后续 owner 替换时存在泄漏风险。
+- 为什么选这条路线：draft vocab 使用明确临时 owner，gather 目标使用本地 `CudaPtr`；vocab H2D 和 gather 同步都
+  检查返回值。只有 `bind_raw` 成功后，head owner 才 move 到成员，`vram_` 才增加。`bind_raw` 的 dvocab 同样先由
+  局部 `shared_ptr` 持有，在 top-k 限制和 logits 分配通过后再发布。
+- 改动与实验：成功路径的 vocab 顺序、head rows、gather kernel、logits 宽度、共享权重分支和 VRAM 计数不变。
+  `dflash2.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；
+  `python3 -m pytest tests/terminal -q` 通过（200 passed、46 skipped、93 subtests passed）。
+- 判决：采纳。DFlash2 bind 的可见状态现在以完整上传和 logits 准备完成为边界，失败不会留下未完成的权重 owner。
+- 生产状态与回滚：未改 token mapping、gather 数值、head 类型、graph 或 draft 输出；正常绑定顺序不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、DFlash2 pack 或 RTX 2080 Ti，未真实注入 vocab H2D、gather synchronize 或
+  logits 分配失败。没有 `Dflash2Drafter::bind` 的主机侧故障测试；本阶段为生产控制流静态审查与全量回归。
+- 下一步与理由：继续收口 MTP/DFlash2 的 bulk weight upload 与 sync 检查，并检查多卡 hand-off 初始化失败后的资源回收。
+
 ## I-20261027-100 · MTP draft head 绑定失败可回滚
 
 - 目标 / 指标：非共享 MTP draft head 的 vocab 缓冲、head-row 缓冲、vocab H2D、gather 同步与跨卡 D2D 必须全部

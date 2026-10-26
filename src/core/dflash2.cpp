@@ -409,18 +409,30 @@ bool Dflash2Drafter::bind_raw(EmbedFn embed, const void* head_w, int head_type, 
     head_w_ = head_w;
     head_type_ = head_type;
     n_dvocab_ = head_rows;
+    CudaPtr dvocab_pending;
+    int32_t* dvocab_new = nullptr;
+    std::vector<int32_t> dvocab_host_new;
     if (!vocab.empty()) {
         n_dvocab_ = (int64_t) vocab.size();
-        int32_t* dv = nullptr;
-        if (cudaMalloc((void**) &dv, vocab.size() * 4) != cudaSuccess) { err = "dflash2: draft vocabulary"; return false; }
-        dvocab_owner_ = CudaPtr(dv, CudaFree{});
-        dvocab_ = dv;
-        vram_ += vocab.size() * 4;
-        cudaMemcpy(dvocab_, vocab.data(), vocab.size() * 4, cudaMemcpyHostToDevice);
-        dvocab_host_ = vocab;
+        if (cudaMalloc((void**) &dvocab_new, vocab.size() * 4) != cudaSuccess) {
+            err = "dflash2: draft vocabulary";
+            return false;
+        }
+        dvocab_pending = CudaPtr(dvocab_new, CudaFree{});
+        if (cudaMemcpy(dvocab_new, vocab.data(), vocab.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = "dflash2: draft vocabulary upload";
+            return false;
+        }
+        dvocab_host_new = vocab;
     }
     if ((n_dvocab_ + kernels::kDf2TopBlocks - 1) / kernels::kDf2TopBlocks > 4096) { err = "dflash2: the head has too many rows for the top-k"; return false; }
     if (!alloc_logits(err)) return false;
+    if (dvocab_pending) {
+        dvocab_owner_ = std::move(dvocab_pending);
+        dvocab_ = dvocab_new;
+        dvocab_host_ = std::move(dvocab_host_new);
+        vram_ += vocab.size() * 4;
+    }
     bound_ = true;
     return true;
 }
@@ -505,17 +517,30 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
             err = "dflash2: the draft vocabulary's head rows do not fit";
             return false;
         }
-        dhead_owner_ = CudaPtr(dh, CudaFree{});
-        dhead_ = dh;
-        cudaMemcpy(dv, vocab.data(), vocab.size() * 4, cudaMemcpyHostToDevice);
-        kernels::gather_rows((const uint8_t*) hw, row_bytes, dv, (int64_t) vocab.size(), dhead_, nullptr);
-        cudaDeviceSynchronize();
-        cudaFree(dv);
-        vram_ += (uint64_t) ((int64_t) vocab.size() * row_bytes);
-        hw = dhead_;
+        struct VocabFree {
+            int32_t* p;
+            ~VocabFree() { if (p != nullptr) cudaFree(p); }
+        } vocab_free{dv};
+        CudaPtr dhead_pending(dh, CudaFree{});
+        if (cudaMemcpy(dv, vocab.data(), vocab.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = "dflash2: the draft vocabulary upload failed";
+            return false;
+        }
+        kernels::gather_rows((const uint8_t*) hw, row_bytes, dv, (int64_t) vocab.size(), dh, nullptr);
+        const cudaError_t sync = cudaDeviceSynchronize();
+        if (sync != cudaSuccess) {
+            err = std::string("dflash2: draft head gather: ") + cudaGetErrorString(sync);
+            return false;
+        }
+        hw = dh;
         head_rows = (int64_t) vocab.size();
+        if (!bind_raw(embed, hw, head->type(), head_rows, vocab, err)) return false;
+        dhead_owner_ = std::move(dhead_pending);
+        dhead_ = dh;
+        vram_ += (uint64_t) ((int64_t) vocab.size() * row_bytes);
+    } else {
+        if (!bind_raw(embed, hw, head->type(), head_rows, vocab, err)) return false;
     }
-    if (!bind_raw(embed, hw, head->type(), head_rows, vocab, err)) return false;
     std::fprintf(stderr, "strata dflash2: %lld-token draft head (%.1f MiB), drafter %.0f MiB of VRAM\n", (long long) n_dvocab_,
                  (double) (n_dvocab_ * row_bytes) / 1048576.0, (double) vram_ / 1048576.0);
     return true;
