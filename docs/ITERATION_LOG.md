@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-119 · Pin reserve 释放失败不丢所有权
+
+- 目标 / 指标：soft/hard pin reserves 只有 `cudaFreeHost` 成功后才能清空指针、字节数和预算；失败后保留原记录，
+  后续 `pin_reserve_release_*` 仍可重试。
+- 假设与预期：旧 `free_locked()` 不返回驱动结果，reserve 调用方无论成功失败都立即把指针和字节归零；释放失败后
+  既失去重试入口，也让“仍占用的 pin 内存”在预算中消失。
+- 为什么选这条路线：让 `free_locked()` 返回 `cudaError_t`，两个 reserve 释放函数仅在成功时 clear；
+  `host_alloc_guarded()` 在释放 headroom 后也只对成功释放的 reserve 清状态；普通 guarded free 仍保持接口不变。
+- 改动与实验：`mapped_host_test` 模拟 800 MiB reserves，注入 soft free 失败并断言指针/字节保留，重试后清空；
+  hard reserve 成功释放后 `sim_used == 0`。普通及 ASan/UBSan 通过，MTP clang static analyzer 无告警。
+- 判决：采纳。reserve 的驱动所有权与模拟预算现在只在成功释放后同步消失。
+- 生产状态与回滚：reserve 默认在 Linux 关闭；成功路径不变，只在驱动释放失败时保留状态，单提交可回退。
+- 未验证：当前无 CUDA 工具链或驱动，free failure 由 link wrapper 注入；未测试真实 WDDM 下 reserve free 失败。
+- 下一步与理由：完成最终回归、远端 SHA 复核和 08:00 截止报告。
+
 ## I-20261027-118 · PinnedRing 在自有 device 上释放
 
 - 目标 / 指标：PinnedRing 的 event 与 pinned slots 必须在其首次使用的 CUDA device 上释放；成员析构发生在调用者的

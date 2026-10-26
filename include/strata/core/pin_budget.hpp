@@ -72,8 +72,8 @@ inline cudaError_t alloc_locked(State& s, void** p, size_t bytes, unsigned flags
     if (e == cudaSuccess) sim_charge(s, *p, bytes);
     return e;
 }
-inline void free_locked(State& s, void* p) {
-    if (p == nullptr) return;
+inline cudaError_t free_locked(State& s, void* p) {
+    if (p == nullptr) return cudaSuccess;
     const auto it = s.sim_ptrs.find(p);
     const uint64_t bytes = it == s.sim_ptrs.end() ? 0 : it->second;
     const cudaError_t result = cudaFreeHost(p);
@@ -81,6 +81,7 @@ inline void free_locked(State& s, void* p) {
         s.sim_used -= bytes;
         s.sim_ptrs.erase(it);
     }
+    return result;
 }
 
 inline uint64_t soft_reserve_default_mib() {
@@ -151,7 +152,7 @@ inline void pin_reserve_release_soft() {
     auto& s = pin_detail::st();
     std::lock_guard<std::mutex> g(s.mu);
     if (s.soft == nullptr) return;
-    pin_detail::free_locked(s, s.soft);
+    if (pin_detail::free_locked(s, s.soft) != cudaSuccess) return;
     s.soft = nullptr;
     std::fprintf(stderr, "strata: pinned-memory headroom: %llu MiB handed back after the expert arena\n",
                  (unsigned long long) (s.soft_bytes >> 20));
@@ -162,7 +163,7 @@ inline void pin_reserve_release_hard() {
     auto& s = pin_detail::st();
     std::lock_guard<std::mutex> g(s.mu);
     if (s.hard == nullptr) return;
-    pin_detail::free_locked(s, s.hard);
+    if (pin_detail::free_locked(s, s.hard) != cudaSuccess) return;
     s.hard = nullptr;
     s.hard_bytes = 0;
 }
@@ -196,8 +197,14 @@ inline cudaError_t host_alloc_guarded(void** p, size_t bytes, unsigned flags) {
         if (e == cudaSuccess) return e;
         (void) cudaGetLastError();
         if (s.hard == nullptr && s.soft == nullptr) return e;
-        if (s.soft != nullptr) { pin_detail::free_locked(s, s.soft); s.soft = nullptr; s.soft_bytes = 0; }
-        if (s.hard != nullptr) { pin_detail::free_locked(s, s.hard); s.hard = nullptr; s.hard_bytes = 0; }
+        if (s.soft != nullptr && pin_detail::free_locked(s, s.soft) == cudaSuccess) {
+            s.soft = nullptr;
+            s.soft_bytes = 0;
+        }
+        if (s.hard != nullptr && pin_detail::free_locked(s, s.hard) == cudaSuccess) {
+            s.hard = nullptr;
+            s.hard_bytes = 0;
+        }
         ++s.hard_retries;
         std::fprintf(stderr, "strata: pinned-memory headroom: a %llu KiB pinned buffer was refused; the held headroom is handed back "
                              "and the allocation retried\n", (unsigned long long) (bytes >> 10));
@@ -212,7 +219,7 @@ inline void host_free_guarded(void* p) {
     if (p == nullptr) return;
     auto& s = pin_detail::st();
     std::lock_guard<std::mutex> g(s.mu);
-    pin_detail::free_locked(s, p);
+    (void) pin_detail::free_locked(s, p);
 }
 
 /// The sentence every hard failure ends with, so the app can recognise it in the log.

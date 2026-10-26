@@ -155,6 +155,22 @@ int main() {
     check(pin.sim_used == 0, "a successful host unregistration did not return its pin budget");
     std::free(registered);
 
+    reset_counts();
+    pin.sim_budget = std::size_t{1} << 30;
+    strata::core::pin_reserve_take();
+    check(pin.soft != nullptr && pin.hard != nullptr, "the simulated pin reserves were not taken");
+    fail_host_free = true;
+    strata::core::pin_reserve_release_soft();
+    check(pin.soft != nullptr && pin.soft_bytes != 0,
+          "a failed soft-reserve free cleared the reserve");
+    fail_host_free = false;
+    strata::core::pin_reserve_release_soft();
+    check(pin.soft == nullptr && pin.soft_bytes == 0,
+          "a successful soft-reserve free did not clear the reserve");
+    strata::core::pin_reserve_release_hard();
+    check(pin.hard == nullptr && pin.hard_bytes == 0 && pin.sim_used == 0,
+          "the hard reserve did not clear its pointer, bytes and pin budget");
+
     std::puts("mapped_host_test: mapped host ownership and failure rollback pass");
     return 0;
 }
