@@ -28,8 +28,7 @@ class GgufPyLookup(unittest.TestCase):
                 self.assertEqual(_paths.gguf_py(), d)
         env = {k: v for k, v in os.environ.items() if k not in ("STRATA_GGUF_PY", "STRATA_INSTALL_DIR")}
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch.object(_paths, "ENGINE", Path(d) / "a" / "b"), \
-                mock.patch.object(_paths, "_install_dirs", return_value=[]):
+                mock.patch.object(_paths, "ENGINE", Path(d) / "a" / "b"):
             with self.assertRaises(SystemExit) as cm:
                 _paths.gguf_py()
             self.assertIn("STRATA_GGUF_PY", str(cm.exception))

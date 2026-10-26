@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-109 · 修复 GGUF 路径测试的过期 mock
+
+- 目标 / 指标：`python3 -m unittest tools.test_gguf_paths -v` 必须全部通过，并继续验证环境变量提示。
+- 假设与预期：`_paths.py` 已收敛为 `gguf_py()` 内部构造候选列表，测试仍在 patch 已不存在的 `_install_dirs`，因此
+  mock 在进入上下文时直接抛 `AttributeError`，没有执行路径查找。
+- 为什么选这条路线：这是测试与当前 API 脱节，不需要改生产路径解析；删除过期 mock 后，临时不存在的 `ENGINE` 已足以
+  强制走缺失分支并检查异常文本。
+- 改动与实验：`test_env_wins_and_message_names_it` 继续清除 `STRATA_GGUF_PY` / `STRATA_INSTALL_DIR`，并把 `ENGINE`
+  指向临时目录；移除不存在属性的 patch。`python3 -m unittest tools.test_gguf_paths -v` 通过 2 tests。
+- 判决：采纳。该测试恢复为有效的黑盒契约检查。
+- 生产状态与回滚：未修改 `_paths.py` 或安装路径行为；只修测试，单提交可回退。
+- 未验证：只在当前 Linux x86_64、Python 3.13 环境运行；未在 Windows 安装目录布局上重跑。
+- 下一步与理由：继续做剩余可运行故障测试与静态资源审查，并定期重试 origin 推送。
+
 ## I-20261027-108 · Mapped staging 按 pin 预算统一释放
 
 - 目标 / 指标：通过 `alloc_mapped_pinned()` / `host_alloc_guarded()` 取得的 mapped-pinned host 内存，必须通过
