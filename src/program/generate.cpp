@@ -1492,15 +1492,34 @@ int32_t* res_pairs_alloc(size_t cap, const std::vector<int>& devs) {
 /// it over, `idle` says whether it has finished; the owner never posts while a job runs.
 class JobThread {
 public:
-    JobThread() : th_([this] { loop(); }) {}
+    JobThread() {
+        try {
+            th_ = std::thread([this] { loop(); });
+            threaded_ = true;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "strata serve: adaptive copy worker did not start (%s); copies run on the request thread\n",
+                         e.what());
+        } catch (...) {
+            std::fprintf(stderr, "strata serve: adaptive copy worker did not start; copies run on the request thread\n");
+        }
+    }
     ~JobThread() {
-        { std::lock_guard<std::mutex> lk(mu_); quit_ = true; }
-        cv_.notify_one();
-        th_.join();
+        if (th_.joinable()) {
+            { std::lock_guard<std::mutex> lk(mu_); quit_ = true; }
+            cv_.notify_one();
+            th_.join();
+        }
     }
     JobThread(const JobThread&) = delete;
     JobThread& operator=(const JobThread&) = delete;
+    bool threaded() const { return threaded_; }
     void post(std::function<void()> f) {
+        if (!threaded_) {
+            done_.store(false, std::memory_order_release);
+            f();
+            done_.store(true, std::memory_order_release);
+            return;
+        }
         {
             std::lock_guard<std::mutex> lk(mu_);
             job_ = std::move(f);
@@ -1546,6 +1565,7 @@ private:
     bool has_ = false, quit_ = false;
     std::atomic<bool> done_{true};
     std::thread th_;   // last: started once the members above exist
+    bool threaded_ = false;
 };
 
 // ---- --serve's conversation cache.  A chat or an agent sends the whole conversation again with every request, and
@@ -9911,9 +9931,12 @@ int main(int argc, char** argv) {
             for (auto& st : stages) ahomes.push_back({&st->cache, st->adapt_stream, st->adapt_ev, st->dev, false});
             if (o.adapt_async) {
                 ajob = std::make_unique<JobThread>();
-                std::fprintf(stderr, "strata serve: adaptive tier asynchronous (--adapt-async 1): up to %lld swaps per round, "
-                                     "a round every %d windows%s\n", (long long) a_cap, o.adapt_every,
-                             a_arena ? " (arena: copy-in only)" : "");
+                if (ajob->threaded())
+                    std::fprintf(stderr, "strata serve: adaptive tier asynchronous (--adapt-async 1): up to %lld swaps per round, "
+                                         "a round every %d windows%s\n", (long long) a_cap, o.adapt_every,
+                                 a_arena ? " (arena: copy-in only)" : "");
+                else
+                    std::fprintf(stderr, "strata serve: adaptive tier falls back to request-thread copies\n");
             } else {
                 std::fprintf(stderr, "strata serve: adaptive tier: blocking, and the asynchronous tier is tried once the session "
                                      "shows the swaps hold the windows up (--adapt-async 0 or STRATA_ADAPT_ASYNC=0: never)\n");
@@ -11082,7 +11105,9 @@ int main(int argc, char** argv) {
                 char adapt_txt[160] = "";
                 if (!drive.d.usage.empty() && ajob)
                     std::snprintf(adapt_txt, sizeof adapt_txt,
-                                  "; adaptive tier (async): %lld rounds started, %lld experts swapped in",
+                                  ajob->threaded()
+                                      ? "; adaptive tier (async): %lld rounds started, %lld experts swapped in"
+                                      : "; adaptive tier (request-thread fallback): %lld rounds started, %lld experts swapped in",
                                   (long long) (a_rounds - bt_a_rounds0), (long long) (a_swapped - bt_a_swapped0));
                 else if (!drive.d.usage.empty())
                     std::snprintf(adapt_txt, sizeof adapt_txt, "; adaptive tier: %lld rounds, %lld experts swapped in",
@@ -14788,9 +14813,12 @@ int main(int argc, char** argv) {
                     const auto act = asw.window(asw_ms, asw_wait_ms, a + 1);
                     if (act == strata::core::AdaptAsyncSelf::Action::ToAsync) {
                         ajob = std::make_unique<JobThread>();
-                        std::fprintf(stderr, "strata serve: adaptive tier: the swaps held the windows up by %.1f%% (%.2f ms per "
-                                             "token): trying the asynchronous tier for a while\n",
-                                     100.0 * asw.wait_fraction(), asw.measure_ms_per_token());
+                        if (ajob->threaded())
+                            std::fprintf(stderr, "strata serve: adaptive tier: the swaps held the windows up by %.1f%% (%.2f ms per "
+                                                 "token): trying the asynchronous tier for a while\n",
+                                         100.0 * asw.wait_fraction(), asw.measure_ms_per_token());
+                        else
+                            std::fprintf(stderr, "strata serve: adaptive tier keeps request-thread copies\n");
                     } else if (act == strata::core::AdaptAsyncSelf::Action::ToBlocking) {
                         adapt_quiesce();
                         ajob.reset();

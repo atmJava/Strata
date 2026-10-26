@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-54 · adaptive copy worker 失败退化请求线程
+
+- 目标 / 指标：可选 `--adapt-async` 的复制 worker 被系统拒绝时，请求仍应完成 adaptive refill；不能因线程构造异常退出
+  serve，也不能向日志虚报异步执行。
+- 假设与预期：`JobThread` 构造时直接启动线程，`make_unique<JobThread>` 的异常会穿过主循环。该 worker 只承担专家换入
+  复制，调用线程可以同步执行同一 job。
+- 为什么选这条路线：记录失败并令 `post()` 在请求线程同步执行 job，`idle()` 随后为真。调用方现有状态机无需改写，
+  复制内容、顺序和 fence 保持；只失去后台重叠。
+- 改动与实验：线程创建失败后保存 `threaded_=false`，跳过无关的 quit/join；`post()` 同步运行 job 并恢复 idle。启动日志和
+  batch 统计区分 async 与 request-thread fallback。成功路径仍使用原后台线程。
+- 结果：`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA 调用由同步 shim 模拟；跳过该配置
+  原有的未使用变量告警）。`git diff --check` 通过。没有真实线程配额失败、serve 请求、RTX 2080 Ti 或双卡 adaptive swap
+  验证。
+- 判决：采纳。可选异步复制失败只降低重叠，不让请求丢失 adaptive refill 或终止进程。
+- 生产状态与回滚：未改成功路径线程、复制 job、事件或状态机；单提交可回退。
+- 学到什么：线程对象需要显式区分“已启动”和“可用”，否则构造失败后所有 `post/idle` 调用方都会建立在错误前提上。
+- 下一步与理由：继续审查 checkpoint stage 线程组，再开始本轮综合 Python/CPU 回归。
+
 ## I-20261027-53 · graph launch 线程失败返回可清理错误
 
 - 目标 / 指标：异步 verify graph launch 的 helper 线程创建失败时，constructor 不能把异常抛出所有权边界，也不能让
