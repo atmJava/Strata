@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-50 · sm_75 prefill 恢复缺失的 gfx11 回退符号
+
+- 目标 / 指标：专用 sm_75 CUDA 树必须能编译 `prefill.cpp`。收敛提交删除 gfx11 WMMA 源和头文件后，残留的两个调用不能
+  再造成未声明符号，同时默认路径不能悄悄启用 gfx11 专用算法。
+- 假设与预期：`strata_pf_padded_gemm_available()` 与 `strata_pf_hcdown_bf16()` 只由已删除的 `wmma_gemm.h` 声明；当前树
+  没有 `nvcc` 时，主机编译器在 `prefill.cpp` 的 430、2978 行左右直接报未声明。
+- 为什么选这条路线：目标发行版只支持 sm_75，gfx11 WMMA 产品不属于发行边界。恢复与旧 CUDA 构建相同的 `false` 回退，
+  比删除整个调用方更小，也保留 `STRATA_PF_PAD` 的安全拒绝和 `STRATA_PF_HCDOWN` 的显式错误。
+- 改动与实验：在非 HIP 构建中提供 `false` 内联回退；`STRATA_PF_PAD` 不填充激活行，`STRATA_PF_HCDOWN` 在请求不存在
+  的产品时仍旧失败并给出原有错误。默认环境和成功请求路径不变。
+- 结果：`prefill.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA 调用由同步 shim 模拟；DFlash2 未启用，
+  跳过该配置原有的未使用变量告警）。`git diff --check` 通过。未运行 `nvcc`、CUDA sm_75、RTX 2080 Ti 或真实 prefill；
+  没有验证 gfx11，因为该后端已不在发行版中。
+- 判决：采纳。修复当前树中可复现的编译阻断，不扩大发行边界。
+- 生产状态与回滚：默认路径、字节、模型装载和 prefill 分区不变；单提交可回退。目标机仍需用 CUDA toolkit 完成真实编译。
+- 学到什么：删除后端源文件时必须同时处理宿主侧回退声明；仅删除 CMake 目标和实现不足以保持编译闭包。
+- 下一步与理由：继续用主机侧编译和静态审查查找其他收敛遗留，再集中跑 Python 与 CPU 合成回归。
+
 ## I-20261027-49 · prefill 与 native dense 辅助线程失败保持装载可用
 
 - 目标 / 指标：prefill stager 的复制 worker、expert issuer 以及 native dense 的 BF16→Q8_0 转换 helper 在系统拒绝新线程时，

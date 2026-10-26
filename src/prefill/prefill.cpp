@@ -412,6 +412,15 @@ inline bool hcd_exact() {
     static const bool v = [] { const char* e = std::getenv("STRATA_HCD_EXACT"); return e && e[0] == '1'; }();
     return v;
 }
+// The sm_75 CUDA distribution has no gfx11 WMMA products.  Keep the callers below explicit about their fallback:
+// STRATA_PF_PAD declines to pad, and STRATA_PF_HCDOWN reports that its requested product is unavailable.
+#if !defined(STRATA_USE_HIP)
+inline bool strata_pf_padded_gemm_available() { return false; }
+inline bool strata_pf_hcdown_bf16(const uint16_t*, int64_t, const uint16_t*, const uint16_t*, int64_t, int64_t,
+                                  float*, float*, int64_t, int64_t, void* = nullptr) {
+    return false;
+}
+#endif
 inline bool hc_pad() { return pf_hcdown() || hcd_exact(); }
 inline bool cvec_fuse() {
     static const bool v = [] { const char* e = std::getenv("STRATA_CVEC_FUSE"); return e && e[0] == '1'; }();
