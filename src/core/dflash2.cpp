@@ -370,37 +370,104 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
 }
 
 bool Dflash2Drafter::alloc(std::string& err) {
-    auto dev = [&](auto** p, size_t n) {
-        using T = std::remove_pointer_t<std::remove_reference_t<decltype(*p)>>;
-        if (cudaMalloc((void**) p, n * sizeof(T)) != cudaSuccess) return false;
-        vram_ += n * sizeof(T);
-        return true;
+    std::vector<std::pair<void**, size_t>> requests;
+    auto add = [&](auto** p, size_t n) {
+        requests.push_back({(void**) p, n * sizeof(**p)});
     };
     const size_t B = kRows;
-    bool ok = dev(&d_meta_, 32) && dev(&xq_, kernels::native_q8_1_bytes(N_, kRows) + 4096) && dev(&xqp_, (size_t) 5 * N_ * 8 + 4096) && dev(&xdp_, (size_t) 5 * N_ / 32 * 8 + 64) && dev(&xqc_, (size_t) 5 * N_ * 8 + 4096) && dev(&xdc_, (size_t) 5 * N_ / 32 * 8 + 64) && dev(&rt_ctx_, B * 128) && dev(&rt_blk_, B * 128) &&
-              dev(&fcy_, B * N_) && dev(&hctx_, B * N_) && dev(&kc_, B * NKV_ * HD_) && dev(&vc_, B * NKV_ * HD_) && dev(&h_, B * N_) && dev(&xn_, B * N_) &&
-              dev(&xc_, B * N_) && dev(&dyn_, B * 640) && dev(&q_, B * NH_ * HD_) && dev(&qn_, B * NH_ * HD_) && dev(&k_, B * NKV_ * HD_) && dev(&v_, B * NKV_ * HD_) &&
-              dev(&kblk_, B * NKV_ * HD_) && dev(&ao_, B * NH_ * HD_) && dev(&o_, B * N_) && dev(&gate_, B * I_) && dev(&up_, B * I_) && dev(&mlp_, B * N_) &&
-              dev(&part_, (size_t) kernels::kDf2MaxChunks * 8 * 32 * 130) && dev(&fn_, B * N_) && dev(&topval_, kDrafts * 16) && dev(&toptok_, kDrafts * 16) &&
-              dev(&hsel_, kDrafts * rank_) && dev(&topscratch_, (size_t) kDrafts * kernels::kDf2TopBlocks * kernels::kDf2TopK * 2);
-    for (int l = 0; ok && l < L_; ++l) ok = dev(&kring_[l], (size_t) kRing * NKV_ * HD_) && dev(&vring_[l], (size_t) kRing * NKV_ * HD_);
-    if (!ok) { err = "dflash2: the drafter's buffers do not fit in VRAM"; return false; }
-    void* hd = nullptr;
-    void* dd = nullptr;
-    if (!mapped(32 * 4, (void**) &hd, &dd)) { err = "dflash2: mapped staging"; return false; }
-    h_meta_ = (int32_t*) hd;
-    m_meta_ = (int32_t*) dd;
-    if (!mapped(64 * 4, &hd, &dd)) { err = "dflash2: mapped output"; return false; }
-    h_out_ = (int32_t*) hd;
-    out_tok_ = (int32_t*) dd;            // the select kernel writes the 7 picks here (host-visible) ...
-    out_prob_ = (float*) dd + 16;        // ... and their probabilities at +16 ints
-    cudaMemset(rt_ctx_, 0, B * 128 * 4);
-    cudaMemset(xqp_, 0, (size_t) 5 * N_ * 8 + 4096);
-    cudaMemset(xdp_, 0, ((size_t) 5 * N_ / 32 * 8 + 64) * 4);
-    cudaMemset(xqc_, 0, (size_t) 5 * N_ * 8 + 4096);
-    cudaMemset(xdc_, 0, ((size_t) 5 * N_ / 32 * 8 + 64) * 4);
-    for (int l = 0; l < L_; ++l) { cudaMemset(kring_[l], 0, (size_t) kRing * NKV_ * HD_ * 4); cudaMemset(vring_[l], 0, (size_t) kRing * NKV_ * HD_ * 4); }
-    return cudaDeviceSynchronize() == cudaSuccess;
+    add(&d_meta_, 32); add(&xq_, kernels::native_q8_1_bytes(N_, kRows) + 4096);
+    add(&xqp_, (size_t) 5 * N_ * 8 + 4096); add(&xdp_, (size_t) 5 * N_ / 32 * 8 + 64);
+    add(&xqc_, (size_t) 5 * N_ * 8 + 4096); add(&xdc_, (size_t) 5 * N_ / 32 * 8 + 64);
+    add(&rt_ctx_, B * 128); add(&rt_blk_, B * 128);
+    add(&fcy_, B * N_); add(&hctx_, B * N_); add(&kc_, B * NKV_ * HD_); add(&vc_, B * NKV_ * HD_);
+    add(&h_, B * N_); add(&xn_, B * N_); add(&xc_, B * N_); add(&dyn_, B * 640);
+    add(&q_, B * NH_ * HD_); add(&qn_, B * NH_ * HD_); add(&k_, B * NKV_ * HD_); add(&v_, B * NKV_ * HD_);
+    add(&kblk_, B * NKV_ * HD_); add(&ao_, B * NH_ * HD_); add(&o_, B * N_); add(&gate_, B * I_); add(&up_, B * I_);
+    add(&mlp_, B * N_); add(&part_, (size_t) kernels::kDf2MaxChunks * 8 * 32 * 130); add(&fn_, B * N_);
+    add(&topval_, kDrafts * 16); add(&toptok_, kDrafts * 16); add(&hsel_, kDrafts * rank_);
+    add(&topscratch_, (size_t) kDrafts * kernels::kDf2TopBlocks * kernels::kDf2TopK * 2);
+    for (int l = 0; l < L_; ++l) {
+        add(&kring_[l], (size_t) kRing * NKV_ * HD_);
+        add(&vring_[l], (size_t) kRing * NKV_ * HD_);
+    }
+
+    std::vector<void*> made;
+    made.reserve(requests.size());
+    auto free_made = [&] {
+        for (void* p : made) if (p != nullptr) cudaFree(p);
+        made.clear();
+    };
+    size_t total = 0;
+    for (const auto& [slot, bytes] : requests) {
+        void* p = nullptr;
+        if (cudaMalloc(&p, bytes) != cudaSuccess) {
+            free_made();
+            err = "dflash2: the drafter's buffers do not fit in VRAM";
+            return false;
+        }
+        made.push_back(p);
+        total += bytes;
+    }
+    void* meta_host = nullptr;
+    void* meta_device = nullptr;
+    if (!mapped(32 * 4, &meta_host, &meta_device)) {
+        free_made();
+        err = "dflash2: mapped staging";
+        return false;
+    }
+    void* out_host = nullptr;
+    void* out_device = nullptr;
+    if (!mapped(64 * 4, &out_host, &out_device)) {
+        strata::core::host_free_guarded(meta_host);
+        free_made();
+        err = "dflash2: mapped output";
+        return false;
+    }
+
+    for (size_t i = 0; i < requests.size(); ++i) *requests[i].first = made[i];
+    h_meta_ = (int32_t*) meta_host;
+    m_meta_ = (int32_t*) meta_device;
+    h_out_ = (int32_t*) out_host;
+    out_tok_ = (int32_t*) out_device;       // the select kernel writes the 7 picks here (host-visible) ...
+    out_prob_ = (float*) out_device + 16;   // ... and their probabilities at +16 ints
+    vram_ += total;
+
+    auto release_buffers = [&] {
+        for (const auto& [slot, bytes] : requests) {
+            (void) bytes;
+            if (*slot != nullptr) cudaFree(*slot);
+            *slot = nullptr;
+        }
+        if (h_meta_ != nullptr) strata::core::host_free_guarded(h_meta_);
+        if (h_out_ != nullptr) strata::core::host_free_guarded(h_out_);
+        h_meta_ = nullptr;
+        m_meta_ = nullptr;
+        h_out_ = nullptr;
+        out_tok_ = nullptr;
+        out_prob_ = nullptr;
+        vram_ -= total;
+    };
+    auto zero = [](void* p, size_t bytes) { return cudaMemset(p, 0, bytes) == cudaSuccess; };
+    const bool zeroed =
+        zero(rt_ctx_, B * 128 * 4) && zero(xqp_, (size_t) 5 * N_ * 8 + 4096) &&
+        zero(xdp_, ((size_t) 5 * N_ / 32 * 8 + 64) * 4) && zero(xqc_, (size_t) 5 * N_ * 8 + 4096) &&
+        zero(xdc_, ((size_t) 5 * N_ / 32 * 8 + 64) * 4);
+    bool rings_zeroed = zeroed;
+    for (int l = 0; rings_zeroed && l < L_; ++l)
+        rings_zeroed = zero(kring_[l], (size_t) kRing * NKV_ * HD_ * 4) &&
+                       zero(vring_[l], (size_t) kRing * NKV_ * HD_ * 4);
+    if (!rings_zeroed) {
+        release_buffers();
+        err = "dflash2: the private buffers could not be initialized";
+        return false;
+    }
+    const cudaError_t sync = cudaDeviceSynchronize();
+    if (sync != cudaSuccess) {
+        release_buffers();
+        err = std::string("dflash2: private buffer initialization: ") + cudaGetErrorString(sync);
+        return false;
+    }
+    return true;
 }
 
 bool Dflash2Drafter::bind_raw(EmbedFn embed, const void* head_w, int head_type, int64_t head_rows, const std::vector<int32_t>& vocab, std::string& err) {

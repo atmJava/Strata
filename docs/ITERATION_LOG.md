@@ -3,6 +3,27 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-103 · DFlash2 private buffers 事务分配
+
+- 目标 / 指标：DFlash2 的三十余块 private device buffer、每层 K/V ring、两块 mapped staging/output 必须整体成功
+  后才发布；中途 `cudaMalloc`、device alias、memset 或最终同步失败时，本次已取得的所有资源必须释放并把成员清空。
+  `vram_` 只计算最终保留的 private buffer。
+- 假设与预期：旧 `alloc()` 使用长 `&&` 链，并把每个成功 allocation 立即写入成员；中途失败会留下前半个 drafter，
+  依赖调用方随后 release。mapped meta 成功后 output 失败也会提前发布 meta；memset 与最终 synchronize 返回值未检查，
+  可能把未初始化 buffer 报告为可用。
+- 为什么选这条路线：先构造 `(成员指针, 字节数)` 请求表并预留本地结果数组，再逐块 `cudaMalloc` 到局部；mapped
+  input/output 也先在局部完成。全部成功后才写成员并增加 `vram_`。memset 组和最终 synchronize 失败时，统一释放
+  请求表中的 device 块、两块 mapped host，并清空对应成员/`vram_`。成功路径的 buffer 大小、顺序、清零范围和持久
+  member 地址不变。
+- 改动与实验：`dflash2.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；
+  `python3 -m pytest tests/terminal -q` 通过（200 passed、46 skipped、93 subtests passed）。
+- 判决：采纳。DFlash2 private buffer 不再以半分配状态发布，初始化失败能自行回滚。
+- 生产状态与回滚：未改 pack/head 权重、ring 大小、缓存布局、graph 或 draft 数值；只改分配发布和失败清理；单提交
+  可回退。
+- 未验证：当前无 CUDA 工具链、驱动、DFlash2 pack 或 RTX 2080 Ti，未真实注入中途 `cudaMalloc`、alias、memset 或
+  synchronize 失败。主机侧没有 DFlash2 `alloc()` 故障测试；本阶段是严格静态审查加全量 Terminal/Control 回归。
+- 下一步与理由：检查 DFlash2 pack load 的 blob/tensor 上传失败回滚，然后运行最终跨模块验证并审计残余风险。
+
 ## I-20261027-102 · MTP bulk 加载检查上传完成
 
 - 目标 / 指标：MTP 的 Q4 dense、dense、experts、K/V zero、arena、identity table 和 coupled sampling 初始化必须
