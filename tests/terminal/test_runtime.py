@@ -104,7 +104,12 @@ class RuntimeTests(unittest.TestCase):
         host = runtime.Host("local", shutdown_timeout=2)
         child = mock.Mock(pid=987654)
         child.wait.return_value = 0
-        with mock.patch.object(runtime.subprocess, "Popen", return_value=child), \
+
+        def spawn(command, **_kwargs):
+            Path(command[command.index("--ready-file") + 1]).write_text("{}", encoding="utf-8")
+            return child
+
+        with mock.patch.object(runtime.subprocess, "Popen", side_effect=spawn), \
                 mock.patch.object(runtime.procs, "write_record", side_effect=OSError("record failed")), \
                 mock.patch.object(host, "_kill_child_tree") as kill:
             with self.assertRaisesRegex(OSError, "record failed"):
@@ -112,6 +117,8 @@ class RuntimeTests(unittest.TestCase):
         kill.assert_called_once_with()
         child.wait.assert_called_once_with(timeout=10)
         self.assertIsNone(host.owner_write_fd)
+        self.assertIsNone(host.ready_path)
+        self.assertEqual(list((self.root / "runtime").glob("*.ready.json")), [])
 
     def test_popen_failure_closes_launch_descriptors(self):
         host = runtime.Host("local", shutdown_timeout=2)

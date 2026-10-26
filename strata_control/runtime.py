@@ -710,6 +710,7 @@ class Host:
     def _launch(self, args: list[str], source: Path, source_bytes: bytes,
                 revision: str | None) -> None:
         ready = self.state_path.parent / f"{self.name}-{uuid.uuid4().hex}.ready.json"
+        self.ready_path = ready
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -739,7 +740,13 @@ class Host:
                                               stderr=subprocess.STDOUT, close_fds=True,
                                               pass_fds=(reader,), start_new_session=True, env=child_env)
         except BaseException:
-            os.close(writer)
+            try:
+                os.close(writer)
+            finally:
+                try:
+                    self._clear_ready()
+                except OSError:
+                    pass
             raise
         finally:
             os.close(reader)
@@ -752,7 +759,6 @@ class Host:
             # this instance. Stop this child immediately instead.
             self._abort_launch()
             raise
-        self.ready_path = ready
         self.args, self.source, self.source_bytes, self.revision = list(args), source, source_bytes, revision
         self.expected_attestation = expected_attestation
         self.last_error = None
@@ -909,6 +915,10 @@ class Host:
             except (subprocess.TimeoutExpired, OSError):
                 pass
         self._close_owner_pipe()
+        try:
+            self._clear_ready()
+        except OSError:
+            pass
 
     def _kill_child_tree(self) -> None:
         """Kill the server this host started and its dedicated process group."""

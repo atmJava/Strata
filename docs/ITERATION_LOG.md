@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-47 · 托管启动回滚清理子进程 ready 文件
+
+- 目标 / 指标：托管服务器进程启动后，如果所有权记录或 owner marker 发布失败，abort 路径必须 kill/reap 子进程、关闭 owner pipe，
+  并删除子进程已经发布的 ready 文件；失败实例不能留下可被客户端误认的持久化端点。
+- 假设与预期：旧 `_launch()` 只在记录发布成功后才设置 `self.ready_path`。子进程可能在记录写入窗口内创建 ready 文件；随后
+  `_abort_launch()` 虽结束进程，却因 `self.ready_path is None` 永远不删除该文件。
+- 为什么选这条路线：这是托管启动的单一事务边界，现有 fake child 测试可直接让 Popen 写出 ready 并令记录写入失败；正常成功
+  路径的 ready 路径、owner marker、attestation 和状态字段不变。
+- 改动与实验：在 Popen 前登记本次 ready 路径，使后续所有失败都有清理 owner；`_abort_launch()` 在关闭 pipe 后显式清除 ready。
+  扩展记录失败测试，断言 child 被 reap、pipe/ready 状态清空且 runtime 目录无 `*.ready.json`。
+- 结果：`tests/terminal/test_runtime.py` 为 `51 passed / 11 subtests`；相关文件 `py_compile` 与 `git diff --check` 通过。
+- 判决：采纳。所有权发布失败不会留下子进程或已发布 ready 文件。
+- 生产状态与回滚：未改成功启动、ready 内容、server 参数、owner marker 或 probe；单提交可回退。未在真实 server/Python 启停竞争、
+  RTX 2080 Ti 或 CUDA sm_75 上运行。
+- 学到什么：子进程能先于父进程所有权发布创建资源；父进程必须在启动前登记这些资源的清理路径，而不是成功后再登记。
+- 下一步与理由：继续审查托管 runtime finally 的独立清理，并在结束前跑完整 terminal 与服务端回归。
+
 ## I-20261027-46 · owner-loss guard 线程失败关闭继承描述符
 
 - 目标 / 指标：托管服务器启动 owner-loss guard 时，如果系统拒绝新线程，必须关闭传入的继承 pipe 描述符，并以正常的启动
