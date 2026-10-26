@@ -73,6 +73,12 @@ bool RemoteExpertOpt::init(std::string& err) {
     for (auto& p : peers_) {
         p.device = p.remote->device_;
         const OnDevice on(p.device);
+        if (!on.ok) {
+            err = std::string("remote expert decode optimization: cannot enter CUDA") +
+                  std::to_string(p.device) + ": " + cudaGetErrorString(on.error);
+            (void) release();
+            return false;
+        }
         if (!check(cudaMalloc((void**) &p.sum, MAXT * H * sizeof(float)), err)) {
             (void) release();
             return false;
@@ -220,6 +226,11 @@ bool RemoteExpertOpt::adapt(const std::vector<float>& usage, const std::vector<i
         if ((int) swaps.size() > max_swaps) swaps.resize((size_t) max_swaps);
         if (swaps.empty()) continue;
         const OnDevice on(r.device_);
+        if (!on.ok) {
+            err = std::string("remote expert decode optimization: cannot enter CUDA") +
+                  std::to_string(r.device_) + ": " + cudaGetErrorString(on.error);
+            return false;
+        }
         for (const auto& s : swaps) {
             const uint8_t* in_blob = source.blob(s.layer, s.in);
             if (!r.cache_.fill_slot(r.cache_.slot_of(s.layer, s.out), in_blob,

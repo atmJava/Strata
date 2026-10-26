@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-136 · RemoteExpertOpt 分配与迁移检查设备切换
+
+- 目标 / 指标：`RemoteExpertOpt::init()` 必须在每个 peer 所属 device 分配 sum；`adapt()` 必须在该 device 发起
+  cache fill、stream wait 和 residency 发布。
+- 假设与预期：两处都构造了 `OnDevice`，但忽略 `ok`。切换失败时会向当前 device 分配或复制，随后把结果记到另一个
+  helper 的状态里，可能耗尽错误 GPU 或发布未落地 swap。
+- 改动与实验：`init()` 在分配失败前关闭已获取资源并返回包含 CUDA 错误的原因；`adapt()` 在任何 copy 或
+  residency 更新前返回错误。代码保持原有成功路径。
+- 判决：采纳。remote sum 与 adaptive swap 只在声明所属的 device 上执行。
+- 生产状态与回滚：RemoteExpertOpt 为显式 opt-in；默认路径不变，单提交可回退。
+- 未验证：当前无 CUDA Toolkit/多 helper GPU，无法用 nvcc 重编或注入真实切卡失败；Clang 主机侧兼容构建与已有
+  `remote_expert_opt_init_test`（分配、free 与 mapping 失败）通过，但本阶段新增分支仍为严格静态审查。
+- 下一步与理由：进入最终回归，不再扩展资源重构。
+
 ## I-20261027-135 · ForesightSwap 与 Verifier 跨卡生命周期收口
 
 - 目标 / 指标：Foresight swap 的分配、后台拷贝、event 查询和析构必须在 layer 所属 CUDA device；Verifier 析构
