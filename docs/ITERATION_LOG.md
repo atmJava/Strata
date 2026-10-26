@@ -3,6 +3,18 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-137 · Adaptive swap 回拷检查所属卡
+
+- 目标 / 指标：resident adaptive swap 的交换缓冲回拷必须从 owning cache 发起，并在 owning card 的 stream 上同步。
+- 假设与预期：`resident_stage_swaps()` 已用 `OnDevice(home.dev)` 选择所属卡，但忽略切换失败；随后会把 DMA 排到
+  当前卡，或同步一个并未成为当前上下文的 stream，可能读错 cache 内容或把错误写到别的设备。
+- 改动与实验：回拷与同步前分别检查 `OnDevice.ok`，失败时带 CUDA 错误返回；成功路径不变。
+- 判决：采纳。设备切换失败时不再发布这一轮 exchange，也不在错误的 CUDA 上下文中继续拷贝。
+- 生产状态与回滚：仅影响 `--adapt`、resident RAM mode 且多卡拥有层的显式路径；单提交可回退。
+- 未验证：当前无 CUDA Toolkit/双 GPU，无法注入真实切卡失败；本阶段为严格静态审查。Clang 主机侧 CUDA
+  声明兼容语法构建通过，`prefill_plan_test` 与 `share_rules_test` 通过。
+- 下一步与理由：完成最终回归，不再扩展修改面。
+
 ## I-20261027-136 · RemoteExpertOpt 分配与迁移检查设备切换
 
 - 目标 / 指标：`RemoteExpertOpt::init()` 必须在每个 peer 所属 device 分配 sum；`adapt()` 必须在该 device 发起

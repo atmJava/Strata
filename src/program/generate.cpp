@@ -317,6 +317,11 @@ bool resident_stage_swaps(strata::core::FileExpertSource& src, const std::vector
         if (slot < 0) continue;
         const SwapHome home = locate(s.layer);
         const strata::core::OnDevice on(home.dev);
+        if (!on.ok) {
+            std::fprintf(stderr, "strata: copy back of layer %d slot %d cannot enter device %d: %s\n", (int) s.layer,
+                         (int) slot, home.dev, cudaGetErrorString(on.error));
+            return false;
+        }
         if (const cudaError_t e = cudaMemcpyAsync(src.exchange_buffer(q, s.layer), home.cache->device_slot(slot),
                             (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer), cudaMemcpyDeviceToHost,
                             home.stream); e != cudaSuccess) {
@@ -333,6 +338,11 @@ bool resident_stage_swaps(strata::core::FileExpertSource& src, const std::vector
     if (!staged.empty()) {
         for (const SwapHome& u : used) {
             const strata::core::OnDevice on(u.dev);
+            if (!on.ok) {
+                std::fprintf(stderr, "strata: copy back sync cannot enter device %d: %s\n", u.dev,
+                             cudaGetErrorString(on.error));
+                return false;
+            }
             if (const cudaError_t e = cudaStreamSynchronize(u.stream); e != cudaSuccess) {
                 std::fprintf(stderr, "strata: copy back sync (device %d) failed: %s\n", u.dev, cudaGetErrorString(e));
                 return false;
