@@ -176,6 +176,9 @@ public:
     }
 
 private:
+    /// Frees every resource this instance owns and returns it to the unloaded state.  The destructor calls it, and a
+    /// failed load() calls it before returning so resources do not live until the caller destroys the object.
+    void release() noexcept;
     bool record_forward(int T, int step_row0, cudaStream_t cs, std::string& err);
     /// The layer's front for T rows at step rows [row0, +T): the embedding, the fc projections, the attention
     /// hyper-connection read (R_, inj_, mixed_) and the K/V appended.

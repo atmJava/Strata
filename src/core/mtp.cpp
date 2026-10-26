@@ -114,7 +114,10 @@ bool read_file(const std::string& path, std::vector<uint8_t>& out) {
 
 }  // namespace
 
-MtpDrafter::~MtpDrafter() {
+MtpDrafter::~MtpDrafter() { release(); }
+
+void MtpDrafter::release() noexcept {
+    if (device_ < 0) return;
     // The drafter and a layer split's later stage may live on a device other than the one current on the
     // destroying thread. Every handle below belongs to `device_`, so release it in that device's context.
     const OnDevice on_device(device_);
@@ -150,6 +153,77 @@ MtpDrafter::~MtpDrafter() {
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
     for (void* h : hosts) if (h) cudaFreeHost(h);
+
+    // Nothing above owns memory after this point.  Clear every alias as well as the owners: a failed load leaves some
+    // carve pointers in the reserved arena, and a second release must not try to free any of them.
+    auto clear = [](auto*& p) { p = nullptr; };
+    for (auto& e : prefill_exec_) e = nullptr;
+    for (auto& e : prefill_dev_exec_) e = nullptr;
+    for (auto& e : round_exec_) e = nullptr;
+    for (auto& e : step_exec_) e = nullptr;
+    for (auto& e : round_exec_c_) e = nullptr;
+    for (auto& e : step_exec_c_) e = nullptr;
+    clear(pf_dev_); clear(dense4_); clear(cparams_); clear(cring_); clear(dinv_); clear(cscratch_);
+    clear(h_cparams_); clear(m_cparams_); clear(h_chist_); clear(m_chist_); clear(h_q_); clear(m_q_);
+    clear(cs_); clear(side_); clear(sh_fork_); clear(sh_join_);
+    clear(ev_chain_);
+    for (cudaEvent_t& e : ev_step_) e = nullptr;
+    clear(h_tok_); clear(m_tok_); clear(h_step_); clear(m_step_); clear(h_pos_); clear(m_pos_);
+    clear(h_row_); clear(m_row_); clear(h_out_); clear(m_out_); clear(h_prob_); clear(m_prob_);
+    clear(h_force_); clear(m_force_);
+    clear(dense_); clear(experts_); clear(state_arena_); clear(arena_);
+    clear(tok_); clear(step_); clear(pos_); clear(row_); clear(ident_);
+    clear(Rin_); clear(R_); clear(emb_); clear(en_); clear(e2_); clear(hn_); clear(h2_);
+    clear(mixed_); clear(inj_); clear(inj2_); clear(lo_); clear(rs_); clear(bo_); clear(xn_); clear(xq_);
+    clear(qfull_); clear(qcur_); clear(kcur_); clear(vcur_); clear(attn_); clear(attn32_); clear(attn_scratch_);
+    clear(logits_); clear(w_); clear(shared_); clear(parts_); clear(y_); clear(sample_);
+    clear(ids_); clear(hit_slot_); clear(hit_dst_); clear(hit_count_); clear(out_ids_);
+    clear(hit_xq_); clear(grp_ptr_); clear(grp_start_); clear(grp_counts_); clear(hit_xs_);
+    clear(hit_scratch_); clear(sh_scratch_); clear(x_bf16_);
+    clear(head_logits_); clear(dhead_); clear(dvocab_); clear(dummy_inj_);
+
+    own_gr_ = {};
+    st_ = QsaState{};
+    tensors_.clear();
+    q4_off_.clear();
+    top2_.clear();
+    dvocab_host_.clear();
+    lg_host_.clear();
+    draft_timing_.events.release();
+
+    g_ = nullptr;
+    ss_ = nullptr;
+    ple_ss_ = nullptr;
+    wt_ = nullptr;
+    head_ = nullptr;
+    window_R_ = nullptr;
+    src_R_ = nullptr;
+    rr_res_ = nullptr;
+    max_t_ = 0;
+    max_drafts_ = 1 << 30;
+    n_vocab_ = 0;
+    n_dvocab_ = 0;
+    dhead_type_ = -1;
+    vram_ = 0;
+    window_ = 0;
+    prompt_len_ = 0;
+    cap_ = 0;
+    attn_scratch_floats_ = 0;
+    head_logits_cap_ = 0;
+    pf_cap_ = 0;
+    coupled_ok_ = false;
+    coupled_active_ = false;
+    coupled_rec_ = false;
+    coupled_j_ = 0;
+    chain_live_ = false;
+    steps_seen_ = 0;
+    chain_n_ = 0;
+    chain_early_ = 0;
+    for (int32_t& token : chain_tok_) token = 0;
+    for (float& probability : chain_prob_) probability = 0.0f;
+    owns_weights_ = true;
+    owns_draft_head_ = true;
+    device_ = -1;
 }
 
 const float* MtpDrafter::f32(const char* name) const {
@@ -246,7 +320,20 @@ bool MtpDrafter::make_q4_head(std::string& err) {
 
 bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, SessionState& ss, int max_t, std::string& err,
                       int64_t window, const MtpDrafter* shared) {
-    cudaGetDevice(&device_);   // a layer split's last stage on another GPU: the drafter lives there
+    if (device_ >= 0) {
+        err = "mtp: this drafter is already loaded";
+        return false;
+    }
+    if (cudaGetDevice(&device_) != cudaSuccess) {   // a layer split's last stage on another GPU: the drafter lives there
+        device_ = -1;
+        err = "mtp: cannot identify the current device";
+        return false;
+    }
+    struct Rollback {
+        MtpDrafter& self;
+        bool commit = false;
+        ~Rollback() { if (!commit) self.release(); }
+    } rollback{*this};
     g_ = &g;
     ss_ = &ss;
     if (ple_ss_ == nullptr) ple_ss_ = &ss;
@@ -488,6 +575,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
                      files_s > 0 ? ((double) g.n_expert * strata::kernels::cpu::BLOB + (double) tensors_.back().off) /
                                        1048576.0 / files_s : 0.0);
     }
+    rollback.commit = true;
     return true;
 }
 

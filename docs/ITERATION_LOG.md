@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-106 · MTP load 失败整体回滚
+
+- 目标 / 指标：`MtpDrafter::load()` 无论在哪一步失败，返回前都必须释放本次取得的 device、host、mapped、stream、
+  event 与 K/V 状态，不依赖调用者随后恰好销毁对象；同一对象不能重复加载并覆盖旧资源。
+- 假设与预期：旧实现把 dense、experts、arena、pinned staging 和 streams 直接发布到成员，后续文件校验、状态初始化、
+  buffer 初始化或 stream 创建失败时只返回 `false`，资源会保留到析构。若调用者保留失败对象，显存和 pin 预算会被
+  长期占住；重复调用还会覆盖旧指针。
+- 为什么选这条路线：把析构清理抽成幂等 `release()`，先同步并释放 graph、CUDA/host 分配、stream/event 和 K/V 状态，
+  再清空 arena 内的所有别名并恢复未加载标量；`load()` 用作用域 rollback 在失败时立即调用，成功末尾才 commit。
+  处理顺序保持 K/V host 所有权、共享权重所有权和 `OnDevice` 设备上下文不变。
+- 改动与实验：`load()` 拒绝已加载对象，读取当前 device 失败时给出明确错误；成功路径的分配大小、上传内容和对象布局
+  不变。`mtp.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；新增 resource 工具的普通及
+  ASan/UBSan 故障测试继续通过。
+- 判决：采纳。MTP 加载失败不再向调用者留下半加载资源。
+- 生产状态与回滚：不改模型格式、draft 数值、共享权重语义或 VRAM 预算；只改失败清理和重复加载保护，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 RTX 2080 Ti，未真实注入 dense/experts/state/buffer/stream 创建失败，也未测量
+  失败后显存与 pin 预算的实际归零；当前结论来自严格静态审查和主机侧编译检查。
+- 下一步与理由：检查 `setup_coupled()` 的多块分配，它仍在部分成功后直接发布成员，失败会留下到对象析构为止的资源。
+
 ## I-20261027-105 · Verifier 初始化检查必需 memset
 
 - 目标 / 指标：Verifier 的主 device arena 与 overlapped hand-off counter 是正确运行所需资源，`cudaMemset` 失败必须
