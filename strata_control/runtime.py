@@ -811,11 +811,20 @@ class Host:
                     if self.probe_key != key:
                         self.probe_key, self.probe_result = key, None
                         host = self.args[self.args.index("--host") + 1]
-                        threading.Thread(target=self._verify_ready,
-                                         args=(ready, key, host, self.source_bytes,
-                                               self.expected_attestation,
-                                               max(0.1, self.probe_deadline - time.monotonic())),
-                                         name="strata-generation-probe", daemon=True).start()
+                        probe = threading.Thread(
+                            target=self._verify_ready,
+                            args=(ready, key, host, self.source_bytes,
+                                  self.expected_attestation,
+                                  max(0.1, self.probe_deadline - time.monotonic())),
+                            name="strata-generation-probe", daemon=True)
+                        try:
+                            probe.start()
+                        except RuntimeError:
+                            # Readiness probing is auxiliary. A temporary
+                            # process thread limit must not tear down the host
+                            # and the serving child; retry on the next status.
+                            self.probe_key = None
+                            self.probe_result = None
                     if self.probe_result is None:
                         return {**base, "state": "starting", "phase": "verifying_generation",
                                 "instance_id": ready["instance_id"]}

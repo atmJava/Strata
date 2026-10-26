@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-40 · 生成探针线程失败不拖垮托管主机
+
+- 目标 / 指标：`Runtime.Host` 启动 `strata-generation-probe` 时若进程无法再创建线程，只能暂缓生成就绪验证；控制通道、
+  托管服务器和活动租约必须继续存在，后续状态请求应能重新尝试探针。
+- 假设与预期：旧实现先发布 `probe_key` 后直接调用 `Thread.start()`。线程配额耗尽产生的 `RuntimeError` 不在控制循环的
+  `OSError/ValueError` 处理范围内，会离开 `serve()` 并触发托管子进程停止；即使捕获，残留 `probe_key` 也会永久阻止重试。
+- 为什么选这条路线：探针负责 API 身份和一次生成验证，属于辅助能力；可用 fake child/ready 文件和线程启动故障确定性覆盖，
+  不影响成功路径的探针参数、超时或恢复状态。
+- 改动与实验：捕获探针启动的 `RuntimeError`，清除本次 `probe_key/probe_result`，让状态保持 `verifying_generation`，下次轮询重试；
+  新增线程启动失败下 `_status()` 不抛异常且可重试的断言。
+- 结果：`tests/terminal/test_runtime.py` 为 `51 passed / 11 subtests`；相关文件 `py_compile` 与 `git diff --check` 通过。
+- 判决：采纳。生成验证线程创建失败不再关闭控制主机或服务器，并保留后续恢复机会。
+- 生产状态与回滚：未改正常探针的鉴权、HTTP 请求、超时或就绪判定；单提交可回退。未在真实操作系统线程配额耗尽或双
+  RTX 2080 Ti 加载进程上运行。
+- 学到什么：保存“已开始”状态必须与真正启动成功绑定；辅助线程的失败还必须有可重试状态，而不能只是吞掉异常。
+- 下一步与理由：继续审查控制主机 finally 的顺序与失败后仍可恢复的进程/文件所有权。
+
 ## I-20261027-39 · sd-cli 等待 OS 错误仍终止并释放子进程
 
 - 目标 / 指标：图像子进程的 `poll()`/`wait()` 抛普通 `OSError` 时，也必须 kill、做一次有界 wait、join/关闭输出 reader，

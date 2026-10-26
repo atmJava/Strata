@@ -194,6 +194,25 @@ class RuntimeTests(unittest.TestCase):
             host._kill_child_tree()
         child.kill.assert_called_once_with()
 
+    def test_generation_probe_thread_failure_keeps_host_status_available(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock(pid=987654)
+        child.poll.return_value = None
+        host.child = child
+        ready = self.root / "probe.ready.json"
+        ready.write_text(json.dumps({"pid": child.pid, "instance_id": "a" * 32}), encoding="utf-8")
+        host.ready_path = ready
+        host.args = ["--host", "127.0.0.1"]
+        host.source_bytes = self.config.read_bytes()
+        host.expected_attestation = "b" * 64
+        with mock.patch.object(runtime.threading.Thread, "start",
+                               side_effect=RuntimeError("can't start new thread")):
+            result = host._status()
+        self.assertEqual((result["state"], result["phase"]),
+                         ("starting", "verifying_generation"))
+        self.assertIsNone(host.probe_key)
+        self.assertIsNone(host.probe_result)
+
     def test_stop_treats_exit_before_sigterm_as_stopped(self):
         host = runtime.Host("local", shutdown_timeout=2)
         child = mock.Mock()
