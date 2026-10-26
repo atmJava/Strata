@@ -16,6 +16,7 @@
 // (`phase-2-correct-engine.md:5-9`).  What it is FOR is the honest tok/s figure and the logit dump.
 
 #include "strata/platform/memory.hpp"
+#include "strata/platform/diagnostic_thread.hpp"
 #include "strata/core/adapt_async_default.hpp"
 #include "strata/core/batch_telemetry.hpp"
 #include "strata/core/dma_batch.hpp"
@@ -10571,8 +10572,7 @@ int main(int argc, char** argv) {
             const char* wio = std::getenv("STRATA_WATCHDOG_IO_S");
             const int io_limit = wio ? std::atoi(wio) : limit * 10;
             if (limit > 0) {
-                try {
-                    std::thread([limit, io_limit] {
+                strata::platform::start_diagnostic_thread("strata serve watchdog", [limit, io_limit] {
                     strata::platform::name_this_thread("strata-watchdog");
                     strata::aux_cpus::pin_current_thread();
                     strata::core::Progress& p = strata::core::progress();
@@ -10618,13 +10618,7 @@ int main(int argc, char** argv) {
                         std::fflush(stderr);
                         std::abort();
                     }
-                    }).detach();
-                } catch (const std::exception& e) {
-                    std::fprintf(stderr, "strata serve: the watchdog did not start (%s); running without it\n",
-                                 e.what());
-                } catch (...) {
-                    std::fprintf(stderr, "strata serve: the watchdog did not start; running without it\n");
-                }
+                });
             }
         }
         strata::core::pin_sim_report("at READY");
@@ -16303,8 +16297,7 @@ int main(int argc, char** argv) {
         if (const char* sw = std::getenv("STRATA_SPEC_WATCH"); sw != nullptr && std::atoi(sw) > 0) {
             const int limit = std::atoi(sw);
             strata::core::progress().busy.store(true);
-            try {
-                std::thread([limit] {
+            strata::platform::start_diagnostic_thread("strata generate STRATA_SPEC_WATCH watchdog", [limit] {
                     strata::core::Progress& pr = strata::core::progress();
                     uint64_t last = pr.beats.load(), ticks_at = pr.ticks.load();
                     auto since = std::chrono::steady_clock::now();
@@ -16320,14 +16313,7 @@ int main(int argc, char** argv) {
                         std::fflush(stderr);
                         std::abort();
                     }
-                }).detach();
-            } catch (const std::exception& e) {
-                std::fprintf(stderr, "strata generate: the STRATA_SPEC_WATCH watchdog did not start (%s); "
-                                     "running without it\n", e.what());
-            } catch (...) {
-                std::fprintf(stderr, "strata generate: the STRATA_SPEC_WATCH watchdog did not start; "
-                                     "running without it\n");
-            }
+            });
         }
         // the next round's drafts after a commit: the MTP chain, or the DFlash2 block from the committed rows' taps
         auto draft_next = [&](int T_, int a_) -> bool {

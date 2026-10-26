@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-73 · watchdog 线程体异常只关闭诊断
+
+- 目标 / 指标：`STRATA_WATCHDOG_S` 与 `STRATA_SPEC_WATCH` 使用 detached 诊断线程；线程启动失败或
+  `stage_text()/stall_report()` 等诊断分配异常时，只关闭对应 watchdog，正常请求循环继续。
+- 假设与预期：两个调用点只捕获线程构造异常。线程体本身没有异常边界；一旦报告路径抛异常，detached
+  thread 会触发 `std::terminate()`，把可选诊断升级为服务崩溃。
+- 为什么选这条路线：抽出通用
+  [`strata/platform/diagnostic_thread.hpp`](../include/strata/platform/diagnostic_thread.hpp)，同时封装线程构造
+  和线程体异常；两个 watchdog 只传自己的循环体。真正检测到停滞时仍保留原 `stall_report`、GPU wait
+  释放和 `abort()` 行为。
+- 改动与实验：新增独立回归，在线程体中先发出已进入信号再抛异常，验证进程没有终止；watchdog 的检查周期、
+  I/O 宽限、进度条件和停机动作均保持不变。
+- 结果：`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；跳过源码原有的
+  一个未使用变量告警）。新测试以 `-O2 -Wall -Wextra -Werror` 构建，普通构建重复 100 次通过；ASan/UBSan 和
+  ThreadSanitizer 均通过。`git diff --check` 通过。
+- 判决：采纳。可选诊断失败不再终止引擎，真正停滞的 watchdog 行为不变。
+- 生产状态与回滚：未改 watchdog 参数、时限、输出内容或 abort 条件；单提交可回退。
+- 未验证：无 CUDA 工具链，未运行完整 `strata generate`、真实 GPU 停滞、`stall_report()` 异常或双卡路径。
+- 下一步与理由：继续将可复用线程/资源边界抽成可单测组件，并检查其余 detached 线程。
+
 ## I-20261027-72 · 路由统计评分热路径零分配
 
 - 目标 / 指标：启用 `STRATA_LOOKAHEAD_STATS` 后，每层 `stats_score()` 不再进行 vector 分配，避免可选诊断在
