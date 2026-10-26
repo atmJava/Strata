@@ -54,28 +54,51 @@ void RemoteExpertOpt::attach(RemoteExperts& remote) {
 }
 
 bool RemoteExpertOpt::init(std::string& err) {
+    // init() is retryable: a failed allocation must not leave a previous staging set or peer sums alive.
+    release();
     void* mapped = nullptr;
     if (!check(cudaHostAlloc((void**) &h_sum_, MAXT * (H + K) * sizeof(float),
-                             cudaHostAllocPortable | cudaHostAllocMapped), err) ||
-        !check(cudaHostGetDevicePointer(&mapped, h_sum_, 0), err)) return false;
+                             cudaHostAllocPortable | cudaHostAllocMapped), err))
+        return false;
+    if (!check(cudaHostGetDevicePointer(&mapped, h_sum_, 0), err)) {
+        release();
+        return false;
+    }
     m_sum_ = (float*) mapped;
     h_mask_ = reinterpret_cast<int32_t*>(h_sum_ + MAXT * H);
     m_mask_ = reinterpret_cast<int32_t*>(m_sum_ + MAXT * H);
     for (auto& p : peers_) {
-        const OnDevice on(p.remote->device_);
-        if (!check(cudaMalloc((void**) &p.sum, MAXT * H * sizeof(float)), err)) return false;
+        p.device = p.remote->device_;
+        const OnDevice on(p.device);
+        if (!check(cudaMalloc((void**) &p.sum, MAXT * H * sizeof(float)), err)) {
+            release();
+            return false;
+        }
     }
     return true;
 }
 
 RemoteExpertOpt::~RemoteExpertOpt() {
+    release();
     for (auto& p : peers_) {
-        const OnDevice on(p.remote->device_);
-        if (p.remote->stream_) cudaStreamSynchronize(p.remote->stream_);
-        if (p.sum) cudaFree(p.sum);
         p.remote->remote_opt_ = nullptr;
     }
+}
+
+void RemoteExpertOpt::release() {
+    for (auto& p : peers_) {
+        const OnDevice on(p.device);
+        if (p.device >= 0 && p.remote->device_ == p.device && p.remote->stream_)
+            cudaStreamSynchronize(p.remote->stream_);
+        if (p.sum) cudaFree(p.sum);
+        p.sum = nullptr;
+        p.device = -1;
+    }
     if (h_sum_) cudaFreeHost(h_sum_);
+    h_sum_ = nullptr;
+    m_sum_ = nullptr;
+    h_mask_ = nullptr;
+    m_mask_ = nullptr;
 }
 
 size_t RemoteExpertOpt::metadata_bytes() { return sizeof(ReduceMeta); }

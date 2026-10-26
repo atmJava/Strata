@@ -32,6 +32,24 @@
 - 未验证：当前无 CUDA 工具链、驱动或 GPU，因此尚未用真实 CUDA 头文件编译该测试。
 - 下一步与理由：继续检查 peer/remote expert 与 prefill 的多块 pinned host 分配、失败清理和跨设备释放。
 
+## I-20261027-121 · RemoteExpertOpt 初始化失败完整回滚并可重试
+
+- 目标 / 指标：`RemoteExpertOpt::init()` 的 host staging、mapped alias 与每个 helper 的 reduction sum 必须全有或全无；
+  任一步骤失败后立即释放前序资源，失败对象仍可再次 `init()`。
+- 假设与预期：旧实现按短路顺序获取资源，失败直接返回；这部分资源要等到对象最终析构才释放，重复初始化还会覆盖
+  已有指针。
+- 为什么选这条路线：初始化只在启动时执行，用统一 `release()` 收尾不会改变热路径；同时记录每个 peer 分配时的 device，
+  清理不再依赖 `RemoteExperts` 此刻仍处于 open 状态。
+- 改动与实验：`init()` 先清理旧状态，mapped alias 或任一 `cudaMalloc` 失败时回滚全部 host/device 资源；析构与显式
+  release 共用幂等清理。新增 `remote_expert_opt_init_test` 注入 mapping 失败和第二个 peer allocation 失败，随后重试并
+  核对 host/device 分配与释放次数。普通及 ASan/UBSan 通过；CUDA host-only 严格语法检查通过，clang analyzer 未在
+  host 初始化/释放路径发现告警（仅报告 kernel 内 `threadIdx` 未建模导致的 `skip` 未初始化假阳性）。
+- 判决：采纳。初始化失败不再保留半套 staging，资源释放有直接故障测试。
+- 生产状态与回滚：成功初始化后的布局、数据与 kernel 参数不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 GPU；测试使用 declaration-only CUDA shim 和 link wrapper 注入失败，尚未在真实
+  多卡 context 中制造 `cudaHostGetDevicePointer` / `cudaMalloc` 失败。
+- 下一步与理由：继续检查 peer/remote 的 device switch 失败、adapt 批次失败和跨设备析构；优先只改可静态证明的资源状态。
+
 ## I-20261027-118 · PinnedRing 在自有 device 上释放
 
 - 目标 / 指标：PinnedRing 的 event 与 pinned slots 必须在其首次使用的 CUDA device 上释放；成员析构发生在调用者的

@@ -40,8 +40,13 @@ private:
     void prepare(const RemoteExperts& remote, void* metadata) const;
     bool reduce(RemoteExperts& remote, const void* metadata, std::string& err);
     void accumulate(const RemoteExperts& remote);
+    void release();
 
-    struct Peer { RemoteExperts* remote; float* sum = nullptr; };
+    struct Peer {
+        RemoteExperts* remote;
+        float* sum = nullptr;
+        int device = -1;   ///< captured at init: cleanup must not depend on the remote still being open
+    };
     std::vector<Peer> peers_;
     float* h_sum_ = nullptr;
     float* m_sum_ = nullptr;
