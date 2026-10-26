@@ -51,6 +51,7 @@
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <exception>
 #include <map>
 #include <string>
 #include <atomic>
@@ -109,6 +110,27 @@ namespace strata::prefill {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// Thread creation is not part of the prompt's numerical work.  If the system refuses an async worker, run the same job
+// now and hand back an already-ready future; callers keep their existing get()/error path while losing only overlap.
+template <class Job>
+std::future<bool> async_or_inline(const char* what, Job job) {
+    try {
+        return std::async(std::launch::async, job);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "prefill: %s worker did not start (%s); running it on the caller\n", what, e.what());
+    } catch (...) {
+        std::fprintf(stderr, "prefill: %s worker did not start; running it on the caller\n", what);
+    }
+    std::promise<bool> ready;
+    try {
+        ready.set_value(job());
+    } catch (...) {
+        ready.set_exception(std::current_exception());
+    }
+    return ready.get_future();
+}
+
 constexpr float EPS = 1e-6f;
 constexpr int64_t N = 2560, HC = 4, D = N * HC, LR = 320, K = 10, NE = 512;
 constexpr int64_t C = 10240, ZV = 6144, HV = 48;
@@ -352,26 +374,39 @@ struct HandWorker {
     std::condition_variable cv;
     std::deque<std::packaged_task<bool()>> jobs;
     bool stop = false;
+    bool threaded = false;
     std::thread th;
     HandWorker() {
-        th = std::thread([this] {
-            strata::platform::name_this_thread("strata-hand");
-            strata::aux_cpus::pin_current_thread();
-            for (;;) {
-                std::packaged_task<bool()> job;
-                {
-                    std::unique_lock<std::mutex> lk(mu);
-                    cv.wait(lk, [this] { return stop || !jobs.empty(); });
-                    if (jobs.empty()) return;   // stopped, and every job taken has run (no broken promise)
-                    job = std::move(jobs.front());
-                    jobs.pop_front();
+        try {
+            th = std::thread([this] {
+                strata::platform::name_this_thread("strata-hand");
+                strata::aux_cpus::pin_current_thread();
+                for (;;) {
+                    std::packaged_task<bool()> job;
+                    {
+                        std::unique_lock<std::mutex> lk(mu);
+                        cv.wait(lk, [this] { return stop || !jobs.empty(); });
+                        if (jobs.empty()) return;   // stopped, and every job taken has run (no broken promise)
+                        job = std::move(jobs.front());
+                        jobs.pop_front();
+                    }
+                    job();
                 }
-                job();
-            }
-        });
+            });
+            threaded = true;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "prefill: hand-off worker did not start (%s); later stages run on the caller\n",
+                         e.what());
+        } catch (...) {
+            std::fprintf(stderr, "prefill: hand-off worker did not start; later stages run on the caller\n");
+        }
     }
     std::future<bool> submit(std::packaged_task<bool()> job) {
         std::future<bool> f = job.get_future();
+        if (!threaded) {
+            job();
+            return f;
+        }
         {
             std::lock_guard<std::mutex> lk(mu);
             jobs.push_back(std::move(job));
@@ -2455,6 +2490,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     };
     std::string ple_next_err;
     std::future<bool> ple_next;             // declared after everything it reads: an early return waits for it
+    auto start_ple = [&](int64_t chunk, int buf) {
+        ple_next = async_or_inline("PLE gather", [&ple_gather, &ple_next_err, chunk, buf] {
+            strata::aux_cpus::pin_current_thread();
+            return ple_gather(chunk, buf, ple_next_err);
+        });
+    };
     int ple_buf = 0;
 
     if (hand_in_ == nullptr) stopped_at_ = -1;
@@ -2590,11 +2631,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         // ---- the PLE rows of the whole chunk, one batched SSD request on a thread (see ple_gather).  A later chunk's
         // were read ahead during the previous chunk; the first chunk's are read beside layer 0 - they are needed from
         // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt)
-        if (ple_on && !ple_next.valid())
-            ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
-                strata::aux_cpus::pin_current_thread();
-                return ple_gather(c0, b, ple_next_err);
-            });
+        if (ple_on && !ple_next.valid()) start_ple(c0, ple_buf);
         bool ple_pending = ple_on;
         // the chunk's rows onto the device just before layer 1 reads them, and the next chunk's gather started
         auto ple_land = [&]() -> bool {
@@ -2620,10 +2657,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     err = std::string("prefill: the PLE rows' upload failed: ") + cudaGetErrorString(cudaGetLastError());
                     return false;
                 }
-                ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c1 = c0 + C, b = ple_buf ^ 1] {
-                    strata::aux_cpus::pin_current_thread();
-                    return ple_gather(c1, b, ple_next_err);
-                });
+                start_ple(c0 + C, ple_buf ^ 1);
             }
             ple_buf ^= 1;
             stats_.ms_ple += ms_since(tp);
@@ -3731,7 +3765,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 if (m.cpu_ev[0] == nullptr) { cudaEventCreate(&m.cpu_ev[0]); cudaEventCreate(&m.cpu_ev[1]); }
                                 cudaEventRecord(m.cpu_ev[0], m.cs);
                             }
-                            cpu_fut = std::async(std::launch::async, [&m, &on_cpu, &cpu_blob, &cf, &cpu_ms, src_h, l, T, r0c, this]() -> bool {
+                            auto cpu_job = [&m, &on_cpu, &cpu_blob, &cf, &cpu_ms, src_h, l, T, r0c, this]() -> bool {
                                 const auto t0 = std::chrono::steady_clock::now();
                                 constexpr size_t AB = strata::kernels::cpu::kNativeActBytes;
                                 // a Q2_0 layer (gate/up on the pool's Q2_0 kernels): ActQ activations, as decode's
@@ -3766,7 +3800,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 cpu_pool_->run_split_multi_native(cf, m.cpu_jobs.data(), (int) m.cpu_jobs.size());
                                 cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                                 return true;
-                            });
+                            };
+                            cpu_fut = async_or_inline("CPU expert", cpu_job);
                         }
                         const size_t mmq_gub = use_mmq ? mmq::matrix_bytes(mmq_gt, 1280, N) : 0;
                         const size_t mmq_db = use_mmq ? mmq::matrix_bytes(mmq_dt, N, 640) : 0;
@@ -4520,7 +4555,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     return r;
                 }));
             } else
-            next_run_ = std::async(std::launch::async, [this, tokens, c0, T, p0] {
+            next_run_ = async_or_inline("next prefill stage", [this, tokens, c0, T, p0] {
                 strata::aux_cpus::pin_current_thread();
                 return next_->run_impl(tokens + c0, T, p0, next_err_);
             });

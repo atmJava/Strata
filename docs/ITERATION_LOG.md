@@ -3,6 +3,27 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-61 · prefill 异步任务失败由调用线程完成
+
+- 目标 / 指标：PLE 行读取、CPU expert 计算、layer-split 下一 stage 和 hand-off worker 在系统拒绝新线程时必须继续完成原工作；
+  不能因可选重叠失败而丢掉 prompt chunk、让 future 失效或让异常中止模型读取。
+- 假设与预期：四处 `std::async(std::launch::async)`/`std::thread` 直接启动没有构造异常边界。hand-off worker 的构造函数
+  在首次启用 `STRATA_HANDOFF_PIPE` 时抛错会使整次 prefill 展开；其余 future 同样没有“线程未启动”的 ready 状态。
+- 为什么选这条路线：这些任务都已有确定的同步实现，且结果只依赖不可变输入。新增局部 `async_or_inline()`：线程成功时保留原
+  future，失败时在调用线程执行同一 job，并用 ready promise 返回同一 `bool`/异常；hand-off worker 启动失败时 `submit()`
+  直接在调用线程运行 packaged task。成功路径的并发、数据顺序和调用方 `get()` 协议不变。
+- 改动与实验：PLE 两个预读点、CPU expert share、下一 stage 启动和 hand-off worker 均接入该降级；CPU job 原线程体抽成
+  可复用 lambda，不改变量化、job 顺序、输出位置或计时。`<exception>` 已显式引入。
+- 结果：`prefill.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；未启用 DFlash2，跳过该配置原有的
+  未使用变量告警）。`git diff --check` 通过。未运行真实线程创建失败注入、`nvcc`、CUDA sm_75、RTX 2080 Ti、真实 PLE SSD read、
+  CPU expert share 或双卡 layer split。
+- 判决：采纳。线程不可用时退化到调用线程，保持 token/专家计算与 stage hand-off 完整；只失去 overlap 或增加调用线程耗时。
+- 生产状态与回滚：未改成功路径线程、流/event、专家顺序、数值或 pipeline gate；单提交可回退。目标机仍需在真实 Qwen pack 与
+  双卡上验证降级后的正确性和时延。
+- 学到什么：异步辅助的 future 不只表示结果，还隐含“任务已经启动”；启动失败时必须构造等价的 ready/exception future，
+  调用方才能保持原错误路径。
+- 下一步与理由：检查 prefill 剩余的持久 worker 与 thread group 异常安全，并在网络恢复后推送当前提交。
+
 ## I-20261027-60 · generate 剩余短生命周期线程失败可诊断降级
 
 - 目标 / 指标：profile fill 的 64 对预读、cache checksum helper、serve stdin reader 和两个 watchdog 在系统拒绝新线程时，
