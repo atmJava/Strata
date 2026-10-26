@@ -153,6 +153,9 @@ void MtpDrafter::release() noexcept {
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
     for (void* h : hosts) host_free_guarded(h);
+    // The ring's events belong to device_.  Destroy them before OnDevice restores the caller's device; its destructor
+    // runs after this function and would otherwise release them in the wrong context.
+    pf_ring_.release();
 
     // Nothing above owns memory after this point.  Clear every alias as well as the owners: a failed load leaves some
     // carve pointers in the reserved arena, and a second release must not try to free any of them.

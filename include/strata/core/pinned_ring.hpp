@@ -149,12 +149,18 @@ public:
     }
 
     void release() {
+        int previous = -1;
+        int current = -1;
+        if (dev_ >= 0 && cudaGetDevice(&current) == cudaSuccess && current != dev_ &&
+            cudaSetDevice(dev_) == cudaSuccess)
+            previous = current;
         for (Slot& sl : slots_) {
             if (sl.pending && sl.ev) cudaEventSynchronize(sl.ev);
             if (sl.ev) cudaEventDestroy(sl.ev);
             if (sl.p) cudaFreeHost(sl.p);
             sl = Slot{};
         }
+        if (previous >= 0) cudaSetDevice(previous);
         cudaGetLastError();
         acquired_ = nullptr;
         dev_ = -1;

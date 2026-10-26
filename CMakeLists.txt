@@ -456,6 +456,20 @@ if(STRATA_ENABLE_CUDA)
       add_test(NAME mapped_host_test COMMAND mapped_host_test)
       set_tests_properties(mapped_host_test PROPERTIES
         ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+      add_executable(pinned_ring_test tests/core/pinned_ring_test.cpp)
+      target_include_directories(pinned_ring_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      target_link_options(pinned_ring_test PRIVATE
+        -Wl,--wrap=cudaGetDevice -Wl,--wrap=cudaSetDevice
+        -Wl,--wrap=cudaHostAlloc -Wl,--wrap=cudaFreeHost
+        -Wl,--wrap=cudaEventCreateWithFlags -Wl,--wrap=cudaEventSynchronize
+        -Wl,--wrap=cudaEventRecord -Wl,--wrap=cudaEventDestroy
+        -Wl,--wrap=cudaMemcpyAsync -Wl,--wrap=cudaStreamSynchronize
+        -Wl,--wrap=cudaGetLastError -Wl,--wrap=cudaGetErrorString)
+      target_link_libraries(pinned_ring_test PRIVATE strata_warnings)
+      add_test(NAME pinned_ring_test COMMAND pinned_ring_test)
+      set_tests_properties(pinned_ring_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
       add_executable(qsa_state_resource_test
         tests/core/qsa_state_resource_test.cpp src/core/qsa_state.cpp)
       target_include_directories(qsa_state_resource_test PRIVATE

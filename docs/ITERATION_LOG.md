@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-118 · PinnedRing 在自有 device 上释放
+
+- 目标 / 指标：PinnedRing 的 event 与 pinned slots 必须在其首次使用的 CUDA device 上释放；成员析构发生在调用者的
+  `OnDevice` 作用域结束之后时，也必须恢复调用者原来的 device。
+- 假设与预期：MTP 的 `pf_ring_` 是对象成员，`MtpDrafter::release()` 只能覆盖自身函数体；成员析构晚于 `OnDevice`
+  析构，多卡 layer split 时可能在默认 device 0 上销毁属于另一张卡的 event。Prefill 代码虽手动调用 release，但其
+  资源安全不应依赖每个调用者的析构顺序。
+- 为什么选这条路线：让 Ring 自己保存并切回 `dev_`，清理后恢复 caller device；同时在 `MtpDrafter::release()` 的
+  设备作用域内提前 release。两层保证正常析构、显式释放和未来调用者都不会跨设备销毁句柄。
+- 改动与实验：新增 `pinned_ring_test`，在 device 1 acquire 后切到 device 0，断言 release 在 device 1 销毁 event/free
+  slot、随后恢复 device 0，并验证二次 release 幂等。普通及 ASan/UBSan 通过；`mtp.cpp` 严格语法检查通过。
+- 判决：采纳。PinnedRing 的设备归属由类型自身维护，不依赖析构调用栈。
+- 生产状态与回滚：单卡下 device 相同，release 行为不变；多卡只修正上下文顺序，不改上传或事件语义，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或双 RTX 2080 Ti，未在真实 CUDA context 中触发跨卡析构；主机 link-wrap 验证了
+  device 切换、event 销毁、slot 释放和恢复顺序。
+- 下一步与理由：继续检查其他成员析构类（profiler、event pair、共享 owner）是否同样需要自带 device 上下文。
+
 ## I-20261027-117 · free 失败保留映射与预算
 
 - 目标 / 指标：`cudaFreeHost` 失败时，guarded free 不能把指针当成已释放，也不能提前归还模拟 pin 预算；同一指针
