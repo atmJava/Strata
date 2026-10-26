@@ -1,0 +1,81 @@
+{
+ "slice": "A0 基线锚点（服务器专用化重构 阶段 A）",
+ "plan": "docs/superpowers/plans/2026-10-26-server-first-refactor.md",
+ "ts_utc": "2026-10-26T10:37:13Z",
+ "host": "ubuntu-server",
+ "access": "atm@192.168.2.223 (ssh, 密码认证)",
+ "ips_observed": "192.168.2.223 192.168.2.255",
+ "dev_repo": {
+  "path_local": "D:/temp/strata",
+  "branch": "hw/server-adapt-0.2.3",
+  "head": "31082e5e",
+  "upstream_main": "upstream/main",
+  "commits_ahead": 210,
+  "merge_base": "4b9e05a2a806a3fe24f7b2560d98626c37dade35"
+ },
+ "service": {
+  "unit": "strata.service",
+  "exec_start": "/opt/ai/src/strata-0.2.2/run-022.sh",
+  "server_process_cmdline": "/opt/ai/src/strata-0.1.40.1/.venv/bin/python /opt/ai/src/strata-port-v1/serve/server.py --engine strata --config /opt/ai/src/strata-0.2.2/strata-022.json --port 8080",
+  "server_cwd": "/opt/ai/src/strata-port-v1",
+  "health": "{\"status\": \"ok\", \"max_context\": 262144, \"model\": \"qwen3.8-flash-next-iq3_xxs-abliterated\", \"images\": true, \"api_key\": true, \"image_generation\": false, \"loaded\": true, \"service\": \"strata\"}",
+  "server_env_strata": {
+   "STRATA_ADMIT_SHORT_FIRST": "2048",
+   "STRATA_MP_STAGED_READ": "1",
+   "STRATA_MP_STAGED_READ_MIN_TOKENS": "2048"
+  },
+  "engine_env_strata": {
+   "STRATA_ADMIT_MERGE_FIRST": "1",
+   "STRATA_ADMIT_SHORT_FIRST": "2048",
+   "STRATA_BATCH_SELF_COMMIT": "1",
+   "STRATA_BATCH_STAGED_READ": "1",
+   "STRATA_BF16_TC": "1",
+   "STRATA_CKPT_POOL": "1",
+   "STRATA_CKPT_THREADS": "1",
+   "STRATA_EXP_MODE": "8",
+   "STRATA_HC_Q8": "1",
+   "STRATA_MP_STAGED_READ": "1",
+   "STRATA_MP_STAGED_READ_MIN_TOKENS": "2048",
+   "STRATA_MTP_STAGE0": "1",
+   "STRATA_PIPED_CONCURRENT": "1",
+   "STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS": "4096",
+   "STRATA_PIPED_DECODE_LEADIN_MS": "1600",
+   "STRATA_PIPED_DECODE_LEADIN_WAIT_MS": "750",
+   "STRATA_PIPE_BYIELD_NODRAIN": "1",
+   "STRATA_ROUTE_TAIL_SKIP": "0",
+   "STRATA_SELECT_SIMT": "1",
+   "STRATA_SHARED_SLOT_ROPE": "1",
+   "STRATA_SLOT_COPY_BATCHSYNC": "1",
+   "STRATA_SLOT_COPY_DIRECT": "1",
+   "STRATA_SM75_PERF": "1",
+   "STRATA_STAGE_TRIM": "1"
+  }
+ },
+ "engine_binary": {
+  "path": "/opt/ai/src/strata-0.2.2/build/strata",
+  "sha256": "b46fc8895717f59aa7581a773eed0f56a47584fce74536133ea6b5466e7e4022"
+ },
+ "deploy_files_sha256": {
+  "/opt/ai/src/strata-port-v1/serve/server.py": "fc3a7e7e4d852252c0eb96be9e02d733deb47eac05b56decfd9ab1a94c5208f4",
+  "/opt/ai/src/strata-0.2.2/run-022.sh": "7c0493f262953e9e48c4e01bcaa6970df799bbe4dc5e500d194e3952854a2c72"
+ },
+ "rollback_snapshot": {
+  "path": "/opt/ai/tmp/pre-ctx256k-20261026T075110Z",
+  "present": true,
+  "sample_entries": ["admit-short-first.conf", "ctx256k-needle-251k.json", "ctx256k-needle.json", "engine-cmdline-before.txt", "engine-env-before.txt"]
+ },
+ "hardware": {
+  "gpu": "0, NVIDIA GeForce RTX 2080 Ti, 22528 MiB, 595.71.05, 7.5, 280.00 W | 1, NVIDIA GeForce RTX 2080 Ti, 22528 MiB, 595.71.05, 7.5, 280.00 W",
+  "nvlink_links_total": 4,
+  "cpu": "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz (28 threads, 单 NUMA)",
+  "mem_gb": "62 total, 3 available (2026-10-26 10:37 UTC)",
+  "kernel": "7.0.0-38-generic",
+  "cuda": "Build cuda_13.0.r13.0/compiler.36424714_0"
+ },
+ "notes": [
+  "部署树 /opt/ai/src/strata-port-v1 与 strata-0.2.2 均非 git 仓库；STATE.md 记录的 server de09cffd / config ea1e2959 是开发仓库提交号，本锚点改以文件 SHA256 为权威指纹。",
+  "docs/SERVER_HW.md 的迁址说法过期：2026-10-26 实测 192.168.2.223 为本机 wlx 无线网卡当前地址且 8080 在服务；3.14 亦可 SSH 到达。",
+  "引擎子进程 /proc/<pid>/environ 实测 25 个 STRATA_ 开关，与 STATE.md 口径一致（STRATA_SM75_PERF=1、STRATA_EXP_MODE=8 在列）。",
+  "A-A 基线吞吐对照未在本锚点内执行：62 GiB 内存仅剩约 3 GiB 可用，起第二引擎实例有 OOM 风险；该步并入 A1 验证窗口，在低流量时段进行。"
+ ]
+}
