@@ -186,6 +186,7 @@ private:
     void norm_rope(float* data, const float* gamma, int rows, int cols, const int32_t* p, cudaStream_t cs);
     bool capture_prefill(int T, std::string& err);
     bool capture_prefill_dev(int T, std::string& err);   ///< E-4: without the mapped staging (inputs copied on device)
+    bool ensure_prefill_records(int64_t rows, int64_t per_row, std::string& err);
     bool capture_round(int T, bool coupled, std::string& err);
     bool capture_step(int j, bool coupled, std::string& err);
     cudaGraphExec_t step_exec_[9] = {};

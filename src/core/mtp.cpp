@@ -1264,19 +1264,37 @@ void MtpDrafter::kv_restore(int64_t upto) {
     cudaStreamSynchronize(cs_);
 }
 
+bool MtpDrafter::ensure_prefill_records(int64_t rows, int64_t per_row, std::string& err) {
+    if (rows <= 0 || per_row <= 0 || rows > INT64_MAX / per_row) {
+        err = "mtp prefill: the input record size overflows";
+        return false;
+    }
+    const int64_t count = rows * per_row;
+    if (count <= pf_cap_) return true;
+    if ((uint64_t) count > (uint64_t) SIZE_MAX / sizeof(int32_t)) {
+        err = "mtp prefill: the input record size overflows";
+        return false;
+    }
+    void* replacement = nullptr;
+    if (cudaMalloc(&replacement, (size_t) count * sizeof(int32_t)) != cudaSuccess) {
+        err = "mtp prefill: the input records do not fit";
+        return false;
+    }
+    if (pf_dev_ && cudaFree(pf_dev_) != cudaSuccess) {
+        (void) cudaFree(replacement);
+        err = "mtp prefill: the previous input records could not be released";
+        (void) cudaGetLastError();
+        return false;
+    }
+    pf_dev_ = (int32_t*) replacement;
+    pf_cap_ = count;
+    return true;
+}
+
 bool MtpDrafter::prepare_prefill(std::string& err) {
     const OnDevice on_device(device_);
     const int64_t per_row = 1 + 4 + g_->n_head;
-    if (pf_cap_ < (int64_t) max_t_ * per_row) {
-        if (pf_dev_) cudaFree(pf_dev_);
-        pf_dev_ = nullptr;
-        pf_cap_ = 0;
-        if (cudaMalloc((void**) &pf_dev_, (size_t) (max_t_ * per_row) * sizeof(int32_t)) != cudaSuccess) {
-            err = "mtp prefill: the input records do not fit";
-            return false;
-        }
-        pf_cap_ = max_t_ * per_row;
-    }
+    if (!ensure_prefill_records(max_t_, per_row, err)) return false;
     for (int T = 1; T <= max_t_; ++T)
         if (!capture_prefill_dev(T, err)) return false;   // (STRATA_MTP_PREFILL_SYNC's loop syncs anyway)
     return true;
@@ -1306,16 +1324,7 @@ bool MtpDrafter::reserve_prefill(int64_t n, std::string& err) {
     if (!pf_ring_.reserve((size_t) (n * per_row) * sizeof(int32_t)))
         std::fprintf(stderr, "strata mtp: the prompt records' pinned upload slots could not be reserved (they grow at "
                              "first use)\n");
-    if (pf_cap_ >= n * per_row) return true;
-    if (pf_dev_) cudaFree(pf_dev_);
-    pf_dev_ = nullptr;
-    pf_cap_ = 0;
-    if (cudaMalloc((void**) &pf_dev_, (size_t) (n * per_row) * sizeof(int32_t)) != cudaSuccess) {
-        err = "mtp prefill: the input records do not fit";
-        return false;
-    }
-    pf_cap_ = n * per_row;
-    return true;
+    return ensure_prefill_records(n, per_row, err);
 }
 
 bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0, std::string& err,
@@ -1338,16 +1347,7 @@ bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_
     const bool per_group_sync = prefill_per_group_sync();
     const int64_t NHp = g_->n_head, per_row = 1 + 4 + NHp;
     if (!per_group_sync && n > 0) {
-        if (pf_cap_ < n * per_row) {
-            if (pf_dev_) cudaFree(pf_dev_);
-            pf_dev_ = nullptr;
-            pf_cap_ = 0;
-            if (cudaMalloc((void**) &pf_dev_, (size_t) (n * per_row) * sizeof(int32_t)) != cudaSuccess) {
-                err = "mtp prefill: the input records do not fit";
-                return false;
-            }
-            pf_cap_ = n * per_row;
-        }
+        if (!ensure_prefill_records(n, per_row, err)) return false;
         std::vector<int32_t> rec((size_t) (n * per_row));
         int32_t* tk = rec.data();
         int32_t* stp = tk + n;

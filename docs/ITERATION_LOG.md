@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-90 · MTP prefill 记录缓冲事务式扩容
+
+- 目标 / 指标：`MtpDrafter` 的 prompt 输入记录缓冲在 `prepare_prefill`、`reserve_prefill` 和实际 `prefill`
+  三条路径扩容时，必须对 `rows * per_row * sizeof(int32_t)` 做溢出检查；新分配失败时要保留旧容量，旧缓冲释放
+  失败时也不能覆盖仍有效的指针。
+- 假设与预期：原实现三处重复“先 free 旧缓冲，再 malloc 新缓冲”。新分配失败会同时丢掉旧缓冲和容量；乘法也
+  在查过头文件提示的合理输入范围之外可能溢出。
+- 为什么选这条路线：抽出一个 `ensure_prefill_records(rows, per_row)`：检查维度乘法、字节数、先分配 replacement，
+  旧缓冲成功释放后才发布新指针。三处调用只保留同一策略，减少重复错误路径。
+- 改动与实验：成功路径的容量、布局、上传起点和 graph staging 不变；不用扩容时仍直接返回。
+  `mtp.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）。
+- 判决：采纳。扩容失败保持原有可用缓冲，运算前后均有明确的溢出边界。
+- 生产状态与回滚：未改 prompt token、窗口、K/V、图捕获或上传顺序；单提交可回退。
+- 未验证：当前没有 CUDA 工具链和 RTX 2080 Ti，未在真实显存耗尽时注入 replacement 失败；该结论来自控制流和
+  主机侧编译。
+- 下一步与理由：继续把重复设备缓冲扩容路径收敛到“先分配、后替换”的事务边界。
+
 ## I-20261027-89 · DFlash2 诊断 event 失败即降级并完整释放
 
 - 目标 / 指标：`STRATA_DF2_PROFILE` 和 `STRATA_DF2_TIMING` 是可选诊断，任何 event 创建、记录、同步或计时失败
