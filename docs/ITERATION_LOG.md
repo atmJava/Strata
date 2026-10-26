@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-48 · NUMA toucher 线程失败回退调用线程
+
+- 目标 / 指标：complement 的两次 NUMA slice 触碰分别启动 pinned toucher；任一线程创建失败时，另一个已启动线程必须 join，
+  失败 slice 由调用线程无 pin 地触碰，不能因 joinable 局部线程析构触发进程终止。
+- 假设与预期：旧代码用函数局部 `std::thread a(...), b(...)`。若第二个构造失败，第一个仍 joinable，栈展开会调用
+  `std::terminate()`；源码注释已明确记录这一缺口。
+- 为什么选这条路线：NUMA 触碰是装载加速与放置优化，失败仍可完成相同的页写入；正常两线程路径的 core、range 顺序、pin 行为
+  和调用线程补洞逻辑不变。
+- 改动与实验：拆出无 pin 的 `touch_ranges()`；两个 worker 独立启动和记录状态，先 join 已启动者，再由调用线程补齐未启动 slice。
+  失败信息区分具体 slice，且不改变自动 NUMA balancing 下“已触碰 slice 不重复触碰”的约束。
+- 结果：`expert_source.cpp` 以 `-Wall -Wextra -Werror` 主机侧编译通过，合成 `file_expert_source_test: PASS`；
+  `git diff --check` 通过。该路径需要 NUMA 拓扑与 page
+  placement，当前环境未做实机 NUMA 测试，结论属于控制流静态确认。
+- 判决：采纳。线程配额或资源错误只让对应 slice 改由调用线程完成，不再终止模型装载进程。
+- 生产状态与回滚：未改成功路径的 slice 划分、CPU pin、madvise/mlock 或页字节；单提交可回退。未验证真实双路 NUMA、RTX 2080 Ti、
+  CUDA sm_75 或真实 Qwen expert arena。
+- 学到什么：相邻声明的多个 `std::thread` 并不构成异常安全线程组；每个线程都必须单独记录、join 并准备调用线程接管。
+- 下一步与理由：继续处理 prefill/native 路径的裸局部线程组，并在结束前重跑 CPU 合成与 Python 综合套件。
+
 ## I-20261027-47 · 托管启动回滚清理子进程 ready 文件
 
 - 目标 / 指标：托管服务器进程启动后，如果所有权记录或 owner marker 发布失败，abort 路径必须 kill/reap 子进程、关闭 owner pipe，

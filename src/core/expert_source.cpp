@@ -609,21 +609,38 @@ struct NumaComplementPlacement {
     /// must not re-touch slice pages: with automatic NUMA balancing on, its access faults would migrate them to its node.
     void touch_step(uint8_t* arena, uint64_t lo, uint64_t hi) {
         // CBA: two threads spawned per 1 GiB step (~50 spawns per start); long-lived touchers if the spawn ever shows
-        auto touch = [&](int k) {
-            cpu_set_t set;
-            CPU_ZERO(&set);
-            CPU_SET(core[k], &set);
-            if (sched_setaffinity(0, sizeof set, &set) != 0) pin_failed = true;
+        auto touch_ranges = [&](int k) {
             const auto& rs = ranges[k];
             auto it = std::partition_point(rs.begin(), rs.end(), [&](const auto& r) { return r.second <= lo; });
             for (; it != rs.end() && it->first < hi; ++it)
                 for (uint64_t at = std::max(it->first, lo); at < std::min(it->second, hi); at += 4096)
                     ((volatile uint8_t*) arena)[at] = 0;
         };
-        // CBA: a failed spawn terminates; fall back to an unpinned touch if it ever happens
-        std::thread a(touch, 0), b(touch, 1);
-        a.join();
-        b.join();
+        auto touch = [&](int k) {
+            cpu_set_t set;
+            CPU_ZERO(&set);
+            CPU_SET(core[k], &set);
+            if (sched_setaffinity(0, sizeof set, &set) != 0) pin_failed = true;
+            touch_ranges(k);
+        };
+        std::thread workers[2];
+        bool started[2] = {false, false};
+        for (int k = 0; k < 2; ++k) {
+            try {
+                workers[k] = std::thread(touch, k);
+                started[k] = true;
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "FileExpertSource: NUMA toucher %d did not start (%s); touching its slice "
+                                     "from the caller without pinning\n", k, error.what());
+            } catch (...) {
+                std::fprintf(stderr, "FileExpertSource: NUMA toucher %d did not start; touching its slice "
+                                     "from the caller without pinning\n", k);
+            }
+        }
+        for (std::thread& worker : workers)
+            if (worker.joinable()) worker.join();
+        for (int k = 0; k < 2; ++k)
+            if (!started[k]) touch_ranges(k);
         size_t c[2] = {0, 0};   // the pages no slice holds, as the default loop touches them
         for (uint64_t at = lo; at < hi; at += 4096) {
             bool covered = false;
