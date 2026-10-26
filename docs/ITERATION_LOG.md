@@ -3,6 +3,26 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-100 · MTP draft head 绑定失败可回滚
+
+- 目标 / 指标：非共享 MTP draft head 的 vocab 缓冲、head-row 缓冲、vocab H2D、gather 同步与跨卡 D2D 必须全部
+  成功后才发布 `n_dvocab_`、`dvocab_`、`dhead_` 和 host vocab。任一步失败要释放本轮已取得的两个 device buffer，
+  不能留下同一对象重试时会被覆盖的成员。
+- 假设与预期：旧实现直接对 `dvocab_/dhead_` 做两次 `cudaMalloc`，第二次失败时第一块已成为成员；vocab 上传、
+  gather 后同步和跨卡复制也未检查。失败后仍可能以旧宽度或部分 head 继续，或在下一次 bind 中覆盖泄漏。
+- 为什么选这条路线：draft head 的全部候选资源放在局部变量；失败清理 lambda 只释放本轮两块的组合；错误路径先
+  清理再构造字符串。单卡 gather 后检查 `cudaDeviceSynchronize`，跨卡路径继续使用原有临时 head-row 与 vocab
+  缓冲，并在 D2D 成功后才发布。成功路径的 tensor 行、类型、vocab 顺序、显存计数和后续 Q4/Q6 处理顺序不变。
+- 改动与实验：`mtp.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；
+  `python3 -m pytest tests/terminal -q` 通过（200 passed、46 skipped、93 subtests passed）。
+- 判决：采纳。draft head 绑定只在完整上传和同步后可见，失败不会发布部分权重或丢失本轮另一块分配。
+- 生产状态与回滚：正常加载的 draft token、logits 宽度、head 类型、gather 结果和显存占用不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、MTP pack、双 RTX 2080 Ti 或 layer-split head，未真实注入第二次
+  `cudaMalloc`、gather 或跨卡 D2D 失败。主机侧没有 `MtpDrafter::bind` 级故障测试，此阶段为严格静态审查加全量
+  Terminal/Control 回归，不能替代 GPU 权重加载验证。
+- 下一步与理由：继续检查 MTP 的 dense/expert/ident 上传与初始化同步返回值，并处理 DFlash2 bind 中同样的复制失败
+  后仍可能发布 head 的情况。
+
 ## I-20261027-99 · Batch 初始化资源事务化
 
 - 目标 / 指标：Verifier 的 `init_slots()` 必须先验证 slot 数、session 形状和重复初始化，再一次性发布 mapped

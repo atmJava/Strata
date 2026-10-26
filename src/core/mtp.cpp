@@ -647,17 +647,30 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
     if (dhead_ == nullptr && shared == nullptr && !full_head_env()) {
         std::vector<uint8_t> raw;
         if (read_file(vocab_file(), raw) && raw.size() >= 4 && raw.size() % 4 == 0) {
-            n_dvocab_ = (int64_t) (raw.size() / 4);
+            const int64_t draft_n = (int64_t) (raw.size() / 4);
             const int64_t row_bytes = (int64_t) head->row_bytes();   // a vocabulary row of the native head
-            if (cudaMalloc((void**) &dvocab_, raw.size()) != cudaSuccess ||
-                cudaMalloc((void**) &dhead_, (size_t) (n_dvocab_ * row_bytes)) != cudaSuccess) {
+            int32_t* dvocab_new = nullptr;
+            uint8_t* dhead_new = nullptr;
+            const auto free_pending = [&] {
+                if (dvocab_new != nullptr) cudaFree(dvocab_new);
+                if (dhead_new != nullptr) cudaFree(dhead_new);
+                dvocab_new = nullptr;
+                dhead_new = nullptr;
+            };
+            if (cudaMalloc((void**) &dvocab_new, raw.size()) != cudaSuccess ||
+                cudaMalloc((void**) &dhead_new, (size_t) (draft_n * row_bytes)) != cudaSuccess) {
+                free_pending();
                 err = "mtp: the draft head does not fit";
-                draft_head_hint(n_dvocab_, row_bytes);
+                draft_head_hint(draft_n, row_bytes);
                 return false;
             }
-            cudaMemcpy(dvocab_, raw.data(), raw.size(), cudaMemcpyHostToDevice);
-            dvocab_host_.resize((size_t) n_dvocab_);
-            std::memcpy(dvocab_host_.data(), raw.data(), raw.size());
+            if (cudaMemcpy(dvocab_new, raw.data(), raw.size(), cudaMemcpyHostToDevice) != cudaSuccess) {
+                free_pending();
+                err = "mtp: the draft vocabulary upload failed";
+                return false;
+            }
+            std::vector<int32_t> dvocab_host_new((size_t) draft_n);
+            std::memcpy(dvocab_host_new.data(), raw.data(), raw.size());
             const int head_dev = head->device();
             if (head_dev >= 0 && head_dev != device_) {
                 // the main head is on another card (the drafter on the first stage of a layer split, 0.1.44): the rows are
@@ -667,26 +680,40 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                 bool ok_x = true;
                 {
                     const OnDevice on_head(head_dev);
-                    ok_x = cudaMalloc((void**) &tmp, (size_t) (n_dvocab_ * row_bytes)) == cudaSuccess &&
+                    ok_x = cudaMalloc((void**) &tmp, (size_t) (draft_n * row_bytes)) == cudaSuccess &&
                            cudaMalloc((void**) &dv, raw.size()) == cudaSuccess &&
                            cudaMemcpy(dv, raw.data(), raw.size(), cudaMemcpyHostToDevice) == cudaSuccess;
                     if (ok_x) {
-                        strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dv, n_dvocab_,
+                        strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dv, draft_n,
                                                      (uint8_t*) tmp, nullptr);
                         ok_x = cudaDeviceSynchronize() == cudaSuccess;
                     }
                 }
-                ok_x = ok_x && cudaMemcpy(dhead_, tmp, (size_t) (n_dvocab_ * row_bytes), cudaMemcpyDeviceToDevice) == cudaSuccess;
+                ok_x = ok_x && cudaMemcpy(dhead_new, tmp, (size_t) (draft_n * row_bytes), cudaMemcpyDeviceToDevice) == cudaSuccess;
                 {
                     const OnDevice on_head(head_dev);
                     if (tmp) cudaFree(tmp);
                     if (dv) cudaFree(dv);
                 }
-                if (!ok_x) { err = "mtp: the draft head's rows could not be copied from the head's card"; return false; }
+                if (!ok_x) {
+                    free_pending();
+                    err = "mtp: the draft head's rows could not be copied from the head's card";
+                    return false;
+                }
             } else {
-                strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
+                strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_new, draft_n,
+                                             dhead_new, nullptr);
+                const cudaError_t sync = cudaDeviceSynchronize();
+                if (sync != cudaSuccess) {
+                    free_pending();
+                    err = std::string("mtp: draft head gather: ") + cudaGetErrorString(sync);
+                    return false;
+                }
             }
-            cudaDeviceSynchronize();
+            n_dvocab_ = draft_n;
+            dvocab_ = dvocab_new;
+            dhead_ = dhead_new;
+            dvocab_host_ = std::move(dvocab_host_new);
             vram_ += (uint64_t) (n_dvocab_ * row_bytes) + raw.size();
             std::fprintf(stderr, "strata mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
