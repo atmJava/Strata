@@ -50,6 +50,23 @@
   多卡 context 中制造 `cudaHostGetDevicePointer` / `cudaMalloc` 失败。
 - 下一步与理由：继续检查 peer/remote 的 device switch 失败、adapt 批次失败和跨设备析构；优先只改可静态证明的资源状态。
 
+## I-20261027-123 · RemoteExpertOpt 清理失败不覆盖保留的 peer sum
+
+- 目标 / 指标：`release()` 遇到 device switch 或 `cudaFree` 失败时必须保留对应 peer sum；此后的 `init()` 不得向非空
+  指针再次 `cudaMalloc`，必须先确认旧资源已全部释放。
+- 假设与预期：在 I-121 的“切换失败保留状态”分支上，`release()` 只返回 `void`，这让 `init()` 无法知道旧 sum 仍在；
+  若继续初始化会覆盖指针并永久泄漏前一份 device 内存。
+- 为什么选这条路线：把清理结果显式返回给唯一的初始化入口，失败时直接报告并保持对象可重试；独立 host staging 仍可在
+  peer device 清理失败时先安全释放。
+- 改动与实验：`release()` 返回是否全部成功，并仅在 `cudaFree` / `cudaFreeHost` 成功后清空对应指针；`init()` 在旧资源
+  未完全释放时停止。扩展故障测试：注入 `cudaFree` 失败，断言 host 已回收、两个 peer sum 仍在且没有新分配；解除故障后
+  重试，断言旧 sum 被释放并由完整新资源集替换。普通及 ASan/UBSan 通过。
+- 判决：采纳。初始化不会覆盖尚未释放的 device 所有权。
+- 生产状态与回滚：正常成功路径只多一次布尔检查；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 GPU；`cudaFree` 失败由 link wrapper 注入，尚未验证真实 driver/context 丢失后的
+  可恢复性。
+- 下一步与理由：继续处理 `PeerExperts::adapt()` 批次中途失败，避免未记录完成的异步复制被后续 apply 误发布。
+
 ## I-20261027-122 · device 切换失败不再丢失 peer/remote 资源
 
 - 目标 / 指标：`OnDevice` 必须报告 `cudaGetDevice` / `cudaSetDevice` 的失败；PeerExperts 和 RemoteExperts 在无法切回

@@ -55,13 +55,16 @@ void RemoteExpertOpt::attach(RemoteExperts& remote) {
 
 bool RemoteExpertOpt::init(std::string& err) {
     // init() is retryable: a failed allocation must not leave a previous staging set or peer sums alive.
-    release();
+    if (!release()) {
+        err = "remote expert decode optimization: previous resources could not be released";
+        return false;
+    }
     void* mapped = nullptr;
     if (!check(cudaHostAlloc((void**) &h_sum_, MAXT * (H + K) * sizeof(float),
                              cudaHostAllocPortable | cudaHostAllocMapped), err))
         return false;
     if (!check(cudaHostGetDevicePointer(&mapped, h_sum_, 0), err)) {
-        release();
+        (void) release();
         return false;
     }
     m_sum_ = (float*) mapped;
@@ -71,7 +74,7 @@ bool RemoteExpertOpt::init(std::string& err) {
         p.device = p.remote->device_;
         const OnDevice on(p.device);
         if (!check(cudaMalloc((void**) &p.sum, MAXT * H * sizeof(float)), err)) {
-            release();
+            (void) release();
             return false;
         }
     }
@@ -85,21 +88,32 @@ RemoteExpertOpt::~RemoteExpertOpt() {
     }
 }
 
-void RemoteExpertOpt::release() {
+bool RemoteExpertOpt::release() {
+    bool complete = true;
     for (auto& p : peers_) {
         const OnDevice on(p.device);
-        if (p.device >= 0 && !on.ok) continue;
+        if (p.device >= 0 && !on.ok) {
+            complete = false;
+            continue;
+        }
         if (p.device >= 0 && p.remote->device_ == p.device && p.remote->stream_)
             cudaStreamSynchronize(p.remote->stream_);
-        if (p.sum) cudaFree(p.sum);
+        if (p.sum && cudaFree(p.sum) != cudaSuccess) {
+            complete = false;
+            continue;
+        }
         p.sum = nullptr;
         p.device = -1;
     }
-    if (h_sum_) cudaFreeHost(h_sum_);
-    h_sum_ = nullptr;
-    m_sum_ = nullptr;
-    h_mask_ = nullptr;
-    m_mask_ = nullptr;
+    if (h_sum_ && cudaFreeHost(h_sum_) != cudaSuccess) {
+        complete = false;
+    } else {
+        h_sum_ = nullptr;
+        m_sum_ = nullptr;
+        h_mask_ = nullptr;
+        m_mask_ = nullptr;
+    }
+    return complete;
 }
 
 size_t RemoteExpertOpt::metadata_bytes() { return sizeof(ReduceMeta); }

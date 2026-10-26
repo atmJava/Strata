@@ -18,6 +18,7 @@ int device_frees = 0;
 int device_alloc_attempts = 0;
 int fail_malloc_at = -1;
 bool fail_mapping = false;
+bool fail_device_free = false;
 int current_device = 0;
 
 void check(bool condition, const char* message) {
@@ -31,6 +32,7 @@ void reset_counters() {
     host_allocs = host_frees = device_allocs = device_frees = device_alloc_attempts = 0;
     fail_malloc_at = -1;
     fail_mapping = false;
+    fail_device_free = false;
     current_device = 0;
 }
 
@@ -73,6 +75,7 @@ extern "C" cudaError_t __wrap_cudaMalloc(void** pointer, std::size_t) {
 }
 
 extern "C" cudaError_t __wrap_cudaFree(void* pointer) {
+    if (fail_device_free) return cudaErrorMemoryAllocation;
     if (pointer != nullptr) {
         ++device_frees;
         delete static_cast<int*>(pointer);
@@ -134,10 +137,23 @@ int main() {
         check(host_allocs == 3 && host_frees == 2, "successful retry must retain one host allocation");
         check(device_allocs == 3 && device_frees == 1, "successful retry must retain both peer sums");
         check(first->optimized_decode() && second->optimized_decode(), "attached peers must remain linked");
+
+        fail_device_free = true;
+        err.clear();
+        check(!opt.init(err), "init must refuse to overwrite resources that could not be released");
+        check(host_allocs == 3 && host_frees == 3, "release failure must still reclaim independent host staging");
+        check(device_allocs == 3 && device_frees == 1, "failed device frees must retain both peer sums");
+        check(!err.empty(), "release failure must be reported by init");
+
+        fail_device_free = false;
+        err.clear();
+        check(opt.init(err), "init must succeed once the retained peer sums can be released");
+        check(host_allocs == 4 && host_frees == 3, "retry must allocate fresh host staging after cleanup");
+        check(device_allocs == 5 && device_frees == 3, "retry must release and replace both peer sums");
     }
 
-    check(host_frees == 3, "destruction must free the retained host staging exactly once");
-    check(device_frees == 3, "destruction must free both retained peer sums exactly once");
+    check(host_frees == 4, "destruction must free the retained host staging exactly once");
+    check(device_frees == 5, "destruction must free both retained peer sums exactly once");
     check(!first->optimized_decode() && !second->optimized_decode(), "destruction must unlink every peer");
     std::puts("remote_expert_opt_init_test: initialization rollback and retry");
     return 0;

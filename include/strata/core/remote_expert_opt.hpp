@@ -40,7 +40,7 @@ private:
     void prepare(const RemoteExperts& remote, void* metadata) const;
     bool reduce(RemoteExperts& remote, const void* metadata, std::string& err);
     void accumulate(const RemoteExperts& remote);
-    void release();
+    bool release();
 
     struct Peer {
         RemoteExperts* remote;
