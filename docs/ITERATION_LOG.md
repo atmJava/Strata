@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-12 · 原子记录写入统一，失败路径关闭描述符并删除临时文件
+
+- 目标 / 指标：profile、connection 和 Web run config 的整文件替换必须共用同一实现；写临时文件、
+  `fdopen`、`fsync` 或 `replace` 任一步失败时，不能泄漏描述符、覆盖旧记录或遗留临时文件。
+- 假设与预期：旧 profiles 与 connections 各自复制了同一段原子替换逻辑，且 `os.fdopen(fd)` 自身失败时
+  没有关闭原始 fd；run config 还使用固定 `<name>.tmp`，并发保存会碰撞。
+- 为什么选这条路线：这是跨三个持久化入口的重复实现和同一个失败缺口，合并后能同时减少代码并扩大故障覆盖。
+- 改动与实验：在 `strata_control.atomic` 增加 `write_bytes()`，统一使用同目录随机临时文件、flush/fsync、
+  replace 和父目录 fsync；profiles 与 connections 改为委托该实现；Web run config 改用同一原子写入，
+  删除固定 `.tmp` 路径；`write_text()` 也复用字节实现。新增 fdopen 失败、replace 失败、父目录 fsync
+  失败和正常模式/残留文件检查。
+- 结果：`test_atomic.py`、profiles、connections、runconfig 合计
+  `41 passed / 26 subtests passed`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。三个入口现在共享一个失败语义，旧记录在提交点之前保持不变。
+- 生产状态与回滚：未改生产；仅收紧本地 profile、连接与 run config 的保存路径，可用单个提交回退。
+- 学到什么：原子替换不仅是 `os.replace`；临时 fd 的所有权、清理点和父目录同步都必须放在同一个事务边界里。
+- 下一步与理由：继续收敛 exclusive-create 写入（ready/state/journal）的 fd 所有权，并补充失败注入。
+
 ## I-20261027-11 · Runtime stop 正确处理 SIGTERM 前 fast-exit，强杀等待保持有界
 
 - 目标 / 指标：`Host._stop_child()` 不能在 `poll()` 与 `send_signal(SIGTERM)` 之间子进程自行退出时误报失败；

@@ -11,7 +11,6 @@ import json
 import os
 import re
 import stat
-import tempfile
 import fcntl
 from contextlib import contextmanager
 from pathlib import Path
@@ -145,25 +144,7 @@ def list_connections() -> list[dict]:
 
 
 def _replace(path: Path, data: bytes) -> None:
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        _atomic_mod.replace(name, path)
-        try:
-            parent = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(parent)
-            finally:
-                os.close(parent)
-        except OSError:
-            # The replacement succeeded; do not report a failed save afterward.
-            pass
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
+    _atomic_mod.write_bytes(path, data)
 
 
 @contextmanager

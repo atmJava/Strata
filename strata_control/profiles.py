@@ -193,25 +193,7 @@ def _lock(name: str):
 
 
 def _atomic(path: Path, data: bytes) -> None:
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        _atomic_mod.replace(temp_name, path)
-        try:
-            parent_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
-        except OSError:
-            # Replacement already succeeded; do not report a failed save after it changed the profile.
-            pass
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
+    _atomic_mod.write_bytes(path, data)
 
 
 def create(name: str, source_config: str) -> tuple[dict, str]:
