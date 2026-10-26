@@ -72,6 +72,13 @@ constexpr int GGML_Q4_0 = 2;
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
+bool mtp_device_ok(const OnDevice& on, int device, const char* where, std::string& err) {
+    if (on.ok) return true;
+    err = std::string("mtp: cannot enter CUDA") + std::to_string(device) + " for " + where + ": " +
+          cudaGetErrorString(on.error);
+    return false;
+}
+
 struct Bump {
     uint8_t* base = nullptr;
     uint64_t used = 0;
@@ -813,6 +820,7 @@ void draft_head_hint(int64_t n_tokens, int64_t row_bytes) {
 bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float* window_R, std::string& err,
                       const MtpDrafter* shared) {
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "binding", err)) return false;
     wt_ = &wt;
     head_ = head;
     window_R_ = window_R;
@@ -869,9 +877,10 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                 bool ok_x = true;
                 {
                     const OnDevice on_head(head_dev);
-                    ok_x = cudaMalloc((void**) &tmp, (size_t) (draft_n * row_bytes)) == cudaSuccess &&
-                           cudaMalloc((void**) &dv, raw.size()) == cudaSuccess &&
-                           cudaMemcpy(dv, raw.data(), raw.size(), cudaMemcpyHostToDevice) == cudaSuccess;
+                    ok_x = on_head.ok;
+                    if (ok_x) ok_x = cudaMalloc((void**) &tmp, (size_t) (draft_n * row_bytes)) == cudaSuccess &&
+                                      cudaMalloc((void**) &dv, raw.size()) == cudaSuccess &&
+                                      cudaMemcpy(dv, raw.data(), raw.size(), cudaMemcpyHostToDevice) == cudaSuccess;
                     if (ok_x) {
                         strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dv, draft_n,
                                                      (uint8_t*) tmp, nullptr);
@@ -881,8 +890,10 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                 ok_x = ok_x && cudaMemcpy(dhead_new, tmp, (size_t) (draft_n * row_bytes), cudaMemcpyDeviceToDevice) == cudaSuccess;
                 {
                     const OnDevice on_head(head_dev);
-                    if (tmp) cudaFree(tmp);
-                    if (dv) cudaFree(dv);
+                    if (on_head.ok) {
+                        if (tmp) cudaFree(tmp);
+                        if (dv) cudaFree(dv);
+                    }
                 }
                 if (!ok_x) {
                     free_pending();
@@ -960,7 +971,7 @@ struct MtpProf {
     ~MtpProf() {
         if (d == nullptr) return;
         const OnDevice on_device(device);
-        cudaFree(d);
+        if (on_device.ok) cudaFree(d);
     }
     void init() {
         if (!on || d != nullptr) return;
@@ -1536,6 +1547,7 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
 
 void MtpDrafter::kv_restore(int64_t upto) {
     const OnDevice on_device(device_);
+    if (!on_device.ok) return;
     if (st_.kv_mode != 2 || upto <= 0) return;
     // the ring's blocks below `upto`, from the host copy: a checkpoint resume may have left later cells in them
     const strata::kernels::QsaShapes s = shapes_of(*g_);
@@ -1573,6 +1585,7 @@ bool MtpDrafter::ensure_prefill_records(int64_t rows, int64_t per_row, std::stri
 
 bool MtpDrafter::prepare_prefill(std::string& err) {
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "prefill preparation", err)) return false;
     const int64_t per_row = 1 + 4 + g_->n_head;
     if (!ensure_prefill_records(max_t_, per_row, err)) return false;
     for (int T = 1; T <= max_t_; ++T)
@@ -1591,6 +1604,7 @@ static bool prefill_per_group_sync() {
 
 bool MtpDrafter::reserve_prefill(int64_t n, std::string& err) {
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "prefill reservation", err)) return false;
     if (prefill_per_group_sync()) {
         for (int T = 1; T <= max_t_; ++T)
             if (!capture_prefill(T, err)) return false;
@@ -1610,6 +1624,7 @@ bool MtpDrafter::reserve_prefill(int64_t n, std::string& err) {
 bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0, std::string& err,
                          bool sync) {
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "prefill", err)) return false;
     const Clock::time_point t0 = Clock::now();
     const int64_t HCN = g_->hc * g_->n_embd;
     // cells the window can never reach again need no K/V
@@ -1729,6 +1744,7 @@ void MtpDrafter::DraftTiming::report() const {
 bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
                        float* probs, float min_p, int* n_drafts) {
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "drafting", err)) return false;
     if (T < 1 || T > max_t_ || a < 0 || a >= T) { err = "mtp: draft arguments out of range"; return false; }
     if (chain_live_) { err = "mtp: a pipelined chain is still in flight"; return false; }
     // #783 PR-i (stuchapin909): the round runs for the cells up to the accepted row a (T = a + 1): the K/V of the rejected
@@ -1921,6 +1937,7 @@ bool MtpDrafter::stage_source_R(int T, std::string& err) {
 
 bool MtpDrafter::prepare_chain(std::string& err) {
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "chain preparation", err)) return false;
     if (!force_on_ || h_force_ == nullptr) { err = "mtp: chains need set_force_capture before load"; return false; }
     for (int T = 1; T <= max_t_; ++T)
         if (!capture_round(T, false, err)) return false;
@@ -1941,6 +1958,7 @@ bool MtpDrafter::prepare_chain(std::string& err) {
 bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force,
                               int n_out, int n_early, std::string& err) {
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "chain launch", err)) return false;
     if (chain_live_) { err = "mtp: a chain is already in flight"; return false; }
     if (!force_on_ || ev_chain_ == nullptr) { err = "mtp: chains need prepare_chain"; return false; }
     if (T < 1 || T > max_t_ || a < 0 || a >= T || n_out < 1 || n_out > max_t_ - 1 || n_force < 0 || n_force > n_out ||
@@ -1994,6 +2012,7 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
 int MtpDrafter::chain_outputs_ready(std::string& err) {
     if (!chain_live_) return chain_n_;
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "chain outputs", err)) return -1;
     while (steps_seen_ < chain_early_) {
         const cudaError_t q = cudaEventQuery(ev_step_[steps_seen_]);
         if (q == cudaErrorNotReady) break;
@@ -2008,6 +2027,7 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
 int MtpDrafter::chain_poll(std::string& err) {
     if (!chain_live_) return 1;
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "chain polling", err)) return -1;
     const cudaError_t q = cudaEventQuery(ev_chain_);
     if (q == cudaErrorNotReady) return 0;
     chain_live_ = false;
@@ -2023,6 +2043,7 @@ int MtpDrafter::chain_poll(std::string& err) {
 bool MtpDrafter::draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                              float* probs, float min_p, int* n_drafts) {
     const OnDevice on_device(device_);
+    if (!mtp_device_ok(on_device, device_, "the first draft", err)) return false;
     // row 0 is the real pair; rows 1.. repeat it and only write cells the next round overwrites
     const int64_t HCN = g_->hc * g_->n_embd;
     for (int t = 0; t < T; ++t)

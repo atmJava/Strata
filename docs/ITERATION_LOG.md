@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-141 · MTP 入口与 chain 操作检查设备切换
+
+- 目标 / 指标：MTP 的 bind、prefill、draft、chain 与 profiler 只能在 drafter 所属 device 上操作 graph、event 和
+  buffer；切卡失败时不得继续或跨上下文释放。
+- 假设与预期：这些入口创建了 `OnDevice(device_)`，但多数忽略 `ok`。失败后仍可能启动 graph、查询 event、复制
+  logits 或释放 profiler 内存，于错误卡上执行。
+- 改动与实验：新增统一的 `mtp_device_ok()`；所有返回 bool 的入口在设备失败时返回错误，chain 查询返回 `-1`，
+  void profiler/restore 路径保留资源并停止。读取共享 head 的临时分配也只在成功进入 head device 后创建/释放。
+- 判决：采纳。MTP 的使用期和清理路径现在共享同一设备前提。
+- 生产状态与回滚：影响多卡与显式 MTP/chained drafting 路径；单卡正常路径不变，单提交可回退。
+- 未验证：当前无 CUDA Toolkit/双 GPU，无法注入 drafter/head 切卡失败；Clang 主机侧 CUDA 声明兼容语法构建、
+  `mtp_logits_width_test`、`on_device_test` 及 406 个 Terminal/tools pytest 通过。
+- 下一步与理由：完成 MTP 目标测试后进入最终回归。
+
 ## I-20261027-140 · Prefill 主路径在设备切换失败时停止
 
 - 目标 / 指标：初始化、运行、draft 与清理只能在该 stage 的 device 上下文中操作资源；切卡失败时必须保留资源并
