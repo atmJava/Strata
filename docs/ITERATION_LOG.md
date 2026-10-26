@@ -3,6 +3,19 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-113 · quant format 测试支持直接执行
+
+- 目标 / 指标：`python3 tools/test_quant_formats.py` 与 `python3 -m tools.test_quant_formats` 都应运行同一 2 个测试。
+- 假设与预期：脚本使用 `import tools.quant_formats`，但直接执行时 Python 只把 `tools/` 放进 `sys.path`，仓库根目录
+  不在导入路径，因而在任何测试执行前报 `ModuleNotFoundError: tools`。
+- 为什么选这条路线：测试脚本可以像其他直接运行的 tools 测试一样，用自身位置推导仓库根目录并加入 `sys.path`；
+  不需要改包结构或生产 `quant_formats.py`。
+- 改动与实验：增加基于 `__file__` 的根目录插入；两种调用方式都通过 2 tests，`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。该测试不再依赖调用者的当前目录或 `PYTHONPATH`。
+- 生产状态与回滚：未修改量化读取逻辑；只改测试的导入入口，单提交可回退。
+- 未验证：仅在 Linux x86_64、Python 3.13 上验证；未覆盖 Windows 路径分隔符，但 `pathlib.Path` 与现有测试模式一致。
+- 下一步与理由：继续运行其余非 GPU 工具测试，并把测试入口差异收敛到最小。
+
 ## I-20261027-112 · DFlash2 重绑定保留旧 logits
 
 - 目标 / 指标：DFlash2 在重新绑定向更宽的 draft vocabulary 时，只有新 logits 缓冲成功分配后才能释放旧缓冲和
