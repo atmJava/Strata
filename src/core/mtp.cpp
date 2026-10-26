@@ -932,6 +932,7 @@ const char* const kMpNames[kMpSlots] = {"-", "embed+fc_emb", "hnorm+fc_hidden+ad
 struct MtpProf {
     bool on = false;
     unsigned long long* d = nullptr;
+    int device = -1;
     std::vector<unsigned long long> h;
     int base = -1;   // the graph being captured (-1: none, no stamps)
     double sum[2][kMpSlots] = {};
@@ -940,10 +941,25 @@ struct MtpProf {
         const char* e = std::getenv("STRATA_MTP_PROFILE");
         on = e != nullptr && e[0] == '1';
     }
+    ~MtpProf() {
+        if (d == nullptr) return;
+        const OnDevice on_device(device);
+        cudaFree(d);
+    }
     void init() {
         if (!on || d != nullptr) return;
-        if (cudaMalloc((void**) &d, (size_t) kMpSlots * kMpGraphs * 8) != cudaSuccess) { on = false; d = nullptr; (void) cudaGetLastError(); return; }
-        cudaMemset(d, 0, (size_t) kMpSlots * kMpGraphs * 8);
+        int current = -1;
+        const size_t bytes = (size_t) kMpSlots * kMpGraphs * 8;
+        if (cudaGetDevice(&current) != cudaSuccess ||
+            cudaMalloc((void**) &d, bytes) != cudaSuccess ||
+            cudaMemset(d, 0, bytes) != cudaSuccess) {
+            if (d != nullptr) cudaFree(d);
+            d = nullptr;
+            on = false;
+            (void) cudaGetLastError();
+            return;
+        }
+        device = current;
         h.assign((size_t) kMpSlots * kMpGraphs, 0);
     }
     void stamp(int i, cudaStream_t cs) const {
@@ -951,7 +967,11 @@ struct MtpProf {
     }
     void collect(int n_steps_run) {   // after the round's sync: the round graph and steps 1..n_steps_run-1
         if (!on || d == nullptr) return;
-        cudaMemcpy(h.data(), d, h.size() * 8, cudaMemcpyDeviceToHost);
+        if (cudaMemcpy(h.data(), d, h.size() * 8, cudaMemcpyDeviceToHost) != cudaSuccess) {
+            on = false;
+            (void) cudaGetLastError();
+            return;
+        }
         for (int gi = 0; gi < n_steps_run && gi < kMpGraphs; ++gi) {
             const unsigned long long* s = h.data() + (size_t) gi * kMpSlots;
             const int k = gi == 0 ? 0 : 1;

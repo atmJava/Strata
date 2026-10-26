@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-110 · MTP profiler 初始化与设备释放补齐
+
+- 目标 / 指标：`STRATA_MTP_PROFILE` 的 device stamp 缓冲必须在分配和清零都成功后启用，读取失败后停止采样，
+  并在进程退出时回到创建它的 device 上释放。
+- 假设与预期：旧 `MtpProf::init()` 不检查 `cudaMemset`；清零失败仍保留 `on=true`，随后把未初始化 stamp 当时间。
+  `collect()` 忽略 D2H copy 失败，可能继续累计过期数据；全局缓冲也没有析构释放。
+- 为什么选这条路线：初始化先在局部记录当前 device，allocation/memset 合成一个成功条件，失败立即 free 并关闭诊断；
+  collect 失败也关闭。析构使用 `OnDevice` 切回分配卡后 free，避免在默认卡上释放另一张卡的指针。
+- 改动与实验：不启用 `STRATA_MTP_PROFILE` 时行为不变；启用时成功路径的 buffer 大小、stamp 位置和报告内容不变。
+  `mtp.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；`mtp_logits_width_test` 通过
+  116 checks。
+- 判决：采纳。诊断路径不再使用未初始化缓冲，也不再依赖进程回收 device 分配。
+- 生产状态与回滚：只影响 opt-in profiler；默认推理路径和数值不变，单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 RTX 2080 Ti，未真实注入 memset/D2H 失败，也未验证 CUDA runtime 在进程
+  静态析构阶段的关闭顺序。
+- 下一步与理由：继续检查 MTP bind 的重新分配与 Q4 head 转换，避免失败时覆盖仍有效的旧缓冲。
+
 ## I-20261027-109 · 修复 GGUF 路径测试的过期 mock
 
 - 目标 / 指标：`python3 -m unittest tools.test_gguf_paths -v` 必须全部通过，并继续验证环境变量提示。
