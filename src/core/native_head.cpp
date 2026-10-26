@@ -1,4 +1,5 @@
 #include "strata/core/native_head.hpp"
+#include "strata/core/mapped_host.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -116,12 +117,20 @@ const NativeEmbed* native_embed() { return g_embed; }
 
 NativeEmbed::~NativeEmbed() {
     const strata::core::OnDevice on_device(device_);
-    if (host_) cudaFreeHost(host_);
+    if (host_) strata::core::host_free_guarded(host_);
     else if (dev_) cudaFree(const_cast<void*>(dev_));   // the VRAM fallback below
 }
 
 bool NativeEmbed::load(const std::vector<std::string>& shards, int64_t n_embd, int64_t n_vocab, std::string& err) {
-    cudaGetDevice(&device_);
+    if (host_ != nullptr || dev_ != nullptr) {
+        err = "native embedding is already loaded";
+        return false;
+    }
+    int device = -1;
+    if (cudaGetDevice(&device) != cudaSuccess) {
+        err = "native embedding: cannot identify the current device";
+        return false;
+    }
     try {
         const strata::GgufModel model(shards);
         // --embd-gguf's one-tensor file (tools/embd_bf16_pack.py) says "strata-embd": only its tensor is checked
@@ -137,44 +146,44 @@ bool NativeEmbed::load(const std::vector<std::string>& shards, int64_t n_embd, i
                   "dequantizer";
             return false;
         }
-        row_ = strata::kernels::iq_row_bytes((int) t->type, n_embd);
-        bytes_ = (uint64_t) row_ * (uint64_t) n_vocab;
+        const size_t row = strata::kernels::iq_row_bytes((int) t->type, n_embd);
+        const uint64_t bytes = (uint64_t) row * (uint64_t) n_vocab;
         // the table is copied out of the mapping below: a truncated shard must be an error, not a read past EOF
-        if (!model.in_bounds(*t, at) || strata::tensor_payload_bytes(*t) != bytes_) {
-            err = "native embedding: token_embd.weight's payload is truncated or not " + std::to_string(bytes_) +
+        if (!model.in_bounds(*t, at) || strata::tensor_payload_bytes(*t) != bytes) {
+            err = "native embedding: token_embd.weight's payload is truncated or not " + std::to_string(bytes) +
                   " B (" + gguf.path() + ")";
-            bytes_ = 0;
             return false;
         }
-        strata::platform::advise_willneed(gguf.tensor_data(*t), bytes_);   // copied out of the mapping below
-        cudaError_t host_err = cudaHostAlloc(&host_, bytes_, cudaHostAllocMapped | cudaHostAllocPortable);
-        if (host_err != cudaSuccess) {
+        strata::platform::advise_willneed(gguf.tensor_data(*t), bytes);   // copied out of the mapping below
+        void* host = nullptr;
+        void* dev = nullptr;
+        const bool mapped = strata::core::alloc_mapped_pinned(
+            bytes, &host, &dev, cudaHostAllocPortable, false);
+        if (!mapped) {
             // Under WSL2 the driver's pinned/mapped host budget (~1 GiB) can be spent by the GPU contexts
             // themselves (three cards). The table is only gathered from, so keep it in the current device's VRAM
             // instead: it costs its size there and reads faster than over PCIe.
             cudaGetLastError();
-            host_ = nullptr;
             void* d = nullptr;
-            if (cudaMalloc(&d, bytes_) != cudaSuccess ||
-                cudaMemcpy(d, gguf.tensor_data(*t), bytes_, cudaMemcpyHostToDevice) != cudaSuccess) {
+            if (cudaMalloc(&d, bytes) != cudaSuccess ||
+                cudaMemcpy(d, gguf.tensor_data(*t), bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
                 if (d) cudaFree(d);
                 cudaGetLastError();
-                err = "native embedding: cannot pin " + std::to_string(bytes_ >> 20) + " MiB: " +
-                      cudaGetErrorString(host_err) + ", nor place it in VRAM";
+                err = "native embedding: cannot pin " + std::to_string(bytes >> 20) +
+                      " MiB, and cannot place it in VRAM";
                 return false;
             }
             std::fprintf(stderr, "strata: native embedding: cannot pin %llu MiB, kept in VRAM instead\n",
-                         (unsigned long long) (bytes_ >> 20));
-            dev_ = d;
+                         (unsigned long long) (bytes >> 20));
+            dev = d;
         } else {
-            std::memcpy(host_, gguf.tensor_data(*t), bytes_);
-            void* d = nullptr;
-            if (cudaHostGetDevicePointer(&d, host_, 0) != cudaSuccess) {
-                err = "native embedding: no device alias for the mapped table";
-                return false;
-            }
-            dev_ = d;
+            std::memcpy(host, gguf.tensor_data(*t), bytes);
         }
+        host_ = host;
+        dev_ = dev;
+        device_ = device;
+        row_ = row;
+        bytes_ = bytes;
         type_ = (int) t->type;
         n_embd_ = n_embd;
         n_vocab_ = n_vocab;

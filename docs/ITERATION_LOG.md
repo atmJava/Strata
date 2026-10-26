@@ -3,6 +3,28 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-98 · Native embedding 加载事务化
+
+- 目标 / 指标：`NativeEmbed::load()` 只能在模型检查、payload 边界检查、mapped-pinned 分配、device alias 和内容
+  复制全部成功后发布资源与几何信息。alias 失败必须释放 host 块；同一对象不能以半加载状态被重试。guarded pin
+  分配必须由对应 guarded free 释放。
+- 假设与预期：旧实现一开始就写 `device_`，随后提前写 `row_/bytes_`；host 分配成功后 alias 失败会留下 `host_`
+  非空但 `type_` 仍无效的半状态。再次调用会覆盖该指针。改成 guarded 分配后若析构仍直接 `cudaFreeHost`，测试 pin
+  预算会保留已释放地址的计数。
+- 为什么选这条路线：所有候选资源先放在局部变量，成功末尾一次性发布；已有资源时拒绝重复加载。mapped 表不再先
+  清零再被整表 memcpy 覆盖，共享分配器增加 `clear=false` 路径；alias 失败会自动走原有 VRAM fallback。析构使用
+  `host_free_guarded()`，与分配及模拟预算保持同一路径。
+- 改动与实验：成功加载后的 tensor 字节、portable/mapped flags、VRAM fallback 条件、embedding gather 指针和模型
+  数值不变。`mapped_host_test` 增加跳过清零路径的检查；普通及 ASan/UBSan 通过。`native_head.cpp`、`mtp.cpp`、
+  `dflash2.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警）；Terminal/Control 全量通过
+  （200 passed、46 skipped、93 subtests passed）。
+- 判决：采纳。native embedding 不再发布部分加载状态，host 分配类型与释放路径一致。
+- 生产状态与回滚：未改 embedding 量化格式、row 字节数、gather kernel 或 VRAM fallback 内容；只改发布和释放
+  顺序；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动、实际 GGUF pack 或 RTX 2080 Ti，未真实触发大表 pin 失败、alias 失败和 VRAM
+  fallback，也未测量 skippable memset 的时间收益。测试覆盖共享分配器的失败路径，不替代真实模型加载。
+- 下一步与理由：继续检查 native head 与 peer/remote staging 的加载失败路径，以及多卡初始化时逐项发布句柄的顺序。
+
 ## I-20261027-97 · Mapped-pinned 分配在 alias 失败时释放
 
 - 目标 / 指标：`cudaHostAlloc(..., Mapped)` 成功后，如果 `cudaHostGetDevicePointer` 失败，必须立即释放 host

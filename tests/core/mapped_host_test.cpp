@@ -74,6 +74,17 @@ int main() {
     check(host_frees == 1, "the successful allocation did not free exactly once");
 
     reset_counts();
+    host = old_host;
+    device = old_device;
+    check(alloc_mapped_pinned(8, &host, &device, 0, false),
+          "an allocation that skips initialization was rejected");
+    std::memset(host, 0x5a, 8);
+    check(static_cast<unsigned char*>(host)[7] == 0x5a,
+          "an allocation that skips initialization was overwritten");
+    strata::core::host_free_guarded(host);
+    check(host_frees == 1, "the uninitialized allocation did not free exactly once");
+
+    reset_counts();
     fail_device_alias = true;
     host = old_host;
     device = old_device;
