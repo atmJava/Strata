@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-05 · 关闭后的 MCP HTTP 响应不会写回旧会话
+
+- 目标 / 指标：`HttpTransport.close()` 执行时，已在 `urlopen` 中等待的响应即使随后返回，也不能更新
+  session 或完成调用槽；关闭后的新 POST 必须立即失败。
+- 假设与预期：上一个阶段中断了启动等待，但 `_post()` 在 `urlopen` 返回后没有重新检查关闭状态，
+  因此迟到的响应仍可能写入结果，形成旧会话复活。
+- 为什么选这条路线：这是关闭竞争的第二半，可用阻塞假 `urlopen` 精确复现，不需要外部 MCP server。
+- 改动与实验：`_post()` 在进入请求、`urlopen` 返回和确认结果三处检查关闭状态；关闭后的迟到答案转为
+  `McpError("the MCP server is closed")`；新增迟到响应回归。
+- 结果：`python3 -m pytest serve/test_mcp.py -q` 为 `27 passed / 8 subtests passed`；新增用例断言关闭后
+  worker 结束、等待槽被唤醒、没有写入 `msg`，错误为明确的 closed；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。关闭是单向状态：迟到的成功结果不能覆盖关闭结果。
+- 生产状态与回滚：未改生产；MCP 可选功能内的关闭竞争修复。
+- 学到什么：取消只能缩短等待，不能自动丢弃已经发起的 I/O；异步结果写回前必须再次验证生命周期状态。
+- 下一步与理由：继续检查其他“后台线程完成后写回对象”的路径，尤其是 HTTP、会话保存和重载。
+
 ## I-20261027-04 · MCP 启动与关闭竞争可中断，stdio 读线程随进程退出
 
 - 目标 / 指标：服务器关闭时，尚在 `initialize` 或工具列表阶段的 MCP 启动线程不能继续等待完整启动超时；

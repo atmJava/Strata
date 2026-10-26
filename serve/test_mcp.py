@@ -267,6 +267,39 @@ class Closing(unittest.TestCase):
             self.assertTrue(all(not thread.is_alive() for thread in hub.threads))
             self.assertEqual(hub.servers["slow"].status, "stopped")
 
+    def test_an_http_answer_arriving_after_close_is_discarded(self):
+        from serve import mcp
+        entered, release = threading.Event(), threading.Event()
+
+        class Answer:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                entered.set()
+                release.wait(2)
+                return b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        slot = mcp._Slot()
+        with mock.patch.object(mcp.urllib.request, "urlopen", return_value=Answer()):
+            worker = threading.Thread(target=transport._post,
+                                      args=({"jsonrpc": "2.0", "id": 1, "method": "ping"}, 1, 5, slot))
+            worker.start()
+            self.assertTrue(entered.wait(2))
+            transport.close()
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(slot.done.is_set())
+        self.assertIsNone(slot.msg)
+        self.assertEqual(str(slot.error), "the MCP server is closed")
+
 
 # ------------------------------------------------------------------------------------------------ the tool loop
 class ToolLoop(unittest.TestCase):

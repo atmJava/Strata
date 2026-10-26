@@ -275,9 +275,13 @@ class HttpTransport:
 
     def _post(self, msg: dict, rid, timeout: float, slot: _Slot | None):
         try:
+            if self.closed:
+                raise McpError("the MCP server is closed")
             req = urllib.request.Request(self.url, data=json.dumps(msg, ensure_ascii=False).encode("utf-8"),
                                          headers=self._headers(), method="POST")
             with urllib.request.urlopen(req, timeout=timeout) as r:
+                if self.closed:
+                    raise McpError("the MCP server is closed")
                 if r.headers.get("Mcp-Session-Id"):
                     self.session = r.headers["Mcp-Session-Id"]
                 if slot is None:                         # a notification: 202, nothing to read
@@ -294,6 +298,8 @@ class HttpTransport:
                             found = m
                 if found is None:
                     raise McpError("the server's answer did not contain a response")
+                if self.closed:
+                    raise McpError("the MCP server is closed")
                 slot.msg = found
         except urllib.error.HTTPError as e:
             detail = ""
