@@ -1011,14 +1011,13 @@ class StrataEngine:
             self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env,
                               **pin)
-        except BaseException:                            # nothing started: no narrator or log handle is retained
+        except BaseException:                            # nothing started: release the narrator and the log handle
             loading.set()
             if narrator is not None and narrator.ident is not None:
                 narrator.join(timeout=1)
             if self.log not in (None, subprocess.DEVNULL):
                 with contextlib.suppress(OSError, ValueError):
                     self.log.close()
-            self.log = None
             raise
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
@@ -1097,7 +1096,6 @@ class StrataEngine:
             if self.log not in (None, subprocess.DEVNULL):
                 with contextlib.suppress(OSError, ValueError):
                     self.log.close()
-            self.log = None
             return None
         with contextlib.suppress(OSError):
             if proc.poll() is None:
@@ -1115,7 +1113,6 @@ class StrataEngine:
         if self.log not in (None, subprocess.DEVNULL):
             with contextlib.suppress(OSError, ValueError):
                 self.log.close()
-        self.log = None
         self.proc = None
         self.ended = True
         return proc.poll()

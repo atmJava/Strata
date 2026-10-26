@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-59 · 启动失败的日志句柄保持可观察且已关闭
+
+- 目标 / 指标：引擎程序无法启动时，请求仍返回 503；同时关闭服务器持有的 engine log 句柄，并保留已关闭对象的可观察状态，
+  满足现有启动失败回归对资源归还的检查。
+- 假设与预期：`4ded23b4` 在启动异常和 `_abort_start()` 中先关闭 `self.log`，随后把它设为 `None`。资源确实已释放，但
+  `serve/test_ready_timeout.py` 依赖 `eng.log.closed` 判断句柄归还，因此完整 `serve` 套件出现 4 个同源子用例失败。
+- 为什么选这条路线：保留已关闭的文件对象不会占用描述符；下一次 `__init__` 会把它替换为新的日志句柄。相比改动测试或在上层
+  额外保存句柄，这恢复启动失败路径原有的可观察语义，也避免对外部调用方产生新的空值行为。
+- 改动与实验：启动异常、无子进程和子进程启动后失败三条清理路径均关闭日志但不再清空引用；子进程、READY reader、stdout/stdin
+  和运行状态的清理保持不变。
+- 结果：`python -m pytest -q serve/test_ready_timeout.py` → `3 passed, 4 subtests passed`。完整 `serve` 套件此前为
+  `984 passed, 8 skipped, 10793 subtests passed`，唯一失败组即本次修复对象；完整套件将在本轮收尾重跑。
+- 判决：采纳。启动失败仍为可诊断 503，日志描述符归还，且资源状态可由测试和运维代码检查。
+- 生产状态与回滚：未改成功启动路径、请求响应或子进程控制；单提交可回退。
+- 学到什么：释放资源与清空对象引用是两件事；若调用方以对象状态验证释放，清理代码不能无条件擦除该状态。
+- 下一步与理由：继续完成 `generate.cpp` 剩余 detached/read-ahead 线程的故障路径，然后重跑综合套件。
+
 ## I-20261027-58 · spec adaptive helper 线程失败跳过本轮
 
 - 目标 / 指标：batch/serial/pipelined spec 路径的 adaptive tier helper 被系统拒绝时，生成与 commit 必须继续；不能因一个
