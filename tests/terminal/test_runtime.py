@@ -185,6 +185,15 @@ class RuntimeTests(unittest.TestCase):
             host._kill_child_tree()
         killpg.assert_not_called()
 
+    def test_kill_child_tree_falls_back_to_the_child_when_the_group_is_gone(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock(pid=987654)
+        child.poll.return_value = None
+        host.child = child
+        with mock.patch.object(runtime.os, "killpg", side_effect=OSError("no group")):
+            host._kill_child_tree()
+        child.kill.assert_called_once_with()
+
     def test_stop_treats_exit_before_sigterm_as_stopped(self):
         host = runtime.Host("local", shutdown_timeout=2)
         child = mock.Mock()
@@ -202,11 +211,37 @@ class RuntimeTests(unittest.TestCase):
         child.wait.side_effect = [subprocess.TimeoutExpired("server", 10),
                                   subprocess.TimeoutExpired("server", 10)]
         host.child = child
+        ready = self.root / "stop.ready.json"
+        ready.write_text("{}", encoding="utf-8")
+        host.ready_path = ready
+        owner_read, owner_write = os.pipe()
+        os.close(owner_read)
+        host.owner_write_fd = owner_write
         with mock.patch.object(host, "_kill_child_tree") as kill:
             result = host._stop_child()
         kill.assert_called_once_with()
         self.assertEqual((result["ok"], result["error"], result["exit_code"]),
                          (False, "server_stop_deadline_expired", 8))
+        self.assertFalse(ready.exists())
+        self.assertIsNone(host.ready_path)
+        self.assertIsNone(host.owner_write_fd)
+        with self.assertRaises(OSError):
+            os.fstat(owner_write)
+
+    def test_stop_reraises_an_oserror_as_a_forced_stop_and_still_cleans_up(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock()
+        child.poll.return_value = None
+        child.wait.side_effect = [OSError("wait failed"), 0]
+        host.child = child
+        ready = self.root / "oserror.ready.json"
+        ready.write_text("{}", encoding="utf-8")
+        host.ready_path = ready
+        with mock.patch.object(host, "_kill_child_tree") as kill:
+            result = host._stop_child()
+        kill.assert_called_once_with()
+        self.assertEqual((result["ok"], result["error"]), (False, "server_stop_deadline_expired"))
+        self.assertFalse(ready.exists())
 
     def test_local_management_bridge_and_cli_share_owner_and_journal(self):
         command = [sys.executable, "-m", "strata_control.management"]

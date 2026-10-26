@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-22 · runtime stop 在 wait 异常与强制终止后完成 ready/owner 释放
+
+- 目标 / 指标：runtime host 停止 child 时，普通 wait、TimeoutExpired、OSError 和已退出四种情况都必须关闭 owner pipe、
+  删除本次 ready 文件；进程组 SIGKILL 失败时仍需直接 kill child。
+- 假设与预期：旧 `_stop_child()` 只在正常停止和“child 已退出”路径删除 ready；SIGTERM 后超时或 wait 抛 OSError 时
+  只关闭 owner pipe，ready 文件可能残留。`_kill_child_tree()` 仅处理 `ProcessLookupError`，进程组权限/状态异常时
+  不会尝试直接 kill。
+- 为什么选这条路线：这些分支都可在本地 runtime 单元测试中故障注入，不需要模型；它们直接影响下一次 start 的
+  ready 文件辨识和 owner pipe 生命周期。
+- 改动与实验：新增 `_clear_ready()`，所有停止终点统一删除本次 ready；首次 wait 的 OSError 与 TimeoutExpired 走同一
+  强制终止路径；进程组 kill 的普通 OSError 回退到 `child.kill()`。新增直接 kill 回退、wait OSError、强制停止后
+  ready 删除与 owner fd 关闭测试。
+- 结果：`tests/terminal/test_runtime.py` 为 `50 passed / 11 subtests`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。runtime stop 无论正常或强制结束，都不留下本次 ready 所有权标记或 owner pipe。
+- 生产状态与回滚：未改生产；正常 SIGTERM 停止、state/socket 协议和重启回滚行为由现有集成测试保持，单提交可回退。
+- 学到什么：停止结果“失败”仍必须完成清理；报告 stop 失败与释放本次尝试的资源不是同一件事。
+- 下一步与理由：运行完整 Terminal/Control 回归，随后检查 CLI 和工具脚本中未显式关闭的 HTTP/process 资源。
+
 ## I-20261027-21 · MCP stdio 进程组升级终止并有界回收，HTTPError 显式关闭
 
 - 目标 / 指标：stdio MCP 忽略 QUIT/SIGTERM 时，close 必须升级到 SIGKILL、再次有界 wait，并分别关闭 stdin/stdout/stderr；

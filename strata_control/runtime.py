@@ -845,12 +845,16 @@ class Host:
             return current
         return {**current, "ok": False, "error": "startup_wait_expired", "exit_code": 8}
 
+    def _clear_ready(self) -> None:
+        if self.ready_path is not None:
+            self.ready_path.unlink(missing_ok=True)
+            self.ready_path = None
+
     def _stop_child(self) -> dict:
         child = self.child
         if child is None or child.poll() is not None:
             self._close_owner_pipe()
-            if self.ready_path is not None:
-                self.ready_path.unlink(missing_ok=True)
+            self._clear_ready()
             return {"ok": True, "state": "stopped", "exit_code": child.returncode if child else 0}
         try:
             child.send_signal(signal.SIGTERM)
@@ -858,18 +862,19 @@ class Host:
             pass        # it exited between poll() and the signal; wait() below still collects the code
         try:
             code = child.wait(timeout=self.shutdown_timeout + 8)
-        except subprocess.TimeoutExpired:
+        except (OSError, subprocess.TimeoutExpired):
             self._kill_child_tree()
             try:
                 child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
+            except (OSError, subprocess.TimeoutExpired):
                 self._close_owner_pipe()
+                self._clear_ready()
                 return {"ok": False, "state": "failed", "error": "server_stop_deadline_expired", "exit_code": 8}
             self._close_owner_pipe()
+            self._clear_ready()
             return {"ok": False, "state": "failed", "error": "server_stop_deadline_expired", "exit_code": 8}
         self._close_owner_pipe()
-        if self.ready_path is not None:
-            self.ready_path.unlink(missing_ok=True)
+        self._clear_ready()
         return {"ok": code == 0, "state": "stopped" if code == 0 else "failed",
                 "exit_code": code, "error": None if code == 0 else "server_stop_failed"}
 
@@ -905,6 +910,11 @@ class Host:
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except OSError:
+            try:
+                child.kill()
+            except OSError:
+                pass
 
     def _restart(self, startup_wait: float, expected_profile_revision: str | None = None,
                  allow_source_switch: bool = False,
