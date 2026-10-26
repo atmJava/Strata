@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-142 · Verifier 入口在设备切换失败时停止
+
+- 目标 / 指标：Verifier 的 init、窗口、commit、batch 与 pipeline 操作只能在其 device 上执行；设备切换失败时
+  必须返回错误或保留资源，不能在当前卡上启动 graph、查询 event 或更新旧 context。
+- 假设与预期：多数公开入口与 batch/pipeline 轮询构造了 `OnDevice(device_)` 却忽略 `ok`；init 也忽略
+  `cudaGetDevice`。切换失败会造成跨卡 graph/event 操作、错误计数器和难以发现的 residency/状态错误。
+- 改动与实验：新增统一的 `verify_device_ok()`，覆盖 init、prelaunch/run、logit bias、commit/wait、batch slots/rows/
+  commit/poll、capture/pipeline launch/service/finish 和 release waits。int 轮询失败返回 `-1` 并清 busy 状态。
+- 判决：采纳。设备上下文是这些操作的前置条件，失败时不再执行 CUDA 工作。
+- 生产状态与回滚：适用于所有 Verifier 路径，多卡 layer split 受益；正常单卡成功路径不变，单提交可回退。
+- 未验证：当前无 CUDA Toolkit/双 GPU，无法注入 stage/switch 失败；Clang 主机侧 CUDA 声明兼容语法构建、
+  graph/mapped/pinned/native/weights/on-device/remote/MTP 目标测试及 200 个 Terminal pytest 通过。
+- 下一步与理由：完成 Verifier 目标测试与最终回归。
+
 ## I-20261027-141 · MTP 入口与 chain 操作检查设备切换
 
 - 目标 / 指标：MTP 的 bind、prefill、draft、chain 与 profiler 只能在 drafter 所属 device 上操作 graph、event 和
