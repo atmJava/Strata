@@ -2135,7 +2135,14 @@ int64_t FileExpertSource::prefetch_begin(int64_t layer, const int64_t* experts, 
             for (size_t at; (at = async_next_.fetch_add(16)) < todo.size();) {
                 const size_t k = std::min<size_t>(16, todo.size() - at);
                 const auto t0 = std::chrono::steady_clock::now();
-                const bool ok = read_direct(todo.data() + at, k);
+                bool ok = false;
+                try {
+                    ok = read_direct(todo.data() + at, k);
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "FileExpertSource: a background read batch failed (%s)\n", e.what());
+                } catch (...) {
+                    std::fprintf(stderr, "FileExpertSource: a background read batch failed\n");
+                }
                 const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
                 for (size_t i = at; i < at + k; ++i) {
                     const Fill& f = todo[i];
@@ -2154,7 +2161,25 @@ int64_t FileExpertSource::prefetch_begin(int64_t layer, const int64_t* experts, 
     };
     const size_t nt = direct ? std::min<size_t>(4, (async_todo_.size() + 15) / 16)
                              : std::min<size_t>(async_todo_.size(), (size_t) std::max(1, fetch_threads_));
-    for (size_t t = 0; t < nt; ++t) async_th_.emplace_back(work);
+    // STRATA_TEST_COLD_THREAD_FAIL=N injects N thread-start refusals (tests only).  The caller then performs the
+    // same work, so claimed stage buffers are still published and no joinable worker is abandoned.
+    int forced_failures = [&] {
+        const char* v = std::getenv("STRATA_TEST_COLD_THREAD_FAIL");
+        return v != nullptr ? std::max(0, std::atoi(v)) : 0;
+    }();
+    try {
+        async_th_.reserve(nt);
+        for (size_t t = 0; t < nt; ++t) {
+            if (forced_failures-- > 0) throw std::runtime_error("injected thread start failure");
+            async_th_.emplace_back(work);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FileExpertSource: background reads fall back to the caller (%s)\n", e.what());
+        work();
+        prefetch_end();
+        for (int64_t i = 0; i < n; ++i) pending[i] = 0;
+        return 0;
+    }
     return np;
 }
 

@@ -598,6 +598,24 @@ void test_unbuffered_reads() {
                 std::memcmp(copy.data(), bytes.data() + (size_t) (2 * BLOB), (size_t) BLOB) == 0,
             "an unbuffered copy_blob differs from the file");
     require(source.direct_fallbacks() == 0, "an unbuffered read fell back to the mapping");
+    FileExpertSource cold_source;
+    require(cold_source.open(dir.path.string(), layers, experts, err), "could not reopen the synthetic pack: " + err);
+    set_env("STRATA_UNBUFFERED_LOAD", "1");
+    require(cold_source.set_unbuffered(0, why), "could not reopen the synthetic pack unbuffered: " + why);
+    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
+    const int64_t cold_ids[experts] = {0, 1, 2};
+    uint8_t pending[experts] = {0, 0, 0};
+    set_env("STRATA_TEST_COLD_THREAD_FAIL", "1");
+    const int64_t cold_pending = cold_source.prefetch_begin(0, cold_ids, experts, pending);
+    set_env("STRATA_TEST_COLD_THREAD_FAIL", nullptr);
+    require(cold_pending == 0 && pending[0] == 0 && pending[1] == 0 && pending[2] == 0,
+            "a background read thread failure did not fall back to the caller");
+    for (int64_t e = 0; e < experts; ++e) {
+        const uint8_t* b = cold_source.blob(0, e);
+        require(b != nullptr && std::memcmp(b, bytes.data() + (size_t) (e * (int64_t) BLOB), (size_t) BLOB) == 0,
+                "a background read fallback left a wrong blob");
+    }
+    cold_source.close();
     source.close();
 }
 

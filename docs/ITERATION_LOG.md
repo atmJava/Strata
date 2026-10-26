@@ -3,6 +3,27 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-26 · 后台 expert 读线程启动失败回退到调用线程
+
+- 目标 / 指标：`prefetch_begin()` 已 claim 的 stage buffer 在任一后台读线程创建失败时仍必须被发布；不能抛穿调用方、
+  遗留 joinable 线程、让 `wait_landed()` 永久等待，或在 direct read 分配异常时留下 busy buffer。
+- 假设与预期：旧代码直接 `async_th_.emplace_back(work)`。若 `reserve` 或线程构造失败，函数抛出，stage buffer 的
+  `busy` 标记和 `pending` 已由 `claim_todo()` 写入；调用方若只收到异常而继续使用 source，后续 blob 会等待一个没有
+  worker 的 fill。
+- 为什么选这条路线：它位于 cold expert 读取的异步边界，可复用已有 unbuffered 合成 pack；用明确的测试注入拒绝首个
+  worker 启动，能覆盖真实线程构造失败所走的后备路径，不需要 GPU 或模型。
+- 改动与实验：`prefetch_begin()` 先 reserve worker 表；任一线程启动失败时由调用线程执行同一 `work()`，随后
+  `prefetch_end()` join 已完成启动的 worker，把所有已 claim blob 标记为不再 pending。direct 批量读的分配/异常改为该批
+  stage 逐项失败发布。新增 `STRATA_TEST_COLD_THREAD_FAIL=1` 注入，断言回退后三个 blob 内容正确且 pending 清零。
+- 结果：主机侧 `file_expert_source_test`（合成 pack、CPU 库和同步 CUDA shim）`PASS`，实际打印
+  `background reads fall back to the caller (injected thread start failure)`；`-Wall -Wextra -Werror` 与
+  `git diff --check` 通过；同一测试的 ASan/UBSan（泄漏检测开启、遇错停止）通过。
+- 判决：采纳。后台读 worker 是加速器而不是正确性依赖；启动失败后由调用线程完成同一批读取并恢复 pending 状态。
+- 生产状态与回滚：未改生产；正常线程启动与 direct batch 字节/顺序不变，单提交可回退。未验证真实 O_DIRECT
+  设备错误、真实线程资源耗尽、CUDA sm_75 或吞吐。
+- 学到什么：提交 pending=1 就必须同时保证有一个会把它清零的执行者；线程创建失败后，调用线程是最可靠的后备执行者。
+- 下一步与理由：检查 RAM promotion worker 的同类后备路径与 `HostGraphLaunch` join 约定，再运行 Python 全量回归。
+
 ## I-20261027-25 · ForesightSwap 初始化校验与 copy 队列提交边界
 
 - 目标 / 指标：`ForesightSwap::init()` 拒绝空几何、层/专家表乘法溢出、缺少或越界的 card 映射，并只允许一次初始化；
