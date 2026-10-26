@@ -57,10 +57,10 @@ using CudaPtr = std::shared_ptr<void>;
 
 void Dflash2Drafter::release() {
     if (device_ < 0) return;      // already released (or never loaded): the destructor calls this
-    prof_report();
-    prof_free();
     const OnDevice on_device(device_);
     if (cs_) cudaStreamSynchronize(cs_);
+    prof_report();
+    prof_free();
     for (cudaGraphExec_t& e : exec_)
         if (e) cudaGraphExecDestroy(e);
     auto fr = [](void* p) { if (p) cudaFree(p); };
@@ -122,6 +122,11 @@ struct Dflash2Drafter::Prof {
     std::vector<std::string> name;
     std::vector<std::pair<std::string, double>> total;
     int64_t rounds = 0;
+    bool enabled = true;
+    ~Prof() {
+        for (cudaEvent_t event : ev)
+            if (event) (void) cudaEventDestroy(event);
+    }
 };
 
 void Dflash2Drafter::prof_free() {
@@ -136,27 +141,68 @@ static bool skip_part(const char* what) {
 }
 
 void Dflash2Drafter::stamp(const char* name) {
-    if (!prof_) return;
-    cudaEvent_t e;
-    cudaEventCreate(&e);
-    cudaEventRecord(e, cs_);
-    prof_->ev.push_back(e);
-    prof_->name.push_back(name);
+    if (!prof_ || !prof_->enabled) return;
+    cudaEvent_t event = nullptr;
+    if (cudaEventCreate(&event) != cudaSuccess || cudaEventRecord(event, cs_) != cudaSuccess) {
+        if (event) (void) cudaEventDestroy(event);
+        prof_->enabled = false;
+        (void) cudaGetLastError();
+        return;
+    }
+    try {
+        prof_->name.emplace_back(name);
+    } catch (...) {
+        (void) cudaEventDestroy(event);
+        prof_->enabled = false;
+        return;
+    }
+    try {
+        prof_->ev.push_back(event);
+    } catch (...) {
+        prof_->name.pop_back();
+        (void) cudaEventDestroy(event);
+        prof_->enabled = false;
+    }
 }
 
 void Dflash2Drafter::prof_collect() {
-    if (!prof_ || prof_->ev.size() < 2) return;
-    cudaStreamSynchronize(cs_);
-    for (size_t i = 1; i < prof_->ev.size(); ++i) {
-        float ms = 0;
-        cudaEventElapsedTime(&ms, prof_->ev[i - 1], prof_->ev[i]);
-        auto it = std::find_if(prof_->total.begin(), prof_->total.end(), [&](const auto& t) { return t.first == prof_->name[i]; });
-        if (it == prof_->total.end()) prof_->total.emplace_back(prof_->name[i], ms); else it->second += ms;
+    if (!prof_) return;
+    if (!prof_->enabled || prof_->ev.size() < 2) {
+        for (cudaEvent_t event : prof_->ev)
+            if (event) (void) cudaEventDestroy(event);
+        prof_->ev.clear();
+        prof_->name.clear();
+        return;
+    }
+    bool valid = cudaStreamSynchronize(cs_) == cudaSuccess;
+    if (valid) {
+        try {
+            for (size_t i = 1; i < prof_->ev.size(); ++i) {
+                float ms = 0;
+                if (cudaEventElapsedTime(&ms, prof_->ev[i - 1], prof_->ev[i]) != cudaSuccess) {
+                    valid = false;
+                    break;
+                }
+                auto it = std::find_if(prof_->total.begin(), prof_->total.end(),
+                                       [&](const auto& t) { return t.first == prof_->name[i]; });
+                if (it == prof_->total.end())
+                    prof_->total.emplace_back(prof_->name[i], ms);
+                else
+                    it->second += ms;
+            }
+        } catch (...) {
+            valid = false;
+        }
     }
     for (cudaEvent_t e : prof_->ev) cudaEventDestroy(e);
     prof_->ev.clear();
     prof_->name.clear();
-    ++prof_->rounds;
+    if (valid)
+        ++prof_->rounds;
+    else {
+        prof_->enabled = false;
+        (void) cudaGetLastError();
+    }
 }
 
 void Dflash2Drafter::prof_report() const {
@@ -313,9 +359,16 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
         if (cudaEventCreateWithFlags(&ev_ctx_[l], cudaEventDisableTiming) != cudaSuccess) { err = "dflash2: events"; return false; }
     if (const char* e = std::getenv("STRATA_DF2_PROFILE"); e && e[0] == '1') prof_ = new Prof();
     if (const char* e = std::getenv("STRATA_DF2_TIMING"); e && e[0] == '1') {
-        timing_ = true;
-        cudaEventCreate(&ev_a_);
-        cudaEventCreate(&ev_b_);
+        cudaEvent_t first = nullptr, second = nullptr;
+        timing_ = cudaEventCreate(&first) == cudaSuccess && cudaEventCreate(&second) == cudaSuccess;
+        if (timing_) {
+            ev_a_ = first;
+            ev_b_ = second;
+        } else {
+            if (first) (void) cudaEventDestroy(first);
+            if (second) (void) cudaEventDestroy(second);
+            (void) cudaGetLastError();
+        }
     }
     if (!alloc(err)) return false;
     if (shared != nullptr)
@@ -657,7 +710,8 @@ bool Dflash2Drafter::draft_launch(const float* taps, int n_new, int64_t pos0, in
     const OnDevice on_device(device_);
     const Clock::time_point t0 = Clock::now();
     if (graph_taps_ != nullptr && graph_taps_ != taps) { err = "dflash2: the taps buffer moved after capture"; return false; }
-    if (!prof_ && !exec_[n_new]) {
+    const bool profile = prof_ != nullptr && prof_->enabled;
+    if (!profile && !exec_[n_new]) {
         if (!lazy_capture_) {
             err = "dflash2: no round graph for " + std::to_string(n_new) + " rows and lazy capture is off (prepare(taps_dev) first)";
             return false;
@@ -676,7 +730,7 @@ bool Dflash2Drafter::draft_launch(const float* taps, int n_new, int64_t pos0, in
     for (int i = 0; i < kDrafts; ++i) { ((volatile int32_t*) h_out_)[i] = -1; }
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (timing_) cudaEventRecord(ev_a_, cs_);
-    if (prof_) {   // the same round without its graph, an event after every stage; this mode synchronizes here
+    if (profile) {   // the same round without its graph, an event after every stage; this mode synchronizes here
         cudaStreamSynchronize(cs_);
         for (cudaEvent_t e : prof_->ev) cudaEventDestroy(e);   // the stamps of context() calls are not a round
         prof_->ev.clear();

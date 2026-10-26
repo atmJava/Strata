@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-89 · DFlash2 诊断 event 失败即降级并完整释放
+
+- 目标 / 指标：`STRATA_DF2_PROFILE` 和 `STRATA_DF2_TIMING` 是可选诊断，任何 event 创建、记录、同步或计时失败
+  都只能关闭该诊断，不能继续使用空句柄，也不能让进程泄漏已创建 event；析构必须在 DFlash2 所属设备执行。
+- 假设与预期：profiler 的 event vector 由 `delete Prof` 直接丢弃，最后一轮未 collect 的 event 不销毁；
+  `stamp()` 忽略 `cudaEventCreate` 失败并把空句柄放进 vector；timing 的两个 event 创建失败仍设置
+  `timing_=true`。`release()` 又在进入所属设备前释放 profiler。
+- 为什么选这条路线：`Prof` 析构统一销毁残留 event；每个 stamp 和 round 的创建/记录/同步/计时失败都永久关闭
+  profiler 并清空本轮句柄，下一轮回到已捕获 graph。timing 先创建到局部句柄，两个都成功才发布；release 先进入
+  所属设备、同步主 stream，再报告和销毁诊断资源。
+- 改动与实验：成功的 stage 名称、event 时点、计时公式、报告频率和 graph 路径不变；失败路径只降级诊断。
+  `dflash2.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）。
+- 判决：采纳。诊断失败不再留下空句柄或未销毁 event。
+- 生产状态与回滚：两个开关默认关闭；关闭时无行为变化；单提交可回退。
+- 未验证：当前没有 CUDA 工具链、驱动、DFlash2 权重或 RTX 2080 Ti，未在真实 profiler 中途失败时观察降级；
+  该结论来自控制流与主机侧编译，未做故障注入。
+- 下一步与理由：继续审查可选诊断中“失败后仍发布半完成状态”的所有权路径。
+
 ## I-20261027-88 · NativeDense scratch 随引用释放并有事务式创建
 
 - 目标 / 指标：`STRATA_HC_Q8` 的四个 BF16 反量化 scratch 和两个跨 stream 排序 event 必须属于使用它们的
