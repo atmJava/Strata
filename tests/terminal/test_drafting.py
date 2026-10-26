@@ -235,18 +235,10 @@ class WhatTheEngineSaid(unittest.TestCase):
                          "Drafting: MTP (the DFlash2 drafter isn't downloaded yet)")
 
 
-class WordsMatchTheApp(unittest.TestCase):
-    def test_every_line_the_engine_start_can_say_is_in_the_apps_catalog_in_all_eight_languages(self):
-        folder = ROOT / "apps" / "host" / "src" / "locales"
-        catalogs = {l: json.loads((folder / f"{l}.json").read_text(encoding="utf-8")) for l in ("en", "de", "es", "ja", "ko", "pt", "ru", "zh")}
-        ids = {v: k for k, v in catalogs["en"].items()}
-        self.assertEqual(len(drafting.REASONS), 4)
-        for reason in drafting.REASONS:
-            line = drafting.mtp_line(reason)
-            self.assertIn(line, ids, line)
-            for lang, catalog in catalogs.items():
-                self.assertTrue(catalog[ids[line]].strip(), f"{line} in {lang}")
-        # and what the engine's log makes of them
+class FallbackNotes(unittest.TestCase):
+    """引擎日志的 fallback 行必须与 CLI 的 mtp_line 文案一致（原与 app 词表对照的测试随 apps/ 退役，此处保留 Terminal 内部一致性）。"""
+
+    def test_the_engine_log_lines_equal_the_cli_mtp_lines(self):
         self.assertEqual(drafting.fallback_note("--draft dflash2: out of memory"), drafting.mtp_line(drafting.DIDNT_FIT))
         self.assertEqual(drafting.fallback_note("--draft dflash2 is off: it is for one card and the CLI run"), drafting.mtp_line(drafting.NOT_HERE))
 

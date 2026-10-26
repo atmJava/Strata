@@ -21,21 +21,11 @@ def first(path, pattern):
 
 class VersionBump(unittest.TestCase):
     def test_the_terminal_is_0_2_4_2_and_control_is_0_1_49_2_while_the_app_stays_0_2_3(self):
-        # 0.2.6: Terminal and app are 0.2.6; Control and the DeepSeek engine are 0.1.51 (the CMake project version); the Qwen engine packages and Metal stay 0.1.50 (no C++ change since 0.2.5)
+        # 0.2.6: Terminal is 0.2.6; Control and the DeepSeek engine are 0.1.51 (the CMake project version); the Qwen engine packages and Metal stay 0.1.50 (no C++ change since 0.2.5)
         self.assertEqual(strata_cli.PRODUCT_VERSION, "0.2.6")
         self.assertEqual(strata_cli.version(), "0.1.51")                # the CMake project version: Control
         self.assertEqual(first("CMakeLists.txt", r"^project\(strata VERSION ([0-9.]+) "), "0.1.51")
         self.assertIn('STRATA_VERSION="0.1.50-metal"', (ROOT / "metal" / "CMakeLists.txt").read_text(encoding="utf-8"))
-
-    def test_every_place_the_app_version_lives_says_0_2_3(self):
-        self.assertEqual(first("apps/desktop/src-tauri/Cargo.toml", r'^version = "([^"]+)"'), "0.2.6")
-        lock = (ROOT / "apps/desktop/src-tauri/Cargo.lock").read_text(encoding="utf-8")
-        self.assertRegex(lock, r'name = "strata-desktop"\r?\nversion = "0.2.6"')
-        self.assertEqual(json.loads((ROOT / "apps/desktop/package.json").read_text(encoding="utf-8"))["version"], "0.2.6")
-        host = json.loads((ROOT / "apps/host/package.json").read_text(encoding="utf-8"))
-        self.assertEqual(host["version"], "0.2.6")
-        locked = json.loads((ROOT / "apps/host/package-lock.json").read_text(encoding="utf-8"))
-        self.assertEqual((locked["version"], locked["packages"][""]["version"]), ("0.2.6", "0.2.6"))
 
     def test_the_documents_that_state_the_current_version_agree(self):
         self.assertIn("Version 0.2.6, engine 0.1.51.", (ROOT / "AGENTS.md").read_text(encoding="utf-8"))
