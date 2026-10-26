@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-138 · Prefill peer/helper 资源按主卡与 peer 卡分别释放
+
+- 目标 / 指标：`PeerPrefill` 的 `ev_in`、`x_stream`、`ev_x` 必须在 primary device 生命周期内管理；peer
+  streams、events 和 buffers 必须在 `dev` 上同步与释放。
+- 假设与预期：`set_peer()` 与 `set_stage_helper()` 手工调用 `cudaSetDevice` 且不检查失败，析构又假定切换成功；
+  `dev < 0` 时还会在已经创建 `ev_in`/copy stream 后直接返回，留下资源。切换失败时则可能在错误上下文中销毁
+  peer 或 primary 资源。
+- 改动与实验：记录实际 primary device，两段初始化各自使用 `OnDevice` 并检查切换；析构分两个设备作用域清理，
+  host buffers 最后独立释放。失败时仍走同一个析构，已创建资源可在各自设备上回收。
+- 判决：采纳。peer/helper 的创建、使用与释放现在使用相同的设备归属。
+- 生产状态与回滚：影响 `--peer-device` 与 layer-split prompt help 的显式多 GPU 路径；默认单卡路径不变，单提交可回退。
+- 未验证：当前无 CUDA Toolkit/双 GPU，无法执行真实 peer/helper 建流或切卡故障注入；Clang 主机侧 CUDA 声明兼容
+  语法构建、`prefill_plan_test`、`share_rules_test` 与 Terminal 回归通过。
+- 下一步与理由：进入最终交付检查，不再扩大改动面。
+
 ## I-20261027-137 · Adaptive swap 回拷检查所属卡
 
 - 目标 / 指标：resident adaptive swap 的交换缓冲回拷必须从 owning cache 发起，并在 owning card 的 stream 上同步。

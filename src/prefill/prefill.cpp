@@ -720,6 +720,7 @@ struct Stager {
 struct PeerPrefill {
     core::PeerExperts* peer = nullptr;
     int dev = -1;
+    int primary_dev = -1;           // ev_in, x_stream and ev_x belong here; dev owns the peer buffers and streams
     int64_t cap_rows = 0, T_max = 0;
     cudaStream_t s = nullptr;
     cudaEvent_t ev_in = nullptr;    // on the primary: the activations and the row tables are ready
@@ -802,28 +803,33 @@ struct PeerPrefill {
     std::vector<void*> owned;
     int64_t layers = 0, experts = 0, rows = 0, over_cap = 0;   // stats
     ~PeerPrefill() {
-        if (dev < 0) return;
-        int prev = 0;
-        cudaGetDevice(&prev);
-        cudaSetDevice(dev);
-        if (s) cudaStreamSynchronize(s);
-        ctx.reset();
-        up_ring.release();
-        for (void* p : owned) cudaFree(p);
-        if (ev_done) cudaEventDestroy(ev_done);
-        if (s_out) cudaStreamSynchronize(s_out);
-        for (cudaEvent_t e : ev_grp) if (e) cudaEventDestroy(e);
-        for (cudaEvent_t e : ev_dm) if (e) cudaEventDestroy(e);
-        if (s_cp) cudaStreamSynchronize(s_cp);
-        for (cudaEvent_t e : pcopied) if (e) cudaEventDestroy(e);
-        for (cudaEvent_t e : pused) if (e) cudaEventDestroy(e);
-        if (s_cp) cudaStreamDestroy(s_cp);
-        if (s_out) cudaStreamDestroy(s_out);
-        if (s) cudaStreamDestroy(s);
-        cudaSetDevice(prev);
-        if (ev_in) cudaEventDestroy(ev_in);
-        if (x_stream) { cudaStreamSynchronize(x_stream); cudaStreamDestroy(x_stream); }
-        if (ev_x) cudaEventDestroy(ev_x);
+        if (dev >= 0) {
+            const core::OnDevice on(dev);
+            if (on.ok) {
+                if (s) cudaStreamSynchronize(s);
+                ctx.reset();
+                up_ring.release();
+                for (void* p : owned) cudaFree(p);
+                if (ev_done) cudaEventDestroy(ev_done);
+                if (s_out) cudaStreamSynchronize(s_out);
+                for (cudaEvent_t e : ev_grp) if (e) cudaEventDestroy(e);
+                for (cudaEvent_t e : ev_dm) if (e) cudaEventDestroy(e);
+                if (s_cp) cudaStreamSynchronize(s_cp);
+                for (cudaEvent_t e : pcopied) if (e) cudaEventDestroy(e);
+                for (cudaEvent_t e : pused) if (e) cudaEventDestroy(e);
+                if (s_cp) cudaStreamDestroy(s_cp);
+                if (s_out) cudaStreamDestroy(s_out);
+                if (s) cudaStreamDestroy(s);
+            }
+        }
+        if (primary_dev >= 0) {
+            const core::OnDevice on(primary_dev);
+            if (on.ok) {
+                if (ev_in) cudaEventDestroy(ev_in);
+                if (x_stream) { cudaStreamSynchronize(x_stream); cudaStreamDestroy(x_stream); }
+                if (ev_x) cudaEventDestroy(ev_x);
+            }
+        }
         if (host_x) cudaFreeHost(host_x);
         if (host_rows) cudaFreeHost(host_rows);
         if (host_src) cudaFreeHost(host_src);
@@ -1766,26 +1772,48 @@ bool Prefill::set_stage_helper(Prefill* helper, std::string& err) {
     bool ok;
     {
         const core::OnDevice on(m.device);
+        if (!on.ok) {
+            err = std::string("prefill: cannot enter CUDA") + std::to_string(m.device) +
+                  " for the layer split's prompt help: " + cudaGetErrorString(on.error);
+            return false;
+        }
+        int actual = -1;
+        const cudaError_t current = cudaGetDevice(&actual);
+        if (current != cudaSuccess) {
+            err = std::string("prefill: cannot read the layer split's primary CUDA device: ") +
+                  cudaGetErrorString(current);
+            return false;
+        }
+        pp->primary_dev = actual;
         ok = cudaEventCreateWithFlags(&pp->ev_in, cudaEventDisableTiming) == cudaSuccess;
     }
-    int prev = 0;
-    cudaGetDevice(&prev);
-    pp->dev = h.device;
-    cudaSetDevice(pp->dev);
-    ok = ok && cudaStreamCreateWithFlags(&pp->s, cudaStreamNonBlocking) == cudaSuccess &&
-         cudaStreamCreateWithFlags(&pp->s_out, cudaStreamNonBlocking) == cudaSuccess &&
-         cudaStreamCreateWithFlags(&pp->s_cp, cudaStreamNonBlocking) == cudaSuccess &&
-         cudaEventCreateWithFlags(&pp->ev_done, cudaEventDisableTiming) == cudaSuccess;
-    for (int i = 0; ok && i < PeerPrefill::kGrpEv; ++i)
-        ok = cudaEventCreateWithFlags(&pp->ev_grp[i], cudaEventDisableTiming) == cudaSuccess;
-    for (int b = 0; ok && b < 2; ++b) ok = cudaEventCreateWithFlags(&pp->ev_dm[b], cudaEventDisableTiming) == cudaSuccess;
-    // the ring's events; its slots are the helper stage's own ring, bound per prompt (bind_stage_helper)
-    pp->pcopied.assign((size_t) kSplitHelpRing, nullptr);
-    pp->pused.assign((size_t) kSplitHelpRing, nullptr);
-    for (int i = 0; ok && i < kSplitHelpRing; ++i)
-        ok = cudaEventCreateWithFlags(&pp->pcopied[(size_t) i], cudaEventDisableTiming) == cudaSuccess &&
-             cudaEventCreateWithFlags(&pp->pused[(size_t) i], cudaEventDisableTiming) == cudaSuccess;
-    cudaSetDevice(prev);
+    if (!ok) {
+        err = "prefill: the layer split's prompt-help event";
+        return false;
+    }
+    {
+        const core::OnDevice on(h.device);
+        if (!on.ok) {
+            err = std::string("prefill: cannot enter CUDA") + std::to_string(h.device) +
+                  " for the layer split's prompt help: " + cudaGetErrorString(on.error);
+            return false;
+        }
+        pp->dev = h.device;
+        ok = cudaStreamCreateWithFlags(&pp->s, cudaStreamNonBlocking) == cudaSuccess &&
+             cudaStreamCreateWithFlags(&pp->s_out, cudaStreamNonBlocking) == cudaSuccess &&
+             cudaStreamCreateWithFlags(&pp->s_cp, cudaStreamNonBlocking) == cudaSuccess &&
+             cudaEventCreateWithFlags(&pp->ev_done, cudaEventDisableTiming) == cudaSuccess;
+        for (int i = 0; ok && i < PeerPrefill::kGrpEv; ++i)
+            ok = cudaEventCreateWithFlags(&pp->ev_grp[i], cudaEventDisableTiming) == cudaSuccess;
+        for (int b = 0; ok && b < 2; ++b)
+            ok = cudaEventCreateWithFlags(&pp->ev_dm[b], cudaEventDisableTiming) == cudaSuccess;
+        // the ring's events; its slots are the helper stage's own ring, bound per prompt (bind_stage_helper)
+        pp->pcopied.assign((size_t) kSplitHelpRing, nullptr);
+        pp->pused.assign((size_t) kSplitHelpRing, nullptr);
+        for (int i = 0; ok && i < kSplitHelpRing; ++i)
+            ok = cudaEventCreateWithFlags(&pp->pcopied[(size_t) i], cudaEventDisableTiming) == cudaSuccess &&
+                 cudaEventCreateWithFlags(&pp->pused[(size_t) i], cudaEventDisableTiming) == cudaSuccess;
+    }
     if (!ok) { err = "prefill: the layer split's prompt help (streams and events)"; return false; }
     helper_ = helper;
     m.help_pp = std::move(pp);
@@ -1872,20 +1900,42 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
     pp->cap_rows = std::max<int64_t>(1, std::min<int64_t>(cap_rows, m.T_max * K));
     const int64_t R = pp->cap_rows;
     const MmqPlan& mp = mmq_plan();
-    if (cudaEventCreateWithFlags(&pp->ev_in, cudaEventDisableTiming) != cudaSuccess) { err = "prefill peer: event"; return false; }
-    if (!pp->p2p) {   // the host route's copies on a stream of their own (STRATA_PF_PEER_XSTREAM=0: the compute stream)
-        const char* xv = std::getenv("STRATA_PF_PEER_XSTREAM");
-        if ((xv == nullptr || std::atoi(xv) != 0) &&
-            (cudaStreamCreateWithFlags(&pp->x_stream, cudaStreamNonBlocking) != cudaSuccess ||
-             cudaEventCreateWithFlags(&pp->ev_x, cudaEventDisableTiming) != cudaSuccess)) {
-            err = "prefill peer: copy stream";
+    {
+        const core::OnDevice on(m.device);
+        if (!on.ok) {
+            err = std::string("prefill peer: cannot enter CUDA") + std::to_string(m.device) + ": " +
+                  cudaGetErrorString(on.error);
             return false;
         }
+        int actual = -1;
+        const cudaError_t current = cudaGetDevice(&actual);
+        if (current != cudaSuccess) {
+            err = std::string("prefill peer: cannot read the primary CUDA device: ") +
+                  cudaGetErrorString(current);
+            return false;
+        }
+        pp->primary_dev = actual;
+        if (cudaEventCreateWithFlags(&pp->ev_in, cudaEventDisableTiming) != cudaSuccess) {
+            err = "prefill peer: event";
+            return false;
+        }
+        if (!pp->p2p) {   // the host route's copies on a stream of their own (STRATA_PF_PEER_XSTREAM=0: the compute stream)
+            const char* xv = std::getenv("STRATA_PF_PEER_XSTREAM");
+            if ((xv == nullptr || std::atoi(xv) != 0) &&
+                (cudaStreamCreateWithFlags(&pp->x_stream, cudaStreamNonBlocking) != cudaSuccess ||
+                 cudaEventCreateWithFlags(&pp->ev_x, cudaEventDisableTiming) != cudaSuccess)) {
+                err = "prefill peer: copy stream";
+                return false;
+            }
+        }
     }
-    int prev = 0;
-    cudaGetDevice(&prev);
     pp->dev = peer->device();
-    cudaSetDevice(pp->dev);
+    const core::OnDevice on_peer(pp->dev);
+    if (!on_peer.ok) {
+        err = std::string("prefill peer: cannot enter CUDA") + std::to_string(pp->dev) + ": " +
+              cudaGetErrorString(on_peer.error);
+        return false;
+    }
     bool ok = cudaStreamCreateWithFlags(&pp->s, cudaStreamNonBlocking) == cudaSuccess &&
               cudaEventCreateWithFlags(&pp->ev_done, cudaEventDisableTiming) == cudaSuccess;
     {
@@ -2002,7 +2052,6 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
         if (ok) host(pp->host_src, pp->host_src_cap, (size_t) pp->cap_rows);
         if (ok) host(pp->host_bounds, bounds_cap, PeerPrefill::kHostBounds);
         if (!ok) {
-            cudaSetDevice(prev);
             err = "prefill peer: the host route's pinned buffers (" +
                   std::to_string(((size_t) pp->cap_rows * N * 4 + (size_t) m.T_max * N * 4) >> 20) + " MiB) do not fit in RAM";
             return false;
@@ -2010,7 +2059,6 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
     }
     size_t fb = 0, tb = 0;
     cudaMemGetInfo(&fb, &tb);
-    cudaSetDevice(prev);
     if (!ok) { err = "prefill peer: the peer's buffers do not fit (raise --peer-reserve-mib or lower --peer-prefill-rows)"; return false; }
     std::fprintf(stderr, "strata prefill: peer GPU %d computes its experts' rows of each prompt chunk (up to %lld rows per "
                          "layer%s%s); %zu MiB left free on it\n", pp->dev, (long long) pp->cap_rows,
