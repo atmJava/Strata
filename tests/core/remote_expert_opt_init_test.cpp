@@ -3,8 +3,8 @@
 
 #include <cuda_runtime.h>
 
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <new>
 #include <string>
 #include <type_traits>

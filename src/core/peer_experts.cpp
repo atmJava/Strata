@@ -347,6 +347,7 @@ bool PeerExperts::finish(float* out, std::string& err) {
         cudaError_t e;
         while ((e = cudaStreamQuery(stream_)) == cudaErrorNotReady) {
         }
+        if (e == cudaSuccess) (void) cudaGetLastError();   // clear the expected NotReady left by the last poll
         if (!ck(e, "finish", err)) return false;
     }
     ms_wait += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -417,7 +418,10 @@ void PeerExperts::apply_pending(bool wait) {
         OnDevice on(device_);
         if (!on.ok) return;
         const cudaError_t status = wait ? cudaEventSynchronize(refill_ev_) : cudaEventQuery(refill_ev_);
-        if (!wait && status == cudaErrorNotReady) return;
+        if (!wait && status == cudaErrorNotReady) {
+            (void) cudaGetLastError();   // NotReady is the poll result, not an error for the next operation
+            return;
+        }
         if (status != cudaSuccess) {
             // The copies did not complete as one batch. Their old destinations were already declared evicted;
             // dropping the pending list wastes those slots for this run but never advertises bytes that did not arrive.

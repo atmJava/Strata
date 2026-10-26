@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-125 · Peer 轮询不把 NotReady 留成后续操作的错误
+
+- 目标 / 指标：`cudaStreamQuery` / `cudaEventQuery` 返回期望的 `cudaErrorNotReady` 后，不得让它作为 sticky last error
+  影响后续 kernel launch 或资源操作。
+- 假设与预期：PeerExperts 的 finish 轮询与异步 adapt apply 都直接处理返回码，但没有消费驱动记录的 NotReady；后续
+  `cudaGetLastError` 路径可能把一次正常等待误报成故障。
+- 为什么选这条路线：只在最终成功或继续等待时消费期望错误，不改变 polling 的循环与热路径时序。
+- 改动与实验：`finish` 的流轮询结束后若最终成功则清一次 last error；`apply_pending(false)` 把 NotReady 作为正常等待，
+  消费该错误后保留 pending。严格主机语法检查与 clang analyzer 通过。
+- 判决：采纳。正常未完成状态不再污染后续 CUDA 错误状态。
+- 生产状态与回滚：成功轮询路径多一次 `cudaGetLastError`，仅用于清除已观察到的 NotReady；单提交可回退。
+- 未验证：当前无 CUDA 驱动可观察真实 sticky error 行为；结论依据 CUDA runtime 的 polling 语义与静态控制流。
+- 下一步与理由：完成 close/free 失败语义审查后进入最终全量回归，避免在没有驱动证据时扩大释放行为改动。
+
 ## I-20261027-124 · Peer adapt 只发布完整完成的复制批次
 
 - 目标 / 指标：`PeerExperts::adapt()` 的 copy + event 批次只有全部成功并等到 event 成功后才能更新 residency；
