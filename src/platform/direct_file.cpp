@@ -60,6 +60,8 @@ int io_threads(int dflt) {
 struct DirectFile::Impl {
     int fd = -1;
     uint64_t size = 0;
+    bool accepting = false;
+    std::mutex control;
     std::mutex mu;
     std::condition_variable cv_work, cv_done;
     std::deque<Pending> queue;
@@ -92,42 +94,87 @@ struct DirectFile::Impl {
         pool.clear();
         stop = false;
     }
+
+    void close_locked() {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            accepting = false;
+        }
+        stop_pool();
+        std::lock_guard<std::mutex> lk(mu);
+        if (fd >= 0) ::close(fd);
+        fd = -1;
+        size = 0;
+        done.clear();
+        queue.clear();
+    }
 };
 
 DirectFile::DirectFile() : impl_(new Impl) {}
 DirectFile::~DirectFile() { close(); delete impl_; }
 
 bool DirectFile::open(const std::string& path, std::string& err) {
-    close();
-    impl_->fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
-    if (impl_->fd < 0) { err = "DirectFile: cannot open " + path; return false; }
+    std::lock_guard<std::mutex> control(impl_->control);
+    impl_->close_locked();
+    const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
+    if (fd < 0) { err = "DirectFile: cannot open " + path; return false; }
     struct stat st;
-    if (fstat(impl_->fd, &st) != 0) { err = "DirectFile: cannot size " + path; close(); return false; }
-    impl_->size = (uint64_t) st.st_size;
+    if (fstat(fd, &st) != 0) {
+        ::close(fd);
+        err = "DirectFile: cannot size " + path;
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->fd = fd;
+        impl_->size = (uint64_t) st.st_size;
+    }
     const int n = io_threads(16);
-    for (int i = 0; i < n; ++i) impl_->pool.emplace_back([this] { strata::aux_cpus::pin_current_thread(); impl_->worker(); });
+    try {
+        for (int i = 0; i < n; ++i)
+            impl_->pool.emplace_back([this] {
+                strata::aux_cpus::pin_current_thread();
+                impl_->worker();
+            });
+    } catch (const std::exception& e) {
+        impl_->close_locked();
+        err = "DirectFile: cannot start an I/O worker: " + std::string(e.what());
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->accepting = true;
+    }
     return true;
 }
 
 void DirectFile::close() {
-    impl_->stop_pool();
-    if (impl_->fd >= 0) ::close(impl_->fd);
-    impl_->fd = -1;
-    impl_->size = 0;
-    impl_->done.clear();
-    impl_->queue.clear();
+    std::lock_guard<std::mutex> control(impl_->control);
+    impl_->close_locked();
 }
 
-bool DirectFile::is_open() const { return impl_->fd >= 0; }
-uint64_t DirectFile::size() const { return impl_->size; }
+bool DirectFile::is_open() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->accepting && impl_->fd >= 0;
+}
+
+uint64_t DirectFile::size() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->size;
+}
 
 bool DirectFile::submit(uint64_t offset, void* buffer, uint32_t length, uint64_t tag, std::string& err) {
-    if (offset % alignment() || length % alignment() || ((uintptr_t) buffer) % alignment() || length == 0) {
+    if (buffer == nullptr || offset % alignment() || length % alignment() ||
+        ((uintptr_t) buffer) % alignment() || length == 0) {
         err = "DirectFile: unaligned request";
         return false;
     }
     {
         std::lock_guard<std::mutex> lk(impl_->mu);
+        if (!impl_->accepting || impl_->fd < 0) {
+            err = "DirectFile: not open";
+            return false;
+        }
         impl_->queue.push_back(Pending{offset, buffer, length, tag});
     }
     impl_->cv_work.notify_one();
