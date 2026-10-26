@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-78 · NativeDense 发布失败不丢设备内存
+
+- 目标 / 指标：`NativeDense::load()` 在 HC scratch 的 vector 扩容、packed Q8 注册或后续所有权转移失败时，
+  不得泄漏刚分配的 `cudaMalloc` 内存，不得把即将释放的指针发布到 `WeightRef`，也不得留下指向已释放 packed
+  内存的全局注册项。
+- 假设与预期：旧路径在若干 `cudaMalloc` 后立即 `weights_.push_back()`；push 分配失败会丢失裸指针。packed
+  路径则先注册、后记录 key 和转移所有权；注册 map 或 vector 分配失败会让引用/注册项悬空。
+- 为什么选这条路线：逐项 HC 分配先用现有 `DevicePtr` 持有，成功放入 `weights_` 后才发布到 `WeightRef`；
+  packed 路径先计算总数并预留全部 vector，再逐个注册并记录回滚 key，最后在容量足够的不可分配阶段统一发布。
+- 改动与实验：任何异常都会注销本轮新注册的 packed 项，`pending`/`DevicePtr` 仍持有尚未发布的内存；成功路径的
+  上传字节、packed 内容、引用顺序和统计值不变。另补 `catch (...)` 的注册回滚。
+- 结果：`native_dense.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim）；
+  `mtp_logits_width_test` 的 116 项 CPU 检查通过，`git diff --check` 通过。
+- 判决：采纳。加载失败不再产生设备内存泄漏或悬空模型指针，成功路径保持原分配与计算结果。
+- 生产状态与回滚：未改数值、矩阵布局、packed 注册格式或 CUDA 调用顺序；单提交可回退。
+- 未验证：当前无 CUDA 工具链和 RTX 2080 Ti，未注入 vector/map 分配失败，也未加载真实 Qwen3.8-Flash-Next
+  native pack；主机侧 shim 不验证真实 `cudaMalloc`/Q8 packing 行为。
+- 下一步与理由：继续审查 `cudaMalloc`/CUDA event 创建后先发布指针、后加入所有权容器的路径。
+
 ## I-20261027-77 · 延迟 pin 失败不泄漏注册且唤醒装载者
 
 - 目标 / 指标：`PinnedArena::register_slices()` 在逐层注册 page-locked 内存时，如果记录 vector 扩容、状态文本

@@ -259,6 +259,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
     };
     if (scratch_ || !weights_.empty()) { err = "native dense: already loaded"; return false; }
     if (shards.empty()) { err = "native dense: at least one GGUF shard is required"; return false; }
+    std::vector<const void*> newly_registered;
     try {
         std::vector<Pending> pending;
         std::set<std::string> seen;
@@ -400,13 +401,17 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     void* p = nullptr;
                     std::vector<uint8_t> q8;
                     if (f32_inject) q8 = q8_0_of((const float*) gguf.tensor_data(tensor), (uint64_t) ref.ne0 * (uint64_t) ref.ne1);
-                    if (cudaMalloc(&p, bytes) != cudaSuccess ||
-                        cudaMemcpy(p, f32_inject ? (const void*) q8.data() : gguf.tensor_data(tensor), bytes,
+                    if (cudaMalloc(&p, bytes) != cudaSuccess) {
+                        err = "native dense (STRATA_HC_Q8) upload " + tensor.name; return false;
+                    }
+                    DevicePtr allocated_p(p);
+                    if (cudaMemcpy(p, f32_inject ? (const void*) q8.data() : gguf.tensor_data(tensor), bytes,
                                    cudaMemcpyHostToDevice) != cudaSuccess) {
                         err = "native dense (STRATA_HC_Q8) upload " + tensor.name; return false;
                     }
-                    ref.hc_q8 = p;
                     weights_.push_back(p);
+                    allocated_p.release();
+                    ref.hc_q8 = p;
                     hc_q8_bytes += bytes;
                 }
         }
@@ -427,7 +432,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 const uint64_t nb = (uint64_t) ref.elements / 32, bytes = nb * 34;
                 void* p = nullptr;
                 if (cudaMalloc(&p, bytes) != cudaSuccess) { err = "native dense (STRATA_HC_Q8) alloc " + name; return false; }
-                weights_.push_back(p);
+                DevicePtr allocated_p(p);
                 if (skipped) {
                     std::vector<uint16_t> host;
                     if (!table.read_bf16_host(name, host, err)) return false;
@@ -438,6 +443,8 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 } else {
                     strata::kernels::fused_gr_quantize_q8_0((const uint16_t*) ref.data, (uint8_t*) p, (int64_t) nb, nullptr);
                 }
+                weights_.push_back(p);
+                allocated_p.release();
                 ref.hc_q8 = p;
                 hc_q8_bytes += bytes;
                 allocated += alloc_bytes(bytes);
@@ -457,7 +464,9 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     for (int i = 0; i < 2; ++i) {
                         void* b = nullptr;
                         if (cudaMalloc(&b, (size_t) elems * 2) != cudaSuccess) { err = "native dense (STRATA_HC_Q8): scratch alloc"; return false; }
+                        DevicePtr allocated_b(b);
                         weights_.push_back(b);
+                        allocated_b.release();
                         g_hc_scratch[dev][c][i] = b;
                     }
                 for (int i = 0; i < 2; ++i)
@@ -472,19 +481,30 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         DevicePtr scratch(allocation);
         if (status != cudaSuccess) { err = std::string("native dense scratch: ") + cudaGetErrorString(status); return false; }
         // All checks and allocations finish before publishing any reference.
-        weights_.reserve(pending.size());
-        uint64_t packed_bytes = 0;
         size_t packed_count = 0;
+        uint64_t packed_bytes = 0;
+        for (const auto& item : pending)
+            if (item.packed) {
+                ++packed_count;
+                packed_bytes += item.bytes;
+            }
+        // These reservations are the only allocations after the device work: a failure here leaves every
+        // allocation owned by pending/DevicePtr and every reference/registry unchanged.
+        weights_.reserve(weights_.size() + pending.size() + packed_count);
+        packed_keys_.reserve(packed_keys_.size() + packed_count);
+        newly_registered.reserve(packed_count);
+        for (const auto& item : pending) {
+            if (!item.packed) continue;
+            strata::kernels::native_q8_0_packed_register(item.data.get(), item.packed.get(), (int) item.ref->ne0,
+                                                         (int) item.ref->ne1);
+            newly_registered.push_back(item.data.get());
+        }
         for (auto& item : pending) {
             item.ref->native_data = item.data.get();
             item.ref->native_type = item.type;
             item.ref->native_q8_1 = scratch.get();
             if (item.packed) {
-                strata::kernels::native_q8_0_packed_register(item.data.get(), item.packed.get(), (int) item.ref->ne0,
-                                                             (int) item.ref->ne1);
                 packed_keys_.push_back(item.data.get());
-                packed_bytes += item.bytes;
-                ++packed_count;
                 weights_.push_back(item.packed.release());
             }
             weights_.push_back(item.data.release());
@@ -500,7 +520,12 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                          (double) hc_q8_bytes / 1073741824.0);
         return true;
     } catch (const std::exception& error) {
+        for (const void* p : newly_registered) strata::kernels::native_q8_0_packed_unregister(p);
         err = std::string("native dense: ") + error.what();
+        return false;
+    } catch (...) {
+        for (const void* p : newly_registered) strata::kernels::native_q8_0_packed_unregister(p);
+        err = "native dense: unknown load failure";
         return false;
     }
 }
