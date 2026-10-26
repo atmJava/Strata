@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-143 · DFlash2 入口在设备切换失败时停止
+
+- 目标 / 指标：DFlash2 的 load、bind、graph capture、context、draft launch/collect 必须只在 drafter 所属 device 上
+  操作 graph、stream 与 buffer；切换失败时不得继续或留下伪装的 loaded 状态。
+- 假设与预期：这些入口都建立 `OnDevice(device_)`，但忽略 `ok`。失败后可能在当前卡分配/复制/启动 graph；load 还会
+  保留新 device 编号，使后续析构误以为存在该卡资源。
+- 改动与实验：新增统一的 `dflash_device_ok()`；load 在进入失败时立即恢复 `device_ = -1`，其余入口返回带 CUDA
+  原因的失败。release 已保留既有设备检查。
+- 判决：采纳。DFlash2 的加载、使用与释放使用同一设备前提。
+- 生产状态与回滚：影响显式 `--no-draft` 之外的 DFlash2 路径；单卡成功路径不变，单提交可回退。
+- 未验证：当前无 CUDA Toolkit/双 GPU，无法运行 DFlash2 权重或注入切卡失败；Clang 主机侧 CUDA 声明兼容语法
+  构建、DFlash2 pack/tools 与 Terminal 合计 406 个 pytest 通过。
+- 下一步与理由：完成目标测试后进入最终回归。
+
 ## I-20261027-142 · Verifier 入口在设备切换失败时停止
 
 - 目标 / 指标：Verifier 的 init、窗口、commit、batch 与 pipeline 操作只能在其 device 上执行；设备切换失败时

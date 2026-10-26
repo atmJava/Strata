@@ -29,6 +29,13 @@ namespace {
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
+bool dflash_device_ok(const OnDevice& on, int device, const char* where, std::string& err) {
+    if (on.ok) return true;
+    err = std::string("dflash2: cannot enter CUDA") + std::to_string(device) + " for " + where + ": " +
+          cudaGetErrorString(on.error);
+    return false;
+}
+
 bool mapped(size_t bytes, void** h, void** d) {
     return strata::core::alloc_mapped_pinned(bytes, h, d);
 }
@@ -248,6 +255,12 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
     }
     device_ = device;
     const OnDevice on_device(device_);
+    if (!on_device.ok) {
+        err = std::string("dflash2: cannot enter CUDA") + std::to_string(device) + ": " +
+              cudaGetErrorString(on_device.error);
+        device_ = -1;
+        return false;
+    }
     struct Rollback {
         Dflash2Drafter& self;
         bool commit = false;
@@ -489,6 +502,7 @@ bool Dflash2Drafter::alloc(std::string& err) {
 
 bool Dflash2Drafter::bind_raw(EmbedFn embed, const void* head_w, int head_type, int64_t head_rows, const std::vector<int32_t>& vocab, std::string& err) {
     const OnDevice on_device(device_);
+    if (!dflash_device_ok(on_device, device_, "raw binding", err)) return false;
     const int64_t n_rows = vocab.empty() ? head_rows : (int64_t) vocab.size();
     if (n_rows <= 0) {
         err = "dflash2: the draft head has no rows";
@@ -555,6 +569,7 @@ bool Dflash2Drafter::alloc_logits(int64_t n_dvocab, std::string& err) {
 
 bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const std::string& vocab_file, std::string& err) {
     const OnDevice on_device(device_);
+    if (!dflash_device_ok(on_device, device_, "binding", err)) return false;
     if (head == nullptr || !head->loaded()) { err = "dflash2: the drafter needs the native head (--native)"; return false; }
     const WeightRef* we = wt.find("token_embd.weight");
     if (we == nullptr) { err = "dflash2: token_embd.weight is missing"; return false; }
@@ -842,6 +857,7 @@ bool Dflash2Drafter::prepare(const float* taps, std::string& err) {
     if (!bound_) { err = "dflash2: not bound"; return false; }
     if (prof_ != nullptr) return true;   // the profile runs without graphs
     const OnDevice on_device(device_);
+    if (!dflash_device_ok(on_device, device_, "graph preparation", err)) return false;
     const Clock::time_point t0 = Clock::now();
     for (int i = 0; i < 8; ++i) h_meta_[i] = i;
     for (int n = 1; n <= kRows; ++n)
@@ -854,6 +870,7 @@ bool Dflash2Drafter::prepare(const float* taps, std::string& err) {
 bool Dflash2Drafter::context(const float* taps, int64_t n, int64_t pos0, std::string& err) {
     if (device_ < 0 || !bound_) { err = "dflash2: the drafter was released"; return false; }
     const OnDevice on_device(device_);
+    if (!dflash_device_ok(on_device, device_, "context staging", err)) return false;
     const int tap_n = (int) taps_.size() * N_;
     for (int64_t r0 = 0; r0 < n; r0 += kRows) {
         const int m = (int) std::min<int64_t>(kRows, n - r0);
@@ -878,6 +895,7 @@ bool Dflash2Drafter::draft_launch(const float* taps, int n_new, int64_t pos0, in
     if (n_new < 1 || n_new > kRows) { err = "dflash2: draft rows out of range"; return false; }
     if (pending_) { err = "dflash2: draft_launch while a draft is in flight (draft_collect first)"; return false; }
     const OnDevice on_device(device_);
+    if (!dflash_device_ok(on_device, device_, "a draft launch", err)) return false;
     const Clock::time_point t0 = Clock::now();
     if (graph_taps_ != nullptr && graph_taps_ != taps) { err = "dflash2: the taps buffer moved after capture"; return false; }
     const bool profile = prof_ != nullptr && prof_->enabled;
@@ -924,6 +942,7 @@ bool Dflash2Drafter::draft_collect(int32_t* drafts, float* probs, std::string& e
     if (!pending_) { err = "dflash2: draft_collect without a draft_launch"; return false; }
     if (drafts == nullptr) { err = "dflash2: draft_collect needs the drafts buffer"; return false; }
     const OnDevice on_device(device_);
+    if (!dflash_device_ok(on_device, device_, "a draft collect", err)) return false;
     if (cudaStreamSynchronize(cs_) != cudaSuccess) {
         pending_ = false;
         err = std::string("dflash2 draft: ") + cudaGetErrorString(cudaGetLastError());
