@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-16 · MCP 启动线程失败回滚子进程，Hub 批量启动不留半活服务器
+
+- 目标 / 指标：stdio MCP 子进程启动后，stderr 或 stdout 读线程任一创建失败时，必须终止子进程、关闭三条管道并
+  join 已启动线程；Hub 批量启动中某个线程失败时，必须关闭已启动服务器，且 close/wait 不能 join 未启动线程。
+- 假设与预期：旧路径只捕获 `Popen` 的 `OSError`。若第一个读线程已启动而第二个线程因资源限制失败，异常会逃出
+  `start()`，子进程继续运行；Hub 的列表中也包含未启动线程，统一 close 会在 `join()` 处再次失败并掩盖原错误。
+- 为什么选这条路线：这是同一事务边界的真实部分构造问题，可用 mock 进程与线程启动注入复现，不需要真实 MCP 服务。
+- 改动与实验：`StdioTransport.start()` 将两个 reader 的启动纳入回滚，失败时调用统一 `close()`；close 仅 join 确实
+  启动过的线程。`McpHub.start()` 任一线程启动失败即关闭全部服务器并传播；`wait()` 跳过尚未启动的线程。
+  新增第二个 reader 失败、Hub 第二个线程失败和既有 close 中断启动测试。
+- 结果：目标测试 `3 passed`；完整 `serve/test_mcp.py` 为 `29 passed / 8 subtests`；`compileall` 与 `git diff --check`
+  通过。
+- 判决：采纳。MCP 启动失败要么留下可重试关闭态，要么完全清理，不保留半活子进程或未启动 join。
+- 生产状态与回滚：未改生产；正常启动和关闭路径不变，单提交可回退。
+- 学到什么：进程创建成功不等于启动事务成功；其附属线程、管道和注册记录必须与进程一起回滚。
+- 下一步与理由：继续检查 server/lifeline 的进程启动与线程注册失败组合，随后进行较广 Python 回归。
+
 ## I-20261027-15 · PLE 初始化回滚与在途 I/O 显式计数，消除 close 等待和缓存竞争
 
 - 目标 / 指标：`PleReader::open()` 在 slab、向量或行缓存分配失败时不能抛穿或留下半开状态；`close()` 只等待确实

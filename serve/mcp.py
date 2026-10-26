@@ -102,9 +102,15 @@ class StdioTransport:
         except OSError as e:
             raise McpError(f"could not start {command!r}: {e}") from None
         self._err_reader = threading.Thread(target=self._read_stderr, daemon=True)
-        self._err_reader.start()
         self._read_thread = threading.Thread(target=self._read, daemon=True)
-        self._read_thread.start()
+        try:
+            self._err_reader.start()
+            self._read_thread.start()
+        except BaseException as exc:
+            self.close()
+            if isinstance(exc, McpError):
+                raise
+            raise McpError(f"could not start {command!r} readers: {exc}") from None
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None and not getattr(self, "ended", False)
@@ -224,7 +230,8 @@ class StdioTransport:
                 pass
         threads = [getattr(self, "_read_thread", None), getattr(self, "_err_reader", None)]
         for thread in threads:
-            if thread is not None and thread is not threading.current_thread():
+            if (thread is not None and thread.ident is not None and
+                    thread is not threading.current_thread()):
                 thread.join(timeout=2.0)
 
     @staticmethod
@@ -525,8 +532,12 @@ class McpHub:
         """Start every server on its own thread (npx may download a package first: that must not delay the chat)."""
         self.threads = [threading.Thread(target=s.start, daemon=True, name=f"mcp-{s.name}")
                         for s in self.servers.values()]
-        for t in self.threads:
-            t.start()
+        try:
+            for t in self.threads:
+                t.start()
+        except BaseException:
+            self.close()
+            raise
         if wait:
             self.wait(None)
 
@@ -534,6 +545,8 @@ class McpHub:
         """Wait (up to `timeout` s in all) for servers that are still starting."""
         end = None if timeout is None else time.monotonic() + timeout
         for t in self.threads:
+            if t.ident is None:
+                continue
             t.join(None if end is None else max(0.0, end - time.monotonic()))
 
     def routes(self) -> dict[str, tuple[McpServer, str]]:

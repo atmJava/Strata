@@ -6,6 +6,7 @@ the fake MCP server in serve/mcp_fake_server.py (no GPU, no pack, no MCP SDK).
 from __future__ import annotations
 
 import json
+import io
 import os
 import sys
 import tempfile
@@ -36,6 +37,81 @@ def call_script(name, **params):
     """The model's text for one tool call, as Qwen's template asks for it."""
     body = "".join(f"<parameter={k}>\n{v}\n</parameter>\n" for k, v in params.items())
     return f"</think>\n\nLet me check.\n\n<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+
+
+class StartupCleanup(unittest.TestCase):
+    def _process(self):
+        proc = mock.Mock(pid=12345)
+        proc.stdin = io.BytesIO()
+        proc.stdout = io.BytesIO()
+        proc.stderr = io.BytesIO()
+        proc.wait.return_value = 0
+        return proc
+
+    def test_stdio_reader_thread_failure_stops_the_child_and_joins_started_reader(self):
+        from serve import mcp
+        transport = mcp.StdioTransport("fake", stdio())
+        proc = self._process()
+        real_start = threading.Thread.start
+        calls = 0
+
+        def fail_second(thread):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("thread limit")
+            return real_start(thread)
+
+        with mock.patch.object(mcp.lifeline, "popen", return_value=proc), \
+                mock.patch.object(mcp.threading.Thread, "start", fail_second):
+            with self.assertRaisesRegex(mcp.McpError, "thread limit"):
+                transport.start()
+        self.assertTrue(proc.stdin.closed)
+        proc.wait.assert_called()
+        self.assertTrue(proc.stdout.closed)
+        self.assertTrue(proc.stderr.closed)
+        self.assertTrue(transport.ended)
+        self.assertFalse(transport._err_reader.is_alive())
+        self.assertIsNone(transport._read_thread.ident)
+
+    def test_hub_start_failure_closes_started_servers_and_skips_unstarted_joins(self):
+        from serve import mcp
+        entered, released = threading.Event(), threading.Event()
+
+        class FakeServer:
+            def __init__(self, name):
+                self.name = name
+                self.closed = False
+
+            def start(self):
+                entered.set()
+                released.wait(2)
+
+            def close(self):
+                self.closed = True
+                released.set()
+
+        hub = mcp.McpHub({})
+        first, second = FakeServer("first"), FakeServer("second")
+        hub.servers = {"first": first, "second": second}
+        real_start = threading.Thread.start
+        calls = 0
+
+        def fail_second(thread):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("thread limit")
+            return real_start(thread)
+
+        with mock.patch.object(mcp.threading.Thread, "start", fail_second):
+            with self.assertRaisesRegex(RuntimeError, "thread limit"):
+                hub.start()
+        self.assertTrue(entered.wait(2))
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+        self.assertFalse(hub.threads[0].is_alive())
+        self.assertIsNone(hub.threads[1].ident)
 
 
 class ScriptedEngine(MockEngine):
