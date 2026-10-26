@@ -84,9 +84,9 @@ public:
     /// `delay_us` after it was issued. 0 disables.
     void set_injected_delay_us(double delay_us);
 
-    /// Read with no ticket in flight (the worker updates these while reads are outstanding; with the keep-alive
-    /// on it may also be counting a keep-alive read - `snapshot` takes a consistent copy).
-    const ReaderStats& stats() const;
+    /// A consistent copy of the counters. The worker updates them while reads and keep-alives are outstanding, so
+    /// callers must never retain a reference into the reader's mutable statistics.
+    ReaderStats stats() const;
     ReaderStats snapshot() const;
     void reset_stats();
     uint64_t cache_capacity() const;

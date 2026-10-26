@@ -600,7 +600,7 @@ void PleReader::set_injected_delay_us(double delay_us) {
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->delay_us = delay_us < 0 ? 0 : delay_us;
 }
-const ReaderStats& PleReader::stats() const { return impl_->stats; }
+ReaderStats PleReader::stats() const { return snapshot(); }
 ReaderStats PleReader::snapshot() const {
     Impl& m = *impl_;
     std::unique_lock<std::mutex> lk(m.mu, std::defer_lock);

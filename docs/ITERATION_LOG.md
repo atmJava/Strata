@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-75 · PLE 统计读取不再与 worker 竞争
+
+- 目标 / 指标：线程模式下的 `PleReader` 允许 I/O worker 更新读延迟、读量和 keep-alive 计数；任何公开统计读取
+  都必须返回一致副本，不能向调用方暴露 worker 正在写入的内部引用。
+- 假设与预期：`stats()` 返回 `const ReaderStats&`，而 `snapshot()` 已在 worker 模式下持锁复制。前者会把一个
+  没有锁的引用交给调用方；如果 keep-alive 或读完成同时发生，调用方与 worker 会并发读写普通字段和
+  `read_us`，构成数据竞争。
+- 为什么选这条路线：保留已有入口名称和字段语义，把返回值改为 `snapshot()` 的副本。生产读取路径、统计公式、
+  worker 调度、keep-alive 周期和计数时机均不变，只消除无锁别名。
+- 改动与实验：新增 `ple_reader_stats_snapshot_test`，启用 2 ms keep-alive 后持续通过旧 `stats()` 入口读取
+  快照，检查计数单调且延迟环不超过 65536，同时确认 keep-alive 确实更新了统计。
+- 结果：新测试以 C++20、`-O2 -Wall -Wextra -Werror` 编译运行通过；ASan/UBSan 与 ThreadSanitizer 均通过；
+  原 `ple_reader_worker_failure_test` 也重新编译运行通过。
+- 判决：采纳。统计调用方获得锁内一致副本，worker 不再与观察者共享可变引用。
+- 生产状态与回滚：只改统计访问的返回值与文档，不读写用户数据；单提交可回退。
+- 未验证：当前没有真实 Qwen3.8-Flash-Next PLE 表、NVMe 压力和完整 CUDA sm_75 构建；未在 RTX 2080 Ti
+  双卡推理过程中采样生产统计。
+- 下一步与理由：继续审查公开 getter 是否返回后台线程会修改的内部引用，并补齐同类并发回归。
+
 ## I-20261027-74 · 分片路径格式化不再有截断可能
 
 - 目标 / 指标：`gguf_split_paths()` 按文件声明的分片数生成五位数文件名时，局部格式化缓冲区必须容纳任意
