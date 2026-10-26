@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -5636,8 +5637,12 @@ class VisionShutdown(unittest.TestCase):
 
             class Proc:
                 stdin = io.StringIO()
+                stdout = io.StringIO()
 
                 def wait(self, timeout=None):
+                    return 0
+
+                def poll(self):
                     return 0
 
                 def kill(self):
@@ -5645,9 +5650,69 @@ class VisionShutdown(unittest.TestCase):
 
             v.proc = Proc()
             v.close()
+            self.assertTrue(v.proc is None)
+            self.assertTrue(Proc.stdin.closed)
+            self.assertTrue(Proc.stdout.closed)
             self.assertTrue((d / "k.sve").exists())
             v.shutdown()
             self.assertFalse(d.exists())
+
+    def test_close_kills_and_reaps_an_encoder_that_does_not_answer_quit(self):
+        import serve.server as server
+        v = server.Vision.__new__(server.Vision)
+        v.stopped = False
+        proc = v.proc = mock.Mock()
+        proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
+        proc.poll.return_value = None
+        proc.wait.side_effect = subprocess.TimeoutExpired("strata-vision", 10)
+
+        v.close()
+        proc.kill.assert_called_once_with()
+        self.assertEqual(proc.wait.call_count, 2)
+        self.assertTrue(proc.stdin.closed)
+        self.assertTrue(proc.stdout.closed)
+        self.assertTrue(v.stopped)
+
+    def test_a_bad_ready_line_closes_the_encoder_pipes(self):
+        import serve.server as server
+        with tempfile.TemporaryDirectory() as d:
+            v = server.Vision.__new__(server.Vision)
+            v.spawn = (["strata-vision"], None, None)
+            v.dir = Path(d)
+            v.cache = {}
+            proc = SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO("ERR no model\n"),
+                                   poll=lambda: 7, returncode=7)
+            with mock.patch.object(server, "popen", lambda *a, **k: proc):
+                with self.assertRaisesRegex(RuntimeError, "exit code 7"):
+                    v._start()
+            self.assertIsNone(v.proc)
+            self.assertTrue(proc.stdin.closed)
+            self.assertTrue(proc.stdout.closed)
+
+    def test_a_ready_reader_thread_failure_closes_the_encoder_pipes(self):
+        import serve.server as server
+        with tempfile.TemporaryDirectory() as d:
+            v = server.Vision.__new__(server.Vision)
+            v.spawn = (["strata-vision"], None, None)
+            v.dir = Path(d)
+            v.cache = {}
+            proc = SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO(), poll=lambda: None,
+                                   kill=mock.Mock(), wait=mock.Mock())
+            real_start = threading.Thread.start
+
+            def start(thread):
+                if thread.name == "strata-vision-line":
+                    raise RuntimeError("no encoder reader")
+                return real_start(thread)
+
+            with mock.patch.object(server, "popen", lambda *a, **k: proc), \
+                    mock.patch.object(threading.Thread, "start", autospec=True, side_effect=start):
+                with self.assertRaisesRegex(RuntimeError, "no encoder reader"):
+                    v._start()
+            proc.kill.assert_called_once_with()
+            self.assertTrue(proc.stdin.closed)
+            self.assertTrue(proc.stdout.closed)
+            self.assertIsNone(v.proc)
 
     def test_shutdown_closes_a_log_it_owns(self):
         import serve.server as server

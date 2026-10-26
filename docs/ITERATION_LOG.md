@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-20 · 视觉编码器超时、非 READY 与 unload 统一关闭管道
+
+- 目标 / 指标：视觉编码器 READY/ENC 读取超时、回答非 READY、读取线程启动失败或 unload 时，都必须 kill/wait 进程并
+  显式关闭 stdin/stdout；下一次请求不能继承半关闭或仍占用显存/管道的 reader。
+- 假设与预期：旧 READY 超时路径只把 `proc` 置空，其他失败路径只 kill/wait；所有路径都依赖垃圾回收关闭管道。
+  `close()` 正常 QUIT 和强制 kill 两条路径也没有显式关闭 stdin/stdout。
+- 为什么选这条路线：视觉 reader 的 READY、ENC、卸载是同一单进程生命周期；线程和等待故障可注入，不需要图像模型。
+- 改动与实验：新增内部读超时类型和统一的 `_discard_reader()/_stop_reader()`；`_start_reader()` 对超时、线程失败和
+  非 READY 回答统一回滚；`encode()` 超时与 `close()` 都通过同一 helper 终止、wait 和关闭两条管道。
+  `_readline()` 只负责有界等待并向调用方报告超时。新增非 READY、读线程失败、QUIT 超时强制终止和正常 unload
+  关闭管道的断言。
+- 结果：视觉目标测试 `37 passed / 5 subtests`；完整 `serve/test_server.py` 为 `341 passed / 502 subtests`；
+  lifecycle、lifeline、images、MCP 合计 `69 passed / 30 subtests`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。视觉 reader 的失败、超时、正常卸载和进程替换共用一个释放边界。
+- 生产状态与回滚：未改生产；正常 READY、编码结果和缓存格式未变，单提交可回退。未运行真实视觉模型或 GPU。
+- 学到什么：把“kill”当成释放完成会漏掉 pipe buffer 和文件对象；进程回收与管道关闭必须同时由 owner 完成。
+- 下一步与理由：继续检查 MCP、runtime 与工具脚本中的进程/文件 owner，优先选择有现成无 GPU 测试入口的路径。
+
 ## I-20261027-19 · 引擎启动的旁路线程和槽位初始化纳入统一回滚
 
 - 目标 / 指标：日志 narrator/echo、READY reader、槽位队列或主 stdout pump 任一启动失败时，不能遗留引擎进程、

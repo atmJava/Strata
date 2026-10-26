@@ -2686,6 +2686,10 @@ def vision_start_error(line: str, log=None, code: int | None = None, waited: flo
     return msg
 
 
+class _VisionReadTimeout(RuntimeError):
+    """The encoder stayed silent past a command's deadline."""
+
+
 class Vision:
     """The resident image encoder: `strata-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     lines and writes each image's embeddings; results are cached by the image's hash, so a conversation that
@@ -2791,33 +2795,62 @@ class Vision:
         args, log, env = self.spawn
         self._ensure_dir()
         # cwd is the encoder's directory: the ENC lines name the files relative to it (#480: no space in the line)
-        self.proc = popen("the image encoder", args, role="vision", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=log or subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1, env=env,
-                          cwd=self.dir)
+        proc = popen("the image encoder", args, role="vision", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=log or subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1, env=env,
+                     cwd=self.dir)
+        self.proc = proc
         try:
             line = self._readline(VISION_READY_S, "the vision encoder did not start")
-        except RuntimeError as e:                       # silent for VISION_READY_S: it was ended, and it is not left half-started
-            self.proc, self.stopped = None, True
+        except _VisionReadTimeout as e:                 # silent for VISION_READY_S: it is ended, not left half-started
+            self._discard_reader(proc)
             if VISION_READY_S:
                 raise RuntimeError(vision_start_error("", log, waited=VISION_READY_S)) from None
             raise RuntimeError(str(e)) from None
+        except BaseException:
+            self._discard_reader(proc)
+            raise
         if not line.startswith("READY"):
-            proc, self.proc = self.proc, None
-            self.stopped = True
             code = proc.poll() if hasattr(proc, "poll") else None   # an encoder that died by itself has its status already
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+            self._discard_reader(proc)
             if code is None:
                 code = getattr(proc, "returncode", None)
             raise RuntimeError(vision_start_error(line, log, code))
         self.stopped = False
 
+    @staticmethod
+    def _close_reader_streams(proc) -> None:
+        for name in ("stdin", "stdout"):
+            stream = getattr(proc, name, None)
+            close = getattr(stream, "close", None)
+            if close is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    close()
+
+    @classmethod
+    def _stop_reader(cls, proc, grace: float = 5.0) -> None:
+        """Kill a reader that is still running, reap it, then close both pipes it owns."""
+        poll = getattr(proc, "poll", None)
+        kill = getattr(proc, "kill", None)
+        with contextlib.suppress(OSError):
+            if kill is not None and (poll is None or poll() is None):
+                kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            wait = getattr(proc, "wait", None)
+            if wait is not None:
+                wait(timeout=grace)
+        cls._close_reader_streams(proc)
+
+    def _discard_reader(self, proc) -> None:
+        try:
+            self._stop_reader(proc)
+        finally:
+            if self.proc is proc:
+                self.proc = None
+            self.stopped = True
+
     def _readline(self, timeout: float, what: str) -> str:
-        """One line from the encoder, waiting at most `timeout` s (#1317).  On a timeout the encoder is killed, so the
-        next request starts a fresh one, and the read raises RuntimeError instead of holding the request turn."""
+        """One line from the encoder, waiting at most `timeout` s (#1317).  A timeout raises so the caller can kill,
+        reap and close the encoder before the next request starts a fresh one."""
         proc = self.proc
         got: queue.Queue = queue.Queue()
 
@@ -2827,15 +2860,12 @@ class Vision:
             except (OSError, ValueError):               # killed under the read
                 got.put("")
 
-        threading.Thread(target=read, daemon=True).start()
+        reader = threading.Thread(target=read, name="strata-vision-line", daemon=True)
+        reader.start()
         try:
             return got.get(timeout=timeout)
         except queue.Empty:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-            raise RuntimeError(f"{what}: it said nothing for {timeout:.0f} s") from None
+            raise _VisionReadTimeout(f"{what}: it said nothing for {timeout:.0f} s") from None
 
     def alive(self) -> bool:
         return self.proc is not None and not self.stopped and self.proc.poll() is None
@@ -2969,7 +2999,7 @@ class Vision:
                 try:
                     line = self._readline(VISION_ENCODE_S, "the image could not be read").strip()
                 except RuntimeError as e:                 # silent for VISION_ENCODE_S: the encoder was ended (#1317)
-                    self.stopped = True                   # alive() is False, so the next request starts it again
+                    self._discard_reader(self.proc)       # alive() is False, so the next request starts it again
                     raise ValueError(str(e)) from None
             finally:                                                   # #352: also when the encoder's pipe is gone
                 img.unlink(missing_ok=True)
@@ -3005,15 +3035,10 @@ class Vision:
             proc.stdin.flush()
             proc.wait(timeout=10)
         except Exception:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=10)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        self.stopped = True
+            pass
+        finally:
+            self._stop_reader(proc, grace=10)
+            self.stopped = True
 
     def shutdown(self):
         """#914: close() for good: the server ends, so the encoder's directory (one ~10 MB .sve per image, on a tmpfs
