@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-56 · 并发读 doorbell 线程失败交还 pump
+
+- 目标 / 指标：`STRATA_PIPED_CONCURRENT` 的 prompt reader 把各 stage doorbell 交给独立线程服务；该线程被拒绝时，
+  当前读取必须恢复 `pump()` 内的普通服务，不能留下 `conc_serving=true` 而无服务者。
+- 假设与预期：`Doorbells` 先对所有 verifier 设置 `external_serve=true`，再直接构造线程。构造异常会让请求展开；即使
+  RAII 析构最终复位，当前读取也会丢失并发服务。
+- 为什么选这条路线：doorbell 外部服务是延迟优化；线程不可用时调用现有的 `bells.off()`，恢复各 verifier 和
+  `conc_serving` 的普通路径，读取、窗口和输出保持原样。
+- 改动与实验：线程构造放在异常边界内；失败记录后立即 `off()`，不进行 join，也不设置等待标志。成功路径的服务循环、
+  wake/等待和每 2 ms 轮询不变。
+- 结果：`generate.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA shim；跳过该配置原有的未使用
+  变量告警）。`git diff --check` 通过。未运行真实线程配额失败、并发 prompt read、双卡 pump 或 CUDA sm_75。
+- 判决：采纳。可选 doorbell 并发失败退化为普通 pump 服务，不遗失窗口 hand-off。
+- 生产状态与回滚：未改成功路径线程和窗口调度；单提交可回退。
+- 学到什么：设置全局服务所有权后启动服务者，必须把“服务者已启动”纳入状态，失败时回滚所有权。
+- 下一步与理由：继续检查 prompt reader 和 spec-adaptive helper 的直接线程构造，再做下一轮综合测试。
+
 ## I-20261027-55 · checkpoint stage 线程失败串行保存
 
 - 目标 / 指标：`STRATA_CKPT_THREADS` 启动多 stage checkpoint 线程时，任一线程构造失败都必须由请求线程补齐全部 stage；

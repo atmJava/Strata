@@ -13272,44 +13272,55 @@ int main(int argc, char** argv) {
                         std::lock_guard<std::mutex> lk(bell_mu);
                         bell_cv.notify_one();
                     };
-                    bells.th = std::thread([&] {
-                        conc_thread_cpus();
-                        auto any_busy = [&] {
-                            for (int k = 0; k < n_pipe; ++k)
-                                if (stage_verifier(k).batch_busy()) return true;
-                            return false;
-                        };
-                        while (bells.on.load(std::memory_order_acquire)) {
-                            bool busy = false;
-                            for (int k = 0; k < n_pipe; ++k) {
-                                auto& vk = stage_verifier(k);
-                                if (vk.batch_busy()) {
-                                    busy = true;
-                                    vk.batch_serve(win_pool_fn, win_pool_user);
+                    try {
+                        bells.th = std::thread([&] {
+                            conc_thread_cpus();
+                            auto any_busy = [&] {
+                                for (int k = 0; k < n_pipe; ++k)
+                                    if (stage_verifier(k).batch_busy()) return true;
+                                return false;
+                            };
+                            while (bells.on.load(std::memory_order_acquire)) {
+                                bool busy = false;
+                                for (int k = 0; k < n_pipe; ++k) {
+                                    auto& vk = stage_verifier(k);
+                                    if (vk.batch_busy()) {
+                                        busy = true;
+                                        vk.batch_serve(win_pool_fn, win_pool_user);
+                                    }
                                 }
+                                if (busy) continue;
+                                // STRATA_TEST_BELL_SLEEP_US=N (a test, an A/B of the wait below): sleep N us instead, as
+                                // the first form of this thread did (a whole timer tick on Windows)
+                                static const int test_sleep_us = [] {
+                                    const char* t = std::getenv("STRATA_TEST_BELL_SLEEP_US");
+                                    return t != nullptr ? std::max(0, std::atoi(t)) : 0;
+                                }();
+                                if (test_sleep_us > 0) {
+                                    std::this_thread::sleep_for(std::chrono::microseconds(test_sleep_us));
+                                    continue;
+                                }
+                                // no window in flight: wait for pump's next launch (it notifies when this is set; the
+                                // fences pair the flag with batch_launch's running flag, so one of the two sides sees the
+                                // other), or for the end of the read
+                                std::unique_lock<std::mutex> lk(bell_mu);
+                                bell_waiting.store(true, std::memory_order_relaxed);
+                                std::atomic_thread_fence(std::memory_order_seq_cst);
+                                bell_cv.wait_for(lk, std::chrono::milliseconds(2),
+                                                 [&] { return !bells.on.load(std::memory_order_acquire) || any_busy(); });
+                                bell_waiting.store(false, std::memory_order_relaxed);
                             }
-                            if (busy) continue;
-                            // STRATA_TEST_BELL_SLEEP_US=N (a test, an A/B of the wait below): sleep N us instead, as
-                            // the first form of this thread did (a whole timer tick on Windows)
-                            static const int test_sleep_us = [] {
-                                const char* t = std::getenv("STRATA_TEST_BELL_SLEEP_US");
-                                return t != nullptr ? std::max(0, std::atoi(t)) : 0;
-                            }();
-                            if (test_sleep_us > 0) {
-                                std::this_thread::sleep_for(std::chrono::microseconds(test_sleep_us));
-                                continue;
-                            }
-                            // no window in flight: wait for pump's next launch (it notifies when this is set; the
-                            // fences pair the flag with batch_launch's running flag, so one of the two sides sees the
-                            // other), or for the end of the read
-                            std::unique_lock<std::mutex> lk(bell_mu);
-                            bell_waiting.store(true, std::memory_order_relaxed);
-                            std::atomic_thread_fence(std::memory_order_seq_cst);
-                            bell_cv.wait_for(lk, std::chrono::milliseconds(2),
-                                             [&] { return !bells.on.load(std::memory_order_acquire) || any_busy(); });
-                            bell_waiting.store(false, std::memory_order_relaxed);
-                        }
-                    });
+                        });
+                    } catch (const std::exception& e) {
+                        std::fprintf(stderr,
+                                     "strata batch: the concurrent doorbell worker did not start (%s); pump serves them\n",
+                                     e.what());
+                        bells.off();
+                    } catch (...) {
+                        std::fprintf(stderr,
+                                     "strata batch: the concurrent doorbell worker did not start; pump serves them\n");
+                        bells.off();
+                    }
                     for (int64_t q0 = a0; q0 < b0;) {
                         const auto tc = Clock::now();
                         const int64_t rows0 = pipe_rows;
