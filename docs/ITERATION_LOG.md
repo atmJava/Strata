@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-132 · Drafter 清理不再忽略设备切换失败
+
+- 目标 / 指标：`MtpDrafter::release()` 与 `Dflash2Drafter::release()` 必须先成功进入资源所属 device；失败时不得
+  在调用者 device 上销毁 stream/event/graph 或释放显存，也不得清空仍有效的句柄。
+- 假设与预期：两处都构造了 `OnDevice`，但随后无条件执行完整清理；现有 `OnDevice` 已显式报告 `cudaGetDevice` /
+  `cudaSetDevice` 失败，而这两个 owner 没有读取状态。多卡或驱动瞬态错误时会错误释放并永久丢失所有权。
+- 为什么选这条路线：复用现有作用域类型，只在进入任何 CUDA clean-up 前检查 `ok`；正常路径不增加驱动调用，故障时保留
+  全部成员供显式析构或后续重试。
+- 改动与实验：两个 `release()` 在 `!on_device.ok` 时立即返回；`mtp.cpp` 与 `dflash2.cpp` 的 GCC 严格主机语法检查通过。
+- 判决：采纳。错误 context 上的资源清理被阻止。
+- 生产状态与回滚：正常清理路径不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、GPU 或双卡 context，未实际注入 `cudaSetDevice` 失败执行两个 owner；逐项
+  `cudaFree` / destroy 失败仍不能完整重试，本轮只封住更严重的错误设备清理。
+- 下一步与理由：最后复跑当前构建的定向主机测试、检查远端 SHA，并在 08:00 前停止新改动。
+
 ## I-20261027-131 · 移除伪 DFlash2 测试
 
 - 目标 / 指标：常规 pytest 收集不得执行无断言、绑定开发机 Windows 路径的 DFlash2 脚本。

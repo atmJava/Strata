@@ -50,6 +50,7 @@ using CudaPtr = std::shared_ptr<void>;
 void Dflash2Drafter::release() {
     if (device_ < 0) return;      // already released (or never loaded): the destructor calls this
     const OnDevice on_device(device_);
+    if (!on_device.ok) return;    // keep every handle for a later retry: none is valid on the caller's device
     if (cs_) cudaStreamSynchronize(cs_);
     prof_report();
     prof_free();
