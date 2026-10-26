@@ -218,7 +218,12 @@ class Telemetry:
         self._disk_prev = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        try:
+            self._thread.start()
+        except BaseException as e:                   # noqa: BLE001 - the server must still start
+            self._thread = None
+            print(f"[strata] hardware telemetry sampler did not start ({e}); /metrics will be sampled on demand",
+                  flush=True)
 
     def _disk(self):
         if not self.ps:

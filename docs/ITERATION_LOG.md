@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-38 · telemetry 采样线程失败不阻止服务启动
+
+- 目标 / 指标：硬件 telemetry 的后台采样线程无法创建时，服务仍应启动；保留静态 GPU/CPU 信息与按需 `sample()`，不得留下
+  半启动对象，`close()` 仍可安全重复调用。
+- 假设与预期：`Telemetry.__init__()` 直接启动 daemon 线程，线程配额限制或运行时拒绝会把异常抛到 `Service.start_telemetry()`，
+  仅影响监控图表却中止整个服务器初始化。
+- 为什么选这条路线：采样器是纯辅助设施，可用 mock GPU reader 和线程启动故障完全验证；正常采样周期与 `/metrics` 快照不变。
+- 改动与实验：线程启动失败后记录告警并把 `_thread` 置空，保留静态信息和按需采样；新增双卡静态/按需读数断言、空历史快照
+  和失败对象安全关闭测试。
+- 结果：`NvidiaTelemetry` 与 `TelemetryNoDisks` 目标测试为 `3 passed`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。采样线程只会影响周期历史，不能成为服务可用性的前置条件。
+- 生产状态与回滚：未改成功启动的采样、GPU 聚合、磁盘/CPU 内存字段或 `/metrics` 格式；单提交可回退。未在真实线程配额
+  耗尽或双 RTX 2080 Ti 服务器上运行。
+- 学到什么：构造函数中的后台监控线程应像其他辅助 worker 一样有降级路径；按需采样接口可以继续为状态检查提供当前值。
+- 下一步与理由：继续审计构造函数中启动线程的组件和可失败进程清理，优先找会让主服务不可用的辅助路径。
+
 ## I-20261027-37 · PLE issue 队列与 ticket 提交保持一致
 
 - 目标 / 指标：`PleReader::issue()` 在 jobs 的 vector/unordered_map/deque 或 ticket 表分配失败时，必须回滚本次已追加

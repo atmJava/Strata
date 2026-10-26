@@ -4780,6 +4780,19 @@ class NvidiaTelemetry(unittest.TestCase):
                 t.close()
             self.assertFalse(t._thread.is_alive())
 
+    def test_sampler_thread_failure_keeps_the_server_observable(self):
+        from serve import telemetry
+        with mock.patch.object(telemetry, "gpu_reader", self.Reader), \
+                mock.patch.object(telemetry.threading.Thread, "start", side_effect=RuntimeError("thread limit")):
+            t = telemetry.Telemetry(gpu_indices=[0, 1])
+        try:
+            self.assertIsNone(t._thread)
+            self.assertEqual(t.static["gpu_count"], 2)
+            self.assertEqual(t.sample()["gpu_util"], 30.0)
+            self.assertEqual(t.snapshot()["now"], {})
+        finally:
+            t.close()
+
 
 class TelemetryNoDisks(unittest.TestCase):
     """psutil.disk_io_counters() returns None where it finds no disk (a gVisor container; Windows with its disk counters
