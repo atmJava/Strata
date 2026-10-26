@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-107 · Coupled draft sampler 初始化事务化
+
+- 目标 / 指标：MTP 的 coupled draft sampler 参数、penalty ring、scratch、mapped staging、可选 q 分布缓冲和 token map
+  只能在全部分配、清零、上传与 device sync 成功后发布；任何失败返回前必须释放本轮已取得资源。
+- 假设与预期：旧实现按顺序直接写 `cparams_`、`cring_`、`cscratch_`、mapped 指针和 `dinv_`。中途一次
+  allocation/alias/upload/memset/sync 失败会留下部分成员，调用者即使继续运行并重试也可能覆盖旧句柄。
+- 为什么选这条路线：所有候选资源先持有在局部变量，统一 discard 负责释放；成功末尾一次性复制到成员并计入 VRAM，
+  再标记 `coupled_ok_`。失败时 `coupled_ok_` 保持关闭，后续请求不会进入半初始化 sampler。
+- 改动与实验：采样参数内容、ring 初值、history 初值、token-map 语义、buffer 大小和成功路径 VRAM 统计不变；
+  `mtp.cpp` 通过 C++20 主机侧严格语法检查（仅跳过仓库既有未使用/缩进告警），`mtp_logits_width_test` 通过
+  116 checks。
+- 判决：采纳。coupled sampler 不再发布半初始化状态。
+- 生产状态与回滚：只影响 opt-in `STRATA_SPEC_COUPLED` / `STRATA_SPEC_PROB` 的失败路径；成功路径和 draft 数值不变，
+  单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 RTX 2080 Ti，未真实注入每类 allocation、alias、memset、upload 和 sync 失败；
+  结论来自严格静态审查与主机侧编译检查。
+- 下一步与理由：核对 mapped-pinned 分配与释放是否全部经过同一 pin 预算记账，避免分配计入而释放漏记。
+
 ## I-20261027-106 · MTP load 失败整体回滚
 
 - 目标 / 指标：`MtpDrafter::load()` 无论在哪一步失败，返回前都必须释放本次取得的 device、host、mapped、stream、

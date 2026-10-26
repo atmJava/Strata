@@ -644,6 +644,7 @@ uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const 
 }
 
 bool MtpDrafter::setup_coupled(std::string& err) {
+    coupled_ok_ = false;
     const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
     const size_t scratch = strata::kernels::coupled_draft_scratch_bytes((int) nv);
     if (scratch == 0) {
@@ -652,49 +653,84 @@ bool MtpDrafter::setup_coupled(std::string& err) {
         return true;
     }
     const size_t ring = (size_t) (kCoupledHistCap + max_t_) * sizeof(int32_t);
-    if (cudaMalloc((void**) &cparams_, sizeof(strata::kernels::SamplerParams)) != cudaSuccess ||
-        cudaMalloc((void**) &cring_, ring) != cudaSuccess || cudaMalloc(&cscratch_, scratch) != cudaSuccess ||
-        !mapped(sizeof(strata::kernels::SamplerParams), (void**) &h_cparams_, (void**) &m_cparams_) ||
-        !mapped((size_t) kCoupledHistCap * sizeof(int32_t), (void**) &h_chist_, (void**) &m_chist_)) {
+    strata::kernels::SamplerParams* params = nullptr;
+    int32_t* ring_dev = nullptr;
+    void* scratch_dev = nullptr;
+    void* host_params = nullptr;
+    void* dev_params = nullptr;
+    void* host_hist = nullptr;
+    void* dev_hist = nullptr;
+    void* host_q = nullptr;
+    void* dev_q = nullptr;
+    int32_t* inv_dev = nullptr;
+    auto discard = [&] {
+        if (params) cudaFree(params);
+        if (ring_dev) cudaFree(ring_dev);
+        if (scratch_dev) cudaFree(scratch_dev);
+        if (host_params) cudaFreeHost(host_params);
+        if (host_hist) cudaFreeHost(host_hist);
+        if (host_q) cudaFreeHost(host_q);
+        if (inv_dev) cudaFree(inv_dev);
+    };
+    if (cudaMalloc((void**) &params, sizeof(strata::kernels::SamplerParams)) != cudaSuccess ||
+        cudaMalloc((void**) &ring_dev, ring) != cudaSuccess ||
+        cudaMalloc(&scratch_dev, scratch) != cudaSuccess ||
+        !mapped(sizeof(strata::kernels::SamplerParams), &host_params, &dev_params) ||
+        !mapped((size_t) kCoupledHistCap * sizeof(int32_t), &host_hist, &dev_hist)) {
+        discard();
         err = "mtp: the coupled draft sampler's buffers do not fit";
         return false;
     }
     if (spec_prob_env() &&
-        !mapped((size_t) max_t_ * (size_t) kSpecQStride * sizeof(int32_t), (void**) &h_q_, (void**) &m_q_)) {
+        !mapped((size_t) max_t_ * (size_t) kSpecQStride * sizeof(int32_t), &host_q, &dev_q)) {
+        discard();
         err = "mtp: the draft distributions' buffer does not fit";
         return false;
     }
-    if (cudaMemset(cring_, 0xff, ring) != cudaSuccess) {   // -1: no token
+    if (cudaMemset(ring_dev, 0xff, ring) != cudaSuccess) {   // -1: no token
+        discard();
         err = "mtp: could not initialize the coupled draft ring";
         return false;
     }
-    std::fill(h_chist_, h_chist_ + kCoupledHistCap, -1);
-    vram_ += sizeof(strata::kernels::SamplerParams) + ring + scratch;
+    std::fill((int32_t*) host_hist, (int32_t*) host_hist + kCoupledHistCap, -1);
     if (dhead_ != nullptr) {   // token id -> subset index (-1: not in the draft head), for the penalties
         std::vector<int32_t> sub((size_t) n_dvocab_), inv((size_t) n_vocab_, -1);
         if (cudaMemcpy(sub.data(), dvocab_, sub.size() * sizeof(int32_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
+            discard();
             err = "mtp: could not read the coupled draft vocabulary";
             return false;
         }
         for (size_t i = 0; i < sub.size(); ++i)
             if (sub[i] >= 0 && sub[i] < n_vocab_ && inv[(size_t) sub[i]] < 0) inv[(size_t) sub[i]] = (int32_t) i;
-        if (cudaMalloc((void**) &dinv_, inv.size() * sizeof(int32_t)) != cudaSuccess) {
+        if (cudaMalloc((void**) &inv_dev, inv.size() * sizeof(int32_t)) != cudaSuccess) {
+            discard();
             err = "mtp: the coupled draft sampler's token map does not fit";
             return false;
         }
-        if (cudaMemcpy(dinv_, inv.data(), inv.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
-            cudaFree(dinv_);
-            dinv_ = nullptr;
+        if (cudaMemcpy(inv_dev, inv.data(), inv.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
+            discard();
             err = "mtp: the coupled draft token map upload failed";
             return false;
         }
-        vram_ += inv.size() * sizeof(int32_t);
     }
     const cudaError_t sync = cudaDeviceSynchronize();
     if (sync != cudaSuccess) {
+        discard();
         err = std::string("mtp: coupled setup: ") + cudaGetErrorString(sync);
         return false;
     }
+    cparams_ = params;
+    cring_ = ring_dev;
+    cscratch_ = scratch_dev;
+    h_cparams_ = (strata::kernels::SamplerParams*) host_params;
+    m_cparams_ = (strata::kernels::SamplerParams*) dev_params;
+    h_chist_ = (int32_t*) host_hist;
+    m_chist_ = (int32_t*) dev_hist;
+    h_q_ = (int32_t*) host_q;
+    m_q_ = (int32_t*) dev_q;
+    dinv_ = inv_dev;
+    vram_ += sizeof(strata::kernels::SamplerParams) + ring + scratch;
+    if (dinv_ != nullptr) vram_ += (uint64_t) n_vocab_ * sizeof(int32_t);
     coupled_ok_ = true;
     if (spec_prob_env())
         std::fprintf(stderr, "strata mtp: probabilistic draft acceptance on (STRATA_SPEC_PROB): sampled requests draft by "
