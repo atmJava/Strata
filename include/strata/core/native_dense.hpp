@@ -51,7 +51,7 @@ public:
     /// last GEMM that reads the slot), 1 = the layer / session read (its own pair: it is captured into graphs, where an
     /// event wait on an outside event is illegal). The scratches are allocated by `load`, never on first use.
     static const uint16_t* hc_bf16_view(const WeightRef& w, void* stream, int slot, int cls);
-    static void hc_bf16_release(void* stream, int slot, int cls);
+    static void hc_bf16_release(const WeightRef& w, void* stream, int slot, int cls);
     uint64_t weight_bytes() const { return bytes_; }
     /// What the device lost to `load`: each matrix rounded up to the granule `cudaMalloc` backs it with.
     uint64_t allocated_bytes() const { return allocated_; }

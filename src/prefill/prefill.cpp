@@ -3039,8 +3039,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 }
 
                 if (wd_q8.data) {   // the HC GEMMs that read the scratch are enqueued: the next user waits for them
-                    core::NativeDense::hc_bf16_release(m.cs, 0, 0);
-                    core::NativeDense::hc_bf16_release(m.cs, 1, 0);
+                    core::NativeDense::hc_bf16_release(*wd, m.cs, 0, 0);
+                    core::NativeDense::hc_bf16_release(*wu, m.cs, 1, 0);
                 }
                 if (half == 0 && !core::is_qsa_layer(g, l)) {
                     // ======================= GDN =======================

@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-88 · NativeDense scratch 随引用释放并有事务式创建
+
+- 目标 / 指标：`STRATA_HC_Q8` 的四个 BF16 反量化 scratch 和两个跨 stream 排序 event 必须属于使用它们的
+  tensor 表；任何分配/event 创建失败都要回收已取得资源，最后一个引用释放时在所属设备同步、销毁和释放。
+- 假设与预期：原实现把 scratch 指针放在 `[device][class][slot]` 全局数组，并把四个 buffer 混入第一个
+  `NativeDense::weights_`。该实例析构后全局 event 和 `event_set` 仍保留；同一设备上的后续实例会等待可能已
+  失效的 event。多个实例的 event 状态也没有独立所有权。
+- 为什么选这条路线：新增 `NativeDenseScratch`，由 `WeightRef::native_dense_scratch` 共享持有。每张权重表有
+  自己的四槽 scratch；五个句柄由同一个事务式构造器创建，失败时整体回滚，析构在创建设备同步后销毁 event、
+  释放 buffer。成功路径的 Q8 反量化、stream 顺序、槽编号和等待规则不变。
+- 改动与实验：新增无 GPU link-wrap 回归，覆盖四个 buffer/两个 event 的成功所有权、prompt slot 的重复使用
+  等待、第三个 buffer 失败、第二个 event 失败和析构设备恢复。
+- 判决：采纳。scratch/event 生命周期不再由进程级数组或第一个实例的权重列表承担。
+- 生产状态与回滚：`STRATA_HC_Q8=0` 时完全不走此路径；启用时只改 scratch/event 所有权和失败清理；
+  单提交可回退。
+- 未验证：本机没有 CUDA 工具链、驱动或 RTX 2080 Ti，未在真实多 stream、多实例表和多卡场景执行。
+- 下一步与理由：严格编译和 sanitizer 验证后再处理相同形状的全局资源。
+
 ## I-20261027-87 · dense 权重加载只在完整成功后发布
 
 - 目标 / 指标：`WeightTable::load()` 在 staging 分配、文件读取、宽度转换、设备上传或最终同步任一步失败时，

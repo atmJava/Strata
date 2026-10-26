@@ -365,7 +365,8 @@ if(STRATA_ENABLE_CUDA)
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
   add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
     src/core/remote_expert_opt.cu
-    src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp src/core/dflash2.cpp
+    src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/native_dense_scratch.cpp
+    src/core/verify.cpp src/core/mtp.cpp src/core/dflash2.cpp
     src/core/conversation_copy.cpp src/core/conversation_snapshot.cpp src/core/conversation_state.cpp
     src/core/conversation_memory.cpp src/core/peer_experts.cpp
     src/core/vmm.cpp src/core/conversation_file.cpp)
@@ -398,6 +399,20 @@ if(STRATA_ENABLE_CUDA)
       target_link_libraries(weights_load_transaction_test PRIVATE strata_warnings ${_strata_gpu_runtime_target})
       add_test(NAME weights_load_transaction_test COMMAND weights_load_transaction_test)
       set_tests_properties(weights_load_transaction_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+      add_executable(native_dense_scratch_test
+        tests/platform/native_dense_scratch_test.cpp src/core/native_dense_scratch.cpp)
+      target_include_directories(native_dense_scratch_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      target_link_options(native_dense_scratch_test PRIVATE
+        -Wl,--wrap=cudaGetDevice -Wl,--wrap=cudaSetDevice
+        -Wl,--wrap=cudaMalloc -Wl,--wrap=cudaFree
+        -Wl,--wrap=cudaEventCreateWithFlags -Wl,--wrap=cudaEventDestroy
+        -Wl,--wrap=cudaEventRecord -Wl,--wrap=cudaStreamWaitEvent
+        -Wl,--wrap=cudaDeviceSynchronize -Wl,--wrap=cudaGetLastError)
+      target_link_libraries(native_dense_scratch_test PRIVATE strata_warnings)
+      add_test(NAME native_dense_scratch_test COMMAND native_dense_scratch_test)
+      set_tests_properties(native_dense_scratch_test PROPERTIES
         ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
     endif()
     add_executable(host_graph_launch_test tests/core/host_graph_launch_test.cu)

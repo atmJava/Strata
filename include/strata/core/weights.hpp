@@ -36,6 +36,8 @@
 
 namespace strata::core {
 
+class NativeDenseScratch;
+
 /// What the loader had to DO for a tensor, decided by `tools/pack_index.py` and written into the index
 /// rather than inferred here.  The four cases are distinguishable in the manifest only by combining
 /// `source_type` with `values_fp16`, and getting that combination wrong yields a plausible tensor.
@@ -100,6 +102,9 @@ struct WeightRef {
     /// STRATA_HC_Q8 (experiment): non-null when `data` holds int8 codes [ne1][ne0] of a BF16 hyper-connection
     /// projection quantized Q8_0-style (one fp32 scale per 32 contiguous values, `q8_scale[ne1][ne0 / 32]`).
     const float* q8_scale = nullptr;
+    /// The table's four-slot BF16 dequantization scratch when this tensor needs it; ownership lives as long as any
+    /// referring tensor.  null for a resident BF16 tensor.
+    std::shared_ptr<NativeDenseScratch> native_dense_scratch;
 };
 
 struct LoadReport {
