@@ -37,7 +37,8 @@ inline std::vector<std::string> gguf_split_paths(const std::string& any) {
     if (n < 1 || no < 1 || no > n) return {any};
     std::vector<std::string> out;
     for (int i = 1; i <= n; ++i) {
-        char num[8];
+        // The filenames carry five digits; size for any int so the guarded formatter cannot truncate.
+        char num[16];
         std::snprintf(num, sizeof num, "%05d", i);
         std::string p = any;
         p.replace(at - 5, 5, num);
