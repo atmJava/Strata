@@ -20,6 +20,7 @@ NativeHead::~NativeHead() {
 
 void NativeHead::unload() {
     const strata::core::OnDevice on_device(device_);
+    if (!on_device.ok) return;   // the weights and scratch belong to device_: keep them for retry
     if (weights_) strata::kernels::native_q6_k_unpack(weights_);
     if (scratch_) cudaFree(scratch_);
     if (weights_) cudaFree(weights_);
@@ -117,6 +118,7 @@ const NativeEmbed* native_embed() { return g_embed; }
 
 NativeEmbed::~NativeEmbed() {
     const strata::core::OnDevice on_device(device_);
+    if (!on_device.ok) return;   // the mapped/device allocation belongs to the embedding's device
     if (host_) strata::core::host_free_guarded(host_);
     else if (dev_) cudaFree(const_cast<void*>(dev_));   // the VRAM fallback below
 }

@@ -238,6 +238,7 @@ bool NativeDense::keep_unquantized_ple_key(const std::string& pack_dir, std::set
 
 NativeDense::~NativeDense() {
     const strata::core::OnDevice on_device(device_);
+    if (!on_device.ok) return;   // retain every allocation rather than freeing it in another device's context
     for (const void* p : packed_keys_) strata::kernels::native_q8_0_packed_unregister(p);
     if (scratch_) cudaFree(scratch_);
     for (void* p : weights_) cudaFree(p);

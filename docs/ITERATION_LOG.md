@@ -3,6 +3,17 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-134 · Native dense/head/embedding 析构遵守设备归属
+
+- 目标 / 指标：`NativeDense`、`NativeHead`、`NativeEmbed` 析构时若无法进入分配所属 device，不得释放权重、scratch
+  或 mapped embedding。
+- 假设与预期：这三类 owner 已用 `OnDevice` 选择 context，但均未读取 `ok`；多卡析构时会错误 free 并丢失原指针。
+- 改动与实验：三个析构入口在 `!on_device.ok` 时直接返回，保留成员状态；GCC 严格 `-Werror` 与 Clang 语法检查通过。
+- 判决：采纳。正常单卡析构不变，故障路径不再跨 context 释放。
+- 生产状态与回滚：单提交可回退。
+- 未验证：没有可用的 CUDA 双卡环境执行真实析构故障注入；该分支属于静态审查结论。
+- 下一步与理由：停止新增改动，完成最终主机回归和远端 SHA 复核。
+
 ## I-20261027-133 · 其他 device 所属资源只在正确 context 清理
 
 - 目标 / 指标：NativeDense scratch、ExpertCache、DeviceArena、阶段计时事件和权重共享指针的 deleter 在无法进入资源所属
