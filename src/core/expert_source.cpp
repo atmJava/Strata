@@ -85,11 +85,12 @@ uint64_t clamp_resident_budget(uint64_t requested, uint64_t physical, uint64_t c
 }
 
 bool pin_depends_on_reclaim(uint64_t free_now, uint64_t bytes, uint64_t reserve) {
-    return bytes > 0 && free_now < bytes + reserve;
+    if (bytes == 0) return false;
+    return free_now < bytes || free_now - bytes < reserve;
 }
 
 bool pin_step_fits(uint64_t available, uint64_t step, uint64_t reserve) {
-    return available >= step + reserve;
+    return available >= step && available - step >= reserve;
 }
 
 uint64_t meminfo_bytes(const std::string& meminfo_text, const std::string& key) {
@@ -111,7 +112,8 @@ uint64_t meminfo_bytes(const std::string& meminfo_text, const std::string& key) 
 uint64_t numa_pin_free(uint64_t global_free, const std::vector<uint64_t>& node_free) {
     if (node_free.size() < 2) return global_free;
     const uint64_t smallest = *std::min_element(node_free.begin(), node_free.end());
-    return std::min<uint64_t>(global_free, smallest * (uint64_t) node_free.size());
+    const uint64_t nodes = (uint64_t) node_free.size();
+    return smallest > global_free / nodes ? global_free : std::min(global_free, smallest * nodes);
 }
 
 std::array<std::pair<uint64_t, uint64_t>, 3> numa_slice_ranges(uint64_t slot_off, const uint64_t role_bytes[3],
@@ -245,8 +247,13 @@ int64_t append_stage_lend_regions(int64_t n_layers, int64_t n_expert, const std:
                                   std::vector<uint64_t>& offsets, uint64_t& bytes, uint64_t cap_bytes,
                                   const std::vector<std::vector<std::pair<int32_t, int32_t>>>& regions,
                                   std::string& err) {
-    const size_t blobs = (size_t) (n_layers * n_expert);
-    if (n_layers <= 0 || n_expert <= 0 || layer_blob_bytes.size() != (size_t) n_layers || offsets.size() != blobs) {
+    if (n_layers <= 0 || n_expert <= 0 || (uint64_t) n_layers > std::numeric_limits<size_t>::max() / (uint64_t) n_expert ||
+        layer_blob_bytes.size() != (size_t) n_layers) {
+        err = "append_stage_lend_regions: the plan does not match the geometry";
+        return -1;
+    }
+    const size_t blobs = (size_t) n_layers * (size_t) n_expert;
+    if (offsets.size() != blobs) {
         err = "append_stage_lend_regions: the plan does not match the geometry";
         return -1;
     }
@@ -272,7 +279,7 @@ int64_t append_stage_lend_regions(int64_t n_layers, int64_t n_expert, const std:
             if (offsets[index] != kNoCacheComplement) continue;   // already in the copy: the complement, or a
                                                                   // CUDA0 lend slot the region is asked to skip
             const uint64_t b = layer_blob_bytes[(size_t) pair.first];
-            if (b > cap_bytes - bytes) break;                     // this stage's rest keeps the file fallback
+            if (bytes >= cap_bytes || b > cap_bytes - bytes) break;   // this stage's rest keeps the file fallback
             offsets[index] = bytes;
             bytes += b;
             ++kept;

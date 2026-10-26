@@ -336,6 +336,14 @@ void test_split_lend_regions() {
     require(append_stage_lend_regions(2, 3, blobs, offsets, bytes, 100, {{{0, 2}, {2, 0}}}, err) == -1 &&
                 !err.empty() && bytes == 5 && offsets[2] == kNoCacheComplement,
             "an out-of-range lend-region pair was accepted, or a rejected walk touched the plan");
+    require(append_stage_lend_regions(std::numeric_limits<int64_t>::max(), 3, {}, offsets, bytes, 100, {}, err) == -1 &&
+                !err.empty(),
+            "an overflowing lend-region geometry was accepted");
+    offsets = {kNoCacheComplement, 0, kNoCacheComplement, kNoCacheComplement, kNoCacheComplement, kNoCacheComplement};
+    bytes = 11;
+    require(append_stage_lend_regions(2, 3, blobs, offsets, bytes, 10, regions, err) == 0 && bytes == 11 &&
+                offsets[2] == kNoCacheComplement,
+            "a plan already past its cap appended experts");
 }
 
 void test_resident_exchange() {
@@ -380,6 +388,9 @@ void test_pin_pacing() {
     require(!pin_depends_on_reclaim(0, 0, 4 * GiB), "no complement, nothing to pin");
     require(pin_step_fits(6 * GiB, 1 * GiB, 4 * GiB) && !pin_step_fits(4 * GiB, 1 * GiB, 4 * GiB),
             "a step must leave the reserve");
+    constexpr uint64_t max = std::numeric_limits<uint64_t>::max();
+    require(pin_depends_on_reclaim(1, max, max), "an overflowing reserve made an oversized pin look safe");
+    require(!pin_step_fits(max, 1, max), "an overflowing reserve made a pin step look safe");
     const std::string info =
         "MemTotal:       65011484 kB\nMemFree:         1284096 kB\nMemAvailable:   33463296 kB\nCached:         54507520 kB\n";
     require(meminfo_bytes(info, "MemFree") == 1284096ull * 1024, "MemFree was misread");
@@ -391,6 +402,7 @@ void test_pin_pacing() {
     require(numa_pin_free(90 * GiB, {88 * GiB, 2 * GiB}) == 4 * GiB, "an emptied node did not lower the figure");
     require(numa_pin_free(40 * GiB, {20 * GiB, 20 * GiB}) == 40 * GiB, "balanced nodes changed the figure");
     require(numa_pin_free(10 * GiB, {50 * GiB, 50 * GiB}) == 10 * GiB, "the total must still bound it");
+    require(numa_pin_free(max, {max, max}) == max, "the per-node estimate overflowed");
     require(pin_depends_on_reclaim(numa_pin_free(90 * GiB, {88 * GiB, 2 * GiB}), 26 * GiB, 4 * GiB),
             "an unbalanced two-node host was not paced");
     require(page_cache_hint(info).find("drop_caches") != std::string::npos &&

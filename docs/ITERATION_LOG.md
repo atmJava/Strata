@@ -3,6 +3,28 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-27 · 驻留预算、NUMA 与 stage lend 计划的溢出边界
+
+- 目标 / 指标：pin 判断不得因 `bytes + reserve` / `step + reserve` 溢出而错误放行；NUMA 估算不得因节点数乘法
+  溢出；stage lend 计划不得在负几何、乘法溢出或 `bytes > cap` 时越界或下溢。
+- 假设与预期：旧 `pin_depends_on_reclaim()`、`pin_step_fits()` 直接相加，极端值会绕回小数；
+  `numa_pin_free()` 的 `smallest * node_count` 也会溢出。`append_stage_lend_regions()` 在参数校验前计算
+  `n_layers * n_expert`，且用 `cap_bytes - bytes` 比较，调用方状态已超过 cap 时会产生无符号下溢。
+- 为什么选这条路线：这些都是纯主机算术，可在现有合成测试中精确覆盖；正常 2080 Ti 几何和真实内存数值不受影响，
+  修复可防止损坏的 profile/容器读数或错误调用把安全检查变成放行。
+- 改动与实验：pin 判断改用先比较 bytes/step、再比较剩余量的无溢出形式；NUMA 乘法在超过全局可用量时直接由全局量
+  封顶；lend 计划先验证正几何和 `size_t` 乘法，再分配索引，并在 `bytes >= cap` 时保留整段文件回退。新增溢出 reserve、
+  NUMA 乘法、lend 几何和已超 cap 四种断言。
+- 结果：主机侧 `file_expert_source_test`（合成 pack、CPU 库和同步 CUDA shim）`PASS`；`-Wall -Wextra -Werror` 和
+  `git diff --check` 通过；同一测试的 ASan/UBSan（泄漏检测开启、遇错停止）也通过。完整
+  `serve/test_server.py serve/test_images.py serve/test_lifeline.py serve/test_mcp.py` 为
+  `403 passed / 530 subtests`；`tests/terminal` 为 `199 passed / 46 skipped / 93 subtests`（跳过项均为平台/环境条件）。
+- 判决：采纳。所有安全预算判断对 `uint64_t` 极值保持 fail-closed（无法证明安全时不进入预取/驻留路径）。
+- 生产状态与回滚：未改生产；常规内存值、NUMA 节点选择和合法 lend 偏移逐一由既有测试保持，单提交可回退。
+  未验证真实 NUMA 双路机、RTX 2080 Ti 或伪造 cgroup 的内核竞态。
+- 学到什么：安全余量检查不能先做可能溢出的加法；“剩余空间”必须先确认当前用量没有超过上限。
+- 下一步与理由：补充真实服务端全量回归结果，检查 RAM promotion/HTTP 下载的资源收尾，再集中重试远端的全部本地提交。
+
 ## I-20261027-26 · 后台 expert 读线程启动失败回退到调用线程
 
 - 目标 / 指标：`prefetch_begin()` 已 claim 的 stage buffer 在任一后台读线程创建失败时仍必须被发布；不能抛穿调用方、
