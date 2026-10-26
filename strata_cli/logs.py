@@ -1,4 +1,4 @@
-"""Read-only, bounded request activity for the source and portable CLI."""
+"""Read-only, bounded request activity for the server CLI."""
 
 from __future__ import annotations
 

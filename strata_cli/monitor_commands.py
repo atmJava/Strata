@@ -1,4 +1,4 @@
-"""Shared status/monitor grammar for the source launcher and portable client.
+"""Read-only status, monitor, logs and connection commands for the server CLI.
 
 This module and the one-shot status path use only Python's standard library.
 Textual is imported only when an interactive monitor actually starts.
@@ -34,20 +34,15 @@ def add_status(sp: argparse._SubParsersAction) -> None:
 
 
 def running_launch() -> dict | None:
-    """The server a `strata launch` has running (address and its key), when no address was given: so `strata monitor` needs no --url.
-    Nothing is read when a connection, STRATA_URL or STRATA_CONNECTION names the server, and a thin monitor bundle has no launch code."""
-    if os.environ.get("STRATA_URL") or os.environ.get("STRATA_CONNECTION"):
-        return None
-    try:
-        from strata_cli.launch.cmd import launch_info
-        info = launch_info()
-    except Exception:                                    # noqa: BLE001 - no launch code, no profiles: use the default address
-        return None
-    return info if info and info.get("running") and info.get("url") else None
+    """Compatibility hook: this server build has no launcher-owned disposable instance.
+
+    Telemetry defaults to the loopback address, or to ``STRATA_URL`` / a saved connection.
+    """
+    return None
 
 
 def add_monitor(sp: argparse._SubParsersAction) -> None:
-    monitor = sp.add_parser("monitor", help="read-only terminal monitor: seven views (Overview ... Logs, Connect), the same as the one strata launch opens")
+    monitor = sp.add_parser("monitor", help="read-only terminal monitor for a Strata server")
     _connection(monitor)
     monitor.add_argument("--once", action="store_true", help="print one snapshot without starting the TUI")
     monitor.add_argument("--output", choices=("human", "json"), default="human")
@@ -114,11 +109,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _file_words(exc: BaseException) -> str:
-    try:
-        from strata_control import longpath
-    except ImportError:                                 # the standalone monitor bundle does not carry strata_control
-        return f"local file operation failed ({type(exc).__name__})"
-    return longpath.file_words(exc)
+    return f"local file operation failed ({type(exc).__name__})"
 
 
 def _error(message: str, code: int, machine: bool) -> int:
@@ -212,21 +203,11 @@ def run(a: argparse.Namespace) -> int:
                 print(render_view(snapshot, "overview", width=80, height=24))
             return 0
         try:
-            from strata_cli.launch.monitor_ext import LaunchMonitor
+            from strata_cli.monitor import MonitorApp
         except ImportError:
-            # the portable monitor bundle carries the read-only client only (no launch/Connect view): run the plain Monitor
-            try:
-                from strata_cli.monitor import MonitorApp
-            except ImportError:
-                return _error("monitor component missing; install the optional terminal UI dependency", 5, machine)
-            MonitorApp(endpoint, None, interval=a.interval, requests=a.requests,
-                       theme=a.theme, color=a.color, glyphs=a.glyphs).run()
-            return 0
-        # the one monitor, with the same seven views as the one `strata launch` opens (Connect is key 7 and works against this --url
-        # server); q just detaches here: nothing was started by this command, so there is nothing to stop
-        LaunchMonitor(endpoint, None, info={"url": endpoint.base_url, "urls": [endpoint.base_url], "key": endpoint.credential or "", "model": "",
-                                            "profile": None, "name": None}, ask_quit=False, interval=a.interval, requests=a.requests,
-                      theme=a.theme, color=a.color, glyphs=a.glyphs).run()
+            return _error("monitor component missing; install the optional terminal UI dependency", 5, machine)
+        MonitorApp(endpoint, None, interval=a.interval, requests=a.requests,
+                   theme=a.theme, color=a.color, glyphs=a.glyphs).run()
         return 0
     except ClientError as e:
         return _error(str(e), e.exit_code, machine)

@@ -1,40 +1,24 @@
 """Owner-local monitor connections; store references, never credential values.
 
-This module is standard-library only so the portable monitor bundle and source
-CLI resolve the same saved connection without importing server or installer code.
+This module is standard-library only so saved read-only endpoints stay separate
+from inference and server launch state.
 """
 
 from __future__ import annotations
 
-import os
-try:
-    from strata_control.private_files import private_mkdir as _private_mkdir
-except ImportError:                                     # a thin bundle (monitor only) ships without strata_control
-    def _private_mkdir(path, *, parents=False, exist_ok=True):
-        path.mkdir(mode=0o700, parents=parents, exist_ok=exist_ok)
-        return path
-try:
-    from strata_control import posix_owner
-except ImportError:                                     # the same thin bundle: the old plain check
-    import stat as _stat
-
-    class posix_owner:                                  # noqa: N801
-        owner_only_wrong = staticmethod(lambda path, details: os.name == "posix" and (details.st_uid != os.getuid() or _stat.S_IMODE(details.st_mode) & 0o077))
-        owner_only_text = staticmethod(lambda text, path: text)
-try:
-    from strata_control import atomic as _atomic_mod
-except ImportError:                                     # the same thin bundle: a plain replace
-    class _atomic_mod:                                  # noqa: N801
-        replace = staticmethod(os.replace)
 import hashlib
 import json
 import os
 import re
 import stat
 import tempfile
+import fcntl
 from contextlib import contextmanager
 from pathlib import Path
 
+from strata_control import atomic as _atomic_mod
+from strata_control import posix_owner
+from strata_control.private_files import private_mkdir
 from strata_cli.client import server_url, url_prefix
 
 
@@ -75,17 +59,13 @@ def connection_dir(*, create: bool = False) -> Path:
         directory = Path(explicit).expanduser()
         if not directory.is_absolute():
             raise ConnectionError("STRATA_CONNECTION_DIR must be absolute")
-    elif os.name == "nt":
-        base = os.environ.get("APPDATA")
-        directory = (Path(base) if base else Path.home() / "AppData" / "Roaming") / "Strata" / "connections"
     else:
         directory = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "strata" / "connections"
     if create:
-        _private_mkdir(directory, parents=True, exist_ok=True)
+        private_mkdir(directory, parents=True, exist_ok=True)
     if directory.exists() or directory.is_symlink():
         details = directory.lstat()
-        if not stat.S_ISDIR(details.st_mode) or (os.name == "posix" and
-                (posix_owner.owner_only_wrong(directory, details))):
+        if not stat.S_ISDIR(details.st_mode) or posix_owner.owner_only_wrong(directory, details):
             raise ConnectionError(posix_owner.owner_only_text("connection directory must be owner-only", directory), 5)
     return directory
 
@@ -130,7 +110,7 @@ def load(name: str) -> tuple[dict, str]:
     try:
         details = path.lstat()
         if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_BYTES or \
-                (os.name == "posix" and (posix_owner.owner_only_wrong(path, details))):
+                posix_owner.owner_only_wrong(path, details):
             raise ConnectionError(posix_owner.owner_only_text("connection file must be a private regular file under 4 KiB", path), 5)
         data = path.read_bytes()
         value = json.loads(data.decode("utf-8"))
@@ -172,16 +152,15 @@ def _replace(path: Path, data: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         _atomic_mod.replace(name, path)
-        if os.name == "posix":
+        try:
+            parent = os.open(path.parent, os.O_RDONLY)
             try:
-                parent = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(parent)
-                finally:
-                    os.close(parent)
-            except OSError:
-                # The replacement succeeded; do not report a failed save afterward.
-                pass
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        except OSError:
+            # The replacement succeeded; do not report a failed save afterward.
+            pass
     finally:
         if os.path.exists(name):
             os.unlink(name)
@@ -193,29 +172,13 @@ def _lock(name: str):
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(descriptor, "r+b") as stream:
         details = os.fstat(stream.fileno())
-        if not stat.S_ISREG(details.st_mode) or (os.name == "posix" and
-                (posix_owner.owner_only_wrong(path, details))):
+        if not stat.S_ISREG(details.st_mode) or posix_owner.owner_only_wrong(path, details):
             raise ConnectionError(posix_owner.owner_only_text("connection lock must be owner-only", path), 5)
-        if os.name == "nt":
-            import msvcrt
-            stream.seek(0)
-            if not stream.read(1):
-                stream.write(b"0")
-                stream.flush()
-            stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def create(name: str, url: str, *, prefix: str = "",

@@ -13,7 +13,7 @@ from pathlib import Path
 
 def enabled(env=None) -> bool:
     env = os.environ if env is None else env
-    return os.name != "nt" and env.get("STRATA_DROP_CACHE_ON_EXIT", "").strip().lower() in ("1", "true", "yes", "on")
+    return env.get("STRATA_DROP_CACHE_ON_EXIT", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def model_files(paths) -> list[str]:

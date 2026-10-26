@@ -20,11 +20,7 @@
 namespace cpu = strata::kernels::cpu;
 
 static void put_env(const char* k, const char* v) {
-#if defined(_WIN32)
-    _putenv_s(k, v);
-#else
     setenv(k, v, 1);
-#endif
 }
 // a synthetic Strata-form (s2) expert: random codes, fp16 scales ~0.004-0.016 (as expert_multi_test's)
 static void make_s2_blob(uint8_t* b, std::mt19937& rng) {
@@ -37,11 +33,7 @@ static void make_s2_blob(uint8_t* b, std::mt19937& rng) {
 static bool same_h(const float* a, const float* b) { return std::memcmp(a, b, (size_t) cpu::H * sizeof(float)) == 0; }
 static void nan_h(float* a) { std::fill(a, a + cpu::H, std::numeric_limits<float>::quiet_NaN()); }
 static void unset_env(const char* k) {
-#if defined(_WIN32)
-    _putenv_s(k, "");
-#else
     unsetenv(k);
-#endif
 }
 
 int main(int argc, char** argv) {
@@ -50,8 +42,8 @@ int main(int argc, char** argv) {
     if (!cpu::cpu_avx1_ok()) { std::printf("pool_tasks_test: no AVX on this CPU, skipped\n"); return 0; }
     cpu::NativeFmt f;
     std::string err;
-    if (!cpu::native_fmt(argc == 4 ? std::atoi(argv[1]) : GGML_TYPE_Q4_0,
-                         argc == 4 ? std::atoi(argv[2]) : GGML_TYPE_Q4_0, cpu::H, cpu::FF, f, err)) {
+    if (!cpu::native_fmt(argc == 4 ? std::atoi(argv[1]) : GGML_TYPE_IQ3_XXS,
+                         argc == 4 ? std::atoi(argv[2]) : GGML_TYPE_IQ4_NL, cpu::H, cpu::FF, f, err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
@@ -65,9 +57,9 @@ int main(int argc, char** argv) {
     } else {
         std::vector<float> weights((size_t) cpu::H * cpu::FF);
         for (size_t i = 0; i < weights.size(); ++i) weights[i] = 0.02f * std::sin((float) i * 0.17f);
-        ggml_quantize_chunk(GGML_TYPE_Q4_0, weights.data(), blob.data(), 0, cpu::FF, cpu::H, nullptr);
-        ggml_quantize_chunk(GGML_TYPE_Q4_0, weights.data(), blob.data() + f.up_off, 0, cpu::FF, cpu::H, nullptr);
-        ggml_quantize_chunk(GGML_TYPE_Q4_0, weights.data(), blob.data() + f.down_off, 0, cpu::H, cpu::FF, nullptr);
+        ggml_quantize_chunk(GGML_TYPE_IQ3_XXS, weights.data(), blob.data(), 0, cpu::FF, cpu::H, nullptr);
+        ggml_quantize_chunk(GGML_TYPE_IQ3_XXS, weights.data(), blob.data() + f.up_off, 0, cpu::FF, cpu::H, nullptr);
+        ggml_quantize_chunk(GGML_TYPE_IQ4_NL, weights.data(), blob.data() + f.down_off, 0, cpu::H, cpu::FF, nullptr);
     }
     for (int tasks : {-1, cpu::ExpertPool::kMaxTasks + 1}) {
         try { cpu::ExpertPool invalid(1, false, true, cpu::PoolAffinity::All, tasks); return 1; }

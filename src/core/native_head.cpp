@@ -18,7 +18,6 @@ NativeHead::~NativeHead() {
 
 void NativeHead::unload() {
     if (weights_) strata::kernels::native_q6_k_unpack(weights_);
-    if (weights_) strata::kernels::native_q8_0_sm60_release(weights_);
     if (scratch_) cudaFree(scratch_);
     if (weights_) cudaFree(weights_);
     scratch_ = nullptr;
@@ -74,8 +73,6 @@ bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int6
         type_ = (int) tensor->type;
         if (type_ == 14 && strata::kernels::native_q6_k_packed_enabled())   // STRATA_Q6_PACKED=1
             strata::kernels::native_q6_k_pack(weights_, n_in_, n_out_, "output head");
-        if (type_ == 8)   // STRATA_Q8_SM60=1 (a no-op otherwise); the MTP draft head reads the same matrix
-            strata::kernels::native_q8_0_sm60_pack(weights_, n_in_, n_out_, "output head");
         return true;
     } catch (const std::exception& error) {
         err = std::string("native head: ") + error.what();
@@ -168,31 +165,10 @@ bool NativeEmbed::load(const std::vector<std::string>& shards, int64_t n_embd, i
         } else {
             std::memcpy(host_, gguf.tensor_data(*t), bytes_);
             void* d = nullptr;
-#if defined(STRATA_USE_HIP)
-            // #325: the Windows HIP stack can refuse the device alias of a mapped allocation (and, when it gives
-            // one, it is the host address itself - unified addressing; kernels read it correctly there, a
-            // device-to-device copy into it does not land: tests/hip/mapped_alias). The table is only gathered from,
-            // so without an alias it goes into VRAM like the unpinnable case above, instead of failing the start.
-            if (cudaHostGetDevicePointer(&d, host_, 0) != cudaSuccess || d == nullptr) {
-                cudaGetLastError();
-                d = nullptr;
-                if (cudaMalloc(&d, bytes_) != cudaSuccess ||
-                    cudaMemcpy(d, gguf.tensor_data(*t), bytes_, cudaMemcpyHostToDevice) != cudaSuccess) {
-                    if (d) cudaFree(d);
-                    cudaGetLastError();
-                    err = "native embedding: no device alias for the mapped table, and no VRAM to copy it into";
-                    return false;
-                }
-                cudaFreeHost(host_);   // the destructor frees dev_ when host_ is null
-                host_ = nullptr;
-                std::fprintf(stderr, "strata: native embedding: no device alias for the mapped table, kept in VRAM\n");
-            }
-#else
             if (cudaHostGetDevicePointer(&d, host_, 0) != cudaSuccess) {
                 err = "native embedding: no device alias for the mapped table";
                 return false;
             }
-#endif
             dev_ = d;
         }
         type_ = (int) t->type;

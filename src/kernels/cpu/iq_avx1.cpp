@@ -12,8 +12,7 @@
 // additions differs; the integer sums are exact.  iq_avx1_parity checks: rows vs ggml-cpu's dot rel <= 1e-5,
 // and a multi-token row bit for bit the same kernel's single-token row for that token (#152).
 //
-// Formats: gate/up IQ3_XXS (18), IQ3_S (21), IQ2_S (22), IQ4_XS (23); down IQ4_NL (20) and Q2_0 (42, the
-// fork's type).  IQ2_XXS/IQ2_XS have no layer in the packs that need this and stay on ggml-cpu's dot.
+// Formats: gate/up IQ3_XXS (18); down IQ4_NL (20) and Q2_0 (42).
 //
 // This file is compiled for SSE4.2 + AVX with AVX2/FMA/F16C explicitly off (CMakeLists.txt), and the engine
 // calls it only behind cpu_avx1_ok().  No static constructors at namespace scope (#391): the tables below
@@ -69,17 +68,6 @@ inline uint32_t u32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, 4); retur
 inline uint16_t u16(const uint8_t* p) { uint16_t v; std::memcpy(&v, p, 2); return v; }
 inline uint64_t u64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
 
-// The sign-vector pattern of iq_avx2.cpp's sgn_vec_at in 128-bit: 16 values from two sign bytes.
-// bits = the two bytes broadcast over the 16 lanes, sel = bit k of each byte per lane, -> 16 bytes of
-// -1 (bit set) / +1.  ggml's bit_selector pattern, same bits.
-inline __m128i sgn16(uint32_t w, int byte_pair) {   // byte_pair 0: bytes 0-1 (values 0-15), 1: bytes 2-3
-    const __m128i bits = _mm_shuffle_epi8(_mm_set1_epi32((int) w),
-                                          byte_pair ? _mm_setr_epi8(2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3)
-                                                    : _mm_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1));
-    const __m128i sel = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char) 0x80, 1, 2, 4, 8, 16, 32, 64, (char) 0x80);
-    return _mm_or_si128(_mm_cmpeq_epi8(_mm_and_si128(bits, sel), sel), _mm_set1_epi8(1));
-}
-
 // keven_signs_q2xs as a constexpr table (iq_avx2.cpp's EvenSigns; byte k = 0xFF when bit k of
 // ksigns_iq2xs[i] is set, 0x01 otherwise).  constexpr, not a runtime constructor (#391).
 struct EvenSigns {
@@ -98,33 +86,6 @@ struct EvenSigns {
 static constexpr EvenSigns even_signs{};
 static_assert(even_signs.v[0] == 0x0101010101010101ull && even_signs.v[1] == 0xFF010101010101FFull,
               "keven_signs_q2xs: byte k = 0xFF when bit k of ksigns_iq2xs[i] is set");
-
-// The high index bits of a 32-value half spread one per byte (iq_avx2.cpp's HiSpread): punpcklbw puts them
-// next to the low index bytes, so every grid index is a 16-bit load.  IQ3_S: byte k = bit k (the 9th bit of
-// index k).  IQ2_S: byte k = bits 2k,2k+1 (bits 8-9 of index k), k < 4.
-struct HiSpread {
-    uint64_t iq3s[256];
-    uint64_t iq2s[256];
-    constexpr HiSpread() : iq3s{}, iq2s{} {
-        for (int h = 0; h < 256; ++h) {
-            uint64_t r3 = 0, r2 = 0;
-            for (int k = 0; k < 8; ++k) r3 |= (uint64_t) ((h >> k) & 1) << (8 * k);
-            for (int k = 0; k < 4; ++k) r2 |= (uint64_t) ((h >> (2 * k)) & 3) << (8 * k);
-            iq3s[h] = r3;
-            iq2s[h] = r2;
-        }
-    }
-};
-static constexpr HiSpread hi_spread{};
-static_assert(hi_spread.iq3s[0x81] == 0x0100000000000001ull && hi_spread.iq2s[0xE4] == 0x0000000003020100ull,
-              "hi_spread: one high-bit group per index byte");
-
-// The low index bytes interleaved with the spread high bits: eight 16-bit grid indices in one register.
-// (iq_avx2.cpp's grid_indices stores them to memory; on Ivy Bridge that store -> narrow-load round trip
-// costs a forwarding stall per index, so the decoders below read the lanes with _mm_extract_epi16 instead.)
-inline __m128i grid_idx(const uint8_t* q, uint64_t hi) {
-    return _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*) q), _mm_cvtsi64_si128((long long) hi));
-}
 
 inline float hsum4(__m128 v) {
     __m128 s = _mm_add_ps(v, _mm_movehl_ps(v, v));
@@ -165,69 +126,6 @@ template <> struct Fmt128<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x
         s0 = _mm_set_epi64x((long long) even_signs.v[(w >> 7) & 127], (long long) even_signs.v[w & 127]);
         s1 = _mm_set_epi64x((long long) even_signs.v[(w >> 21) & 127], (long long) even_signs.v[(w >> 14) & 127]);
         c0 = c1 = _mm_set1_epi16((short) (2 * (int) (w >> 28) + 1));
-    }
-};
-
-template <> struct Fmt128<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4]
-    static constexpr int bytes = 110;
-    static constexpr float K = 1.0f;
-    static inline void decode(const uint8_t* b, int j, int half,
-                              __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1, __m128i& c0, __m128i& c1) {
-        const uint8_t* q = b + 2 + 16 * j + 8 * half;
-        const __m128i idx = grid_idx(q, hi_spread.iq3s[b[66 + 2 * j + half]]);
-#define G3(k) (int) iq3s_grid[_mm_extract_epi16(idx, k)]
-        g0 = _mm_set_epi32(G3(3), G3(2), G3(1), G3(0));
-        g1 = _mm_set_epi32(G3(7), G3(6), G3(5), G3(4));
-#undef G3
-        const uint32_t sg = u32(b + 74 + 8 * j + 4 * half);
-        s0 = sgn16(sg, 0);
-        s1 = sgn16(sg, 1);
-        const uint8_t s = b[106 + j];
-        c0 = c1 = _mm_set1_epi16((short) (2 * (int) (half ? s >> 4 : s & 15) + 1));
-    }
-};
-
-template <> struct Fmt128<22> {   // IQ2_S: d, qs[64] (32 grid bytes, 32 sign bytes), qh[8], scales[8]
-    static constexpr int bytes = 82;
-    static constexpr float K = 0.125f;
-    static inline void decode(const uint8_t* b, int j, int half,
-                              __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1, __m128i& c0, __m128i& c1) {
-        // only the first 4 index bytes are this half's (the load's rest stays inside the block)
-        const __m128i idx = grid_idx(b + 2 + 8 * j + 4 * half, hi_spread.iq2s[b[66 + 2 * j + half]]);
-        g0 = _mm_set_epi64x((long long) iq2s_grid[_mm_extract_epi16(idx, 1)],
-                            (long long) iq2s_grid[_mm_extract_epi16(idx, 0)]);
-        g1 = _mm_set_epi64x((long long) iq2s_grid[_mm_extract_epi16(idx, 3)],
-                            (long long) iq2s_grid[_mm_extract_epi16(idx, 2)]);
-        const uint32_t sg = u32(b + 2 + 32 + 8 * j + 4 * half);
-        s0 = sgn16(sg, 0);
-        s1 = sgn16(sg, 1);
-        const uint8_t sb = b[74 + 2 * j + half];
-        c0 = _mm_set1_epi16((short) (2 * (sb & 15) + 1));
-        c1 = _mm_set1_epi16((short) (2 * (sb >> 4) + 1));
-    }
-};
-
-template <> struct Fmt128<23> {   // IQ4_XS: d, scales_h, scales_l[4], qs[128] - 136 B, 8 signed sub-scales
-    // ggml's ggml_vec_dot_iq4_xs_q8_K: the same 16-value codebook as IQ4_NL, one 6-bit scale per 32-value
-    // sub-block read as two nibbles of scales_l plus two bits of scales_h, used SIGNED as (ls - 32): the
-    // scale folds into the int16 operand of madd_epi16.  The codebook sign rides on sign_epi8, |w| is the
-    // unsigned maddubs operand (a pair is at most 2 * 127 * 128, no saturation).
-    static constexpr int bytes = 136;
-    static constexpr float K = 1.0f;
-    static inline void decode(const uint8_t* b, int j, int half,
-                              __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1, __m128i& c0, __m128i& c1) {
-        const int H = 2 * j + half;
-        const __m128i values = _mm_loadu_si128((const __m128i*) kvalues_iq4nl);
-        const __m128i bits = _mm_loadu_si128((const __m128i*) (b + 8 + 16 * H));
-        const __m128i m4 = _mm_set1_epi8(0x0f);
-        const __m128i v0 = _mm_shuffle_epi8(values, _mm_and_si128(bits, m4));
-        const __m128i v1 = _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(bits, 4), m4));
-        g0 = _mm_sign_epi8(v0, v0);
-        g1 = _mm_sign_epi8(v1, v1);
-        s0 = _mm_sign_epi8(_mm_set1_epi8(1), v0);
-        s1 = _mm_sign_epi8(_mm_set1_epi8(1), v1);
-        const int ls = ((b[4 + (H >> 1)] >> (4 * (H & 1))) & 0xf) | (((u16(b + 2) >> (2 * H)) & 3) << 4);
-        c0 = c1 = _mm_set1_epi16((short) (ls - 32));
     }
 };
 
@@ -394,11 +292,7 @@ void q2_0_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* cons
 }  // namespace
 
 bool iq128_supported(int type) noexcept {
-    // IQ4_XS (23) is deliberately NOT here: its ggml generic dot auto-vectorizes well and beats the 128-bit
-    // grid kernel (0.7-1.0x in iq_avx1_parity --bench on an E5-2470 v2); the generic stays for that format's
-    // gate/up rows.  Its down rows (IQ4_NL/Q2_0) still take iq128_down_rows.  The kernel itself stays built
-    // and parity-tested.
-    return type == 18 || type == 21 || type == 22;
+    return type == 18;
 }
 
 bool iq128_down_supported(int type) noexcept {
@@ -409,9 +303,6 @@ void iq128_gu_rows(int type, const uint8_t* blob, size_t gu_row, size_t up_off, 
                    int nt, float* const* ff, int r0, int r1) {
     switch (type) {
         case 18: gu_rows_nt<18>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 21: gu_rows_nt<21>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 22: gu_rows_nt<22>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 23: gu_rows_nt<23>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         default: break;
     }
 }

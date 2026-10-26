@@ -1,6 +1,6 @@
 // prefill_mmq_scatter_test - the prompt path's MoE input quantized per token and scattered to its k rows
 // (mmq::quantize_scatter) against the per-row gather (mmq::quantize over the expert-order source rows): the same
-// q8_1 bytes, the whole buffer, for every q8_1 layout MMQ uses (D4: Q2_0 Q8_0 IQ2_XS, DS4: Q4_1, D2S6: Q2_K), on a
+// q8_1 bytes, the whole buffer, for every q8_1 layout MMQ uses (D4: Q2_0 Q8_0 IQ3_XXS, DS4: Q4_1, D2S6: Q2_K), on a
 // routing built the way Prefill builds it (10 of 512 experts a token, rows grouped by expert), with an all-zero
 // token and token counts that are not multiples of anything.  --bench: both at 2K, 8K and 32K tokens.
 #include "strata/prefill/moe_mmq.hpp"
@@ -129,13 +129,13 @@ int main(int argc, char** argv) {
     const bool do_bench = argc > 1 && std::strcmp(argv[1], "--bench") == 0;
     int fails = 0;
     try {
-        const ggml_type types[] = {GGML_TYPE_Q2_0, GGML_TYPE_Q8_0, GGML_TYPE_IQ2_XS, GGML_TYPE_Q4_1, GGML_TYPE_Q2_K};
+        const ggml_type types[] = {GGML_TYPE_Q2_0, GGML_TYPE_Q8_0, GGML_TYPE_IQ3_XXS, GGML_TYPE_Q4_1, GGML_TYPE_Q2_K};
         uint32_t seed = 11;
         for (ggml_type t : types)
             for (int64_t T : {1, 2, 7, 600, 2099}) fails += check(t, T, seed++);
         if (do_bench) {
             std::printf("--bench (median of 20):\n");
-            for (ggml_type t : {GGML_TYPE_IQ2_XS, GGML_TYPE_Q2_0}) {
+            for (ggml_type t : {GGML_TYPE_IQ3_XXS, GGML_TYPE_Q2_0}) {
                 bench(t, 2048);
                 bench(t, 8192);
                 bench(t, 32768);

@@ -26,37 +26,23 @@ struct DeviceInfo {
     uint64_t free_bytes = 0;
     int driver_version = 0, runtime_version = 0;
     int multi_processor_count = 0;
-    std::string arch;              // HIP: gcnArchName without its feature suffix ("gfx1201"); empty on CUDA
 };
 
-// HIP builds: whether GPU `ordinal` can run this binary - its architecture must be one the binary was COMPILED
-// for (STRATA_HIP_ARCHS, set by cmake/hip_backend.cmake) and it must run wave32.  "" when it can (or when there
-// is no such device: the caller's own device errors apply), else the reason in a sentence.  A binary carried to
-// another card would otherwise fail later with "invalid device function".  CUDA builds: always "".
-std::string gpu_arch_problem(int ordinal);
-
-// The GPU architectures this binary was compiled for ("gfx1100,gfx1201"); "" on CUDA builds.
-const char* compiled_gpu_archs();
-
-// How many devices the runtime enumerates, numbered as HIP_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES number them; 0 when
-// there is none (or no usable runtime).  `device_info` throws on a card this binary cannot run, so a caller that LISTS
-// every card - the ones it has no code for included (`strata-device --list-devices`) - counts them with this first.
+// How many CUDA devices the runtime enumerates; 0 when there is none (or no usable runtime).  `device_info`
+// throws on a card this binary cannot run, so a caller listing every card counts them with this first.
 int device_count();
 
-// One line per device for `strata-device --list-devices`, without the arch check that `device_info` applies:
-// "arch gfx1201, 15.9 GiB" (HIP) or "compute capability 12.0, 11.9 GiB" (CUDA), plus the device's name.  false when
-// the runtime cannot describe it.
+// One line per device for `strata-device --list-devices`, without the sm_75 check that `device_info` applies:
+// its name plus "compute capability 7.5, 22.0 GiB".  False when the runtime cannot describe it.
 bool device_summary(int ordinal, std::string& name, std::string& detail);
 
 // STRATA_PRIMARY_DEVICE (generate.cpp): the ordinal the engine's own session runs on; 0 = the runtime's first
-// visible device (upstream's behavior).  The Windows HIP runtime enumerates the cards in a fixed order no
-// HIP_VISIBLE_DEVICES list can change (it only filters), so a PC whose faster card comes second could not run
-// the model on it while the first card served as a helper.  The helper expert caches and the peer tier must
-// live on another device.  Set once, before any context exists.
+// visible device.  The helper expert caches and the peer tier must live on another device.  Set once, before
+// any context exists.
 void set_primary_device(int ordinal);
 int primary_device();
 
-// Throws when there is no CUDA device.  The engine targets sm_120 specifically and must say so rather than
+// Throws when there is no CUDA device.  The engine targets sm_75 specifically and must say so rather than
 // run slowly on something else: `CMakeLists.txt` already refuses to COMPILE for another architecture, and
 // this is the matching check at run time (a binary can be carried to a different machine).
 DeviceInfo device_info(int ordinal = 0);

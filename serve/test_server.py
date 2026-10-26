@@ -612,27 +612,9 @@ class VisionTempFiles(unittest.TestCase):
     def test_combined_file_stays_off_a_small_shm(self):
         from serve.server import combined_embeddings_path
         with tempfile.TemporaryDirectory() as d:
-            if os.name == "nt":
-                self.assertEqual(combined_embeddings_path(Path(d), 1).parent, Path(d))
-                return
-            with mock.patch("serve.server.shutil.disk_usage", return_value=SimpleNamespace(free=1 << 20)):
+            with mock.patch("serve.server.shutil.disk_usage",
+                            return_value=SimpleNamespace(free=1 << 20)):
                 self.assertEqual(combined_embeddings_path(Path(d), 1 << 20).parent, Path(d))
-
-    def test_smart_app_control_is_said_in_words(self):
-        import subprocess
-        from serve.server import popen
-        for code in (4551, 1260):
-            err = OSError(22, "blocked")
-            err.winerror = code
-            with self.subTest(winerror=code), mock.patch.object(subprocess, "Popen", side_effect=err):
-                with self.assertRaises(OSError) as cm:
-                    popen("the image encoder", ["strata-vision.exe"])
-                self.assertIn("Smart App Control", str(cm.exception))
-                self.assertIn("--vision no", str(cm.exception))
-        with mock.patch.object(subprocess, "Popen", side_effect=FileNotFoundError("gone")):
-            with self.assertRaises(FileNotFoundError):
-                popen("x", ["x"])
-
 
 class ListenProblem(unittest.TestCase):
     """#769: only an address that is taken is "already in use"."""
@@ -641,8 +623,7 @@ class ListenProblem(unittest.TestCase):
         import errno
         from serve.server import listen_problem
         self.assertIn("already in use", listen_problem("127.0.0.1", 8080, OSError(errno.EADDRINUSE, "in use")))
-        e = OSError(10013, "forbidden")
-        e.winerror = 10013
+        e = OSError(errno.EACCES, "forbidden")
         text = listen_problem("127.0.0.1", 8080, e)
         self.assertNotIn("already in use", text)
         self.assertIn("forbidden", text)
@@ -1756,13 +1737,13 @@ class GpuChoice(unittest.TestCase):
         line = card_note(both, child_env(both))
         self.assertIn("GPU 1, then GPU 0", line)
         self.assertIn("CUDA0, CUDA1", line)
-        for same in ({"gpu": 0, "args": []}, {"gpu": [0, 1], "args": [], "gpu_order": "as_given"}, {"args": []}, {"gpu": 1, "backend": "hip"}):
-            self.assertIsNone(card_note(same, child_env(same)), same)       # the numbers agree, or no card was chosen, or AMD (its own numbering)
+        for same in ({"gpu": 0, "args": []}, {"gpu": [0, 1], "args": [], "gpu_order": "as_given"}, {"args": []}):
+            self.assertIsNone(card_note(same, child_env(same)), same)       # the numbers agree, or no card was chosen
 
     def test_card_order(self):
         """#1352: with an auto layer split the faster card (SMs x clock) goes last; ties, a manual split, a
-        measurement we lack, HIP and "gpu_order": "as_given" keep the config's order."""
-        from serve.server import child_env, hip_speed_scores, ordered_gpus
+        measurement we lack and "gpu_order": "as_given" keep the config's order."""
+        from serve.server import child_env, ordered_gpus
         fast_first = {0: 8448.0 * 2610, 2: 4608.0 * 2575}      # 4070 Ti SUPER (66 SMs) vs 5060 Ti (36 SMs), shaped
         base = {"gpu": [0, 2], "args": []}
         self.assertEqual(ordered_gpus(base, fast_first), [2, 0])
@@ -1773,8 +1754,6 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(ordered_gpus({**base, "gpu_order": "as_given"}, fast_first), [0, 2])
         self.assertEqual(ordered_gpus({**base, "layer_split": "24"}, fast_first), [0, 2])
         self.assertEqual(ordered_gpus({**base, "args": ["--layer-split", "24"]}, fast_first), [0, 2])
-        self.assertEqual(ordered_gpus({**base, "backend": "hip"}, fast_first), [2, 0])           # AMD: same rule
-        self.assertEqual(ordered_gpus({**base, "backend": "hip"}, {0: 7.0, 2: 7.0}), [0, 2])      # identical cards (the R9700s)
         self.assertEqual(ordered_gpus(base, {0: 1.0}), [0, 2])                               # a card unmeasured
         self.assertEqual(ordered_gpus({"gpu": 1, "args": []}, {1: 1.0}), [1])
         self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 9.0, 2: 6.0}), [0, 2, 1])
@@ -1790,145 +1769,12 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 9.0, 2: 6.0},
                                     {0: 8192, 1: 12288, 2: 24576}), [0, 1, 2])  # tail 1 (12G) < given tail 2 (24G)
         self.assertEqual(child_env({"gpu": [0, 2], "args": [], "gpu_order": "as_given"})["CUDA_VISIBLE_DEVICES"], "0,2")
-        self.assertIsNone(hip_speed_scores([0], root="/nonexistent/kfd"))
-
-    def test_igpu_is_never_the_last_stage(self):
-        """Strix Halo (gfx1151, BIOS carve-out up to 96 GB) beside an R9700 (gfx1201, 32 GB): the #1576 memory guard used to keep the
-        iGPU LAST (head, draft layer, verify).  Built-in graphics goes first, the cards with memory of their own follow."""
-        from serve.server import ordered_gpus
-        cfg = {"gpu": [0, 1], "backend": "hip", "args": []}
-        arch = {0: "gfx1151", 1: "gfx1201"}
-        speeds = {0: 80 * 2900.0, 1: 128 * 2350.0}
-        self.assertEqual(ordered_gpus(cfg, speeds, {0: 65536, 1: 32768}, arch), [0, 1])           # carve-out 64 GB > 32 GB: still first
-        self.assertEqual(ordered_gpus({**cfg, "gpu": [1, 0]}, speeds, {0: 65536, 1: 32768}, arch), [0, 1])   # given R9700 first: iGPU moves first
-        self.assertEqual(ordered_gpus({**cfg, "gpu": [1, 0]}, speeds, None, arch), [0, 1])
-        self.assertEqual(ordered_gpus({**cfg, "gpu": [1, 0], "gpu_order": "as_given"}, speeds, None, arch), [1, 0])   # the person's order stays
-        self.assertEqual(ordered_gpus({**cfg, "gpu": [1, 0], "layer_split": "24"}, speeds, None, arch), [1, 0])
-        # two cards of their own plus the iGPU: iGPU first, then the two by speed (faster last)
-        three = {"gpu": [1, 0, 2], "backend": "hip", "args": []}
-        arch3 = {0: "gfx1151", 1: "gfx1201", 2: "gfx1100"}
-        self.assertEqual(ordered_gpus(three, {0: 10.0, 1: 30.0, 2: 20.0}, None, arch3), [0, 2, 1])
-        self.assertEqual(ordered_gpus(three, {0: 10.0, 1: 30.0, 2: 30.0}, None, arch3), [0, 1, 2])   # equal cards keep their order
-        # no integrated chip, or only integrated chips: the old rule
-        self.assertEqual(ordered_gpus({"gpu": [0, 1], "backend": "hip", "args": []}, {0: 1.0, 1: 2.0}, None, {0: "gfx1201", 1: "gfx1201"}), [0, 1])
-        self.assertEqual(ordered_gpus({"gpu": [0, 1], "backend": "hip", "args": []}, {0: 2.0, 1: 1.0}, None, {0: "gfx1151", 1: "gfx1151"}), [1, 0])
-
-    def test_igpu_split_warning(self):
-        from serve.server import igpu_split_warning
-        arch = {0: "gfx1151", 1: "gfx1201"}
-        line = igpu_split_warning({"backend": "hip", "gpu": [0, 1]}, arch)
-        self.assertIn("GPU 0 is built-in graphics", line)
-        self.assertIsNone(igpu_split_warning({"backend": "hip", "gpu": [1]}, arch))              # one card
-        self.assertIsNone(igpu_split_warning({"backend": "hip", "gpu": [0]}, arch))
-        self.assertIsNone(igpu_split_warning({"backend": "hip", "gpu": [1, 2]}, {1: "gfx1201", 2: "gfx1201"}))
-        self.assertIsNone(igpu_split_warning({"backend": "cuda", "gpu": [0, 1]}, arch))          # NVIDIA: not this rule
-        self.assertIsNone(igpu_split_warning({"backend": "hip", "gpu": [0, 1]}, {0: "gfx1151", 1: "gfx1103"}))   # only integrated chips
-
-    def test_kfd_archs_and_engine_nice(self):
-        import tempfile
-        from serve.server import engine_nice, hip_gpu_archs
-        with tempfile.TemporaryDirectory() as d:
-            for n, simd, ver in ((0, 0, 0), (1, 80, 110501), (2, 128, 120001)):
-                os.makedirs(os.path.join(d, str(n)))
-                with open(os.path.join(d, str(n), "properties"), "w") as f:
-                    f.write(f"simd_count {simd}\nmax_engine_clk_fcompute 2000\ngfx_target_version {ver}\n")
-            self.assertEqual(hip_gpu_archs(root=d), {0: "gfx1151", 1: "gfx1201"})
-        self.assertIsNone(hip_gpu_archs(root="/nonexistent/kfd"))
-        arch = {0: "gfx1151", 1: "gfx1201"}
-        self.assertEqual(engine_nice({}, arch, "linux"), 5)                            # built-in Radeon on the PC
-        self.assertEqual(engine_nice({}, {0: "gfx1201"}, "linux"), 0)                  # cards only: unchanged
-        self.assertEqual(engine_nice({}, arch, "win32"), 0)
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "0"}, arch, "linux"), 0)   # the off switch
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "9"}, {0: "gfx1201"}, "linux"), 9)
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "x"}, arch, "linux"), 0)
-
-    def test_picture_reader_not_on_the_igpu(self):
-        """The picture reader runs on the first visible card; with a split that starts on the iGPU it must use a card of its own."""
-        from serve.server import vision_env
-        arch = {0: "gfx1151", 1: "gfx1201"}
-        cfg = {"backend": "hip", "gpu": [0, 1], "vision": {"exe": "v"}}
-        env = {"HIP_VISIBLE_DEVICES": "0,1", "PATH": "x"}
-        self.assertEqual(vision_env(cfg, env, arch)["HIP_VISIBLE_DEVICES"], "1")
-        self.assertEqual(env["HIP_VISIBLE_DEVICES"], "0,1")                            # the engine's own environment is not touched
-        self.assertEqual(vision_env({**cfg, "vision": {"exe": "v", "cuda_device": 0}}, env, arch)["HIP_VISIBLE_DEVICES"], "0")   # asked: kept
-        for e in ({"HIP_VISIBLE_DEVICES": "1"}, {"HIP_VISIBLE_DEVICES": "0"}, {}):
-            self.assertIs(vision_env(cfg, e, arch), e)                                 # one card: unchanged
-        two = {"HIP_VISIBLE_DEVICES": "0,1"}
-        self.assertIs(vision_env(cfg, two, {0: "gfx1201", 1: "gfx1201"}), two)         # no integrated chip
-        self.assertIs(vision_env(cfg, two, {0: "gfx1151", 1: "gfx1103"}), two)         # nothing with memory of its own
-
-    def test_kfd_scores(self):
-        """AMD on Linux: the GPU nodes of the KFD topology, SIMDs x clock, node order = the config's index."""
-        import tempfile
-        from serve.server import hip_speed_scores
-        with tempfile.TemporaryDirectory() as d:
-            for n, simd, clk in ((0, 0, 0), (1, 128, 2350), (2, 64, 2000), (3, 128, 2350)):
-                os.makedirs(os.path.join(d, str(n)))
-                with open(os.path.join(d, str(n), "properties"), "w") as f:
-                    f.write(f"simd_count {simd}\nmax_engine_clk_fcompute {clk}\ngfx_target_version 120001\n")
-            sc = hip_speed_scores([0, 1, 2], root=d)
-            self.assertEqual(sc, {0: 128 * 2350.0, 1: 64 * 2000.0, 2: 128 * 2350.0})
-            self.assertIsNone(hip_speed_scores([0, 1, 2, 3], root=d))      # a card the topology does not have
-
-    DEVICES_MINI_PC = (
-        "device 0: AMD Radeon 760M Graphics\n  arch gfx1103, 8.0 GiB, wave32\n  cannot run: GPU 0 (AMD Radeon 760M Graphics, gfx1103) is not an "
-        "architecture this Strata engine was compiled for (gfx1200,gfx1201); compile it\n"
-        "device 1: AMD Radeon RX 9070 XT\n  arch gfx1201, 15.9 GiB, wave32\n")
-
-    def test_automatic_card_skips_what_the_engine_cannot_run(self):
-        """#3203: a mini PC's Radeon 760M is HIP's device 0 and has no code in the engine; Automatic must run on the card behind it."""
-        from serve.server import hip_auto_devices, parse_hip_devices, pick_hip_devices
-        devices = parse_hip_devices(self.DEVICES_MINI_PC)
-        self.assertEqual([(d["index"], d["arch"], d["integrated"], bool(d["cannot_run"])) for d in devices],
-                         [(0, "gfx1103", True, True), (1, "gfx1201", False, False)])
-        self.assertEqual(pick_hip_devices(devices), ([1], None))
-        # an integrated chip that does have code loses to a card of its own; the card of its own wins even when it is device 1
-        both = parse_hip_devices("device 0: Radeon 890M\n  arch gfx1150, 16.0 GiB, wave32\ndevice 1: RX 9070 XT\n  arch gfx1201, 15.9 GiB, wave32\n")
-        self.assertEqual(pick_hip_devices(both), ([1], None))
-        # an integrated chip alone stays the choice; device 0 already right: nothing is changed
-        self.assertEqual(pick_hip_devices(parse_hip_devices("device 0: Radeon 8060S\n  arch gfx1151, 64.0 GiB, wave32\n")), (None, None))
-        self.assertEqual(pick_hip_devices(parse_hip_devices("device 0: R9700\n  arch gfx1201, 31.9 GiB, wave32\ndevice 1: R9700\n  arch gfx1201, 31.9 GiB, wave32\n")), (None, None))
-        self.assertEqual(pick_hip_devices([]), (None, None))
-        # the engine's own flag for an integrated chip is honoured as well
-        flagged = parse_hip_devices("device 0: X\n  arch gfx1300, 8.0 GiB, wave32, integrated\ndevice 1: Y\n  arch gfx1201, 4.0 GiB, wave32\n")
-        self.assertEqual(pick_hip_devices(flagged), ([1], None))
-        # nothing runnable: the plain line names the cards, what the engine is built for and, for the RX 6800 XT, that no package exists
-        nothing = parse_hip_devices(
-            "device 0: AMD Radeon 760M Graphics\n  arch gfx1103, 8.0 GiB, wave32\n  cannot run: x is not an architecture this Strata engine was compiled for "
-            "(gfx1200,gfx1201); y\ndevice 1: AMD Radeon RX 6800 XT\n  arch gfx1030, 16.0 GiB, wave32\n  cannot run: z compiled for (gfx1200,gfx1201); y\n")
-        picked, problem = pick_hip_devices(nothing)
-        self.assertIsNone(picked)
-        self.assertIn("none of this computer's graphics cards has code in this Strata engine (it is built for gfx1200,gfx1201)", problem)
-        self.assertIn("AMD Radeon RX 6800 XT (gfx1030)", problem)
-        self.assertIn("760M Graphics (gfx1103, integrated)", problem)
-        # through the engine's own program, and never over a card the config or the environment names
-        with tempfile.TemporaryDirectory() as d:
-            exe = Path(d) / ("strata.exe" if os.name == "nt" else "strata")
-            probe = Path(d) / ("strata-device.exe" if os.name == "nt" else "strata-device")
-            exe.write_text("")
-            probe.write_text("")
-            cfg = {"backend": "hip", "exe": str(exe), "args": []}
-            done = SimpleNamespace(returncode=0, stdout=self.DEVICES_MINI_PC)
-            with mock.patch("serve.server.subprocess.run", return_value=done) as run, contextlib.redirect_stdout(io.StringIO()) as out:
-                self.assertEqual(hip_auto_devices(cfg, {}), [1])
-                self.assertEqual(run.call_args[0][0], [str(probe), "--list-devices"])
-                self.assertIn("automatic GPU choice: GPU 1", out.getvalue())
-            with mock.patch("serve.server.subprocess.run", return_value=done) as run:
-                self.assertIsNone(hip_auto_devices({**cfg, "gpu": 0}, {}))
-                self.assertIsNone(hip_auto_devices({**cfg, "hip_ordinal": 2}, {}))
-                self.assertIsNone(hip_auto_devices(cfg, {"HIP_VISIBLE_DEVICES": "0"}))
-                self.assertIsNone(hip_auto_devices({**cfg, "backend": "cuda"}, {}))
-                run.assert_not_called()
-            with mock.patch("serve.server.subprocess.run", return_value=SimpleNamespace(returncode=1, stdout="")):
-                self.assertIsNone(hip_auto_devices(cfg, {}))                         # a probe that fails changes nothing
-            with mock.patch("serve.server.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=(
-                            "device 0: A\n  arch gfx1030, 16.0 GiB, wave32\n  cannot run: compiled for (gfx1200)\n"))):
-                with self.assertRaises(SystemExit) as stop:
-                    hip_auto_devices(cfg, {})
-                self.assertIn("none of this computer's graphics cards", str(stop.exception))
-            exe.unlink()
-            probe.unlink()
-            self.assertIsNone(hip_auto_devices(cfg, {}))                            # no probe next to the engine: as before
+    def test_engine_nice_is_operator_selected(self):
+        from serve.server import engine_nice
+        self.assertEqual(engine_nice({}), 0)
+        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "0"}), 0)
+        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "9"}), 9)
+        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "x"}), 0)
 
     def test_vision_device(self):
         # #408: the image encoder on its own card; the engine's environment stays as it was
@@ -1941,65 +1787,6 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
         plain = {"gpu": [0, 1], "vision": {"exe": "v"}}
         self.assertIs(vision_env(plain, env), env)          # no cuda_device: the engine's environment, unchanged
-
-    def test_hip_ordinal(self):
-        """#325: on Windows the HIP ordinal setup resolved wins over the config's "gpu" (an iGPU takes HIP's 0)."""
-        from serve.server import child_env
-        self.assertEqual(child_env({"backend": "hip", "gpu": 1})["HIP_VISIBLE_DEVICES"], "1")       # Linux: KFD order
-        self.assertEqual(child_env({"backend": "hip", "hip_ordinal": 1})["HIP_VISIBLE_DEVICES"], "1")
-        self.assertEqual(child_env({"backend": "hip", "gpu": 0, "hip_ordinal": 1})["HIP_VISIBLE_DEVICES"], "1")
-        self.assertEqual(child_env({"backend": "hip", "gpu": [1, 0], "hip_ordinal": 2})["HIP_VISIBLE_DEVICES"],
-                         "1,0")                                          # a layer split keeps its list
-        self.assertEqual(child_env({"backend": "hip", "gpu": 0, "hip_ordinal": "x"})["HIP_VISIBLE_DEVICES"], "0")
-        plain = child_env({"backend": "hip"})
-        self.assertEqual(plain.get("HIP_VISIBLE_DEVICES"), os.environ.get("HIP_VISIBLE_DEVICES"))
-
-
-class HipEnvGuard(unittest.TestCase):
-    """#654: a HIP_PATH that points nowhere and an unwritable TEMP crash the AMD runtime; both are repaired, a healthy
-    environment is not touched."""
-
-    def test_stale_hip_path_dropped(self):
-        import tempfile
-        from serve.server import hip_env_guard
-        with tempfile.TemporaryDirectory() as d:
-            gone = os.path.join(d, "TheRock", "build")
-            env = {"HIP_PATH": gone, "HIP_DEVICE_LIB_PATH": gone, "LLVM_PATH": d}
-            said = hip_env_guard(env, {"log": os.path.join(d, "x.log")})
-            self.assertNotIn("HIP_PATH", env)
-            self.assertNotIn("HIP_DEVICE_LIB_PATH", env)
-            self.assertEqual(env["LLVM_PATH"], d)             # exists: left alone
-            self.assertEqual(len(said), 2)
-
-    def test_unwritable_temp_replaced(self):
-        import tempfile
-        from serve.server import hip_env_guard
-        with tempfile.TemporaryDirectory() as d:
-            nothing = os.path.join(d, "no", "such", "dir")
-            env = {"TEMP": nothing, "TMP": d}
-            hip_env_guard(env, {"log": os.path.join(d, "x.log")})
-            self.assertEqual(env["TMP"], d)                   # writable: untouched
-            self.assertTrue(os.path.samefile(env["TEMP"], os.path.join(d, "tmp")))
-            self.assertTrue(os.path.isdir(env["TEMP"]))
-
-    def test_healthy_untouched(self):
-        import tempfile
-        from serve.server import hip_env_guard
-        with tempfile.TemporaryDirectory() as d:
-            env = {"HIP_PATH": d, "TEMP": d}
-            before = dict(env)
-            self.assertEqual(hip_env_guard(env, {}), [])
-            self.assertEqual(env, before)
-
-    def test_only_for_hip(self):
-        from serve.server import child_env
-        os.environ["HIP_PATH"] = r"Z:\definitely\not\here"
-        try:
-            self.assertEqual(child_env({}).get("HIP_PATH"), os.environ["HIP_PATH"])
-            self.assertNotIn("HIP_PATH", child_env({"backend": "hip"}))
-        finally:
-            del os.environ["HIP_PATH"]
-
 
 class RecordingPrompt(MockEngine):
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
@@ -2707,31 +2494,6 @@ class DraftHeadHint(unittest.TestCase):
         self.assertEqual(start_failure_hint(str(Path(tempfile.mkdtemp()) / "missing.log"), 0), "")
 
 
-class DesktopVramNote(unittest.TestCase):
-    """#560 #516: an AMD card on a Linux desktop with little VRAM left after the start gets a recommended reserve."""
-
-    def test_when_it_applies(self):
-        from serve.server import desktop_vram_note
-        note = desktop_vram_note("hip", 624, ["--kv", "int8"], True)
-        self.assertIn("624 MiB of VRAM free", note)
-        self.assertIn("--vram-reserve-mib 3072", note)
-        self.assertIn("2.3 GB less", note)
-
-    def test_when_it_does_not(self):
-        from serve.server import desktop_vram_note
-        self.assertEqual(desktop_vram_note(None, 624, [], True), "")               # NVIDIA
-        self.assertEqual(desktop_vram_note("hip", 624, [], False), "")             # no desktop session
-        self.assertEqual(desktop_vram_note("hip", 2994, [], True), "")             # room left
-        self.assertEqual(desktop_vram_note("hip", None, [], True), "")             # lazy start: no INFO yet
-        self.assertEqual(desktop_vram_note("hip", 900, ["--vram-reserve-mib", "4000"], True), "")   # already raised
-
-    def test_desktop_detection(self):
-        from serve import server
-        with mock.patch.object(server.os, "name", "posix"), mock.patch.object(server.sys, "platform", "linux"):
-            self.assertTrue(server.linux_desktop({"WAYLAND_DISPLAY": "wayland-0"}))
-            self.assertFalse(server.linux_desktop({}))
-
-
 class StartFailureLog(unittest.TestCase):
     """#496: whatever stopped the engine before READY, the error carries this start's last log lines."""
 
@@ -2802,17 +2564,13 @@ class StartCrashReported(unittest.TestCase):
         from serve.server import engine_crashed, engine_exit_words
         self.assertEqual(engine_exit_words(None), "")
         self.assertEqual(engine_exit_words(2), "exit code 2")
-        self.assertIn("illegal instruction", engine_exit_words(0xC000001D).lower())
-        self.assertIn("DLL", engine_exit_words(0xC0000135))
-        self.assertTrue(engine_crashed(0xC000001D) and engine_crashed(0xC0000005))
         self.assertFalse(engine_crashed(0) or engine_crashed(1) or engine_crashed(2) or engine_crashed(None))
-        if os.name != "nt":
-            import signal
-            self.assertIn("signal 4 (SIGILL", engine_exit_words(-int(signal.SIGILL)))
-            for sig in (signal.SIGILL, signal.SIGSEGV, signal.SIGBUS, signal.SIGFPE, signal.SIGKILL):
-                self.assertTrue(engine_crashed(-int(sig)), sig)
-            self.assertFalse(engine_crashed(-int(signal.SIGABRT)))     # the ROCm teardown abort stays a retry
-            self.assertFalse(engine_crashed(-int(signal.SIGTERM)))
+        import signal
+        self.assertIn("signal 4 (SIGILL", engine_exit_words(-int(signal.SIGILL)))
+        for sig in (signal.SIGILL, signal.SIGSEGV, signal.SIGBUS, signal.SIGFPE, signal.SIGKILL):
+            self.assertTrue(engine_crashed(-int(sig)), sig)
+        self.assertFalse(engine_crashed(-int(signal.SIGABRT)))
+        self.assertFalse(engine_crashed(-int(signal.SIGTERM)))
 
     def test_a_crash_is_not_a_transient_start(self):
         from serve.server import transient_start_failure
@@ -2820,19 +2578,12 @@ class StartCrashReported(unittest.TestCase):
         p = Path(d) / "engine.log"
         p.write_text("[strata] 2026-10-13 17:49:15 engine started: /x/strata --serve\n", encoding="utf-8")
         self.assertTrue(transient_start_failure(str(p), 0, 3.0, 0))         # a silent plain exit: the old retry
-        self.assertTrue(transient_start_failure(str(p), 0, 3.0, -6))        # SIGABRT (ROCm teardown)
-        self.assertFalse(transient_start_failure(str(p), 0, 3.0, 1))        # the engine's own error exit
-        self.assertFalse(transient_start_failure(str(p), 0, 3.0, 0xC000001D))
-        if os.name != "nt":
-            import signal
-            for sig in (signal.SIGILL, signal.SIGSEGV, signal.SIGBUS, signal.SIGKILL):
-                self.assertFalse(transient_start_failure(str(p), 0, 3.0, -int(sig)), sig)
-        # the runtime's own words keep it a retry whatever the status
-        p.write_text("[strata] x engine started\nterminate called after throwing an instance of "
-                     "'rocr::AMD::hsa_exception'\n", encoding="utf-8")
         self.assertTrue(transient_start_failure(str(p), 0, 3.0, -6))
+        self.assertFalse(transient_start_failure(str(p), 0, 3.0, 1))        # the engine's own error exit
+        import signal
+        for sig in (signal.SIGILL, signal.SIGSEGV, signal.SIGBUS, signal.SIGKILL):
+            self.assertFalse(transient_start_failure(str(p), 0, 3.0, -int(sig)), sig)
 
-    @unittest.skipIf(os.name == "nt", "signals")
     def test_sigill_is_reported_not_retried(self):
         text, said = self.run_fake("import os, signal\nos.kill(os.getpid(), signal.SIGILL)\n")
         self.assertIn("exited before it was ready", text)
@@ -2842,23 +2593,12 @@ class StartCrashReported(unittest.TestCase):
         self.assertNotIn("starting it again", said)                        # not retried
         self.assertNotIn("GPU runtime", text + said)                       # and never called a GPU runtime start
 
-    @unittest.skipIf(os.name == "nt", "signals")
     def test_a_silent_exit_is_retried_without_claiming_the_gpu_runtime(self):
         text, said = self.run_fake("import sys\nsys.exit(0)\n", retries=2)
         self.assertEqual(said.count("starting it again"), 2)
         self.assertIn("the engine exited before it wrote anything to its log (exit code 0)", said)
         self.assertNotIn("stopped while the GPU runtime was starting", said)
         self.assertIn("the engine process ended: exit code 0", text)
-
-    @unittest.skipIf(os.name == "nt", "signals")
-    def test_the_runtimes_own_failure_is_named(self):
-        code = ("import os, sys\nsys.stderr.write(\"terminate called after throwing an instance of 'rocr::AMD::hsa_exception'"
-                "\\n\")\nsys.stderr.flush()\nos._exit(134)\n")
-        text, said = self.run_fake(code, retries=1)
-        self.assertEqual(said.count("starting it again"), 1)
-        self.assertIn("stopped while the GPU runtime was starting", said)
-        self.assertIn("hsa_exception", text)                               # the engine's own last line is in the error
-
 
 class StartNarrator(unittest.TestCase):
     """#505: the start's words say what happens to the experts - --mmap-experts loads nothing into RAM up front."""
@@ -4946,175 +4686,47 @@ class ModelAliases(unittest.TestCase):
             httpd.server_close()
 
 
-class AmdTelemetry(unittest.TestCase):
-    """#301: the AMD backend's readings from a fake amdgpu sysfs tree: KFD node -> render node, as setup numbers the
-    cards (the CPU node skipped), and free_vram_mib on HIP."""
+class NvidiaTelemetry(unittest.TestCase):
+    """NVML readings for the two-card production layout, without a GPU."""
 
-    def tree(self, d):
-        nodes = Path(d) / "class/kfd/kfd/topology/nodes"
-        for n, props in ((0, "cpu_cores_count 16\nsimd_count 0\ngfx_target_version 0\ndrm_render_minor 0\n"),
-                         (1, "simd_count 128\ngfx_target_version 120001\ndrm_render_minor 129\n"),
-                         (2, "simd_count 128\ngfx_target_version 120001\ndrm_render_minor 128\n")):
-            (nodes / str(n)).mkdir(parents=True)
-            (nodes / str(n) / "properties").write_text(props)
-        for minor, used, busy, temp, power in ((129, 2 << 30, 37, 51000, 85000000), (128, 6 << 30, 99, 64000, None)):
-            dev = Path(d) / f"class/drm/renderD{minor}/device"
-            hw = dev / "hwmon" / "hwmon4"
-            hw.mkdir(parents=True)
-            (dev / "gpu_busy_percent").write_text(f"{busy}\n")
-            (dev / "mem_info_vram_used").write_text(f"{used}\n")
-            (dev / "mem_info_vram_total").write_text(f"{32 << 30}\n")
-            (dev / "product_name").write_text("AMD Radeon AI PRO R9700\n")
-            (hw / "temp1_input").write_text(f"{temp}\n")
-            if power is not None:
-                (hw / "power1_average").write_text(f"{power}\n")
-            else:
-                (hw / "power1_input").write_text("120000000\n")
-            (hw / "power1_cap").write_text("300000000\n")
-
-    def test_pcie_link_is_the_narrowest_slowest_hop(self):
-        """#1733: the link is the slowest/narrowest hop between the root port and the card; the bottleneck is only
-        claimed when every hop could be read (pcie_path says how many were)."""
-        from serve import telemetry
-        with tempfile.TemporaryDirectory() as d:
-            hops = []
-            for i, (speed, width) in enumerate((("8.0 GT/s PCIe", "16"), ("8.0 GT/s PCIe", "8"), ("16.0 GT/s PCIe", "16"))):
-                h = Path(d) / f"hop{i}"
-                h.mkdir()
-                (h / "max_link_speed").write_text(speed + "\n")
-                (h / "max_link_width").write_text(width + "\n")
-                hops.append(str(h))
-            (Path(hops[-1]) / "current_link_speed").write_text("16.0 GT/s PCIe\n")
-            (Path(hops[-1]) / "current_link_width").write_text("16\n")
-            a = telemetry.gpu_reader(0, amd=True)
-            a.dev = hops[-1]
-            with mock.patch.object(telemetry._Amd, "_hops", lambda self: hops):
-                self.assertEqual(a.link(), {"pcie_gen": 3, "pcie_gen_max": 3, "pcie_own_gen": 4, "pcie_width": 8,
-                                            "pcie_path": "3/3"})
-            with mock.patch.object(telemetry._Amd, "_hops", lambda self: hops[:2] + [str(Path(d) / "hidden")]):
-                got = a.link()             # an unreadable hop: fall back to the card's own negotiated link
-                self.assertEqual((got["pcie_gen"], got["pcie_width"], got["pcie_path"]), (4, 16, "2/3"))
-            self.assertEqual(telemetry._Amd._gen("32.0 GT/s PCIe"), 5)
-            self.assertIsNone(telemetry._Amd._gen("unknown"))
-            self.assertTrue(telemetry._Amd._bdf("0000:03:00.0"))
-            self.assertFalse(telemetry._Amd._bdf("pci0000:00"))
-
-    def test_readings(self):
-        from serve import telemetry
-        with tempfile.TemporaryDirectory() as d:
-            self.tree(d)
-            with mock.patch.object(telemetry, "SYSFS", d):
-                self.assertTrue(telemetry.amd_device_dir(0).endswith(os.path.join("renderD129", "device")))
-                self.assertTrue(telemetry.amd_device_dir(1).endswith(os.path.join("renderD128", "device")))
-                self.assertIsNone(telemetry.amd_device_dir(2))
-                g = telemetry.gpu_reader(0, amd=True)
-                self.assertTrue(g.ok())
-                self.assertEqual(g.name(), "AMD Radeon AI PRO R9700")
-                self.assertEqual(g.read(), {"util": 37, "mem_used": 2 << 30, "mem_total": 32 << 30, "temp": 51.0,
-                                            "power": 85.0, "power_limit": 300.0, "pcie_gen": None,
-                                            "pcie_gen_max": None, "pcie_own_gen": None, "pcie_width": None,
-                                            "pcie_path": "0/0"})    # #1733: no PCIe files in this fake tree
-                r = telemetry.gpu_reader(1, amd=True).read()
-                self.assertEqual((r["util"], r["temp"], r["power"]), (99, 64.0, 120.0))     # power1_input
-                self.assertEqual(telemetry.free_vram_mib(0, amd=True), 30 << 10)
-                self.assertIsNone(telemetry.free_vram_mib(5, amd=True))
-                t = telemetry.Telemetry(gpu_index=0, gpu_indices=[0, 1], amd=True)
-                s = t.sample()
-                self.assertEqual(t.static["gpu_name"], "AMD Radeon AI PRO R9700 + AMD Radeon AI PRO R9700")
-                self.assertEqual((s["gpu_mem_used"], s["gpu_util"], s["gpu_temp"], s["gpu_power"]),
-                                 (8 << 30, 68.0, 64.0, 205.0))
-        with tempfile.TemporaryDirectory() as d:                    # no amdgpu: nothing, and nothing breaks
-            with mock.patch.object(telemetry, "SYSFS", d):
-                self.assertFalse(telemetry.gpu_reader(0, amd=True).ok())
-                self.assertIsNone(telemetry.free_vram_mib(0, amd=True))
-
-    def test_free_vram_on_hip(self):
-        from serve import telemetry
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        svc.backend, svc.gpu_index = "hip", 1
-        with tempfile.TemporaryDirectory() as d:
-            self.tree(d)
-            with mock.patch.object(telemetry, "SYSFS", d):
-                self.assertEqual(svc.free_vram_mib(), 26 << 10)
-
-
-IOREG_FIXTURE = '''
-  +-o AGXAcceleratorG13X  <class AGXAcceleratorG13X, id 0x100000428, registered, matched, active, busy 0 (0 ms), retain 41>
-    {
-      "IOClass" = "AGXAcceleratorG13X"
-      "model" = "Apple M1 Max"
-      "PerformanceStatistics" = {"In use system memory (driver)"=0,"Alloc system memory"=22991831040,"Tiler Utilization %"=36,"recoveryCount"=44,"lastRecoveryTime"=216970984728,"Renderer Utilization %"=35,"TiledSceneBytes"=1671168,"Device Utilization %"=76,"SplitSceneCount"=0,"Allocated PB Size"=76152832,"In use system memory"=13384105984}
-      +-o IOUserClientCreator  <class IOUserClientCreator, id 0x100000429, registered, matched, active, busy 0 (0 ms), retain 5>
-        {
-          "IOUserClientCreator" = "pid 402, WindowServer"
+    class Reader:
+        values = {
+            0: {"util": 20, "mem_used": 4 << 30, "mem_total": 20 << 30, "temp": 61,
+                "power": 120.0, "power_limit": 250.0, "pcie_rx_mb": 10.0, "pcie_tx_mb": 30.0},
+            1: {"util": 40, "mem_used": 6 << 30, "mem_total": 22 << 30, "temp": 67,
+                "power": 180.0, "power_limit": 250.0, "pcie_rx_mb": 20.0, "pcie_tx_mb": 40.0},
         }
-    }
 
-  +-o AGXAccelerator  <class AGXAccelerator, id 0x10000042a, registered, matched, active, busy 0 (0 ms), retain 12>
-    {
-      "IOClass" = "AGXAccelerator"
-      "model" = "Apple M2 Ultra"
-      "PerformanceStatistics" = {"Renderer Utilization %"=3,"Tiler Utilization %"=2,"In use system memory"=1234567890}
-    }
-'''
+        def __init__(self, index):
+            self.index = index
 
-WORKING_SET = 26800603136          # bytes; the M1 Max's device in the fixture above
+        def ok(self):
+            return True
 
+        def name(self):
+            return f"NVIDIA GeForce RTX 2080 Ti {self.index}"
 
-class MacTelemetry(unittest.TestCase):
-    """The macOS (Metal backend) reader: IOKit's IOAccelerator nodes and the device's Metal working set."""
+        def read(self):
+            return dict(self.values[self.index])
 
-    def _reader(self, index=0, text=IOREG_FIXTURE):
+    def test_two_cards_are_aggregated(self):
         from serve import telemetry
-        return telemetry._Metal(index, run=lambda: text)
-
-    def test_readings(self):
-        g = self._reader()
-        self.assertTrue(g.ok())
-        self.assertEqual(g.name(), "Apple M1 Max")
-        with mock.patch("serve.telemetry.metal_working_set", lambda: WORKING_SET):
-            self.assertEqual(g.read(), {"util": 76, "mem_used": 13384105984, "mem_total": WORKING_SET})
-        # the second accelerator is index 1: the older chips' renderer/tiler-only utilization is the fallback
-        g1 = self._reader(1)
-        self.assertTrue(g1.ok())
-        with mock.patch("serve.telemetry.metal_working_set", lambda: WORKING_SET):
-            self.assertEqual(g1.read()["util"], 3)          # the renderer, the higher of the two
-            self.assertEqual(g1.name(), "Apple M2 Ultra")
-        self.assertFalse(self._reader(5).ok())
-
-    def test_no_registry(self):
-        g = self._reader(text="")
-        self.assertFalse(g.ok())
-        self.assertEqual(g.read(), {})
-        self.assertIsNone(g.name())
-
-    def test_bad_process(self):
-        from serve import telemetry
-        g = telemetry._Metal(0, run=lambda: (_ for _ in ()).throw(OSError("no ioreg")))
-        self.assertFalse(g.ok())
-        self.assertEqual(g.read(), {})
-
-    def test_note_reaches_the_monitor(self):
-        from serve import telemetry
-        t = telemetry.Telemetry(extra=lambda: {"tok_s": 1.0})
-        try:
-            with mock.patch.object(telemetry, "gpu_reader", lambda index=0, amd=False: self._reader()):
-                t2 = telemetry.Telemetry(extra=lambda: {"tok_s": 1.0})
-                try:
-                    self.assertEqual(t2.static["gpu_name"], "Apple M1 Max")
-                    self.assertIn("powermetrics", t2.static["gpu_note"])
-                    with mock.patch("serve.telemetry.metal_working_set", lambda: WORKING_SET):
-                        s = t2.sample()
-                    self.assertEqual(s["gpu_util"], 76)
-                    self.assertEqual(s["gpu_mem_used"], 13384105984)
-                    self.assertEqual(s["gpu_mem_total"], WORKING_SET)
-                    self.assertIsNone(s.get("gpu_temp"))       # no reading without root; the cards show a dash
-                    self.assertIsNone(s.get("gpu_pcie_gen"))
-                finally:
-                    t2.close()
-        finally:
-            t.close()
+        with mock.patch.object(telemetry, "gpu_reader", self.Reader):
+            t = telemetry.Telemetry(gpu_indices=[0, 1])
+            try:
+                self.assertEqual(t.static["gpu_count"], 2)
+                self.assertEqual(t.static["gpu_vram_total_mib"], (20 << 10) + (22 << 10))
+                self.assertEqual(t.static["gpu_name"],
+                                 "NVIDIA GeForce RTX 2080 Ti 0 + NVIDIA GeForce RTX 2080 Ti 1")
+                sample = t.sample()
+                self.assertEqual(sample["gpu_util"], 30.0)
+                self.assertEqual(sample["gpu_mem_used"], 10 << 30)
+                self.assertEqual(sample["gpu_mem_total"], 42 << 30)
+                self.assertEqual(sample["gpu_temp"], 67)
+                self.assertEqual(sample["gpu_power"], 300.0)
+                self.assertEqual([gpu["index"] for gpu in sample["gpus"]], [0, 1])
+            finally:
+                t.close()
 
 
 class TelemetryNoDisks(unittest.TestCase):
@@ -5393,9 +5005,7 @@ class ImageSources(unittest.TestCase):
     """What an image source may name: never a network path (Windows signs in to the host at the first look), a URL up
     to IMAGE_URL_MAX and downloaded outside the request FIFO, a file on this computer not for a page of another site."""
 
-    NETWORK = [r"\\host\share\x.png", "//host/share/x.png", r"\\?\UNC\host\share\x.png", r"\\.\UNC\host\share\x.png",
-               r"\??\UNC\host\share\x.png", r"/\host\share\x.png", "file://host/share/x.png",
-               "file:////host/share/x.png", r"file://\\host\share\x.png"]
+    NETWORK = ["//host/share/x.png", "file://host/share/x.png", "file:////host/share/x.png"]
 
     class Vision(ImageMarkers.FakeVision):
         def __init__(self, d):

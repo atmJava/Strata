@@ -19,7 +19,6 @@
 #include "strata/kernels/f16_bits.hpp"
 
 #include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/fuse_decode.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 
 #include <cuda_fp16.h>
@@ -641,14 +640,6 @@ void moe_hit_grouped_s2(const uint8_t* blob_base, const int32_t* slot_index, con
     //    `x_scales` the intermediate takes the CPU's contract (`quantize_q8_0_scaled`), R4.2h.
     {
         const long long pairs = n_hits * (long long) FF;
-#if defined(STRATA_EXPERIMENTAL_SM60)
-        if (strata::kernels::fuse_decode()) {
-        if (x_scales != nullptr)
-            swilu_quantize_q8_0_scaled(gate_up, gate_up + pairs, gate_up, pairs, 1, h_q8_0, h_scales, stream);
-        else
-            swilu_quantize_q8_0(gate_up, gate_up + pairs, gate_up, pairs, 1, h_q8_0, stream);
-        } else
-#endif
         {
         const unsigned blocks = (unsigned) ((pairs + THREADS - 1) / THREADS);
         swiglu_kernel<<<blocks, THREADS, 0, cs>>>(gate_up, pairs);
@@ -748,14 +739,6 @@ void moe_hit_grouped_s2_dev(const uint8_t* blob_base, const int32_t* slot_index,
     // sentinel rows included - the parity test compares that scratch).
     {
         const long long pairs = cap * (long long) FF;
-#if defined(STRATA_EXPERIMENTAL_SM60)
-        if (strata::kernels::fuse_decode()) {
-        if (x_scales != nullptr)
-            swilu_quantize_q8_0_scaled(gate_up, gate_up + pairs, gate_up, pairs, 1, h_q8_0, h_scales, stream);
-        else
-            swilu_quantize_q8_0(gate_up, gate_up + pairs, gate_up, pairs, 1, h_q8_0, stream);
-        } else
-#endif
         {
         swiglu_kernel<<<(unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate_up, pairs);
         check("moe_hit_grouped_s2_dev/swiglu", stream);
@@ -795,14 +778,6 @@ void moe_hit_grouped_s2_multi(const uint8_t* blob_base, const int32_t* slot_inde
     }
     {
         const long long pairs = cap * (long long) FF;
-#if defined(STRATA_EXPERIMENTAL_SM60)
-        if (strata::kernels::fuse_decode()) {
-        if (x_scales != nullptr)
-            swilu_quantize_q8_0_scaled(gate_up, gate_up + pairs, gate_up, pairs, 1, h_q8_0, h_scales, stream);
-        else
-            swilu_quantize_q8_0(gate_up, gate_up + pairs, gate_up, pairs, 1, h_q8_0, stream);
-        } else
-#endif
         {
         swiglu_kernel<<<(unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate_up, pairs);
         check("moe_hit_grouped_s2_multi/swiglu", stream);
@@ -1203,14 +1178,6 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
         check("moe_grouped_s2/swiglu_q8", stream);
     } else {
         const long long pairs = cap_entries * (long long) FF;
-#if defined(STRATA_EXPERIMENTAL_SM60)
-        if (strata::kernels::fuse_decode()) {
-        if (x_scales != nullptr)
-            swilu_quantize_q8_0_scaled(gate_up, gate_up + pairs, gate_up, pairs, 1, h_q8_0, h_scales, stream);
-        else
-            swilu_quantize_q8_0(gate_up, gate_up + pairs, gate_up, pairs, 1, h_q8_0, stream);
-        } else
-#endif
         {
         swiglu_kernel<<<(unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate_up, pairs);
         check("moe_grouped_s2/swiglu", stream);

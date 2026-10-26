@@ -5,10 +5,11 @@
 //     build/native_grouped_parity           the checks (a ctest; needs the GPU)
 //     build/native_grouped_parity --bench   the checks, then v1/new timings of 48 calls in a graph (a window's layers)
 //
-// Every gate/up format with every down format; calls of 0..cap groups of 1..T entries each (an empty call is what the
-// verify window's PCIe call usually is), entries from 0 and from past 0 (the PCIe call's follow the VRAM call's),
-// scattered destinations, stale scratch, grid_groups 0 (= cap), 1, 2, 3, 4 and above cap: the output must be BITWISE
-// equal to v1's, the rows the call must not write included (both start from the same NaN pattern).
+// The production gate/up formats (IQ3_XXS and the Q8_0 fallback) with every production down format (IQ4_NL, Q2_0 and
+// Q8_0); calls of 0..cap groups of 1..T entries each (an empty call is what the verify window's PCIe call usually is),
+// entries from 0 and from past 0 (the PCIe call's follow the VRAM call's), scattered destinations, stale scratch,
+// grid_groups 0 (= cap), 1, 2, 3, 4 and above cap: the output must be BITWISE equal to v1's, the rows the call must not
+// write included (both start from the same NaN pattern).
 //
 // Random bytes are valid codes for every format here (every grid index is in range); only the fp16 block scales are
 // set, small enough that the SwiGLU outputs keep a finite fp16 q8_1 scale.
@@ -49,19 +50,9 @@ T* dalloc(size_t n) {
 
 const char* name_of(int t) {
     switch (t) {
-        case 16: return "IQ2_XXS";
-        case 17: return "IQ2_XS";
         case 18: return "IQ3_XXS";
         case 20: return "IQ4_NL";
-        case 21: return "IQ3_S";
-        case 22: return "IQ2_S";
-        case 23: return "IQ4_XS";
-        case 29: return "IQ1_M";
         case 42: return "Q2_0";
-        case 12: return "Q4_K";
-        case 13: return "Q5_K";
-        case 14: return "Q6_K";
-        case 7: return "Q5_1";
         case 8: return "Q8_0";
         default: return "?";
     }
@@ -75,22 +66,9 @@ std::vector<uint8_t> random_rows(int t, int64_t rows, int64_t n, std::mt19937& r
     std::uniform_int_distribution<int> byte(0, 255), ex(2, 8), man(0, 1023), sgn(0, 1);
     for (auto& b : w) b = (uint8_t) byte(rng);
     for (size_t o = 0; o < w.size(); o += bs) {
-        if (t == 29) {
-            // IQ1_M: the fp16 scale is the top nibbles of its four scale words (bytes 48..55), the sign and the
-            // exponent's top bits in the last: 0x1 / 0x2 there (0x9 / 0xA negative) keeps it in 2^-11 .. 2^-3
-            const uint8_t nib = (uint8_t) ((sgn(rng) ? 0x8 : 0x0) | (1 + (byte(rng) & 1)));
-            w[o + 55] = (uint8_t) ((w[o + 55] & 0x0F) | (nib << 4));
-        } else {   // the other formats start their block with the fp16 scale: 2^-13 .. 2^-6
-            // (Q4_K / Q5_K: 2^-14 .. 2^-11, their 6-bit sub-scales multiply it by up to 63)
-            const int e = (t == 12 || t == 13) ? 1 + ex(rng) % 4 : ex(rng);
-            const uint16_t h = (uint16_t) ((sgn(rng) ? 0x8000 : 0) | (e << 10) | man(rng));
-            std::memcpy(&w[o], &h, 2);
-            if (t == 12 || t == 13 || t == 7) {   // Q4_K / Q5_K: dmin, Q5_1: m - the second fp16, as small
-                const int em = (t == 7) ? ex(rng) : 1 + ex(rng) % 4;
-                const uint16_t m = (uint16_t) ((sgn(rng) ? 0x8000 : 0) | (em << 10) | man(rng));
-                std::memcpy(&w[o + 2], &m, 2);
-            }
-        }
+        // every production format starts its block with a finite fp16 scale: 2^-13 .. 2^-6
+        const uint16_t h = (uint16_t) ((sgn(rng) ? 0x8000 : 0) | (ex(rng) << 10) | man(rng));
+        std::memcpy(&w[o], &h, 2);
     }
     return w;
 }
@@ -314,8 +292,8 @@ void bench(cudaStream_t s, std::mt19937& rng) {
     std::printf("\n--bench: microseconds per call, a window's 48 calls in a graph, each layer with its own experts (the\n"
                 "weights stream from DRAM as in the engine); v1 / new (grid_groups): medians of %d launches each,\n"
                 "alternating, after %d warm-up pairs - idle GPU assumed\n", kPairs, kWarmPairs);
-    // a verify window's shape: 4 tokens x 10 experts, 2560 x 768 IQ3_S / IQ4_XS experts
-    Setup S(21, 23, 2560, 768, 4, 10, 32, rng, s);
+    // a verify window's shape: 4 tokens x 10 experts, 2560 x 640 IQ3_XXS / IQ4_NL experts
+    Setup S(18, 20, 2560, 640, 4, 10, 32, rng, s);
     std::vector<int> vram(16, 1);
     vram.insert(vram.end(), 12, 2);                                   // 28 groups, 40 entries
     const struct { const char* what; std::vector<int> sizes; int64_t gy; } rows[] = {
@@ -353,15 +331,9 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     ck(cudaStreamCreate(&s), "stream");
     std::mt19937 rng(316);
-    for (int gu : {16, 17, 18, 21, 22, 23, 29, 42, 12, 13,
-#ifdef STRATA_Q6K_EXPERTS
-                   14,
-#endif
-                   8})        // STRATA_GU_FMTS
-        for (int dt : {20, 23, 42, 7, 8}) check(gu, dt, 512, 256, s, rng);   // STRATA_D_FMTS; IQ4_XS: n_ff % 256
-    check(42, 42, 2560, 640, s, rng);
-    check(21, 20, 2560, 640, s, rng);                                   // a model's shapes
-    check(21, 23, 2560, 768, s, rng);
+    for (int gu : {18, 8})                                               // STRATA_GU_FMTS
+        for (int dt : {20, 42, 8}) check(gu, dt, 512, 256, s, rng);       // STRATA_D_FMTS
+    for (int gu : {18, 8}) check(gu, 20, 2560, 640, s, rng);             // the model's shape
     if (do_bench) bench(s, rng);
     std::printf("native_grouped_parity: %d failures\n", g_fail);
     cudaStreamDestroy(s);

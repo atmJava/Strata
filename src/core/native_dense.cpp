@@ -3,7 +3,6 @@
 #include "strata/core/weights.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/fused_gr.hpp"
-#include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/platform/memory.hpp"
 
@@ -51,34 +50,7 @@ bool hc_q8_env() {
         const char* v = std::getenv("STRATA_HC_Q8");
         if (v != nullptr && v[0] == '1') return true;
         if (v != nullptr && v[0] != '\0' && std::strcmp(v, "auto") != 0) return false;
-#if defined(STRATA_USE_HIP)
-        {   // Strix Halo (gfx1151): on by default (decode +9.5%, json/code/tool/chat/agent +7.9..+10.7%); the answers differ in
-            // near-tie tokens by about the size of the engine's own CPU-vs-GPU expert rounding (docs/AMD_HIP.md);
-            // STRATA_HC_Q8=0 keeps the bf16 read
-            int dev1151 = 0;
-            cudaDeviceProp p1151;
-            const bool g1151 = cudaGetDevice(&dev1151) == cudaSuccess && cudaGetDeviceProperties(&p1151, dev1151) == cudaSuccess &&
-                               strata::kernels::gfx_arch_is_gfx1151(p1151.gcnArchName);
-            (void) cudaGetLastError();
-            if (g1151) {
-                std::fprintf(stderr, "strata: Strix Halo (gfx1151): 8-bit hyper-connection weights are on (decode about 9%% faster, "
-                                     "answers can differ in near-tie tokens); STRATA_HC_Q8=0 keeps the bf16 read\n");
-                return true;
-            }
-        }
-        const char* d = std::getenv("STRATA_GFX12_DEFAULTS");
-        if (d != nullptr && d[0] == '0') return false;
-        int dev = 0;
-        cudaDeviceProp p;
-        const bool g12 = cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&p, dev) == cudaSuccess &&
-                         strata::kernels::gfx_arch_is_gfx12(p.gcnArchName);
-        (void) cudaGetLastError();
-        if (g12) std::fprintf(stderr, "strata: gfx12 (RDNA4): the hyper-connection projections are read as Q8_0 (quantized at load, "
-                                      "decode faster, answers differ slightly); STRATA_HC_Q8=0 keeps the bf16 read\n");
-        return g12;
-#else
         return false;
-#endif
     }();
     return on;
 }

@@ -284,12 +284,10 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(len(read_engine_stage_log(str(path), offset)), 4)
             self.assertEqual(read_engine_stage_log(str(path), offset, limit=12), [])
         cuda_env = {"CUDA_VISIBLE_DEVICES": "2,0,3,1", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
-        self.assertEqual(visible_device_order(cuda_env, "cuda"), [2, 0, 3, 1])
-        self.assertEqual(visible_device_order({"CUDA_VISIBLE_DEVICES": "2,0,3,1"}, "cuda"), [])
-        self.assertEqual(visible_device_order({"HIP_VISIBLE_DEVICES": "1,0"}, "hip"), [1, 0])
-        self.assertEqual(visible_device_order({**cuda_env, "CUDA_VISIBLE_DEVICES": "2,2"}, "cuda"), [])
-        self.assertEqual(visible_device_order({**cuda_env, "CUDA_VISIBLE_DEVICES": "9" * 6000}, "cuda"), [])
-        self.assertEqual(visible_device_order({"CUDA_VISIBLE_DEVICES": "2,0"}, "sycl"), [])
+        self.assertEqual(visible_device_order(cuda_env), [2, 0, 3, 1])
+        self.assertEqual(visible_device_order({"CUDA_VISIBLE_DEVICES": "2,0,3,1"}), [])
+        self.assertEqual(visible_device_order({**cuda_env, "CUDA_VISIBLE_DEVICES": "2,2"}), [])
+        self.assertEqual(visible_device_order({**cuda_env, "CUDA_VISIBLE_DEVICES": "9" * 6000}), [])
 
     def test_reported_stage_ranges_render_and_invalid_remote_map_is_rejected(self):
         s = four_gpu_snapshot()
@@ -604,15 +602,6 @@ class ContractTests(unittest.TestCase):
                         server.main(["--engine", "strata", "--config", str(profile),
                                      "--host", "0.0.0.0", "--port", "0", *extra])
                 self.assertIn("tokenizer is missing", err.getvalue(), (body, extra))   # past the key check, stopped later
-
-    def test_code_run_uses_missing_component_exit_until_shared_harness_arrives(self):
-        output = io.StringIO()
-        with redirect_stdout(output):
-            code = main(["code", "run", "--prompt-file", "task.md", "--policy", "policy.json",
-                         "--output", "jsonl"])
-        self.assertEqual(code, 5)
-        self.assertEqual(json.loads(output.getvalue())["error"]["code"], 5)
-
 
 try:
     from strata_cli.monitor import MonitorApp, with_aggregate_rate

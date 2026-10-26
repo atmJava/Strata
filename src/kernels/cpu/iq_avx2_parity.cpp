@@ -3,7 +3,7 @@
 // index and sign pattern occurs, and random activations quantized the way the engine quantizes them.
 //
 //     iq_avx2_parity [--cpu N]
-//         IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ4_XS gate/up rows, IQ4_NL and Q2_0 down rows: every variant
+//         IQ3_XXS gate/up rows, IQ4_NL and Q2_0 down rows: every variant
 //         this CPU runs, 1..8 tokens, each token's rows bit for bit the scalar variant's rows for that token alone (so
 //         also the same at every width, #152); the scalar rows against ggml-cpu's vec_dot (Q2_0: a double
 //         reference), rel <= 1e-5; and where the engine's dispatch (native_gu_rows) takes the multi-token kernel from
@@ -25,19 +25,8 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <intrin.h>
-#else
 #include <cpuid.h>
 #include <sched.h>
-#endif
 
 #include <algorithm>
 #include <chrono>
@@ -198,15 +187,10 @@ unsigned core_type() {   // CPUID 1Ah of the calling thread: 40h performance cor
 }
 
 bool pin_to(int cpu_index) {
-#if defined(_WIN32)
-    if (cpu_index < 0 || cpu_index >= 64) return false;
-    return SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR) 1 << cpu_index) != 0;
-#else
     cpu_set_t s;
     CPU_ZERO(&s);
     CPU_SET(cpu_index, &s);
     return sched_setaffinity(0, sizeof s, &s) == 0;
-#endif
 }
 
 const char* type_name(int type) { return ggml_type_name((ggml_type) type); }
@@ -248,7 +232,7 @@ int check_gate_up(int type) {
     const double r_ggml = rel(one_g.data(), ref.data(), one_g.size());
     std::printf("  %-8s gate rows vs ggml vec_dot: rel %.2e\n", type_name(type), r_ggml);
     if (!(r_ggml <= 1e-5)) { std::printf("  %-8s MISMATCH against ggml\n", type_name(type)); ++failures; }
-    if (type == 16 || type == 17 || type == 18 || type == 21 || type == 22) {
+    if (type == 18) {
         size_t different = 0;
         std::vector<float> exact(R);
         const ggml_vec_dot_t dot = traits_cpu(type)->vec_dot;
@@ -289,7 +273,7 @@ int check_gate_up(int type) {
 int check_down(int d_type) {
     cpu::NativeFmt f;
     std::string err;
-    if (!cpu::native_fmt(16, d_type, kH, kFF, f, err)) {
+    if (!cpu::native_fmt(18, d_type, kH, kFF, f, err)) {
         std::printf("  %-8s %s\n", type_name(d_type), err.c_str());
         return 1;
     }
@@ -353,7 +337,7 @@ int check_down(int d_type) {
 
 #if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
 // #152 through the engine's dispatch: where native_gu_rows gives a format the multi-token kernel from one token on
-// (native_gu_mt_min 1: IQ3_S where its grid is gathered, or every format under STRATA_IQ_MT_MIN=1), each token's
+// (native_gu_mt_min 1: IQ3_XXS under STRATA_IQ_MT_MIN=1), each token's
 // gate/up rows must be the same alone and in any group.
 int check_engine_width(int type) {
     const int mt = cpu::native_gu_mt_min(type);
@@ -468,7 +452,7 @@ int bench(const std::vector<std::string>& pairs, const std::vector<int>& nts, in
                               for (int t = 0; t < nt; ++t)
                                   ddot((int) kFF, &out[t][r], 0, blob + f.down_off + (size_t) r * f.d_row, 0, a.dnp[t], 0, 1);
                       }});
-        if (gt == 16 || gt == 17 || gt == 18 || gt == 21 || gt == 22)
+        if (gt == 18)
             ms.push_back({"exact1", [&, gt](const uint8_t* blob, int nt) {
                               for (int t = 0; t < nt; ++t)
                                   cpu::iq256_gu_rows_exact_one(gt, blob, f.gu_row, f.up_off, (int) kH,
@@ -525,7 +509,7 @@ int main(int argc, char** argv) {
     bool do_bench = false, dispatch_only = !kVariants;
     int pin = -1, mb = 256, reps = 5;
     std::vector<int> nts = {1, 2, 3, 4};
-    std::vector<std::string> pairs = {"iq3_s/iq4_nl", "iq3_xxs/iq4_nl", "iq2_s/q2_0", "iq2_xxs/q2_0"};
+    std::vector<std::string> pairs = {"iq3_xxs/iq4_nl", "iq3_xxs/q2_0"};
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const bool more = i + 1 < argc;
@@ -546,7 +530,7 @@ int main(int argc, char** argv) {
             }
         } else {
             std::fprintf(stderr, "usage: iq_avx2_parity [--cpu N] | --bench [--cpu N] [--nt 1,2,3,4] [--mb 256] "
-                                 "[--reps 5] [--pairs iq3_s/iq4_nl,...] [--dispatch]\n");
+                                 "[--reps 5] [--pairs iq3_xxs/iq4_nl,...] [--dispatch]\n");
             return 2;
         }
     }
@@ -567,10 +551,10 @@ int main(int argc, char** argv) {
 #endif
     if (do_bench) return bench(pairs, nts, mb, reps, dispatch_only);
     int failures = 0;
-    for (int type : {16, 17, 22, 18, 21, 23}) failures += check_gate_up(type);
+    for (int type : {18}) failures += check_gate_up(type);
     for (int type : {20, 42}) failures += check_down(type);
 #if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
-    for (int type : {16, 17, 22, 18, 21, 23}) failures += check_engine_width(type);
+    for (int type : {18}) failures += check_engine_width(type);
 #endif
     std::printf("iq_avx2_parity: %d failures\n", failures);
     return failures == 0 ? 0 : 1;

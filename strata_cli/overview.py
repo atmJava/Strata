@@ -30,7 +30,7 @@ RED = "#f28b82"
 ACCENT = "#34d399"
 GREY = "#59636b"
 STATES = ("Idle", "Reading", "Generating", "Queued", "Error")
-# the classic Windows console draws with its 16 palette colours; these are the names that map onto them (glyphs="solid")
+# palette colour names used by the solid glyph mode
 SOLID_ACCENT, SOLID_BLUE, SOLID_AMBER, SOLID_RED, SOLID_TRACK = "bright_green", "bright_blue", "yellow", "red", "bright_black"
 
 
@@ -243,7 +243,7 @@ def short_gpu(name: str | None) -> str:
     """The card's name without the maker prefixes that eat a tile's width ("NVIDIA GeForce RTX 5070" -> "RTX 5070")."""
     if not name:
         return "graphics card"
-    for prefix in ("NVIDIA GeForce ", "NVIDIA ", "AMD Radeon ", "AMD ", "Intel(R) ", "Intel "):
+    for prefix in ("NVIDIA GeForce ", "NVIDIA "):
         if name.startswith(prefix):
             name = name[len(prefix):]
     return name
@@ -304,7 +304,7 @@ def render(model: dict, *, width: int, height: int, connection: str, connection_
            now: float | None = None, bullet: str = "●") -> Group:
     now = time.time() if now is None else now
     ascii_mode = glyphs == "ascii"
-    solid = glyphs == "solid"                   # the classic Windows console without Cascadia Mono: solid blocks, square boxes, palette colours
+    solid = glyphs == "solid"                   # solid blocks, square boxes and palette colours
     box_style = box.SQUARE if (ascii_mode or solid) else box.ROUNDED
     accent = ("#0c8a60" if theme == "light" else ACCENT) if color else "default"
     blue, amber, red = BLUE, AMBER, RED

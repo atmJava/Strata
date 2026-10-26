@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from importlib import metadata, util
 from pathlib import Path
 
@@ -121,16 +120,14 @@ def _live_probe(cfg: dict, backend: str) -> tuple[dict, list[dict]]:
     except ValueError as exc:
         return ({"status": "invalid_selection", "selected_indices": None, "cards": []},
                 [{"code": "GPU_SELECTION_INVALID", "severity": "error", "message": str(exc)}])
-    if backend == "cpu" and selected is None:
-        return {"status": "not_applicable", "selected_indices": None, "cards": []}, []
-    if backend not in ("cuda", "cuda_or_cpu_unverified", "cpu"):
+    if backend != "cuda":
         return ({"status": "unverified", "selected_indices": selected, "cards": [],
-                 "reason": f"{backend} device numbering needs a qualified live probe"},
-                [{"code": "LIVE_GPU_PROBE_UNAVAILABLE", "severity": "error", "message":
-                  f"{backend} device/driver verification is not implemented for this command"}])
+                 "reason": f"{backend} is outside this sm_75 CUDA distribution"},
+                [{"code": "BACKEND_UNSUPPORTED", "severity": "error", "message":
+                  f"this server build supports CUDA only, not {backend!r}"}])
     cards, reason = _nvidia_cards()
     if cards is None:
-        severity = "error" if selected is not None or backend == "cuda" else "warning"
+        severity = "error" if selected is not None else "warning"
         return ({"status": "unavailable", "selected_indices": selected, "cards": [], "reason": reason},
                 [{"code": "LIVE_GPU_PROBE_UNAVAILABLE", "severity": severity, "message": reason}])
     available = {card["index"] for card in cards}
@@ -160,11 +157,17 @@ def inspect(config_path: Path | None, *, profile_id: str | None = None, live: bo
         return report
 
     cfg = read_run_config(config_path)
-    report["backend"] = cfg.get("backend") or "cuda_or_cpu_unverified"
+    report["backend"] = cfg.get("backend") or "cuda"
     report["devices_selected"] = cfg.get("gpu")
+    if report["backend"] != "cuda":
+        report["issues"].append({
+            "code": "BACKEND_UNSUPPORTED",
+            "severity": "error",
+            "message": f"this server build supports CUDA only, not {report['backend']!r}",
+        })
     exe = _location(cfg["exe"], cfg, config_path)
     components.append(_item("engine", exe, "file"))
-    if components[-1]["status"] == "ok" and os.name != "nt" and not os.access(exe, os.X_OK):
+    if components[-1]["status"] == "ok" and not os.access(exe, os.X_OK):
         components[-1]["status"] = "invalid"
         components[-1]["reason"] = "engine file is not executable"
     build = exe.parent / "BUILD.json"
@@ -216,39 +219,19 @@ def inspect(config_path: Path | None, *, profile_id: str | None = None, live: bo
                                    "required": True, "reason": "missing path"})
 
     components.append(_monitor_component())
-    driver_name = "rocminfo" if cfg.get("backend") == "hip" else "nvidia-smi"
     components.append({"name": "gpu_driver_probe", "status": "unverified", "kind": "external_tool",
-                       "required": False, "tool": shutil.which(driver_name),
+                       "required": False, "tool": shutil.which("nvidia-smi"),
                        "reason": "device/driver compatibility needs a live probe on the target host"})
     for item in components:
         if item["status"] in ("missing", "invalid") and item["required"]:
             report["issues"].append({"code": "COMPONENT_" + item["status"].upper(), "severity": "error",
                                      "component": item["name"], "message": item.get("reason") or "required component unavailable"})
-    access = _device_access_issue(cfg.get("backend"))
-    if access:
-        report["issues"].append(access)
     if live:
         report["live_gpu_probe"], live_issues = _live_probe(cfg, report["backend"])
         report["issues"].extend(live_issues)
     report["ok"] = not any(issue["severity"] == "error" for issue in report["issues"])
     report["integrity"] = "unverified_no_manifest_hashes"
     return report
-
-
-def _device_access_issue(backend: str | None, dev_root: str = "/dev") -> dict | None:
-    """Linux Intel (SYCL) and AMD (HIP) open the card through /dev/dri/renderD* (and /dev/kfd): a user outside the `render`
-    group gets "No device of requested type available" from the engine, which names nothing to fix. None when it is fine,
-    cannot apply (other OS, other backend) or there is no such device node at all."""
-    if backend not in ("sycl", "hip") or not sys.platform.startswith("linux"):
-        return None
-    nodes = sorted(Path(dev_root, "dri").glob("renderD*"))
-    if backend == "hip" and Path(dev_root, "kfd").exists():
-        nodes.append(Path(dev_root, "kfd"))
-    if not nodes or any(os.access(node, os.R_OK | os.W_OK) for node in nodes):
-        return None
-    return {"code": "GPU_DEVICE_ACCESS", "severity": "warning",
-            "message": f"this user cannot open {', '.join(str(n) for n in nodes)}; the {backend} engine will not see the card. "
-                       "Add the user to the `render` group (and `video` for some distributions), then log in again"}
 
 
 def _monitor_component() -> dict:

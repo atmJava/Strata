@@ -203,8 +203,8 @@ void test_native_variable_layout() {
     const bool first_ok = native_fmt(GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_NL, embedding, feed_forward, first_fmt, err);
     require(first_ok, "IQ3_XXS/IQ4_NL synthetic format is unavailable: " + err);
     err.clear();
-    const bool second_ok = native_fmt(GGML_TYPE_IQ2_XS, GGML_TYPE_IQ4_NL, embedding, feed_forward, second_fmt, err);
-    require(second_ok, "IQ2_XS/IQ4_NL synthetic format is unavailable: " + err);
+    const bool second_ok = native_fmt(GGML_TYPE_Q8_0, GGML_TYPE_IQ4_NL, embedding, feed_forward, second_fmt, err);
+    require(second_ok, "Q8_0/IQ4_NL synthetic format is unavailable: " + err);
     require(first_fmt.bytes != second_fmt.bytes, "chosen native formats do not exercise variable layer sizes");
 
     const uint64_t layer0_bytes = (uint64_t) first_fmt.bytes * experts;
@@ -213,7 +213,7 @@ void test_native_variable_layout() {
         std::ofstream metadata(dir.path / "native_experts.txt");
         require((bool) metadata, "could not create synthetic native_experts.txt");
         metadata << "0 " << GGML_TYPE_IQ3_XXS << ' ' << GGML_TYPE_IQ4_NL << " 0 " << first_fmt.bytes << '\n';
-        metadata << "1 " << GGML_TYPE_IQ2_XS << ' ' << GGML_TYPE_IQ4_NL << ' ' << layer0_bytes << ' '
+        metadata << "1 " << GGML_TYPE_Q8_0 << ' ' << GGML_TYPE_IQ4_NL << ' ' << layer0_bytes << ' '
                  << second_fmt.bytes << '\n';
         require((bool) metadata, "could not write synthetic native_experts.txt");
     }

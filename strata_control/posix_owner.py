@@ -5,11 +5,9 @@ Strata keeps its private state in folders (0700) and files (0600) of the user. T
 Now:
 
 * the folder or file is ours and only the mode bits are wrong: the mode is put back (0700 / 0600) and the command goes on;
-* the filesystem cannot hold modes at all (a Windows drive seen from WSL, vfat, some network shares): one note, then it goes on;
+* the filesystem cannot hold modes at all (vfat or some network shares): one note, then it goes on;
 * another account owns it (root after sudo): the check still refuses, because that is the real boundary, but the message names the
   cause and the exact command that fixes it.
-
-Windows has no mode bits; its own check lives in `private_files` and is not touched here.
 """
 
 from __future__ import annotations
@@ -19,7 +17,6 @@ import stat
 import sys
 from pathlib import Path
 
-POSIX = os.name == "posix"
 _NOTED: set[str] = set()
 
 
@@ -29,8 +26,6 @@ def owner_only_wrong(path: str | os.PathLike, details: os.stat_result) -> bool:
     Replaces `details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) & 0o077`. Never follows a link and never touches
     a file that another account owns.
     """
-    if not POSIX:
-        return False
     if details.st_uid != os.getuid():
         return True
     if not stat.S_IMODE(details.st_mode) & 0o077:
@@ -49,8 +44,9 @@ def owner_only_wrong(path: str | os.PathLike, details: os.stat_result) -> bool:
     folder = str(path if stat.S_ISDIR(details.st_mode) else Path(path).parent)
     if folder not in _NOTED:
         _NOTED.add(folder)
-        print(f"strata: {folder} is on a drive that cannot keep files private to your account (a Windows drive seen from Linux, "
-              "a USB stick or a network share). Strata goes on; keep your data on the Linux disk to make it private.", file=sys.stderr)
+        print(f"strata: {folder} is on a drive that cannot keep files private to your account "
+              "(a USB stick or a network share). Strata goes on; keep your data on the Linux disk "
+              "to make it private.", file=sys.stderr)
     return False
 
 
@@ -86,8 +82,6 @@ def fix_target(path: str | os.PathLike) -> Path:
 def owner_only_text(text: str, path: str | os.PathLike) -> str:
     """The message for a refused check. `text` is the old sentence ("recipe directory must be owner-only"); when another account owns
     `path` it becomes a sentence with the cause and the exact command, otherwise it is returned unchanged."""
-    if not POSIX:
-        return text
     try:
         owner = os.lstat(path).st_uid
     except OSError:

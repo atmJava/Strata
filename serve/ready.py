@@ -3,7 +3,7 @@
 A consumer must still compare the instance ID with live telemetry before acting.
 An abruptly killed process can leave this file behind; a stale file is never
 accepted as proof of a running model by this module.
-POSIX files use mode 0600; Windows access follows the parent directory ACL.
+Files use mode 0600.
 """
 
 from __future__ import annotations

@@ -8,7 +8,7 @@ wrote, unchanged: an image from the API is byte for byte the image plain sd-cli 
 The GPU is shared with the text engine one job at a time: an image job takes the service's turn (the FIFO every chat
 request takes), so no chat turn runs on the GPU meanwhile, and the config's "gpu_policy" says what happens to the
 text engine during the job (gpu_turn):
-  keep    - it stays loaded and idle (an APU's shared memory, a card with room for both)
+  keep    - it stays loaded and idle (a card with room for both)
   shrink  - an engine started with --vram-elastic gives the image job VRAM from its expert cache and takes it back
             afterwards (POST /v1/vram's mechanism; the conversation stays in the engine)
   unload  - its conversation is saved to a session file, the engine is stopped, and the next start restores it
@@ -16,12 +16,12 @@ text engine during the job (gpu_turn):
             else unload
 The process per request keeps nothing on the GPU between images: when the job ends, all of its memory is free again.
 
-The config's "images" section (written by setup --images, tools/image/install.py):
-  {"exe": "engine-image/sd-cli", "backend": "vulkan", "diffusion_model": "...Q8_0.gguf", "vae": "...",
+The config's "images" section (written by tools/image/install.py):
+  {"exe": "engine-image/sd-cli", "backend": "cuda", "diffusion_model": "...Q8_0.gguf", "vae": "...",
    "llm": "...Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", "quant": "Q8_0", "args": ["--diffusion-fa"],
    "gpu_policy": "auto", "reload": "lazy"|"eager", "max_n": 4, "max_side": 2048, "timeout_s": 3600,
    "lib_dirs": [...], "uma": false, "need_mib": null, "out_dir": null, "keep_files": 64,
-   "native": false}   (native: Strata's own DiT runner, tools/image/sdcpp_native; CUDA / HIP builds)
+   "native": false}   (native: Strata's own DiT runner, tools/image/sdcpp_native)
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -123,28 +124,34 @@ def sd_cli_args(cfg: dict, job: dict, out_pattern: str) -> list[str]:
         cmd += ["-b", str(job["n"])]
     cmd += ["-o", out_pattern]
     cmd += [str(a) for a in (cfg.get("args") or [])]
-    if cfg.get("native") is True:                   # Strata's DiT runner inside sd-cli (CUDA / HIP builds)
+    if cfg.get("native") is True:                   # Strata's DiT runner inside sd-cli
         cmd += ["--model-args", "qwen_image_2_1_native=1"]
     return cmd
 
 
+def _require_cuda_backend(cfg: dict) -> None:
+    backend = str(cfg.get("backend") or "").strip().lower()
+    if backend != "cuda":
+        raise ValueError(f'images "backend" must be "cuda" in this server build, not {backend or "missing"!r}')
+
+
 def image_env(cfg: dict, base: dict | None = None) -> dict:
-    """sd-cli's environment: the libraries its backend needs (ROCm's, setup's lib_dirs) first on the search path, the
-    GPU to use when the config names one, and the config's own "env"."""
+    """sd-cli's CUDA environment: library folders first on LD_LIBRARY_PATH, the selected CUDA devices, and the
+    config's own "env"."""
+    _require_cuda_backend(cfg)
     env = dict(os.environ if base is None else base)
     dirs = [str(d) for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
-        var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
-        env[var] = os.pathsep.join(dirs + ([env[var]] if env.get(var) else []))
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            dirs + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else []))
     gpu = cfg.get("gpu")
     if gpu is not None:
-        var = {"cuda": "CUDA_VISIBLE_DEVICES", "hip": "HIP_VISIBLE_DEVICES",
-               "vulkan": "GGML_VK_VISIBLE_DEVICES"}.get(cfg.get("backend"))
-        if var:
-            # one card is "1"; a list ([1, 0], "1,0") is every one of them, in order - str() of a list is not a device list
-            env[var] = ",".join(str(x).strip() for x in gpu if str(x).strip() != "") if isinstance(gpu, (list, tuple)) else str(gpu)
-            if var == "CUDA_VISIBLE_DEVICES":
-                env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        # one card is "1"; a list ([1, 0], "1,0") is every one of them, in order
+        env["CUDA_VISIBLE_DEVICES"] = (
+            ",".join(str(x).strip() for x in gpu if str(x).strip() != "")
+            if isinstance(gpu, (list, tuple)) else str(gpu)
+        )
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     for k, v in (cfg.get("env") or {}).items():
         env[str(k)] = str(v)
     return env
@@ -152,8 +159,7 @@ def image_env(cfg: dict, base: dict | None = None) -> dict:
 
 def need_mib(cfg: dict, width: int, height: int) -> int:
     """The GPU memory an image job is planned with: the three model files plus the working buffers (about 2 GiB plus
-    4 GiB per megapixel at Turbo's settings; the 780M baseline peaked 7.4 GB over the weights at 1024x1024 on HIP);
-    the config's "need_mib" overrides it."""
+    4 GiB per megapixel at Turbo's settings); the config's "need_mib" overrides it."""
     if cfg.get("need_mib"):
         return int(cfg["need_mib"])
     files = 0
@@ -171,6 +177,7 @@ class ImageGen:
 
     def __init__(self, cfg: dict, log=None):
         self.cfg = dict(cfg)
+        _require_cuda_backend(self.cfg)
         policy = self.cfg.get("gpu_policy") or "auto"
         if policy not in POLICIES:
             raise ValueError(f'images "gpu_policy" must be one of {", ".join(POLICIES)}, not {policy!r}')
@@ -184,6 +191,7 @@ class ImageGen:
         self.model = self.cfg.get("model_name") or MODEL_NAME
         self.log = log
         out = self.cfg.get("out_dir")
+        self._owns_dir = out is None
         self.dir = Path(out) if out else Path(tempfile.mkdtemp(prefix="strata-images-"))
         self.dir.mkdir(parents=True, exist_ok=True)
         self.keep_files = int(self.cfg.get("keep_files") or 64)
@@ -222,6 +230,17 @@ class ImageGen:
         """Run sd-cli for `job` (parse_request's dict) -> (the PNG files' bytes in order, figures).  The caller holds
         the GPU turn.  ImageJobFailed when sd-cli fails, times out or is cancelled."""
         work = Path(tempfile.mkdtemp(prefix="job-", dir=self.dir))
+        try:
+            return self._run(job, work, cancel)
+        finally:
+            self.progress = None
+            for path in work.iterdir():
+                with contextlib.suppress(OSError):
+                    path.unlink()
+            with contextlib.suppress(OSError):
+                work.rmdir()
+
+    def _run(self, job: dict, work: Path, cancel: threading.Event | None) -> tuple[list[bytes], dict]:
         pattern = str(work / "img_%d.png")
         cmd = sd_cli_args(self.cfg, job, pattern)
         timeout = float(self.cfg.get("timeout_s") or 3600)
@@ -253,31 +272,32 @@ class ImageGen:
                     elif time.monotonic() - t0 > timeout:
                         why = f"it ran past timeout_s ({timeout:g} s)"
                     if why:
-                        proc.kill()
+                        with contextlib.suppress(OSError):
+                            proc.kill()
                         break
                     time.sleep(0.2)
-                with contextlib.suppress(subprocess.TimeoutExpired):
+                try:
                     proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    why = why or "sd-cli did not stop"
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        why = "sd-cli did not stop after being killed"
                 reader.join(timeout=10)
         secs = time.monotonic() - t0
-        self.progress = None
         log = logf.read_text(encoding="utf-8", errors="replace")
         outs = [work / f"img_{i}.png" for i in range(job["n"])]
-        try:
-            if why or proc.returncode != 0 or not all(p.is_file() for p in outs):
-                self.totals["failed"] += 1
-                tail = "\n".join(log.strip().splitlines()[-12:])
-                what = why or (f"sd-cli exited with code {proc.returncode}" if proc.returncode
-                               else "sd-cli wrote no image")
-                self._say(f"image job failed: {what}\n{tail}")
-                raise ImageJobFailed(f"{what}; the end of its log:\n{tail}")
-            images = [p.read_bytes() for p in outs]
-        finally:
-            for p in work.iterdir():
-                with contextlib.suppress(OSError):
-                    p.unlink()
-            with contextlib.suppress(OSError):
-                work.rmdir()
+        if why or proc.returncode != 0 or not all(p.is_file() for p in outs):
+            self.totals["failed"] += 1
+            tail = "\n".join(log.strip().splitlines()[-12:])
+            what = why or (f"sd-cli exited with code {proc.returncode}" if proc.returncode
+                           else "sd-cli wrote no image")
+            self._say(f"image job failed: {what}\n{tail}")
+            raise ImageJobFailed(f"{what}; the end of its log:\n{tail}")
+        images = [p.read_bytes() for p in outs]
         figures = {"seconds": round(secs, 2), "steps": job["steps"], "n": job["n"],
                    "size": f"{job['width']}x{job['height']}", "seed": job["seed"],
                    "backend": self.cfg.get("backend"), "quant": self.cfg.get("quant")}
@@ -292,6 +312,19 @@ class ImageGen:
         self.totals["seconds"] += secs
         self.last = figures
         return images, figures
+
+    def shutdown(self) -> None:
+        """Release the image service's log and scratch directory when the server stops.
+
+        An explicit ``out_dir`` belongs to the operator, so its files stay.  The default directory is private to this
+        process and can be removed.  Repeated shutdowns are harmless.
+        """
+        log, self.log = self.log, None
+        if log is not None:
+            with contextlib.suppress(OSError, ValueError):
+                log.close()
+        if self._owns_dir:
+            shutil.rmtree(self.dir, ignore_errors=True)
 
     def store(self, data: bytes) -> str:
         """Keep one PNG for response_format url -> its file name (32 random hex digits: the name is the access)."""

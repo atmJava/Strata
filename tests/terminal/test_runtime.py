@@ -19,15 +19,10 @@ from pathlib import Path
 from unittest import mock
 
 from strata_cli.cli import main
-from strata_cli import bench
-from strata_cli.client import Endpoint
-from strata_control import calibration, journal, management, owner_transport, procs, profiles, recipes, runtime
+from strata_control import journal, management, owner_transport, procs, profiles, runtime
 
 
-WINDOWS = os.name == "nt"
-
-
-@unittest.skipUnless(os.name in ("posix", "nt"), "no qualified owner transport on this platform")
+@unittest.skipUnless(os.name == "posix", "the managed runtime is Linux/POSIX")
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="strata-runtime-test-")
@@ -59,11 +54,6 @@ class RuntimeTests(unittest.TestCase):
                           "        print('DONE 1 1 1.0 1.0 length 0 0 0', flush=True)\n"
                           "        if slot is not None: print(f'BADM {slot} 0', flush=True)\n", encoding="utf-8")
         engine.chmod(0o700)
-        if WINDOWS:
-            # a script cannot be an engine exe on Windows: a .cmd that runs it stands in for the binary
-            wrapper = self.root / "engine.cmd"
-            wrapper.write_bytes(f'@echo off\r\n"{sys.executable}" "{engine}" %*\r\n'.encode())
-            engine = wrapper
         from tools.strata_tokenizer import BYTE_TO_UNICODE
         tokenizer = self.root / "tokenizer"
         tokenizer.mkdir()
@@ -91,131 +81,6 @@ class RuntimeTests(unittest.TestCase):
         with redirect_stdout(output):
             code = main(["runtime", *args, "--output", "json"])
         return code, json.loads(output.getvalue())
-
-    def test_component_inspection_bridge_is_read_only_and_reports_missing_files(self):
-        command = [sys.executable, "-m", "strata_control.management"]
-        root = Path(__file__).resolve().parents[2]
-
-        def send(live):
-            request = {"schema_version": 1, "action": "components.inspect",
-                       "profile": "local", "params": {"live": live}}
-            completed = subprocess.run(command, input=json.dumps(request), text=True,
-                                       capture_output=True, cwd=root, env=os.environ.copy(), timeout=15)
-            return completed.returncode, json.loads(completed.stdout)
-
-        code, result = send(False)
-        self.assertEqual(code, 0)
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["report"]["ok"])
-        self.assertEqual(result["report"]["profile"], "local")
-        self.assertEqual(Path(result["report"]["source_config"]), self.config.resolve())
-        self.assertIsNone(result["report"]["live_gpu_probe"])
-        self.assertEqual(journal.list_runs("local"), [])
-        self.assertEqual(runtime.status("local")["state"], "stopped")
-
-        code, invalid = send("true")
-        self.assertEqual((code, invalid["ok"]), (2, False))
-        self.assertIn("live must be true or false", invalid["error"])
-        engine = self.root / ("engine.cmd" if WINDOWS else "engine.py")
-        engine.unlink()
-        code, missing = send(False)
-        self.assertEqual((code, missing["ok"], missing["report"]["ok"]), (0, True, False))
-        self.assertIn("engine", [row["name"] for row in missing["report"]["components"]
-                      if row["status"] == "missing"])
-        self.assertEqual(journal.list_runs("local"), [])
-
-    def test_profile_change_bridge_reviews_revision_source_and_typed_overrides(self):
-        command = [sys.executable, "-m", "strata_control.management"]
-        root = Path(__file__).resolve().parents[2]
-
-        def send(action, params):
-            request = {"schema_version": 1, "action": action, "profile": "local", "params": params}
-            completed = subprocess.run(command, input=json.dumps(request), text=True,
-                                       capture_output=True, cwd=root, env=os.environ.copy(), timeout=15)
-            return completed.returncode, json.loads(completed.stdout)
-
-        other = self.root / "strata-other.json"
-        other.write_text(self.config.read_text().replace('"fake"', '"other"'), encoding="utf-8")
-        with mock.patch.dict(os.environ, {"STRATA_INSTALL_DIR": str(self.root)}):
-            code, listed = send("models.installed", {})
-            inspect_code, inspected = send("models.inspect", {"model_id": "other"})
-        self.assertEqual(code, 0)
-        self.assertIn("other", [item["id"] for item in listed["inventory"]["models"]])
-        self.assertEqual((inspect_code, inspected["ok"]), (0, True))
-        self.assertEqual(inspected["inspection"]["model"]["id"], "other")
-        self.assertEqual(journal.list_runs("local"), [])
-        candidate = self.root / "candidate.gguf"
-        candidate.write_bytes(b"GGUF" + (3).to_bytes(4, "little"))
-        code, import_plan = send("models.import.plan", {"path": str(candidate)})
-        self.assertEqual((code, import_plan["ok"]), (0, True))
-        self.assertFalse(import_plan["plan"]["would_write"])
-        self.assertEqual(import_plan["plan"]["execution_compatibility"], "unverified")
-        code, invalid_import = send("models.import.plan", {"path": "relative.gguf"})
-        self.assertEqual((code, invalid_import["ok"]), (2, False))
-        code, current = send("profile.inspect", {})
-        self.assertEqual((code, current["ok"], current["profile"]["id"]), (0, True, "local"))
-        self.assertEqual(current["profile"]["overrides"], {})
-        edits = {"overrides": {"parallel": 4, "batch_groups": "auto", "max_queue": 8,
-                               "queue_timeout": 2.5}, "source_config": str(other)}
-        code, plan = send("profile.change.plan", {**edits, "if_revision": current["revision"]})
-        self.assertEqual((code, plan["ok"], plan["plan"]["would_save"]), (0, True, True))
-        self.assertEqual(plan["plan"]["revision"], current["revision"])
-        self.assertEqual(plan["plan"]["effective"]["parallel"], 4)
-        self.assertEqual(plan["plan"]["source_config_after"], str(other.resolve()))
-        self.assertEqual(profiles.load("local")[0]["source_config"], str(self.config.resolve()))
-        self.assertEqual(journal.list_runs("local"), [])
-
-        execute = {**edits, "if_revision": plan["plan"]["revision"],
-                   "if_source_sha256": plan["plan"]["source_sha256"]}
-        profiles.set_values("local", ["max_queue=1"])
-        code, stale = send("profile.change", execute)
-        self.assertEqual((code, stale["ok"]), (6, False))
-        self.assertIn("changed after review", stale["error"])
-        code, stale_plan = send("profile.change.plan", {**edits, "if_revision": current["revision"]})
-        self.assertEqual((code, stale_plan["ok"]), (6, False))
-        code, plan = send("profile.change.plan", {**edits,
-            "if_revision": profiles.load("local")[1]})
-        execute.update(if_revision=plan["plan"]["revision"],
-                       if_source_sha256=plan["plan"]["source_sha256"])
-        other.write_text(other.read_text() + "\n", encoding="utf-8")
-        code, changed_source = send("profile.change", execute)
-        self.assertEqual((code, changed_source["ok"]), (6, False))
-        code, plan = send("profile.change.plan", {**edits,
-            "if_revision": profiles.load("local")[1]})
-        execute.update(if_revision=plan["plan"]["revision"],
-                       if_source_sha256=plan["plan"]["source_sha256"])
-        code, saved = send("profile.change", execute)
-        self.assertEqual((code, saved["ok"], saved["saved"]), (0, True, True))
-        self.assertEqual(profiles.load("local")[0]["source_config"], str(other.resolve()))
-        self.assertEqual(profiles.load("local")[0]["overrides"], edits["overrides"])
-        self.assertEqual(runtime.status("local")["state"], "stopped")
-        self.assertEqual(journal.list_runs("local"), [])
-
-        code, invalid = send("profile.change.plan", {"overrides": {"parallel": True},
-            "source_config": str(other), "if_revision": profiles.load("local")[1]})
-        self.assertEqual((code, invalid["ok"]), (2, False))
-
-        started = runtime.start("local", wait=12)
-        self.assertTrue(started["ok"], started)
-        running = runtime.status("local")
-        self.assertEqual(running["state"], "ready")
-        running_revision = running["profile_revision"]
-        next_edit = {"overrides": {**edits["overrides"], "parallel": 6},
-                     "source_config": str(other.resolve())}
-        code, next_plan = send("profile.change.plan", {**next_edit,
-            "if_revision": profiles.load("local")[1]})
-        self.assertEqual((code, next_plan["ok"]), (0, True))
-        code, next_saved = send("profile.change", {**next_edit,
-            "if_revision": next_plan["plan"]["revision"],
-            "if_source_sha256": next_plan["plan"]["source_sha256"]})
-        self.assertEqual((code, next_saved["ok"]), (0, True))
-        still_running = runtime.status("local")
-        self.assertEqual(still_running["instance_id"], running["instance_id"])
-        self.assertEqual(still_running["profile_revision"], running_revision)
-        restart_plan = runtime.plan_restart("local")
-        self.assertTrue(restart_plan["ok"], restart_plan)
-        self.assertEqual(restart_plan["candidate_profile_revision"], next_saved["revision"])
-        self.assertNotEqual(restart_plan["candidate_profile_revision"], running_revision)
 
     def test_local_management_bridge_and_cli_share_owner_and_journal(self):
         command = [sys.executable, "-m", "strata_control.management"]
@@ -424,7 +289,6 @@ class RuntimeTests(unittest.TestCase):
                 finally:
                     host.wait(timeout=10)
 
-    @unittest.skipIf(WINDOWS, "Windows console stop needs a platform-specific integration runner (no SIGTERM/SIGINT)")
     def test_foreground_jsonl_emits_ready_and_stop_without_human_stdout(self):
         for stop_signal, expected_code, expected_reason, quiet in (
                 (signal.SIGTERM, 0, "sigterm", False),
@@ -549,55 +413,6 @@ class RuntimeTests(unittest.TestCase):
         record = journal.load("local", stopped["operation_id"])
         self.assertEqual(record["intent"]["expected_owner_id"], preview["plan"]["owner_id"])
 
-    def test_managed_benchmark_binds_to_owned_launch(self):
-        with socket.socket() as reserved:
-            reserved.bind(("127.0.0.1", 0))
-            port = reserved.getsockname()[1]
-        cfg = json.loads(self.config.read_text(encoding="utf-8"))
-        cfg["port"] = port
-        self.config.write_text(json.dumps(cfg), encoding="utf-8")
-        started = runtime.start("local", wait=10, shutdown_timeout=2)
-        self.assertTrue(started["ok"])
-        identity = {"profile": "local", "revision": profiles.load("local")[1],
-                    "source_sha256": hashlib.sha256(self.config.read_bytes()).hexdigest()}
-        endpoint = Endpoint(started["api_url"])
-        output = self.root / "managed-bench"
-        with redirect_stdout(io.StringIO()):
-            result = bench.run(endpoint, endpoint, output, concurrency=1,
-                               profile_identity=identity, require_managed_match=True)
-        self.assertTrue(result["successful"])
-        self.assertEqual(result["profile_running_match"], "managed_launch_checked")
-        self.assertEqual(result["instance_id"], started["instance_id"])
-        self.assertTrue(result["profile_running_check"]["after"]["matched"])
-        output_json = io.StringIO()
-        with redirect_stdout(output_json):
-            code = main(["bench", "run", "--suite", "serving-smoke", "--profile", "local", "--require-managed-match",
-                         "--concurrency", "1", "--out", str(self.root / "cli-managed"),
-                         "--output", "json"])
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(output_json.getvalue())["summary"]["successful"], True)
-        self.assertEqual(json.loads(output_json.getvalue())["summary"]["profile_running_match"],
-                         "managed_launch_checked")
-        self.assertEqual(bench.load(self.root / "cli-managed")["profile_running_match"],
-                         "managed_launch_checked")
-        comparison = bench.compare(result, bench.load(self.root / "cli-managed"))
-        self.assertEqual(comparison["baseline"]["profile_running_match"], "managed_launch_checked")
-        self.assertFalse(any("running server config" in warning for warning in comparison["warnings"]))
-
-    def test_owned_runtime_and_calibration_exclude_each_other_even_on_port_zero(self):
-        first = runtime.start("local", wait=10, shutdown_timeout=2)
-        self.assertTrue(first["ok"])
-        output = self.root / "blocked-calibration.json"
-        with self.assertRaisesRegex(profiles.ProfileError, "engine lease"):
-            calibration.measure("local", output, exclusive_ack=True,
-                                runner=lambda cfg, say: self.fail("calibration runner was started"))
-        self.assertFalse(output.exists())
-        self.assertTrue(runtime.stop("local", timeout=12)["ok"])
-        with calibration._managed_exclusive():
-            with self.assertRaisesRegex(profiles.ProfileError, "runtime host failed to start"):
-                runtime.start("local", wait=1, shutdown_timeout=2)
-        self.assertTrue(runtime.start("local", wait=10, shutdown_timeout=2)["ok"])
-
     def test_failed_new_port_rolls_back_previous_owned_launch(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(first["ok"])
@@ -685,11 +500,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(self.config.read_text())["port"], edited["port"])
         snapshot = Path(result["rollback_source_config"])
         self.assertEqual(snapshot.parent, self.root / "runtime")
-        if WINDOWS:
-            from strata_control import private_files
-            self.assertTrue(private_files.is_unshared(snapshot))      # NTFS has no mode bits: the ACL is the promise
-        else:
-            self.assertEqual(snapshot.stat().st_mode & 0o077, 0)
+        self.assertEqual(snapshot.stat().st_mode & 0o077, 0)
         self.assertEqual(json.loads(snapshot.read_text())["port"], 0)
         self.assertEqual(json.loads(snapshot.read_text())["api_key"], secret)
         self.assertNotIn(secret, json.dumps(result))
@@ -950,37 +761,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(journal.list_runs("local")), count)
         self.assertEqual(runtime.status("local")["instance_id"], started["instance_id"])
 
-    def test_editable_recipe_previews_and_reruns_owned_instance(self):
-        recipes.initialize("local")
-        started = runtime.start("local", wait=10, shutdown_timeout=2)
-        self.assertTrue(started["ok"])
-        profiles.set_values("local", ["parallel=2"])
-        code, planned = self._ops("plan", "restart")
-        self.assertEqual(code, 0)
-        self.assertTrue(planned["plan"]["operation"]["preflight"]["changed"])
-        self.assertEqual(runtime.status("local")["instance_id"], started["instance_id"])
-        revision = planned["plan"]["recipe_revision"]
-        preflight = planned["plan"]["operation"]["preflight"]
-        code, ran = self._ops("run", "restart", "--if-revision", revision,
-                              "--if-profile-revision", planned["plan"]["profile_revision"],
-                              "--if-owner-id", preflight["current_owner_id"],
-                              "--if-instance-id", preflight["current_instance_id"],
-                              "--if-source-sha256", preflight["candidate_source_sha256"])
-        self.assertEqual(code, 0)
-        self.assertTrue(ran["operation"]["result"]["restarted"])
-        self.assertNotEqual(ran["operation"]["result"]["instance_id"], started["instance_id"])
-        record = journal.load("local", ran["operation"]["operation_id"])
-        self.assertEqual(record["state"], "succeeded")
-        self.assertEqual(record["result"]["instance_id"], ran["operation"]["result"]["instance_id"])
-        count = len(journal.list_runs("local"))
-        with self.assertRaisesRegex(profiles.ProfileError, "instance_changed_after_restart_plan"):
-            recipes.run("local", "restart", expected_revision=revision,
-                        expected_profile_revision=planned["plan"]["profile_revision"],
-                        expected_owner_id=preflight["current_owner_id"],
-                        expected_instance_id=preflight["current_instance_id"],
-                        expected_source_sha256=preflight["candidate_source_sha256"])
-        self.assertEqual(len(journal.list_runs("local")), count)
-
     def test_stale_profile_revision_does_not_drain_owned_instance(self):
         started = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(started["ok"])
@@ -991,13 +771,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["error"], "profile_changed_after_preview")
         self.assertEqual(runtime.status("local")["instance_id"], started["instance_id"])
 
-    def _ops(self, *args):
-        output = io.StringIO()
-        with redirect_stdout(output):
-            code = main(["ops", *args, "--profile", "local", "--output", "json"])
-        return code, json.loads(output.getvalue())
-
-    @unittest.skipIf(WINDOWS, "SIGTERM to a Windows process is TerminateProcess: the hard-kill test below covers it")
     def test_terminating_owner_host_stops_its_child_and_removes_state(self):
         started = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(started["ok"])
@@ -1019,17 +792,8 @@ class RuntimeTests(unittest.TestCase):
         orphan.write_bytes(self.config.read_bytes())
         orphan.chmod(0o600)
         owned = runtime._STARTED_HOSTS.pop("local")
-        if WINDOWS:
-            owned.kill()                          # TerminateProcess: the host cannot clean up after itself
-            owned.wait(timeout=3)
-            # the job object ends the server tree with the host, no matter how the host ended
-            deadline = time.monotonic() + 15
-            while runtime._pid_exists(old_child) and time.monotonic() < deadline:
-                time.sleep(0.1)
-            self.assertFalse(runtime._pid_exists(old_child))
-        else:
-            os.kill(started["host_pid"], signal.SIGKILL)
-            self.assertEqual(owned.wait(timeout=3), -signal.SIGKILL)
+        os.kill(started["host_pid"], signal.SIGKILL)
+        self.assertEqual(owned.wait(timeout=3), -signal.SIGKILL)
         stale = runtime.status("local")
         self.assertEqual((stale["state"], stale["error"]), ("stale", "owner_host_lost"))
         # The next start waits for the inherited-pipe guard to stop the old
@@ -1044,7 +808,7 @@ class RuntimeTests(unittest.TestCase):
         state_path, socket_path, _ = runtime._paths("local")
         token = "a" * 64
         state = {"schema_version": 1, "profile": "local",
-                 "socket": "tcp:127.0.0.1:50000" if WINDOWS else str(socket_path),
+                 "socket": str(socket_path),
                  "token": token, "host_pid": 999999}
         lease = runtime._write_new(state_path, (json.dumps(state) + "\n").encode())
         os.close(lease)
@@ -1057,13 +821,13 @@ class RuntimeTests(unittest.TestCase):
             runtime.start("local", wait=0, shutdown_timeout=2)
         self.assertTrue(state_path.exists())
 
-    # ---- owner transport, attach and identity (POSIX socket and Windows loopback alike)
+    # ---- owner transport, attach and identity
 
     def _stale_host(self, child_pid, *, started=None, token="a" * 64):
         """A state file whose host is gone, and the ownership marker naming `child_pid` as its server."""
         state_path, socket_path, _ = runtime._paths("local")
         state = {"schema_version": 1, "profile": "local",
-                 "socket": "tcp:127.0.0.1:50000" if WINDOWS else str(socket_path),
+                 "socket": str(socket_path),
                  "token": token, "host_pid": 999999}
         lease = runtime._write_new(state_path, (json.dumps(state) + "\n").encode())
         runtime._unlock_file(lease)
@@ -1089,8 +853,7 @@ class RuntimeTests(unittest.TestCase):
         started = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(started["ok"])
         state = runtime._read_state("local")
-        if WINDOWS:
-            self.assertRegex(state["socket"], r"^tcp:127\.0\.0\.1:[1-9][0-9]*$")
+        self.assertTrue(state["socket"].endswith(".sock"))
         root = Path(__file__).resolve().parents[2]
         done = subprocess.run([sys.executable, "strata.py", "runtime", "status", "--profile", "local",
                                "--output", "json"], cwd=root, env=os.environ.copy(), capture_output=True,
@@ -1129,42 +892,11 @@ class RuntimeTests(unittest.TestCase):
             victim.kill()
             victim.wait(timeout=10)
 
-    @unittest.skipUnless(WINDOWS, "a creation time is recorded with the PID on Windows only")
-    def test_a_reused_pid_with_another_creation_time_is_not_the_recorded_child(self):
-        victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
-        try:
-            real = runtime.winproc.process_started(victim.pid)
-            self.assertTrue(runtime._pid_exists(victim.pid, real))
-            self.assertFalse(runtime._pid_exists(victim.pid, real + 12345))
-            self._stale_host(victim.pid, started=real + 12345)           # the number was reused by another process
-            started = runtime.start("local", wait=10, shutdown_timeout=2)
-            self.assertTrue(started["ok"])                               # recovered: it was not the recorded child
-            self.assertIsNone(victim.poll(), "the process that reused the PID was stopped")
-        finally:
-            victim.kill()
-            victim.wait(timeout=10)
-
-    def test_marker_without_creation_time_ignores_a_reused_pid_of_a_foreign_program(self):
-        # #3488: the marker had no `started`, the number was reused by another program, every load said "still present".
-        child = {"pid": 38552}
-        with mock.patch.object(runtime, "WINDOWS", True), \
-                mock.patch.object(runtime, "_pid_exists", return_value=True), \
-                mock.patch.object(runtime.winproc, "process_image", create=True) as image:
-            image.return_value = r"C:\Windows\System32\svchost.exe"
-            self.assertFalse(runtime._child_present(child))
-            image.return_value = r"C:\Users\a\AppData\Local\Strata\python\python.exe"
-            self.assertTrue(runtime._child_present(child))
-            image.return_value = None                                    # unreadable: keep refusing, never guess
-            self.assertTrue(runtime._child_present(child))
-            image.return_value = r"C:\Windows\System32\svchost.exe"
-            self.assertTrue(runtime._child_present({"pid": 1, "started": 5}))   # a creation time decides by itself
-
     def test_a_process_created_after_the_marker_was_written_is_not_the_recorded_child(self):
         # 2026-10-22: the app was force-killed, its marker had no creation time, the number now belonged to another Python program, and every
         # load said "lost host child is still present" until the marker was deleted by hand. The child was started BEFORE its marker was written.
         child = {"pid": 4242}
         with mock.patch.object(runtime, "_pid_exists", return_value=True), \
-                mock.patch.object(runtime.winproc, "process_image", create=True, return_value="C:\\Python\\python.exe"), \
                 mock.patch.object(runtime.procs, "started_epoch") as created:
             created.return_value = 1000.0 + 60
             self.assertFalse(runtime._child_present(child, written=1000.0), "created a minute after the marker: another process")
@@ -1181,7 +913,7 @@ class RuntimeTests(unittest.TestCase):
     def test_a_marker_left_by_a_killed_app_is_cleaned_up_when_its_number_belongs_to_a_later_program(self):
         victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         try:
-            state_path, marker = self._stale_host(victim.pid)             # a marker with no creation time (Windows could not read it)
+            state_path, marker = self._stale_host(victim.pid)
             old = time.time() - 3600
             os.utime(marker, (old, old))                                  # written an hour ago: the victim started after it
             started = runtime.start("local", wait=10, shutdown_timeout=2)
@@ -1206,7 +938,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(procs.started_epoch(0))
         self.assertIsNone(procs.started_epoch(-5))
 
-    @unittest.skipUnless(WINDOWS, "os.kill(pid, 0) ends a process on Windows; liveness is a handle query")
     def test_liveness_check_does_not_end_the_process_it_asks_about(self):
         victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         try:
@@ -1218,65 +949,21 @@ class RuntimeTests(unittest.TestCase):
             victim.wait(timeout=10)
         self.assertFalse(runtime._pid_exists(victim.pid))
 
-    @unittest.skipUnless(WINDOWS, "ACLs stand in for mode 0700 on Windows")
     def test_runtime_directory_is_owner_only_and_a_shared_one_is_refused(self):
-        from strata_control import private_files
         directory = runtime.runtime_dir()
-        self.assertTrue(private_files.is_private(directory))
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
         shared = Path(self.temp.name) / "shared-runtime"
-        shared.mkdir()
-        done = subprocess.run(["icacls", str(shared), "/grant", "*S-1-1-0:(OI)(CI)R"], capture_output=True)
-        if done.returncode != 0:
-            self.skipTest("icacls could not widen the test directory")
+        shared.mkdir(mode=0o755)
         with mock.patch.dict(os.environ, {"STRATA_RUNTIME_DIR": str(shared)}):
-            # a folder that names Everyone is the user's own state folder: it is locked down once and used (never a stop)
             self.assertEqual(runtime.runtime_dir(), shared)
-            self.assertTrue(private_files.is_unshared(shared))
-        again = Path(self.temp.name) / "shared-runtime-2"
-        again.mkdir()
-        subprocess.run(["icacls", str(again), "/grant", "*S-1-1-0:(OI)(CI)R"], capture_output=True)
-        with mock.patch.dict(os.environ, {"STRATA_RUNTIME_DIR": str(again)}), \
-                mock.patch.object(private_files, "restrict_to_current_user"), \
-                mock.patch.object(private_files, "repair_access", return_value=False):
-            # when the lock-down does not happen it still refuses, in plain words and naming who can open it
-            with self.assertRaisesRegex(profiles.ProfileError, "Everyone"):
-                runtime.runtime_dir()
+            self.assertEqual(shared.stat().st_mode & 0o777, 0o700)
 
-    def test_ready_pid_may_be_a_child_of_the_launcher_on_windows_only(self):
-        # #3683: a Windows venv's python.exe starts the real interpreter as its child, so the server that writes the ready file
-        # is one process below the pid the host started. It must still match; a stranger or a distant process must not.
-        parents = {200: 100, 300: 200, 400: 300, 500: 400}
-        with mock.patch.object(runtime.procs, "parent_of", side_effect=lambda pid: parents.get(pid)):
-            with mock.patch.object(runtime, "WINDOWS", True):
-                self.assertTrue(runtime._ready_pid_is_child(100, 100))
-                self.assertTrue(runtime._ready_pid_is_child(200, 100))
-                self.assertTrue(runtime._ready_pid_is_child(300, 100))
-                self.assertTrue(runtime._ready_pid_is_child(400, 100))
-                self.assertFalse(runtime._ready_pid_is_child(500, 100))      # too far below
-                self.assertFalse(runtime._ready_pid_is_child(999, 100))      # unrelated
-                self.assertFalse(runtime._ready_pid_is_child(None, 100))
-                self.assertFalse(runtime._ready_pid_is_child("200", 100))
-                self.assertFalse(runtime._ready_pid_is_child(0, 100))
-            with mock.patch.object(runtime, "WINDOWS", False):
-                self.assertTrue(runtime._ready_pid_is_child(100, 100))
-                self.assertFalse(runtime._ready_pid_is_child(200, 100))      # POSIX has no launcher in between
-
-    @unittest.skipUnless(WINDOWS, "the venv launcher is a Windows thing")
-    def test_server_started_through_a_launcher_process_becomes_ready(self):
-        launcher = self.root / "launcher.cmd"
-        launcher.write_bytes(f'@echo off\r\n"{sys.executable}" %*\r\n'.encode())
-        host = runtime.Host("local", shutdown_timeout=2, startup_wait=20)
-        plan, args, source, original = host._plan()
-        with mock.patch.object(sys, "executable", str(launcher)):
-            host._launch(args, source, original, plan["profile_revision"])
-        try:
-            result = host._wait_ready(30)
-            self.assertTrue(result["ok"], result)
-            self.assertTrue(result["generation_ready"])
-            ready = json.loads(host.ready_path.read_text(encoding="utf-8"))
-            self.assertNotEqual(ready["pid"], host.child.pid)               # the server is below the launcher
-        finally:
-            host._stop_child()
+    def test_ready_pid_must_be_the_exact_server_process(self):
+        self.assertTrue(runtime._ready_pid_is_child(100, 100))
+        self.assertFalse(runtime._ready_pid_is_child(200, 100))
+        self.assertFalse(runtime._ready_pid_is_child(None, 100))
+        self.assertFalse(runtime._ready_pid_is_child("100", 100))
+        self.assertFalse(runtime._ready_pid_is_child(0, 100))
 
     def test_a_ready_file_that_is_not_ours_is_named_in_the_status_phase(self):
         host = runtime.Host("local", shutdown_timeout=2, startup_wait=10)

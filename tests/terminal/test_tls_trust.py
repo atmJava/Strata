@@ -55,14 +55,6 @@ class Install(unittest.TestCase):
             self.assertEqual(tls.install(), "default")
         self.assertIs(ssl._create_default_https_context, self.context)
 
-    def test_the_pins_name_truststore_in_requirements_and_every_lock(self):
-        self.assertIn("truststore==", (ROOT / "requirements.txt").read_text())
-        for lock in (ROOT / "packaging" / "locks").glob("runtime-*-cp312.txt"):
-            text = lock.read_text()
-            self.assertRegex(text, r"truststore==\S+ \\r?\n\s+--hash=sha256:[0-9a-f]{64}", lock.name)
-            self.assertIn("certifi==", text)                       # the fallback stays
-
-
 class Plain(unittest.TestCase):
     def test_a_failed_certificate_is_recognised_however_it_is_wrapped(self):
         self.assertTrue(tls.is_certificate_error(cert_error()))
@@ -75,40 +67,12 @@ class Plain(unittest.TestCase):
 
     def test_the_message_is_plain_and_never_offers_to_skip_the_check(self):
         text = tls.explain("github.com")
-        for word in ("github.com", "antivirus", "proxy", "date and time", "Windows Update"):
+        for word in ("github.com", "security software", "proxy", "system clock", "Linux CA bundle"):
             self.assertIn(word, text)
         for raw in ("urlopen", "CERTIFICATE_VERIFY_FAILED", "_ssl.c", "issuer"):
             self.assertNotIn(raw, text)
         self.assertRegex(text, r"will not skip the check")
         self.assertNotRegex(text.lower(), r"verify\s*=\s*false|insecure|disable (the )?verification|turn off (the )?(certificate|verification)")
-
-    def test_setup_urlopen_raises_the_plain_problem(self):
-        import setup
-        request = types.SimpleNamespace(full_url="https://github.com/x/y")
-        with mock.patch.object(setup.acquisition, "require", lambda *a, **k: None), \
-                mock.patch.object(setup.urllib.request, "urlopen", side_effect=cert_error()):
-            with self.assertRaises(tls.CertificateProblem) as cm:
-                setup._urlopen(request)
-        self.assertIn("github.com", str(cm.exception))
-        self.assertNotIn("CERTIFICATE_VERIFY_FAILED", str(cm.exception))
-
-    def test_setup_urlopen_leaves_other_errors_alone(self):
-        import setup
-        refused = urllib.error.URLError(ConnectionRefusedError())
-        with mock.patch.object(setup.acquisition, "require", lambda *a, **k: None), \
-                mock.patch.object(setup.urllib.request, "urlopen", side_effect=refused):
-            with self.assertRaises(urllib.error.URLError):
-                setup._urlopen(types.SimpleNamespace(full_url="https://github.com/x"))
-
-    def test_the_update_reader_gives_the_plain_message(self):
-        from strata_control import transfer
-        with mock.patch.object(transfer, "check_url_policy", lambda url: None), \
-                mock.patch.object(transfer._opener, "open", side_effect=cert_error()):
-            with self.assertRaises(transfer.TransferError) as cm:
-                transfer.read_small("https://updates.example.org/feed.json")
-        self.assertIn("antivirus", str(cm.exception))
-        self.assertNotIn("urlopen", str(cm.exception))
-
 
 if __name__ == "__main__":
     unittest.main()

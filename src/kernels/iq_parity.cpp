@@ -26,7 +26,7 @@
 
 int main(int argc, char** argv) {
     const std::string dir = argc > 1 ? argv[1] : "logs/iq_fixture";
-    const char* names[] = {"IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S", "IQ1_M", "IQ4_NL", "IQ4_XS", "Q2_0", "Q3_K"};
+    const char* names[] = {"IQ3_XXS", "IQ4_NL", "Q2_0", "Q8_0"};
     int failures = 0, missing = 0;
     cudaStream_t s;
     cudaStreamCreate(&s);

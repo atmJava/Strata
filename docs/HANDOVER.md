@@ -34,9 +34,8 @@
 | engine | `a09d78b13c39378d1532a024b983d286` / `0.1.51` |
 | server | `de09cffdac39ff150a689bd3a44cc242` |
 | launcher | `342710595d34936f40e40233f5b62837` |
-| config md5 | `05c9d2539cd92b6c8e0b93ff8a48ce0e` |
-| config sha256 | `3d18619836798b91ecc6a83ba4c726f5aae77a0ac9c3c6b790fffe1fc7fbaebb` |
-| 形状 | 双 RTX 2080 Ti、6×192K、groups=2、INT8 KV、parallel=6 |
+| config md5 | `ea1e29598ba7e671280cafd7604cfd0b` |
+| 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
 关键生产开关：
 
@@ -62,7 +61,7 @@ STRATA_SM75_PERF=1
 
 ## 4. 最近证据
 
-### 生产 soak
+### 生产 soak（192K 基线）
 
 - 3600 秒 mixed soak：618 请求、206 waves。
 - HTTP/执行错误 0、意外 `finish_reason=length` 0、needle 失败 0。
@@ -120,6 +119,7 @@ parity 与 needle 均通过；生产不采纳。
 ## 5. 构建与测试状态
 
 - 合并后 `0.1.51` 已部署并完成运行路径验证。
+- 256K 切换已完成功能门，但 mixed soak 仍待做。
 - CTest：`151 passed / 8 skipped / 1 failed`。
 - 唯一失败是服务器缺少 Q2_0 PLE 外部资产；不能写成“全测试绿”。
 - temperature 0 parity 通过；high-effort reasoning hash 在旧引擎 A/A2 间也会变化，
@@ -134,7 +134,8 @@ parity 与 needle 均通过；生产不采纳。
 3. **满槽准入约 11.4–13.9 s**。现有上限只覆盖受控 400-token 邻居负载。
 4. **公平性覆盖窄**。只覆盖 14/41-token 输出与 96K 冷读；32K/64K、多长读、取消和真实外部
    多租户流量仍未覆盖。
-5. **外部资产例外**。Q2_0 PLE 夹具缺失；DFlash2 drafter 权重也缺失，相关路线搁置。
+5. **外部资产例外**。Q2_0 PLE 夹具缺失；DFlash2 代码与服务接线已保留，但 drafter 权重也缺失，
+   显式启用后应安全回落 MTP，相关性能路线暂不能验收。
 6. **跨 boot 噪声**。4 路聚合跨 boot 曾漂移约 9%；同会话通常以 3% 为噪声地板。
 7. **P7 未验证**。`STRATA_PF_WMMA=1` 可能改变输出，恢复后必须同时过速度与质量门。
 
@@ -171,8 +172,9 @@ parity 与 needle 均通过；生产不采纳。
 
 ## 9. 仓库与工作区
 
-- 本地工作区：`D:\temp\strata`。
-- 分支：`hw/server-adapt-0.2.3`，跟踪 `origin/hw/server-adapt-0.2.3`。
+- 当前本地收敛工作区：`/home/kali/IdeaProjects/strata`。
+- 当前分支：`refactor/sm75-cli-server`。
+- 本地收敛工作按可验证阶段提交并推送；接手时以 `git status` 和 `git log` 核对最新阶段与未完成改动。
 - 服务器实验源码：`/opt/ai/src/strata-merged-a66698c6`。
 - 工作区存在未提交源码、文档、实验说明和未跟踪文件；不得清理、回滚或覆盖用户改动。
 - 只修改与当前任务有关的最小文件，并在交付前运行离线预检、diff check 和 UTF-8 BOM 检查。

@@ -1,4 +1,4 @@
-"""Which graphics cards a model should use: ONE place for the app, `strata launch` and setup.
+"""Which NVIDIA graphics cards a model should use for the Linux CUDA server.
 
 The rule (owner decision):
 1. First try the model on ONE card (the largest) plus system RAM, the normal hybrid mode.
@@ -11,9 +11,8 @@ about SYSTEM_ROOM_GB left for the system; whatever is left would be read from th
 cards but every extra card holds its own dense layers and prompt buffers, so each one costs SPLIT_CARD_OVERHEAD_GB of that (an estimate:
 docs/MULTI_GPU.md says each card "holds the dense weights of its layers and its own prompt buffers").
 
-Cards that count: not integrated (an iGPU shares the system RAM and is ignored), at least MIN_CARD_GB of graphics memory, flagged usable by
-the caller's own driver checks (NVIDIA RTX 20 or newer, a supported AMD card, ...). A card needs SPLIT_MIN_VRAM_GB to share a model.
-Pure functions, no I/O: setup.py, strata_cli/launch and tools/strata_mcp.py import it.
+Cards that count: not integrated, at least MIN_CARD_GB of graphics memory, flagged usable by the caller's own
+NVIDIA driver checks.  A card needs SPLIT_MIN_VRAM_GB to share a model.  Pure functions, no I/O.
 """
 
 from __future__ import annotations
@@ -35,14 +34,9 @@ def _round1(x: float) -> float:
     return round(float(x) * 10) / 10
 
 
-# ---- one engine, one vendor -----------------------------------------------------------------------------------------------
-# Every Strata engine package drives the cards of ONE vendor (CUDA: NVIDIA, HIP: AMD, SYCL: Intel, Metal: Apple). A model is never split
-# across vendors, and two models at once, one per vendor, is not supported yet. So the cards offered for running and splitting are the
-# ones the engine can drive; a better card of the other vendor is mentioned in one plain line (recommend, never force).
-BACKEND_VENDOR = {"cuda": "nvidia", "hip": "amd", "sycl": "intel", "metal": "apple"}
-VENDOR_NAME = {"nvidia": "NVIDIA", "amd": "AMD", "intel": "Intel", "apple": "Apple"}
-SECOND_MODEL_SENTENCE = ("Running two models at the same time, one on each make of graphics card, is not supported yet. "
-                         "Strata runs one model at a time on the cards of one make.")
+BACKEND_VENDOR = {"cuda": "nvidia"}
+VENDOR_NAME = {"nvidia": "NVIDIA"}
+SECOND_MODEL_SENTENCE = "This server distribution runs models on NVIDIA CUDA cards only."
 
 
 def vendor_of_backend(backend: str | None) -> str | None:
@@ -55,18 +49,11 @@ def _vendor(card: dict) -> str | None:
 
 
 def pick_vendor(cards: list[dict], backend: str | None = None) -> str | None:
-    """The make of card the engine drives: the installed (or detected) engine's, else the only make among the cards that count; with more
-    than one make, NVIDIA (the engine setup picks first), else the make of the card with the most memory. None: no card names a make."""
+    """This distribution always selects NVIDIA cards."""
     named = vendor_of_backend(backend)
     if named:
         return named
-    keep, _ = usable_cards(cards)
-    makes = {_vendor(c) for c in keep if _vendor(c)}
-    if len(makes) <= 1:
-        return next(iter(makes), None)
-    if "nvidia" in makes:
-        return "nvidia"
-    return _vendor(keep[0])
+    return "nvidia"
 
 
 def for_vendor(cards: list[dict], vendor: str | None) -> tuple[list[dict], list[dict]]:
@@ -79,7 +66,7 @@ def for_vendor(cards: list[dict], vendor: str | None) -> tuple[list[dict], list[
 
 def _short_name(c: dict, vendor: str) -> str:
     n = str(c.get("name") or "graphics card")
-    for junk in ("NVIDIA GeForce ", "NVIDIA ", "AMD Radeon ", "AMD ", "Intel "):
+    for junk in ("NVIDIA GeForce ", "NVIDIA "):
         if n.startswith(junk):
             n = n[len(junk):]
             break
@@ -87,8 +74,7 @@ def _short_name(c: dict, vendor: str) -> str:
 
 
 def other_vendor_note(cards: list[dict], vendor: str | None) -> str | None:
-    """One plain line when the other make's best card is bigger than the best card the engine can use, else None:
-    "This computer also has an AMD R9700 (32 GB). The AMD build of Strata can use it - it fits bigger models." """
+    """One plain line that non-NVIDIA cards are outside this server distribution."""
     if not vendor:
         return None
     mine, others = for_vendor(usable_cards(cards)[0], vendor)
@@ -100,8 +86,8 @@ def other_vendor_note(cards: list[dict], vendor: str | None) -> str | None:
     if float(best.get("vram_gb") or 0) <= mine_best:
         return None
     other = _vendor(best)
-    return (f"This computer also has an {_short_name(best, other)} ({float(best.get('vram_gb') or 0):.0f} GB). "
-            f"The {VENDOR_NAME.get(other, other.title())} build of Strata can use it — it fits bigger models.")
+    return (f"This computer also has {_short_name(best, other)} ({float(best.get('vram_gb') or 0):.0f} GB), "
+            "but this server distribution supports NVIDIA CUDA cards only.")
 
 
 def memory_needed(variant: dict) -> float:
@@ -138,15 +124,15 @@ def verdict(f: dict) -> str:
 
 
 def _shares_memory(c: dict) -> bool:
-    """An integrated chip or a unified-memory chip (Apple, Strix Halo): its memory is the system RAM."""
-    return bool(c.get("integrated") or c.get("uma") or c.get("unified_memory") or c.get("unified_gb") or str(c.get("vendor")) == "apple")
+    """An integrated or unified-memory chip uses system RAM rather than dedicated VRAM."""
+    return bool(c.get("integrated") or c.get("uma") or c.get("unified_memory") or c.get("unified_gb"))
 
 
 def usable_cards(cards: list[dict]) -> tuple[list[dict], list[dict]]:
     """(cards that count, cards ignored with a plain reason in 'why_ignored'). Largest memory first, then the card number.
 
-    A chip that shares the system memory is ignored when the computer has a card with memory of its own (it adds nothing to it); when it is
-    the only device (a Mac, a Strix Halo PC) it is the one that counts. A card under MIN_CARD_GB cannot hold the dense weights."""
+    An integrated chip is ignored when the computer has a card with memory of its own.  A card under MIN_CARD_GB
+    cannot hold the dense weights."""
     flagged = [c for c in (cards or []) if c.get("usable") is not False]
     has_real = any(not _shares_memory(c) and float(c.get("vram_gb") or 0) >= MIN_CARD_GB for c in flagged)
     keep, ignored = [], []
@@ -170,7 +156,7 @@ def usable_cards(cards: list[dict]) -> tuple[list[dict], list[dict]]:
 
 def _name(c: dict) -> str:
     n = str(c.get("name") or f"card {c.get('index')}")
-    for junk in ("NVIDIA GeForce ", "NVIDIA ", "AMD Radeon ", "AMD "):
+    for junk in ("NVIDIA GeForce ", "NVIDIA "):
         n = n.replace(junk, "")
     return n + (f" (card {c.get('index')})" if c.get("_dup") else "")
 

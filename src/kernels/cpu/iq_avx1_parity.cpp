@@ -2,7 +2,7 @@
 // against themselves at every token count.  No GPU, no model: random blocks (every grid index and sign
 // pattern occurs) and random activations quantized the way the engine quantizes them.
 //
-//     iq_avx1_parity            IQ3_XXS/IQ3_S/IQ2_S/IQ4_XS gate/up rows and IQ4_NL/Q2_0 down rows:
+//     iq_avx1_parity            IQ3_XXS gate/up rows and IQ4_NL/Q2_0 down rows:
 //                               every row bit for bit the same kernel's one-token row (#152), and rel <= 1e-5
 //                               against ggml-cpu's vec_dot (the scalar _generic the engine runs without these).
 //     iq_avx1_parity --bench [--mb 128] [--nt 1,2,4] [--cpu N]
@@ -30,9 +30,7 @@
 #include <string>
 #include <vector>
 
-#if !defined(_WIN32)
 #include <sched.h>
-#endif
 
 namespace cpu = strata::kernels::cpu;
 using Clock = std::chrono::steady_clock;
@@ -76,8 +74,7 @@ struct Case {
 };
 
 const Case kCases[] = {
-    {18, 20, "iq3_xxs/iq4_nl"}, {21, 20, "iq3_s/iq4_nl"}, {22, 20, "iq2_s/iq4_nl"}, {23, 20, "iq4_xs/iq4_nl"},
-    {18, 42, "iq3_xxs/q2_0"},   {21, 42, "iq3_s/q2_0"},   {22, 42, "iq2_s/q2_0"},   {23, 42, "iq4_xs/q2_0"},
+    {18, 20, "iq3_xxs/iq4_nl"}, {18, 42, "iq3_xxs/q2_0"},
 };
 
 // one expert, nt tokens of quantized activations, and the reference rows
@@ -274,14 +271,12 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-#if !defined(_WIN32)
     if (cpu_pin >= 0) {
         cpu_set_t set;
         CPU_ZERO(&set);
         CPU_SET(cpu_pin, &set);
         if (sched_setaffinity(0, sizeof set, &set) != 0) std::fprintf(stderr, "pinning to CPU %d failed\n", cpu_pin);
     }
-#endif
     if (!cpu::cpu_avx1_ok()) { std::printf("iq_avx1_parity: no AVX here, the kernels would not run\n"); return 0; }
     std::printf("iq_avx1_parity: %s\n", cpu::cpu_avx1_ok() ? "AVX1 kernels checked (128-bit lanes)" : "");
     if (bench) { run_bench(mb, nts); return failures != 0; }

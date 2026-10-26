@@ -3,9 +3,9 @@
 //
 //     build/expdec_bench [reps = 300] [device = -1 (all)] [groups = 20] [pairs = all] [choices = def,dec,dec:r2,dec:b4,dec:r2:b4] [shape = real]
 //
-// The model's routed expert formats at its geometry (n_embd 2560, n_ff 640): gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS
-// (18), IQ3_S (21), IQ2_S (22); down IQ4_NL (20), Q2_0 (42).  `pairs` is a comma list of gu/down type ids ("21/20,16/42")
-// or "all" (the 10 pairs).  `choices` is a comma list of kernel choices:
+// The production expert formats at the model's geometry (n_embd 2560, n_ff 640): IQ3_XXS (18) gate/up with IQ4_NL
+// (20) or Q2_0 (42) down, plus the Q8_0 (8/8) fallback. `pairs` is a comma list of gu/down ids ("18/20,18/42") or "all"
+// (the three pairs). `choices` is a comma list of kernel choices:
 //   def                     the default kernels (STRATA_EXPDEC off); the reference for the bitwise check
 //   dec[:r<n>][:d<n>][:b<n>][:w<n>][:x<n>][:g<n>][:h<n>][:m<n>]
 //                           EXPDEC with r = gate/up rows per lane (1, 2), d = down rows per lane (1, 2, 4), b = the
@@ -52,12 +52,12 @@ constexpr int kEmbd = 2560, kFf = 640, kTop = 10, kMaxT = 4;
 constexpr int kMaxEntries = kMaxT * kTop;
 
 struct Pair { int gu, d; };
-const Pair kModelPairs[] = { {16, 20}, {17, 20}, {18, 20}, {21, 20}, {22, 20}, {16, 42}, {17, 42}, {18, 42}, {21, 42}, {22, 42} };
+const Pair kModelPairs[] = { {18, 20}, {18, 42}, {8, 8} };
 
 const char* type_name(int t) {
     switch (t) {
-        case 16: return "IQ2_XXS"; case 17: return "IQ2_XS"; case 18: return "IQ3_XXS"; case 21: return "IQ3_S";
-        case 22: return "IQ2_S"; case 20: return "IQ4_NL"; case 42: return "Q2_0"; default: return "?";
+        case 18: return "IQ3_XXS"; case 8: return "Q8_0"; case 20: return "IQ4_NL"; case 42: return "Q2_0";
+        default: return "?";
     }
 }
 int qk_of(int t) { return t == 20 ? 32 : t == 42 ? 64 : 256; }
@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
         if (!gu || !down) std::printf("# warning: EXPDEC has no %s kernel for pair %d/%d: that phase runs the default\n",
                                       !gu ? "gate/up" : "down", p.gu, p.d);
     }
-    for (const char* name : {"STRATA_NO_SUB16_GU", "STRATA_EXPERT_V2", "STRATA_OLD_IQ_MMVQ", "STRATA_EXP_MODE"}) {
+    for (const char* name : {"STRATA_NO_SUB16_GU", "STRATA_OLD_IQ_MMVQ", "STRATA_EXP_MODE"}) {
         const char* v = std::getenv(name);
         if (v != nullptr && v[0] != '\0' && v[0] != '0') std::printf("# warning: %s is set, the kernel choice is bypassed\n", name);
     }
