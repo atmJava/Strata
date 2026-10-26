@@ -365,7 +365,8 @@ if(STRATA_ENABLE_CUDA)
   add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
     src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp src/core/dflash2.cpp
-    src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
+    src/core/conversation_copy.cpp src/core/conversation_snapshot.cpp src/core/conversation_state.cpp
+    src/core/conversation_memory.cpp src/core/peer_experts.cpp
     src/core/vmm.cpp src/core/conversation_file.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
@@ -467,6 +468,22 @@ if(STRATA_ENABLE_CUDA)
     add_test(NAME conversation_validation_test COMMAND conversation_validation_test)
     set_tests_properties(conversation_validation_test PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 120)
     if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      add_executable(conversation_copy_resources_test
+        tests/core/conversation_copy_resources_test.cpp src/core/conversation_copy.cpp)
+      target_include_directories(conversation_copy_resources_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      find_package(Threads REQUIRED)
+      target_link_libraries(conversation_copy_resources_test PRIVATE Threads::Threads strata_warnings)
+      target_link_options(conversation_copy_resources_test PRIVATE
+        -Wl,--wrap=cudaGetDevice -Wl,--wrap=cudaSetDevice
+        -Wl,--wrap=cudaStreamCreateWithFlags -Wl,--wrap=cudaStreamSynchronize
+        -Wl,--wrap=cudaStreamDestroy -Wl,--wrap=cudaStreamWaitEvent
+        -Wl,--wrap=cudaEventCreateWithFlags -Wl,--wrap=cudaEventRecord
+        -Wl,--wrap=cudaEventDestroy -Wl,--wrap=cudaMemcpyAsync
+        -Wl,--wrap=cudaGetLastError)
+      add_test(NAME conversation_copy_resources_test COMMAND conversation_copy_resources_test)
+      set_tests_properties(conversation_copy_resources_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 60)
       add_executable(conversation_transfer_test src/core/conversation_validation_test.cpp)
       target_compile_definitions(conversation_transfer_test PRIVATE CONVERSATION_TEST_TRANSFERS)
       target_link_options(conversation_transfer_test PRIVATE

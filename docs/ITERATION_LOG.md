@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-85 · 会话复制的线程私有 CUDA 资源在退出时释放
+
+- 目标 / 指标：`conversation_copy.hpp` 为每个调用线程、每张 CUDA 卡延迟创建的非阻塞复制 stream 和排序 event，
+  必须在构造失败路径正确回收，并在线程退出时于所属设备同步、销毁，不能依赖整个进程退出。
+- 假设与预期：原实现把两个 thread-local vector 标注为“never destroyed: process lifetime”。检查点阶段线程和
+  临时图启动线程正常退出后，其每卡 stream/event 仍占用驱动资源；构造失败时也存在半发布风险。
+- 为什么选这条路线：把非模板实现移到 `conversation_copy.cpp`，用线程本地 RAII 对象统一持有每张卡的
+  stream/event；析构按设备切换、同步并销毁两项句柄。成功路径仍复用同一组句柄，复制顺序、同步语义和
+  `order_after_queued()` 的 legacy-stream 依赖不变。
+- 改动与实验：新增无 GPU 的 link-wrap 回归，记录创建、同步、排序和销毁调用；工作线程连续执行同步复制、
+  queued 复制和 legacy-stream 排序，退出后验证每卡只创建一个 stream/event 且各销毁一次。同步检查使用
+  C++20、`-Wall -Wextra -Werror`。
+- 判决：采纳。线程私有复制资源现在归线程所有，正常退出和短生命周期 helper 都会回收。
+- 生产状态与回滚：未改复制目标、K/V/checkpoint 字节、同步时点、CUDA 流属性或请求行为；单提交可回退。
+- 未验证：本机没有 `nvcc`、CUDA 驱动或 RTX 2080 Ti，未在真实多卡上下文触发线程退出和驱动销毁；主机
+  link-wrap 只验证所有权调用序列，不能替代设备上的资源计数。
+- 下一步与理由：继续检查正常路径由进程退出兜底的所有 CUDA stream/event/graph，优先处理可按线程或对象
+  明确归属的资源。
+
 ## I-20261027-84 · stage 计时 event 的失败与退出清理
 
 - 目标 / 指标：session 分层 stage 回放和 `--stage-timing` 诊断在 event 创建中途失败时，必须回收已创建

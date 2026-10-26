@@ -19,34 +19,13 @@ namespace strata::core::conversation_detail {
 /// device, and while another thread captures a graph on one (a drafter or a stage worker), HIP refuses it with
 /// "operation would make the legacy stream depend on a capturing blocking stream".  The caller's contract is
 /// unchanged: the device was synchronized before the copy (the copy itself is complete on return).
-/// private_stream: this thread's stream on the current device, created on first use.
-inline cudaError_t private_stream(cudaStream_t& s) {
-    int dev = 0;
-    cudaError_t e = cudaGetDevice(&dev);
-    if (e != cudaSuccess) return e;
-    thread_local std::vector<cudaStream_t> streams;
-    if (dev < 0) dev = 0;
-    if ((size_t) dev >= streams.size()) streams.resize((size_t) dev + 1, nullptr);   // never destroyed: process lifetime
-    if (!streams[(size_t) dev]) {
-        e = cudaStreamCreateWithFlags(&streams[(size_t) dev], cudaStreamNonBlocking);
-        if (e != cudaSuccess) { streams[(size_t) dev] = nullptr; return e; }
-    }
-    s = streams[(size_t) dev];
-    return cudaSuccess;
-}
+/// private_stream: this thread's stream on the current device, created on first use.  Its matching event and
+/// both handles are released when the thread exits; see conversation_copy.cpp.
+cudaError_t private_stream(cudaStream_t& s);
 
 /// `queued`: the copy is only queued on the private stream, and the caller synchronizes the device (or orders a
 /// later launch after it with order_after_queued) before anything reads the target or writes the source.
-inline cudaError_t copy_nonblocking(void* dst, const void* src, size_t bytes, bool queued = false) {
-    cudaStream_t s = nullptr;
-    cudaError_t e = private_stream(s);
-    if (e != cudaSuccess) return e;
-    e = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDefault, s);
-    if (e != cudaSuccess || queued) return e;
-    e = cudaStreamSynchronize(s);
-    core::progress_beat();   // #2049: a parked conversation is many of these; each one that lands is progress
-    return e;
-}
+cudaError_t copy_nonblocking(void* dst, const void* src, size_t bytes, bool queued = false);
 
 /// #2049 #2065 #1971: a host-to-host copy that tells the watchdog it is moving.  Parked state (the running
 /// checkpoints, the K/V segments) sits in ordinary pageable memory for the whole session; when the OS has written
@@ -99,23 +78,6 @@ inline std::vector<ConversationCheckpoint> copy_checkpoints_beating(const std::v
 
 /// Work queued on the legacy stream after this call starts after every copy this thread queued on the current
 /// device's private stream (an event the legacy stream waits for; no host wait).
-inline cudaError_t order_after_queued() {
-    cudaStream_t s = nullptr;
-    cudaError_t e = private_stream(s);
-    if (e != cudaSuccess) return e;
-    int dev = 0;
-    e = cudaGetDevice(&dev);
-    if (e != cudaSuccess) return e;
-    thread_local std::vector<cudaEvent_t> events;
-    if (dev < 0) dev = 0;
-    if ((size_t) dev >= events.size()) events.resize((size_t) dev + 1, nullptr);    // never destroyed: process lifetime
-    if (!events[(size_t) dev]) {
-        e = cudaEventCreateWithFlags(&events[(size_t) dev], cudaEventDisableTiming);
-        if (e != cudaSuccess) { events[(size_t) dev] = nullptr; return e; }
-    }
-    e = cudaEventRecord(events[(size_t) dev], s);
-    if (e != cudaSuccess) return e;
-    return cudaStreamWaitEvent(nullptr, events[(size_t) dev], 0);
-}
+cudaError_t order_after_queued();
 
 } // namespace strata::core::conversation_detail

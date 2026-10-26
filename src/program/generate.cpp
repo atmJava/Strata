@@ -1659,10 +1659,11 @@ private:
 };
 
 /// STRATA_CKPT_THREADS: runs job(0) on the calling thread and job(k), k = 1..n-1, on persistent thread k at the same
-/// time, and returns when all have.  The threads live as long as this object: a short-lived thread would leave its
-/// private copy stream behind on every device it used (conversation_detail::copy_nonblocking).  A thread inherits the
-/// host thread's one CPU (aux_cpus.hpp), where the copies would only take turns, so each first goes to the aux CPUs
-/// (--aux-cpus) or else to every CPU the process may use.  One caller at a time; a job does not throw.
+/// time, and returns when all have.  The threads live as long as this object to avoid repeated thread startup and
+/// affinity changes; their private CUDA streams and events are released when the threads exit
+/// (conversation_detail::copy_nonblocking).  A thread inherits the host thread's one CPU (aux_cpus.hpp), where the
+/// copies would only take turns, so each first goes to the aux CPUs (--aux-cpus) or else to every CPU the process
+/// may use.  One caller at a time; a job does not throw.
 class StageThreads {
 public:
     StageThreads() = default;
