@@ -14,6 +14,7 @@ int host_frees = 0;
 int device_aliases = 0;
 bool fail_host_alloc = false;
 bool fail_device_alias = false;
+bool fail_host_free = false;
 bool fail_host_unregister = false;
 unsigned last_flags = 0;
 
@@ -25,7 +26,7 @@ void check(bool condition, const char* message) {
 
 void reset_counts() {
     host_allocs = host_frees = device_aliases = 0;
-    fail_host_alloc = fail_device_alias = fail_host_unregister = false;
+    fail_host_alloc = fail_device_alias = fail_host_free = fail_host_unregister = false;
     last_flags = 0;
 }
 
@@ -47,6 +48,7 @@ extern "C" cudaError_t __wrap_cudaHostGetDevicePointer(void** device, void* host
 }
 
 extern "C" cudaError_t __wrap_cudaFreeHost(void* host) {
+    if (fail_host_free) return cudaErrorInvalidValue;
     ++host_frees;
     std::free(host);
     return cudaSuccess;
@@ -101,6 +103,20 @@ int main() {
     strata::core::host_free_guarded(host);
     check(host_frees == 1, "the uninitialized allocation did not free exactly once");
     check(pin.sim_used == 0, "the uninitialized allocation did not return its pin budget");
+
+    reset_counts();
+    host = old_host;
+    device = old_device;
+    check(alloc_mapped_pinned(32, &host, &device), "the free-failure allocation failed");
+    check(pin.sim_used == 32, "the free-failure allocation was not charged");
+    fail_host_free = true;
+    strata::core::host_free_guarded(host);
+    check(host_frees == 0 && pin.sim_used == 32,
+          "a failed cudaFreeHost released the host pointer or its pin budget");
+    fail_host_free = false;
+    strata::core::host_free_guarded(host);
+    check(host_frees == 1 && pin.sim_used == 0,
+          "a retried cudaFreeHost did not release the pointer and its pin budget");
 
     reset_counts();
     fail_device_alias = true;

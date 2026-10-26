@@ -3,6 +3,21 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-117 · free 失败保留映射与预算
+
+- 目标 / 指标：`cudaFreeHost` 失败时，guarded free 不能把指针当成已释放，也不能提前归还模拟 pin 预算；同一指针
+  在驱动恢复后再次释放应成功并完成扣账。
+- 假设与预期：新的 iterator 扣账只在驱动成功时执行，但缺少直接故障测试；若 wrapper 先计数或预算先减，仍可能
+  在失败时产生假释放。
+- 为什么选这条路线：在现有 `mapped_host_test` 注入一次 free failure，检查 free 次数与 `sim_used` 都不变，再关闭
+  注入重试同一 host 块，验证只释放一次并归零。
+- 改动与实验：普通及 ASan/UBSan `mapped_host_test` 通过，覆盖 successful free、failed free、retry、register 与
+  failed unregister。
+- 判决：采纳。host free 的失败和重试语义已有主机侧直接测试。
+- 生产状态与回滚：只增加故障测试，不修改生产释放逻辑；单提交可回退。
+- 未验证：当前无 CUDA 工具链或驱动，`cudaFreeHost` 失败由 link wrapper 注入，不替代驱动级错误注入。
+- 下一步与理由：继续运行全量 Python 与主机测试，网络恢复后推送。
+
 ## I-20261027-116 · 注销失败保留 pin 预算
 
 - 目标 / 指标：`pin_unregister()` 只有 `cudaHostUnregister` 成功后才归还模拟 pin 预算；失败时必须保留原记录，后续
