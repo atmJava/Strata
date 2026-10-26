@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-29 · quant_formats 的 HTTP 响应显式关闭
+
+- 目标 / 指标：Hugging Face 模型树 JSON 和每个 GGUF range 请求都要在读取完成、空响应或解析异常时关闭
+  `HTTPResponse`/连接；工具失败后不能留下 socket 或 TLS 资源。
+- 假设与预期：`RangeFile._fill()` 对 `urlopen(...).read()` 的临时响应没有显式 owner，`hf_headers()` 直接
+  `json.load(urlopen(...))`；完整读取通常会释放连接，但异常、短读和策略差异不应依赖垃圾回收。
+- 为什么选这条路线：它是只读检查工具，HTTP 行为可完全 mock；修复不改变 range 大小、重试语义、输出 JSON 或
+  GGUF 解析。
+- 改动与实验：两处改为 `with urllib.request.urlopen(...) as response`，分别读取 bytes 和 JSON。新增 mock
+  响应测试，断言连续两次 range 请求都已关闭，并验证 tree 响应在 header 构造前关闭。
+- 结果：`python -m pytest -q tools/test_quant_formats.py` 为 `2 passed`；`compileall` 与 `git diff --check`
+  通过。没有访问真实 Hugging Face 网络。
+- 判决：采纳。所有该工具的 HTTP 响应都有明确的上下文所有权。
+- 生产状态与回滚：未改服务；仅维护工具的网络读取方式，单提交可回退。未验证真实 TLS reset、重定向或大型模型树。
+- 学到什么：HTTP 响应不是 JSON/bytes 本身；即使 `.read()` 成功返回，也应由请求点显式结束传输。
+- 下一步与理由：检查同类基准/下载工具中对 `HTTPError` 和本地文件句柄的隐式关闭，并继续补充资源回归。
+
 ## I-20261027-28 · 非透传图片规范化的 Pillow 图像释放
 
 - 目标 / 指标：`Vision.normalize()` 处理 EXIF 旋转、模式转换和透明图像扁平化时，源图、旋转副本、拆分 band、

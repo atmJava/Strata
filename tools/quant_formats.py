@@ -44,7 +44,8 @@ class RangeFile(io.RawIOBase):
         while self.buf_at + len(self.buf) < need_to:
             start = self.buf_at + len(self.buf)
             req = urllib.request.Request(self.url, headers={"Range": f"bytes={start}-{start + self.CHUNK - 1}"})
-            data = urllib.request.urlopen(req, timeout=120).read()
+            with urllib.request.urlopen(req, timeout=120) as response:
+                data = response.read()
             if not data:
                 raise EOFError(self.url)
             self.buf += data
@@ -68,7 +69,8 @@ class Header(G.GGUFFile):
 
 
 def hf_headers(repo: str, rev: str, d: str) -> list[Header]:
-    tree = json.load(urllib.request.urlopen(f"https://huggingface.co/api/models/{repo}/tree/{rev}/{d}", timeout=60))
+    with urllib.request.urlopen(f"https://huggingface.co/api/models/{repo}/tree/{rev}/{d}", timeout=60) as response:
+        tree = json.load(response)
     out = []
     for e in sorted(tree, key=lambda e: e["path"]):
         if e["type"] == "file" and e["path"].endswith(".gguf"):
