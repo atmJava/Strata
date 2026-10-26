@@ -512,6 +512,12 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds, De
 
 void PinnedArena::register_slices(std::atomic<int>& ready) {
     const int n = (int) bounds_.size() - 1;
+    struct PublishDone {
+        std::atomic<int>& ready;
+        ~PublishDone() { ready.store(INT_MAX, std::memory_order_release); }
+    } publish_done{ready};
+    // Reserve before registering a slice: a later reallocation failure must not leave a registered range unrecorded.
+    slice_starts.reserve((size_t) n);
     int i = 0;
     for (; base != nullptr && i < n; ++i) {
         const uint64_t off = bounds_[(size_t) i], len = bounds_[(size_t) i + 1] - off;
@@ -538,7 +544,6 @@ void PinnedArena::register_slices(std::atomic<int>& ready) {
             note = lr.note + "; " + note;
         }
     }
-    ready.store(INT_MAX, std::memory_order_release);   // every slice done (or given up on)
 }
 
 PinnedArena::~PinnedArena() {

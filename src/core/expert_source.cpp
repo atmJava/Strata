@@ -3,6 +3,7 @@
 #include "strata/core/foresight_swap.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/platform/aux_cpus.hpp"
+#include "strata/platform/worker_guard.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/peer_experts.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -5517,13 +5518,16 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     const int readers = unbuffered ? std::max(threads, 16) : threads;   // 16 keep a PCIe 5 drive's queue full
     LoadStats st;
     std::atomic<int> ready{0};
+    std::atomic<bool> register_failed{false};
     std::thread reg;
     if (deferred) {
         int dev = 0;
         cudaGetDevice(&dev);
-        reg = std::thread([a, &ready, dev] {
+        reg = std::thread([a, &ready, &register_failed, dev] {
             cudaSetDevice(dev);
-            a->register_slices(ready);
+            strata::platform::run_worker_nothrow("expert arena slice registration", [&] {
+                a->register_slices(ready);
+            }, register_failed);
         });
     }
     const std::atomic<int>* rp = deferred ? &ready : nullptr;

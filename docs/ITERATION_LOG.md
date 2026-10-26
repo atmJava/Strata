@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-77 · 延迟 pin 失败不泄漏注册且唤醒装载者
+
+- 目标 / 指标：`PinnedArena::register_slices()` 在逐层注册 page-locked 内存时，如果记录 vector 扩容、状态文本
+  或工作集锁定抛异常，线程不能终止进程；装载方必须从 `ready` 等待中退出，已成功注册的范围必须保留记录供
+  析构注销。
+- 假设与预期：旧顺序是“先注册，再 `slice_starts.push_back()`”。若 push 分配失败，注册已生效但没有记录，
+  析构不会注销；异常还会离开普通 `std::thread`，触发 `std::terminate()`，且 `ready` 永远等不到 `INT_MAX`。
+- 为什么选这条路线：在注册前一次预留全部 slice 记录，消除循环中的扩容失败；作用域最终对象无条件发布
+  `INT_MAX`；线程入口复用 `worker_guard`，把任何剩余异常限制在可选 pin 优化内。
+- 改动与实验：成功 slice 仍按原顺序注册并逐项发布；部分注册后失败仍由析构按 `slice_starts` 注销。装载数据、
+  页锁定成功路径、工作集锁定和 GPU 拷贝顺序不变。
+- 结果：`expert_source.cpp` 与 `pinned.cu` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA
+  shim）。`worker_guard_test` 与 `progress_wait_test` 以 10 秒超时重新运行通过。
+- 判决：采纳。pin 优化失败只降低后续 DMA 能力，不再挂死装载，也不会遗留匿名注册。
+- 生产状态与回滚：未改页锁定请求范围、部分 pin 选择、数据读取或模型结果；单提交可回退。
+- 未验证：当前无 `nvcc`/GPU，未真实注入 vector 分配失败，也未验证 33 GiB 双卡 arena 在 RTX 2080 Ti 上的
+  `cudaHostRegister` 失败与注销。
+- 下一步与理由：继续检查“注册/插入资源后才记录所有权”的顺序，优先找异常时可回收的同类路径。
+
 ## I-20261027-76 · prefill 与窗口辅助线程失败不再挂死
 
 - 目标 / 指标：可选 prefill 专家 issuer 和 verifier 下一窗口预启动线程发生任意异常时，进程不能触发
