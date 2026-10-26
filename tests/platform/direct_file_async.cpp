@@ -30,6 +30,10 @@ int main() {
               "closed handle accepted a request");
         check(f.open(name, error), error.c_str());
         check(!f.submit(1, memory, 4096, 0, error), "unaligned request accepted");
+        setenv("STRATA_TEST_DIRECT_QUEUE_FAIL", "1", 1);
+        check(!f.submit(0, memory, 4096, 0, error) && error.find("cannot queue") != std::string::npos,
+              "queue allocation failure was not reported");
+        unsetenv("STRATA_TEST_DIRECT_QUEUE_FAIL");
         for (unsigned i = 0; i < 17; ++i)
             check(f.submit(i * 4096, static_cast<char*>(memory) + i * 4096, 4096, i, error), error.c_str());
         std::vector<bool> seen(17);
@@ -47,6 +51,10 @@ int main() {
         std::jthread waker([&] { f.wake(); });
         Completion c; check(f.wait(&c, 1, 5000) == 1 && c.tag == DirectFile::WAKE_TAG, "wake lost");
         waker.join();
+        f.wake(); f.wake();
+        Completion wakes[2];
+        check(f.wait(wakes, 2, 5000) == 2 && wakes[0].tag == DirectFile::WAKE_TAG &&
+              wakes[1].tag == DirectFile::WAKE_TAG, "allocation-free wakes were lost");
         check(f.submit(0, memory, 4096, 99, error), error.c_str());
         f.close(); // Must drain outstanding buffer writes before returning.
         std::memset(memory, 0, 4096);
@@ -82,7 +90,7 @@ int main() {
         check(!f.open("/tmp/strata-direct-test-no-such-file", error), "missing file opened");
         check(!f.is_open() && !f.submit(0, memory, 4096, 102, error), "failed open left the handle usable");
         DirectFile::free_aligned(memory); unlink(name);
-        std::cout << "direct_file_async: passed closed submit, queued reads, short EOF, wake, close drain, reopen\n";
+        std::cout << "direct_file_async: passed queue failure, queued reads, short EOF, wakes, close drain, reopen\n";
         return 0;
     } catch (const std::exception& e) {
         DirectFile::free_aligned(race_memory);

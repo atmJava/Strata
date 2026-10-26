@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-62 · DirectFile 排队失败可报告，wake 不再分配
+
+- 目标 / 指标：`DirectFile::submit()` 在队列分配失败时必须返回 false 并留下可诊断错误；`wake()` 不能因 `deque` 分配失败丢失
+  唤醒或抛入调用方；未排队请求不产生 completion，已排队请求仍恰好产生一个 completion。
+- 假设与预期：旧 `submit()` 的 `queue.push_back` 直接抛异常，绕过返回 `err` 的 API；旧 `wake()` 把唤醒写进同一个会分配的
+  deque，失败时同样没有受控错误路径。
+- 为什么选这条路线：wake 只需要一个待消费计数，不需要保存 payload。改为锁内 `uint32_t wake_pending` 后，`wait()` 把它呈现为
+  原有 `WAKE_TAG` completion，既不分配又保持公开类型和消费语义；`submit()` 捕获排队失败并明确返回 false。
+- 改动与实验：wake 计数饱和防止回绕，关闭时清零；等待条件同时检查 completion 与待消费 wake。`submit()` 增加确定性注入
+  `STRATA_TEST_DIRECT_QUEUE_FAIL`，回归验证失败报告、随后正常排队、单/双 wake、关闭重开和并发 close。
+- 结果：`direct_file_async_test` 以 C++20 `-O2 -Wall -Wextra -Werror` 编译通过并运行通过。`git diff --check` 通过。未在真实
+  NVMe 掉盘、进程地址空间耗尽或 64 个 I/O worker 全部受压时运行。
+- 判决：采纳。wake 在内存分配失败下仍可送达；请求排队失败由调用方处理，不跨越 API 边界。
+- 生产状态与回滚：未改 worker 的 pread、队列顺序、completion 数据或 close drain；单提交可回退。
+- 学到什么：控制信号若只需要“发生过”，用计数即可；复用数据队列会把一个无 payload 的通知变成可失败的分配路径。
+- 下一步与理由：继续检查 PLE 持久 worker 的运行时异常边界，并完成当前完整 `serve` 回归。
+
 ## I-20261027-61 · prefill 异步任务失败由调用线程完成
 
 - 目标 / 指标：PLE 行读取、CPU expert 计算、layer-split 下一 stage 和 hand-off worker 在系统拒绝新线程时必须继续完成原工作；

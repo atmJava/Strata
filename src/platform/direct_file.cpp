@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <vector>
 
@@ -66,6 +68,7 @@ struct DirectFile::Impl {
     std::condition_variable cv_work, cv_done;
     std::deque<Pending> queue;
     std::deque<Completion> done;
+    uint32_t wake_pending = 0;
     bool stop = false;
     std::vector<std::thread> pool;
 
@@ -107,6 +110,7 @@ struct DirectFile::Impl {
         size = 0;
         done.clear();
         queue.clear();
+        wake_pending = 0;
     }
 };
 
@@ -139,6 +143,10 @@ bool DirectFile::open(const std::string& path, std::string& err) {
     } catch (const std::exception& e) {
         impl_->close_locked();
         err = "DirectFile: cannot start an I/O worker: " + std::string(e.what());
+        return false;
+    } catch (...) {
+        impl_->close_locked();
+        err = "DirectFile: cannot start an I/O worker";
         return false;
     }
     {
@@ -175,7 +183,16 @@ bool DirectFile::submit(uint64_t offset, void* buffer, uint32_t length, uint64_t
             err = "DirectFile: not open";
             return false;
         }
-        impl_->queue.push_back(Pending{offset, buffer, length, tag});
+        try {
+            if (std::getenv("STRATA_TEST_DIRECT_QUEUE_FAIL") != nullptr) throw std::bad_alloc();
+            impl_->queue.push_back(Pending{offset, buffer, length, tag});
+        } catch (const std::exception& e) {
+            err = "DirectFile: cannot queue a request: " + std::string(e.what());
+            return false;
+        } catch (...) {
+            err = "DirectFile: cannot queue a request";
+            return false;
+        }
     }
     impl_->cv_work.notify_one();
     return true;
@@ -183,18 +200,22 @@ bool DirectFile::submit(uint64_t offset, void* buffer, uint32_t length, uint64_t
 
 void DirectFile::wake() {
     std::lock_guard<std::mutex> lk(impl_->mu);
-    impl_->done.push_back(Completion{WAKE_TAG, 0, true});
+    if (impl_->wake_pending != std::numeric_limits<uint32_t>::max()) ++impl_->wake_pending;
     impl_->cv_done.notify_all();
 }
 
 int DirectFile::wait(Completion* out, int max, int timeout_ms) {
     std::unique_lock<std::mutex> lk(impl_->mu);
-    if (impl_->done.empty() && timeout_ms != 0) {
-        auto ready = [&] { return !impl_->done.empty(); };
+    if (impl_->done.empty() && impl_->wake_pending == 0 && timeout_ms != 0) {
+        auto ready = [&] { return !impl_->done.empty() || impl_->wake_pending != 0; };
         if (timeout_ms < 0) impl_->cv_done.wait(lk, ready);
         else impl_->cv_done.wait_for(lk, std::chrono::milliseconds(timeout_ms), ready);
     }
     int n = 0;
+    while (n < max && impl_->wake_pending > 0) {
+        out[n++] = Completion{WAKE_TAG, 0, true};
+        --impl_->wake_pending;
+    }
     while (n < max && !impl_->done.empty()) {
         out[n++] = impl_->done.front();
         impl_->done.pop_front();
