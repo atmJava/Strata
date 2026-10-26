@@ -201,3 +201,18 @@ class HardFallback(unittest.TestCase):
         self.assertIsNone(engine.proc)
         if os.name == "posix":
             self.assertEqual(victim.returncode, -signal.SIGKILL, "it ignored SIGTERM, so only the kill ended it")
+
+
+class OwnerGuardFallback(unittest.TestCase):
+    def test_guard_thread_failure_closes_the_inherited_descriptor(self):
+        from serve import owner_guard
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(lambda: os.close(write_fd))
+        with mock.patch.object(owner_guard.os, "getpgrp", return_value=123), \
+                mock.patch.object(owner_guard.os, "getpid", return_value=123), \
+                mock.patch.object(threading.Thread, "start",
+                                  side_effect=RuntimeError("thread limit")):
+            with self.assertRaisesRegex(ValueError, "guard thread did not start"):
+                owner_guard.start(read_fd)
+        with self.assertRaises(OSError):
+            os.fstat(read_fd)

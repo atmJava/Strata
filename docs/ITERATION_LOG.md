@@ -3,6 +3,23 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-46 · owner-loss guard 线程失败关闭继承描述符
+
+- 目标 / 指标：托管服务器启动 owner-loss guard 时，如果系统拒绝新线程，必须关闭传入的继承 pipe 描述符，并以正常的启动
+  拒绝错误返回；不能留下无所有者描述符或让 `RuntimeError` 变成未处理 traceback。
+- 假设与预期：`owner_guard.start(fd)` 直接调用 `Thread.start()`。失败时 main 只捕获 `OSError/ValueError`，因此既不关 fd，
+  也不会走统一的参数错误路径。
+- 为什么选这条路线：guard 是托管服务器父进程消失后的安全边界，不能降级缺失；正确行为是 fail-closed。pid/pgrp 和 FIFO 检查保留，
+  只增加线程启动失败的显式清理与错误归一化。
+- 改动与实验：任何线程启动异常都先关闭 fd；`RuntimeError` 转成带原因的 `ValueError`，其他异常原样抛出。用真实 pipe 和 mock
+  pid/pgrp、线程启动失败断言 fd 已关闭且错误可用于启动拒绝。
+- 结果：`serve/test_lifeline.py` 为 `8 passed`；相关文件 `py_compile` 与 `git diff --check` 通过。
+- 判决：采纳。guard 无法启动时服务器明确拒绝启动，并释放继承描述符。
+- 生产状态与回滚：未改 guard 正常读取、SIGTERM/SIGKILL 升级、grace 或进程组要求；单提交可回退。未在真实线程配额耗尽或
+  SIGKILL 托管主机上运行。
+- 学到什么：核心安全监视器失败可以 fail-closed，但失败路径仍必须释放调用方刚刚移交的资源。
+- 下一步与理由：继续审查构造函数和启动事务中的描述符/临时目录所有者，再做服务生命周期综合回归。
+
 ## I-20261027-45 · 视觉编码器构造失败清理临时工作目录
 
 - 目标 / 指标：`Vision.__init__` 创建私有 scratch 目录后，只要配置转换或 encoder 启动失败，构造过程必须删除该目录和其中

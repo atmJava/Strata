@@ -41,4 +41,16 @@ def start(fd: int, on_loss=None, grace: float = 60.0) -> None:
         except OSError:
             pass
 
-    threading.Thread(target=watch, name="strata-owner-guard", daemon=True).start()
+    try:
+        threading.Thread(target=watch, name="strata-owner-guard", daemon=True).start()
+    except BaseException as exc:
+        # The caller gave this inherited descriptor to the guard; if the
+        # guard never owns it, close it here and report startup refusal
+        # through the normal ValueError path.
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        if isinstance(exc, RuntimeError):
+            raise ValueError(f"the owner-loss guard thread did not start: {exc}") from exc
+        raise
