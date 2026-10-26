@@ -5,9 +5,10 @@
 //
 // Every gate/up format the prompt path gives it (IQ2_XXS, IQ2_S, IQ1_M, and this pack's IQ4_NL / IQ3_S / IQ4_XS: 1280
 // rows of 2560) and the down products (Q2_0, and IQ4_NL: 2560 rows of 640); a group of experts with 0, 1, 63, 64, 65,
-// 200 and 300 rows (one past the 256-row chunk); the rows placed past a nonzero first bound.  The sums are FP32 on
-// tensor cores in another order than the reference, so the check is a tolerance: max |got - ref| <= 2e-3 * (max |ref|
-// of the matrix) + 1e-6.
+// 200 and 300 rows (one past the 256-row chunk); the rows placed past a nonzero first bound.  The WK=256 gate/up tile
+// needs about 83 KiB of opt-in shared memory, so it is skipped (not failed) on Turing's 64 KiB limit; sm_70's 96 KiB
+// runs it.  The sums are FP32 on tensor cores in another order than the reference, so the check is a tolerance:
+// max |got - ref| <= 2e-3 * (max |ref| of the matrix) + 1e-6.
 #include "strata/kernels/iq_kernels.hpp"
 
 #include <cuda_fp16.h>
@@ -81,7 +82,7 @@ std::vector<uint8_t> random_rows(int t, int64_t rows, int64_t n, std::mt19937& r
 }
 
 
-int run(int ty, int n_out, int K, std::mt19937& rng) {
+int run(int ty, int n_out, int K, std::mt19937& rng, bool wk256_supported) {
     const std::vector<int> rows = {0, 1, 63, 64, 65, 200, 300};
     const int E = (int) rows.size(), base = 5;
     std::vector<int32_t> bounds(E + 1);
@@ -106,6 +107,11 @@ int run(int ty, int n_out, int K, std::mt19937& rng) {
     ck(cudaMalloc(&dq, (size_t) E * n_out * K * 2), "dq");
     const int maxr = *std::max_element(rows.begin(), rows.end());
     if (!k::gemm_iq_f16_grouped(ty, dw, eb, n_out, K, dx, K, db, E, maxr, dy, n_out, nullptr)) {
+        if (!wk256_supported && (ty != 42 && !(ty == 20 && K % 256 != 0))) {
+            std::printf("%-8s %5d x %4d: skipped (needs more opt-in shared memory)\n", name_of(ty), n_out, K);
+            cudaFree(dw); cudaFree(dx); cudaFree(db); cudaFree(dy); cudaFree(dq);
+            return 0;
+        }
         std::printf("%-8s %5d x %4d: not launched\n", name_of(ty), n_out, K);
         return 1;
     }
@@ -138,6 +144,7 @@ int run(int ty, int n_out, int K, std::mt19937& rng) {
 }  // namespace
 
 int main() {
+    constexpr int kWk256Smem = 128 * (256 + 8) * 2 + 64 * (128 + 8) * 2;
     // every sm_70+ card in one process, in turn: a layer split launches the tiles on its second card after the first
     int n_dev = 0, ran = 0, fails = 0;
     cudaGetDeviceCount(&n_dev);
@@ -147,12 +154,15 @@ int main() {
         if (major < 7) continue;
         cudaSetDevice(dev);
         std::printf("device %d\n", dev);
+        int smem_optin = 0;
+        ck(cudaDeviceGetAttribute(&smem_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev), "shared memory");
+        const bool wk256_supported = smem_optin >= kWk256Smem;
         ++ran;
         std::mt19937 rng(70);
-        for (int ty : {16, 22, 29}) fails += run(ty, 1280, 2560, rng);
-        fails += run(42, 2560, 640, rng);
-        for (int ty : {20, 21, 23}) fails += run(ty, 1280, 2560, rng);   // this pack's gate/up formats, generic WK=256 path
-        fails += run(20, 2560, 640, rng);                                // the IQ4_NL down, the new WK=128 lane
+        for (int ty : {16, 22, 29}) fails += run(ty, 1280, 2560, rng, wk256_supported);
+        fails += run(42, 2560, 640, rng, wk256_supported);
+        for (int ty : {20, 21, 23}) fails += run(ty, 1280, 2560, rng, wk256_supported);
+        fails += run(20, 2560, 640, rng, wk256_supported);                // the IQ4_NL down, the new WK=128 lane
     }
     if (!ran) { std::printf("pf_wmma_parity: needs sm_70+, skipped\n"); return 77; }
     std::printf("pf_wmma_parity: %d failures on %d devices\n", fails, ran);

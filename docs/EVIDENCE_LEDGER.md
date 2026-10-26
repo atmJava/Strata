@@ -3,9 +3,14 @@
 每条记录要能追到原始日志。实验方法见 [`RULES.md`](RULES.md)；同 boot 通常按 3% 噪声地板判断，
 4 路跨 boot 漂移曾达到约 9%，小读/首字跨 boot 按约 7% 看。读代码得到的结论一律标 *静态阅读，未测*。
 
+> 台账按时间保留当时的生产地址、版本、hash、候选状态和数字，不能直接当作当前基线。
+> 当前生产与断点以 [`STATE.md`](STATE.md) 为准，当前指标与路线以 [`ROADMAP.md`](ROADMAP.md) 为准。
+
 ---
 
-## 台账索引（80 条：L-000…L-081，按编号；判决只有四类：**采纳 / 否决 / 结论 / 参考**）
+## 台账索引（88 条：L-000…L-087，按编号）
+
+> 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
 | 编号 | 日期 | 一句话结论 | 判决 |
 |---|---|---|---|
@@ -63,6 +68,9 @@
 | L-051 | 10-24 17:0x | 预设校验 `check_preset.py` 对生产配置 **OK**（4x256、groups 2x2、KV 流式、引擎形状一致）；F6 部分采纳、F7 采纳、F11/F5 搁置 | **参考** |
 | L-052 | 10-24 17:1x | 预设门负例 **6/6**（错配置必拒）；`check_preset.py` 对生产配置 OK；清单 11 项全部有判决 | **参考** |
 | L-053 | 10-25 01:2x | W3 **生产启用**（阈值 4096）：长读首 token **47.3 → 17.1 s**、短读保持 40.9 s 不假开始；bench 聚合 **130.2 tok/s**（+8%）、接受率 79.8%；G2 0.97 s、G3 ✓；2 次重启 | **采纳（启用）** |
+| L-054 | 10-25 01:3x | A-B-A 闭环：回滚 A 实测（短 42.3 s / 长 36.3 s，G4 ✓）→ 再启用 B（短 35.9 s / 长 **17.7 s**）；3 流冷读首 token 8.0 s（唯一提示词，修正缓存假象） | **参考** |
+| L-055 | 10-25 02:2x | R11 开关修复部署（引擎 `383b426a`）：短读 40.68 s 不暂存、长读首 17.89 s；**邻居窗口停顿 3.43 s**（>1 s，新发现）；S0 完成 | **参考** |
+| L-056 | 10-25 20:4x | V0 准备批：现网四件实测（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）；现网 server 是 hybrid 且 `52b84d54` 是 patch 树 hash；harness 2 红转绿、补丁追平 `46d12fa9`；S2 探针代价 1.36–1.40 µs/请求；回滚包字节核对（停机级未演练）；0 构建 0 重启 | **参考** |
 | L-057 | 10-25 13:0xZ | V1 免停机批：HEAD `2294d4de` 在实验树构建 7m01s / 0 错（引擎 0.1.49.1、md5 `84a0d410`）；矩阵 5 项全 PASS（单测 61 passed / 10 skipped、isa_guard 2.36 s、64/256 锁死、staged wedge 3 passed）；首跑 12 failed 全是 venv 缺 `jinja2`/`regex` | **结论** |
 | L-058 | 10-25 13:4xZ | V2a 窗口：0.1.49.1 + 0.2.3 自包含树上线（引擎 `84a0d410`、server `b6b695a1`、launcher `0eeee160`，config 未动）；V2 矩阵 4 项全 PASS；S0c 未达（前提不成立：引擎被杀 server 不退出，无自动重启，请求 503 直到手动重启，health 仍 200） | **结论** |
 | L-059 | 10-25 14:0xZ | V2b fused A-B：22K 读 `prompt_ms` 中位 A 10968.9 / B 11035.6（+0.61%，<3%）；去首跑 +0.46%；文本 sha 相同（parity 过）；臂后已恢复默认（config 与快照逐字节一致） | **否决** |
@@ -88,9 +96,12 @@
 | L-079 | 10-26 06:1x | P4-2000 ms：首次代码响应 5.25 s，重复 A-B-A 回到 41.80 s；固定加长窗口不是稳定机制 | **否决** |
 | L-080 | 10-26 07:2x | P4-1600 ms + 短请求准入优先的一小时 soak：606 请求零错误，代码 4.42 s；wave 门限过，单请求 96K 中位 +4.14% 仍越界 | **候选** |
 | L-081 | 10-26 08:2x | `STRATA_QSA_SLOTS=1` 在 4/6 路交错 A-B 中未稳定复现收益，最终相邻臂还慢 0.49% | **否决** |
-| L-056 | 10-25 20:4x | V0 准备批：现网四件实测（引擎 `383b426a` / server `a3c7df58` / launcher `9b6bf792` / config `6c362d01`）；现网 server 是 hybrid 且 `52b84d54` 是 patch 树 hash；harness 2 红转绿、补丁追平 `46d12fa9`；S2 探针代价 1.36–1.40 µs/请求；回滚包字节核对（停机级未演练）；0 构建 0 重启 | **参考** |
-| L-055 | 10-25 02:2x | R11 开关修复部署（引擎 `383b426a`）：短读 40.68 s 不暂存、长读首 17.89 s；**邻居窗口停顿 3.43 s**（>1 s，新发现）；S0 完成 | **参考** |
-| L-054 | 10-25 01:3x | A-B-A 闭环：回滚 A 实测（短 42.3 s / 长 36.3 s，G4 ✓）→ 再启用 B（短 35.9 s / 长 **17.7 s**）；3 流冷读首 token 8.0 s（唯一提示词，修正缓存假象） | **参考** |
+| L-082 | 10-26 03:0xZ | sm_75 共享内存/TQ overlay 修复后：CTest 151/8/1（仅缺外部 PLE 资产）、五臂 A-B-A 单路 +3.6%、4 路 −0.3%；修复版 `a09d78b1` 可部署，尚未做自身 soak | **结论** |
+| L-083 | 10-26 05:4xZ | 新引擎 `a09d78b1` 自身 1 小时 mixed soak：618 请求零错误、零意外 length、needle 全对，RSS 后段平台、swap 未用；T-probe 通过；P4 严格归因待补 | **采纳/候选** |
+| L-084 | 10-26 06:1xZ | 新引擎同 boot A-B-A：代码 41.188→5.074 s（−87.7%），96K by_kind/wave +2.761%/+2.202%，短 JSON 3.980 s；P4 采纳但余量小 | **采纳** |
+| L-085 | 10-26 06:2xZ | P5：96K 冷读 GPU timeline 中位 32.653 s、phase 总墙钟 35.441 s，host staging 仅 0.341 s；成本主要在 GPU 计算，timing 工装开销 +0.72% | **结论** |
+| L-086 | 10-26 06:5xZ | P6 `STRATA_PA_V2T=1`：同 boot A-B-A 全门禁通过但 engine read/wall 只改善 2.346%/2.297%，低于 3%，生产不采纳 | **未定** |
+| L-087 | 10-26 06:5xZ | P7 `STRATA_PF_WMMA=1`：A1 首个请求期间被用户中断，无有效 JSONL/summary；实验暂停、待从全新 A1 重跑 | **结论** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -2884,3 +2895,345 @@ B 为 QSA slots on；臂按 A-B-A 与 B-A-B-A 交错，用相邻与合并结果�
   （sha256 `3d18619836798b91ecc6a83ba4c726f5aae77a0ac9c3c6b790fffe1fc7fbaebb`）；
 - `/opt/ai/tmp/QSA-SLOTS-20261026T0023Z/strata-022-B-qsa.json`
   （sha256 `89f97a283816e6c9d7de13cad6a59799c6449fea9654ed949837b29237356b58`）。
+
+## L-082 sm_75 合并引擎修复后通过测试、正确性与五臂 A-B-A
+
+**判定**：**结论**。合并后的 `0.1.51` 在修复 sm_75 与测试基础设施问题后，测试例外可解释、
+temperature 0 输出一致、性能不劣于旧生产，可作为部署候选；进入生产前仍需运行路径 T-probe，
+部署后仍需独立一小时 soak。此结论替代 L-068 中把整个 `0.1.51` 判为吞吐回退候选的临时概括。
+
+**实验条件**：源码 `/opt/ai/src/strata-merged-a66698c6`，HEAD
+`a66698c6a8d1656fe7b59c8a7561361c35e18209`，双 RTX 2080 Ti sm_75，CUDA 13，
+6×192K，INT8 KV，生产环境 12 项 env 校验开启。
+
+**修复**：
+
+- `src/kernels/cuda/iq_kernels.cu` 查询每张卡的
+  `cudaDevAttrMaxSharedMemoryPerBlockOptin`。sm_75 只有 64 KiB，而 `WK=256` grouped tile 需要
+  约 83 KiB；现在在入口拒绝该组合，不让 launch 失败后留下 sticky CUDA error。
+- 三个 `cudaFuncSetAttribute` 结果都检查并在失败时消费错误；`attr[dev]` 只在全部必要属性
+  成功后设置，避免第二张卡或后续 prompt 路径继承假成功状态。
+- `src/kernels/pf_wmma_parity.cpp` 使用真实设备上限，对 sm_75 不支持的 `WK=256` 组合明确 skip；
+  `WK=128` 的 Q2_0 与 IQ4_NL down 在两张卡上仍执行并通过数值检查。
+- `cmake/ggml_tq_overlay_test.cmake` 显式 `cmake_policy(SET CMP0057 NEW)`，修复独立脚本使用
+  `IN_LIST` 时的 policy 错误。
+
+**测试**：
+
+| 项 | 结果 | 说明 |
+|---|---|---|
+| 全量 CTest | `151 passed / 8 skipped / 1 failed` | 唯一失败 `ple_parity` 缺 Q2_0 PLE 模型和捕获夹具 |
+| server 离线测试 | `73 passed / 10 skipped` | 无失败 |
+| `pf_wmma_parity` | 通过 | sm_75 跳过 `WK=256`，`WK=128` 两卡全跑 |
+| `ggml_tq_overlay` | 通过 | CMP0057 修复后 CTest 正常 |
+
+8 个 skip：`gr_upmix_parity`、`gdn_chunk_parity`、`prefill_fused_moe_test`、
+`prefill_fused_iq_test`、`expert_multi_test`、`native_hadamard_test`、`tq_cpu_parity`、
+`tq_cpu_parity_avx2`。服务器只有 IQ3 权重，不能用它冒充缺失的 Q2_0 PLE 资产；
+因此本结论是带显式平台/资产例外的“通过”，不是“全部测试绿”。
+
+**五臂 A-B-A**：
+
+| 臂 | 引擎 | 单路 tok/s | 4 路聚合 tok/s | cold prefill s |
+|---|---|---:|---:|---:|
+| A | 旧 `8d680c69` | 68.8 | 133.9 | 2291 |
+| B | 新 `a09d78b1` | 71.4 | 127.1 | 2305 |
+| A2 | 旧 `8d680c69` | 68.7 | 130.4 | 2248 |
+| B2 | 新 `a09d78b1` | 71.2 | 132.9 | 2297 |
+| A3 | 旧 `8d680c69` | 72.2 | 128.6 | 2302 |
+
+按同引擎合并中位，单路旧 `68.8`、新 `71.3`（`+3.6%`）；4 路旧 `130.4`、新 `130.0`
+（`-0.3%`）；cold prefill 约 `+0.4%`。第一轮 4 路看似 `-5.1%`，第二轮反向，判为 boot/采样
+噪声；没有把它写成稳定回退。
+
+**正确性**：temperature 0 的五次 answer hash 均为 `b17bc92de6ba8a97`。high-effort reasoning hash
+在旧引擎 A/A2 之间也会变化，不能在该生产形状下作为稳定 parity；此项记录为未覆盖，不写成通过。
+
+**版本与路径**：修复后新引擎 md5 `a09d78b13c39378d1532a024b983d286`、版本 `0.1.51`；
+五臂结束后已恢复旧生产 `8d680c695f1a6a3d9d202c61d17879f2`，A2 T-probe 通过，health 200。
+部署快照 `/opt/ai/tmp/pre-v026-20261026T025109Z` 的 `MANIFEST.sha256` 全部 OK。
+
+**没测什么**：修复版自身尚未做一小时 soak；T-probe 只证明恢复后的旧引擎，部署后必须再对新
+`a09d78b1` 做一次运行路径 probe。32K/64K 混合公平性、真实外部流量与取消场景也不在本条覆盖范围。
+
+**原始证据**：
+
+- `/opt/ai/logs/build75-new-ctest-after-fixes-20261026T031207Z.log`
+  （sha256 `64b1c94eb84d5942854eff2ae4d30c368183be952a4e85a1a860d5bfb6a111bb`）
+- `/opt/ai/logs/pf_wmma-fixed2-20261026T030555Z.log`
+- `/opt/ai/logs/ggml-tq-overlay-20261026T030907Z.log`
+- `/opt/ai/logs/arm-v026-A.log`、`arm-v026-B.log`、`arm-v026-A2.log`、
+  `arm-v026-B2.log`、`arm-v026-A3.log`
+- `/opt/ai/logs/T-probe-v026-B-20261026T032634Z.json`
+- `/opt/ai/logs/T-probe-v026-A2-20261026T033233Z.json`
+
+## L-083 新引擎与 staged 2048 通过自身一小时 soak；P4 仍需严格归因
+
+**判定**：**采纳**修复版 `0.1.51` / `a09d78b1` 作为生产引擎，并**采纳** staged 读取阈值 2048
+作为当前生产基线。P4 的 `1600 ms lead-in + STRATA_ADMIT_SHORT_FIRST=2048` 组合仍为**候选**：
+稳定性已经通过，但尚无同一新引擎 boot 上相对 400 ms、不启用短请求优先的完整 A-B-A 归因。
+
+**实验形状**：双 RTX 2080 Ti sm_75、6×192K、INT8 KV、groups=2、parallel=6。3600 秒
+2/3/4 路混合流量，请求包含短 JSON、约 1.85K-token 代码、agent tool turn 与 32K/64K/96K
+冷 needle；前缀唯一，避免 prompt cache 隐藏冷读成本。
+
+**运行路径与配置**：
+
+- engine md5 `a09d78b13c39378d1532a024b983d286`，version `0.1.51`；
+- server md5 `de09cffdac39ff150a689bd3a44cc242`；
+- launcher md5 `342710595d34936f40e40233f5b62837`；
+- config md5 `05c9d2539cd92b6c8e0b93ff8a48ce0e`；
+- 运行态 `STRATA_MP_STAGED_READ_MIN_TOKENS=2048`、
+  `STRATA_PIPED_DECODE_LEADIN_MS=1600`、`STRATA_ADMIT_SHORT_FIRST=2048`。
+
+第一次 post-soak T-probe 因远端期望 profile 仍写 4096 而失败，证明期望值门禁有效；只把无密钥
+profile 原子同步为 2048 后重跑，没有改动探针或放宽比较。最终 `problems=[]`、health 200、
+`loaded=true`。
+
+**稳定性结果**：
+
+| 项 | 结果 |
+|---|---|
+| 请求 / waves | 618 / 206 |
+| HTTP 或执行错误 | 0 |
+| 意外 `finish_reason=length` | 0 |
+| needle 失败 | 0 |
+| finish | 530 `stop`、88 `tool_calls` |
+| 最大 running / outside slots | 4 / 4 |
+| RSS 后三段中位 | 51.33 / 51.65 / 51.81 GiB |
+| RSS 末值 / 最大值 | 51.706 / 52.026 GiB |
+| MemAvailable 末值 / 最小值 | 7.477 / 7.159 GiB |
+| swap | 全程 4096 MiB 未使用 |
+
+启动阶段 RSS 从 `38.612 GiB` 上升到约 52 GiB，但 15 分钟后进入平台，最大值之后还回落，因此
+没有把它写成持续泄漏；可用内存仍偏紧，后续继续监控但当前不触发回滚。
+
+**分档中位**：
+
+| kind | 请求数 | TTFT | wall | decode tok/s |
+|---|---:|---:|---:|---:|
+| short_json | 257 | 608 ms | 6.025 s | 2.6 |
+| medium_code | 154 | 2.897 s | 6.794 s | 10.4 |
+| long_32k | 52 | 18.948 s | 19.297 s | 60.6 |
+| long_64k | 26 | 26.828 s | 27.222 s | 59.95 |
+| long_96k | 25 | 41.337 s | 41.780 s | 59.6 |
+
+混合 soak 的短 JSON 中位 `6.025 s` 不能替代固定 fairness 判据中的约 4 秒结果；它只证明该形状
+下稳定性。P4 正式采纳仍要求同一 boot 的 A-B-A：A 为 400 ms 且不启用短请求优先，B 为 1600 ms
+加 2048 短请求优先，两臂均 staged 2048。
+
+**回滚**：`/opt/ai/tmp/pre-v026-20261026T025109Z/` 的 `MANIFEST.sha256` 全部通过。
+
+**没测什么**：没有覆盖随机到达顺序、多长读同时到达、取消、192K 满上下文、真实外部多租户，
+也没有在本新引擎 boot 上完成 400 ms 无障碍对照。
+
+**原始证据**：
+
+- `/opt/ai/logs/P4-newengine-soak2048-20261026T044100Z.jsonl`
+  （sha256 `99b3276fe9d61638c02a8ba57a70537049e1f76daf4dcee4298c1b19e4097bbc`）
+- `/opt/ai/logs/P4-newengine-soak2048-20261026T044100Z.summary.json`
+  （sha256 `e6944400d89f388a4c0082091cea9cfcf79a3abd1909f94920738c1e4739b3aa`）
+- `/opt/ai/logs/P4-newengine-soak2048-20261026T044100Z.summary.txt`
+  （sha256 `9bb0580ac3a1a5865d872278c12d2377ef3e981144950138d20cefc40ad16394`）
+- `/opt/ai/logs/T-probe-v026-postsoak-synced-20261026T054252Z.json`
+  （sha256 `ceefe5d14a6ba36930689153b59d44e9b9317018ff7e6170777beb7b2c1d6ba5`）
+- `/opt/ai/logs/T-probe-v026-postsoak-20261026T054153Z.json`
+  （校验 profile 漂移的失败证据，sha256 `4abaac9dee036b392a97081be3616ea253aae50abefbdcebaaff6f6233f5b05d`）
+- `/opt/ai/bin/production-env-2080ti.json`
+  （sha256 `de7d42500d5d2c05c6df08121ce3e7529b33fee826ff3853587e7e287bcef25e`）
+
+## L-084 P4 严格 A-B-A 在修复版新引擎上通过，采纳但长档与短 JSON 余量都很小
+
+**判定**：**采纳** `STRATA_PIPED_DECODE_LEADIN_MS=1600` 与
+`STRATA_ADMIT_SHORT_FIRST=2048` 的组合。代码请求从 A 合并中位 `41.1875 s` 降到 B 的
+`5.074 s`（`−87.681%`）；96K by_kind 与 wave 分别为 `+2.761%` 和 `+2.202%`；短 JSON
+`3.980 s` 未越过 4 s。收益明确，但两个尾延迟指标都只剩很小的门限余量。
+
+**实验条件**：双 RTX 2080 Ti、sm_75、6×192K、INT8 KV、groups=2、parallel=6，engine
+`a09d78b1` / `0.1.51`。判据在测量前已落盘：
+`/opt/ai/logs/P4-fixed-criteria-20261026T035412Z.txt`，sha256
+`c3a208a6f37ba957153577159b360be1b0e33a792e932a67efba50f4caf56663`。
+
+**A-B-A**：
+
+| 臂 | 代码 wall | 短 JSON wall | 96K by_kind | 96K wave | 结果 |
+|---|---:|---:|---:|---:|---|
+| A1：400 ms，无优先 | 41.173 s | 3.418 s | 41.009 s | 41.176 s | 20/20 成功 |
+| B1：1600 ms，优先 2048 | **5.074 s** | **3.980 s** | 42.092 s | 42.098 s | 20/20 成功 |
+| A2：400 ms，无优先 | 41.202 s | 3.396 s | 40.913 s | 41.206 s | 20/20 成功 |
+
+合并 A1/A2 后：代码 `41.1875 s`、短 JSON `3.407 s`、96K by_kind `40.961 s`、
+96K wave `41.191 s`。相对变化：代码 `−87.681%`、短 JSON `+16.818%`、96K by_kind
+`+2.761%`、96K wave `+2.202%`。三臂均为 HTTP/执行错误 0、意外 `length` 0、needle 失败 0。
+
+**运行路径**：三臂切换后均从 `/proc/<pid>/environ` 核对 lead-in、staged 阈值与短请求优先；
+最终恢复 B 配置后 T-probe `problems=[]`，engine `a09d78b1`、server `de09cffd`、
+launcher `34271059`、config `05c9d253`，health 200、`loaded=true`。
+
+**风险与边界**：短 JSON 只比 4 s 门限低 20 ms；96K 单请求只比 3% 门限低约 0.239 个百分点。
+因此它不是“所有请求都加速”：P4 明确用短请求延迟的小幅回升换中请求完成时间。后续不能继续
+增大 lead-in 或扩大短请求优先范围，除非先证明新的尾延迟上界。
+
+**回滚**：`/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`，包含 engine、server、launcher、
+config、service drop-in、env profile 和通过的 `MANIFEST.sha256`。
+
+**没测什么**：未覆盖随机到达、多长读同时到达、取消、192K 满上下文和真实外部多租户；
+B 臂只有一组 5 波，虽然满足 A-B-A 和至少 3 波的门槛，但若后续生产指标靠近门限应优先复测。
+
+**原始证据**：
+
+- `/opt/ai/logs/P4-strict-A1-400-noadmit-20261026T054948Z.jsonl`
+  （sha256 `ad7f2feeee2a8790df18fa7ea6b8bf57db14cb6d9edce96e7278097b5c85cf13`）
+- `/opt/ai/logs/P4-strict-A1-400-noadmit-20261026T054948Z.summary.json`
+  （sha256 `48667aa4dba192afbb3a43f2f9b256431c7eb1d138f0633467bff18e363ae7a0`）
+- `/opt/ai/logs/P4-strict-B1-1600-admit2048-20261026T055653Z.jsonl`
+  （sha256 `46774f24140728a9041853cba120216628557e798d6881f986b46fc13854fd23`）
+- `/opt/ai/logs/P4-strict-B1-1600-admit2048-20261026T055653Z.summary.json`
+  （sha256 `46808901f6c3639e635b1952d977e8efdced7098f697b43bc90f725b1e016cc8`）
+- `/opt/ai/logs/P4-strict-A2-400-noadmit-20261026T060356Z.jsonl`
+  （sha256 `c2669a25a193d903ed1c97646efda83497c2c2bfca9943aa851fa9abe05d532c`）
+- `/opt/ai/logs/P4-strict-A2-400-noadmit-20261026T060356Z.summary.json`
+  （sha256 `2f6e615a800482f76b21215daeb51d44a4082323b34142b4e715c343307f41d8`）
+- `/opt/ai/logs/T-probe-P4-strict-final-20261026T061107Z.json`
+  （sha256 `26711a4cb5361f83d9e1c419d36ee2f664d976244d020c873fc4e800705b9f5a`）
+
+## L-085 P5 相位归因：96K 冷读主要耗在 GPU 计算，host staging 不是主瓶颈
+
+**判定**：**结论**。P5 只用于定位，不直接替换生产。96K 冷 prefill 的 GPU timeline 中位
+`32.653 s`、phase 总墙钟中位 `35.441 s`，而 host staging 中位仅 `0.341 s`；当前最值得继续尝试的是
+GPU prompt-attention 和专家 GEMM 路径，不是加码 host 暂存或继续缩短 staging 窗口。
+
+**实验条件**：双 RTX 2080 Ti、sm_75、6×192K、INT8 KV、groups=2、parallel=6，engine
+`a09d78b13c39378d1532a024b983d286` / `0.1.51`。每次请求使用唯一 96K prompt，避免 prompt cache
+把冷读变成命中。旧 `cold-prefill.py --96K` 生成器实际产生 `312,025` tokens，被 HTTP 400 正确拒绝，
+该次数据不计入结果；正式数组改用 `mixed-soak.task_long` 的已验证生成器。
+
+**timing 臂**：3 个唯一 prompt 的 prompt tokens 均为 `98,387`，请求墙钟
+`37.364 / 38.184 / 38.302 s`，needle 全对。汇总中位：
+
+| 指标 | 中位 |
+|---|---:|
+| GPU timeline | 32.653 s |
+| phase 总墙钟 | 35.441 s |
+| host staging | 0.341 s |
+
+主要 phase 中位：
+
+| phase | 时间 | 占 GPU timeline |
+|---|---:|---:|
+| `gemm gate/up` | 5.807 s | 17.8% |
+| `embed+steps` | 3.692 s | 11.4% |
+| `qsa attn` | 3.422 s | 10.5% |
+| `gemm down` | 3.031 s | 9.3% |
+| `hc read` | 2.830 s | 8.8% |
+| `gdn recurrence` | 2.262 s | 6.9% |
+| `gdn` | 2.055 s | 6.3% |
+| `hc write` | 1.772 s | 5.4% |
+
+**plain 对照**：3 个唯一 prompt 的 prompt tokens 为 `98,388/98,389/98,386`，请求墙钟
+`36.997/37.931/38.095 s`。engine `prompt_ms` 中位 `37.571 s`，timing 为 `37.841 s`，工装开销
+`+0.72%`，在 3% 同会话噪声地板内；timing 只保留为诊断工装，不写入生产配置。
+
+**生产恢复**：恢复后 T-probe `problems=[]`，engine `a09d78b1` / `0.1.51`、server `de09cffd`、
+launcher `34271059`、config `05c9d253`，health 200、`loaded=true`；实际进程环境已无
+`STRATA_PREFILL_TIMING`。实验前配置快照为
+`/opt/ai/tmp/pre-P5-timing-20261026T061726Z/`。
+
+**没测什么**：没有观测 NCU 级 SM 占用、HBM 带宽或 tensor-core 利用率，phase 时间是引擎 event
+口径，不能直接等同于 wall-clock 可回收利润；没有覆盖 32K/64K、并发冷读、取消和 192K 上下文。
+
+**原始证据**：
+
+- `/opt/ai/logs/P5-96k-timing-20261026T061726Z.jsonl`
+  （sha256 `4654c88c8954bf50309956866afe54c37eba719f50a9cbece18eaae00139db8a`）
+- `/opt/ai/logs/P5-96k-timing-summary.json`
+  （sha256 `08e02624655920248ef2fbc31fae09bf0f44ad8b79d70aefdb2ce58abe859d52`）
+- `/opt/ai/logs/P5-96k-plain-20261026T062418Z.jsonl`
+  （sha256 `13126253437e613502ea7cf5527a09410bfb4da9c406a51720b0fe9ede3c61d3`）
+- `/opt/ai/logs/T-probe-P5-restored-20261026T062925Z.json`
+  （sha256 `ac159ef532f4101772ad864100cf159a19db59187f1cf5cc5a165b95ad5e808b`）
+
+## L-086 P6 `STRATA_PA_V2T=1` 方向为正但未达到 3%，生产不采纳
+
+**判定**：**未定**。同一 boot 的 A-B-A 和正确性门均通过，`STRATA_PA_V2T=1` 的 engine read 与 wall
+都改善约 2.3%，方向一致但低于预注册的 3% 门槛；没有足够证据把噪声级收益写入生产。P6 配置已恢复，
+不为补门限而事后改变判据。
+
+**实验条件**：双 RTX 2080 Ti、sm_75、6×192K、INT8 KV、groups=2、parallel=6，engine
+`a09d78b13c39378d1532a024b983d286` / `0.1.51`。判据在首请求前写入
+`/opt/ai/logs/P6-fixed-criteria-20261026T063612Z.txt`，sha256
+`cd6c42b7b3013d76c9f824f78f787d793ca61f54fe21002f36239844a5c2871a`。A1/B/A2 每臂 3 个唯一
+顺序 96K prompt，均由 `mixed-soak.task_long` 生成；B 只比生产多 `STRATA_PA_V2T=1`。
+
+| 臂 | engine read 中位 | wall 中位 | 结果 |
+|---|---:|---:|---|
+| A1：生产 v1 | 37.3342 s | 37.609 s | 3/3，0 错误 |
+| B：`STRATA_PA_V2T=1` | **36.4583 s** | **36.745 s** | 3/3，0 错误 |
+| A2：生产 v1 | 37.5456 s | 37.856 s | 3/3，0 错误 |
+
+相对 A1，B 的 engine read 为 `−2.346%`、wall 为 `−2.297%`；相对 A1/A2 合并中位，分别为
+`−2.622%` 和 `−2.617%`。A2 相对 A1 只漂移 `+0.566%/+0.657%`，说明同 boot 基线可复现。
+三臂均为 0 HTTP/执行错误、0 意外 `length`、needle 3/3，health 200、`loaded=true`。
+
+**正确性**：A1/B/A2 的 greedy parity 文本 sha 都为 `b17bc92de6ba8a97`，prompt 7,663、
+completion 16；本探针直接通过。该结果只覆盖一个固定窗口，不替代后续质量集。
+
+**运行路径**：B 从 `/proc/<pid>/environ` 证明 `STRATA_PA_V2T=1`，T-probe `problems=[]`，config
+md5 为 `6fb45df03ed7a9e903459ead547fbdfe`；A2 和最终恢复都没有该 env，config 恢复为
+`05c9d2539cd92b6c8e0b93ff8a48ce0e`。快照
+`/opt/ai/tmp/pre-P6-pa-v2t-20261026T063612Z/` 的六个文件清单全部 OK。
+
+**没测什么**：3 个唯一 prompt 只能识别约 1 s 的候选差异，不能排除更细的平台内变化；没有覆盖
+32K/64K、并发、192K、取消和完整质量集。下一轮转向 P5 的最大 phase，而不是重复同一开关。
+
+**原始证据**：
+
+- `/opt/ai/logs/P6-96k-A1-20261026T063612Z.jsonl`
+  （sha256 `781f7335e7894ee0b113c76132e31a9309c36c3074ffd76bc537811686cb2a8b`）
+- `/opt/ai/logs/P6-96k-A1-20261026T063612Z.summary.json`
+  （sha256 `65fd9341561d7db736327c4af75c2e981214785a559620a6b445efa2961b2e71`）
+- `/opt/ai/logs/P6-parity-A1-20261026T063612Z.txt`
+  （sha256 `61e5f82e53df0c42cb432fae98705536bd06ea0b88b6dea10e1e382b8355a1cb`）
+- `/opt/ai/logs/P6-96k-B-20261026T063612Z.jsonl`
+  （sha256 `36b51a1f38de16c766b985b842e757bce1eb7a00c65a4da70c6acda97a15310c`）
+- `/opt/ai/logs/P6-96k-B-20261026T063612Z.summary.json`
+  （sha256 `2d2431e6e6cd8ae974e69220fa9edebd238cd177f1fe605313652d428020b7f8`）
+- `/opt/ai/logs/P6-parity-B-20261026T063612Z.txt`
+  （sha256 `631d098739b0f5600aed42a91940420a2e498bba02dd0b1881100f85668f7f31`）
+- `/opt/ai/logs/P6-96k-A2-20261026T063612Z.jsonl`
+  （sha256 `32b2ae3a1ad199468b6b31d990ea3cfad25cfefff9adfd54dea400c1360ee4c3`）
+- `/opt/ai/logs/P6-96k-A2-20261026T063612Z.summary.json`
+  （sha256 `363324581959a72f6a42754da7f4342c5f7f1aeec2a97e5379dccaef01b60213`）
+- `/opt/ai/logs/P6-parity-A2-20261026T063612Z.txt`
+  （sha256 `cd09097889874884559a791e0693c2ee3054e2d4df16ae8991b28b98a6b44f53`）
+- `/opt/ai/logs/T-probe-P6-B-runtime-20261026T063612Z.json`
+  （sha256 `d730c67c5f87482cc29d6cb07a619d3770042f5f6dc775a0d8540038eb9ddb06`）
+- `/opt/ai/logs/T-probe-P6-A2-runtime-20261026T063612Z.json`
+  （sha256 `a20e6c33281b3e5c27021ee102c90a331ac2fe98571eb5e9b4fa8680fce94de8`）
+- `/opt/ai/logs/T-probe-P6-restored-20261026T063612Z.json`
+  （sha256 `326b606341f6bfa29180b7a569b66700798ff2fd328f1d58bff75081cee596ca`）
+- `/opt/ai/tmp/P6-pa-v2t-20261026T063612Z.json`
+  （sha256 `2544fa05d45566ef66f2fff953d534dfcf85f0d2f0f16e26923f14c163e39067`）
+
+## L-087 P7 在 A1 首个请求期间被中断，没有形成有效实验结论
+
+**判定**：**结论**。P7 已完成判据预注册和生产快照，但 A1 首个请求尚未跑完就被用户中断。
+没有生成有效的 A1 JSONL 或 summary，也没有 B/A2、parity、needle 和性能比较。项目状态必须是
+**暂停/待做**，不能写成“进行中”“部分通过”或“已有方向性收益”；恢复后应从全新的 A1 重跑完整
+同 boot A-B-A。
+
+**预注册与快照**：
+
+- 判据：`/opt/ai/logs/P7-fixed-criteria-20261026T065341Z.txt`，sha256
+  `1ae40a8142a7a056e5d36c03902533c3119b896297f5510e4de0ca822ea650b6`；
+- P7 前生产快照：`/opt/ai/tmp/pre-P7-pf-wmma-20261026T065341Z`。
+
+**中断检查**：用户中断发生在 A1 首个请求期间。随后只读核对到 `strata.service` 为 active、
+`/health` 返回 200，生产配置已恢复，未发现残留 soak 进程或 P7 输出文件。该检查说明生产已恢复，
+不等于 P7 获得测量结果。
+
+**当前边界**：`STRATA_PF_WMMA=1` 会改用 FP16 tensor-core prompt experts，潜在输出变化仍必须由
+完整 greedy parity、needle 和质量门覆盖。中断前没有这些证据。
+
+**恢复条件**：用户明确恢复优化目标后，重新确认生产运行路径与 engine hash，再启动全新 A1。
+不得把本次被中断的请求补写成第一个样本。

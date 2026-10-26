@@ -3,28 +3,30 @@
 > 接手顺序：`RULES.md` → 本文件 → `ROADMAP.md` → `ITERATION_LOG.md` 最近两条。
 > 本文件只写当前断点，不重复历史、规则或完整证据。
 
-- 目标：持续优化用户可感知的推理性能、稳定性和资源效率。
-- 当前项：P4
-- 当前迭代：**长 prefill 下 1.85K 代码请求的 decode 公平性**。
-- 下一动作：先从合并后 HEAD 独立构建并验证 sm_75 引擎；随后同 boot 做 1500/1550/1600 ms
-  边界 A-B-A，并固定 96K wave 与单请求中位两种门限，再决定 P4 候选去留。
-- 当前候选：`STRATA_ADMIT_SHORT_FIRST=2048` + 1600 ms lead-in + 750 ms 等待 + ≥4096-token
-  冷读；400 ms 的 P3 E 臂和 `pre-P3-ABA.../strata-022.json` 是回滚基线。
-- 未完成采纳项：14。
+- 目标：持续优化用户可感知的推理性能、稳定性和资源效率；当前全局优化目标暂停。
+- 当前阶段：文档与记录已按 2026-10-26 的实际生产、实验和中断状态整理。
+- 当前项：P7（暂停/待做）。
+- 当前迭代：无运行中实验。P7 的 A1 在首个请求期间被用户中断，没有有效 JSONL/summary，
+  因此不得把该次执行写成进行中、完成或已获得性能结论。
+- 下一动作：等待用户明确恢复目标；恢复后 P7 必须从全新的 A1 起完整重跑 A-B-A，
+  B 只增加 `STRATA_PF_WMMA=1`，并重新从 `/proc/<engine-pid>/environ` 证明运行态。
+- 当前候选：P7 仍是未验证候选；engine read 与 wall 均需改善 ≥3%，A2 需回到 A 的 3% 内。
+  P4 生产回滚基线为 `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`，P7 前快照为
+  `/opt/ai/tmp/pre-P7-pf-wmma-20261026T065341Z/`。
+- 未完成采纳项：15。
 - 阻塞：DFlash2 drafter 权重缺失；该路线搁置，不阻塞主线。
 
 ## 生产
 
-- `strata.service` 在 `192.168.3.14:8080`，health 200（2026-10-26 HC_Q8 恢复后实测）。
-- **源码已合并上游 v0.2.6，但现产引擎仍是从旧代码构建的 0.1.49.1**：共享 RoPE +
-  concurrent-read lead-in / `8d680c69`；server `de09cffd`；launcher `0eeee160`；
-  config `05c9d253`。不能把这枚旧二进制当作合并结果。
-- 生产配置：`parallel=6`、`max_context=192000`、`STRATA_HC_Q8=1`，W3 staged read 开启，阈值 4096；
+- `strata.service` 在 `192.168.2.223:8080`，health 200（P7 中断后的恢复检查实测）。
+- **生产已部署合并引擎 `0.1.51` / `a09d78b1`**：server `de09cffd`、launcher `34271059`、
+  config `05c9d253`；自身一小时 mixed soak 与 T-probe 均通过。
+- 生产配置：`parallel=6`、`max_context=192000`、`STRATA_HC_Q8=1`，W3 staged read 开启，阈值 2048；
   lead-in 1600 ms、等待 750 ms、只处理 ≥4096-token 的冷读，短请求首准入阈值 2048。
 - `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 config 的 `env` 只会传给引擎子进程。
-- 回滚快照：`/opt/ai/tmp/pre-S0b-20261025T161013Z/`（原始 engine `84a0d410`）与
-  `/opt/ai/tmp/pre-rope-share-20261025T164500Z/`；400 ms 完整配置为
-  `/opt/ai/tmp/pre-P3-ABA-20261025T213040Z/strata-022.json`。
+- 回滚快照：当前生产优先使用 `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`；P7 前生产快照为
+  `/opt/ai/tmp/pre-P7-pf-wmma-20261026T065341Z/`。更早的 400 ms P3 配置仍保留在
+  `/opt/ai/tmp/pre-P3-ABA-20261025T213040Z/strata-022.json`，仅用于历史回退。
 
 ## 已知结果
 
@@ -32,8 +34,8 @@
   默认保持 `6×192K`。8×128K 的 +11% 以 192K→128K 上下文为代价。
 - V3-4 已完成：MTP 草稿深度 2/4/6 在噪声内，保持 4。
 - V2b fused prefill +0.61%，否决；V2c `STRATA_PIPED_CONCURRENT` 两臂无差异，S0b 仍需换机制。
-- S0b 已否决：gate 修复后并发读 3/3 触发，但邻居静默中位 ON 7.09/7.59 s、OFF 7.41 s；0.1.51
-  单路和聚合同时回退。旧引擎继续生产。
+- S0b 已否决：gate 修复后并发读 3/3 触发，但邻居静默中位 ON 7.09/7.59 s、OFF 7.41 s；
+  机制无用户收益。L-082 已撤回“整个 0.1.51 吞吐回退”的临时概括。
 - batch slot 共享 RoPE 已采纳：双卡 6×192K 省 562.4 MiB，expert slots +1.8%，吞吐差在噪声内，
   输出 parity 通过；生产源码补丁已固化。
 - C1 已完成：6 槽第 7 请求 TTFT 中位 11.84 s、slot 等待 11.42 s；8 槽第 9 请求 14.38 s、
@@ -55,20 +57,35 @@
   +15.6%/+7.3% 被否决；1200 ms lead-in 也因代码请求未改善且长档超门被否决。
 - P3 未覆盖：41-token 的 1.85K 代码请求仍为 41.51 s；当前机制只释放了 14-token 短响应，
   不能把“长读期间所有请求都公平”写成已解决。
-- P4-2000 ms 已否决：首次代码请求 5.254 s，但同 boot B2 中位回到 41.800 s，且第 1/2/3/4 波
-  TTFT 约 41 s。收益取决于准入顺序，不是稳定的窗口收益；生产已恢复 400 ms。
-- P4 候选已部署但未完全收口：1 小时 soak 为 606 请求、202 waves、0 错误、25/25 needle；
+- 新引擎自身 soak 已完成：618 请求、206 waves，0 错误、0 意外 length、needle 全对；
+  short/medium/32K/64K/96K wall 中位为 6.025/6.794/19.297/27.222/41.780 s。
+  RSS 后段稳定在约 51–52 GiB，swap 未使用；T-probe `problems=[]`。
+- P4 历史候选 soak 不能替代本轮严格归因：旧引擎结果为 606 请求、202 waves、0 错误、25/25 needle；
   96K 邻居下代码 4.424 s、短 JSON 3.370 s。32K/96K 四路 wave 分别 +2.78%/+2.53%，
   但 96K `by_kind` 单请求中位 42.658 对 P2 40.96 s（+4.14%），相邻 400 ms D2 约 +3.21%。
+- P4 新引擎严格 A-B-A 已通过：A1/A2 代码 41.173/41.202 s，B 为 5.074 s（−87.681%）；
+  96K by_kind +2.761%、wave +2.202%，短 JSON 3.980 s；三臂各 20 请求、0 错误、needle 全对。
+  该配置采纳，但短 JSON 距 4 s 仅约 20 ms，96K 距 3% 仅约 0.24 个百分点，后续变更必须保守。
+- P5 已完成：96K timing 臂的 GPU timeline 中位 32.653 s、phase 总墙钟 35.441 s，host staging
+  仅 0.341 s；主要 phase 为 `gemm gate/up` 5.807 s、`embed+steps` 3.692 s、`qsa attn`
+  3.422 s、`gemm down` 3.031 s。timing/plain engine read 为 37.841/37.571 s（+0.72%），
+  3/3 needle 正确、零执行错误，恢复后 T-probe `problems=[]`。
+- P6 已完成但未采纳：A1/B/A2 的 engine read 中位 37.3342/36.4583/37.5456 s，wall 中位
+  37.609/36.745/37.856 s；B 相对 A 合并中位为 −2.622%/−2.617%，低于 3% 门槛；A2 漂移
+  +0.57%，parity 与 needle 全过，生产配置已恢复。
 - QSA slots 已否决：4 路 off/on/off 为 125.7/114.6/115.5 tok/s；6 路首次 on/off
   151.9/146.8 的 +3.5% 未在交错臂复现，最终 B4 对 A4 反向 0.49%。生产保持 off。
 - S2 已完成：流式最终块与非流式响应都有 per-request metrics，mock regression 2/2 通过。
 - T-probe 已完成：版本戳从 `/proc/<pid>/cmdline` 解析实际 engine/server；现网 server hash 为
   port-v1 的 `de09cffd`，不再误读生产目录里的旧副本。
+- 合并后 `0.1.51` 已通过测试、temperature 0 parity、版本戳与五臂 A-B-A：修复版 md5
+  `a09d78b1`，单路合并中位 `71.3` 对旧 `68.8`（+3.6%），4 路 `130.0` 对 `130.4`
+  （−0.3%），cold prefill +0.4%。CTest 为 151 passed / 8 skipped / 1 failed，唯一失败是
+  服务器缺少 Q2_0 PLE 外部资产，不能写成全测试绿。
 - 配置漂移门禁已采纳：`--expect-env-file production-env-2080ti.json` 精确核对 12 个关键运行态 env；
   缺键或错值会失败。现网一次实测 0 problems。
-- 当前最大用户可感知短板是长读期间中等输出请求仍被压到约 41.5 s，以及满槽准入约
-  11.4–13.9 s。
+- 当前最大用户可感知短板仍是 96K 冷 prefill 本身约 37–42 s，以及满槽准入约 11.4–13.9 s；
+  P4 已解决其中 41-token 中等请求被压到约 41 s 的公平性问题。
 
 ## 重启策略
 
@@ -82,13 +99,20 @@
 - 性能 A/B 前必须先证明实验开关真的进入目标路径；否则 on/off 两臂可能完全相同。
 - C1 的 6/8 槽受控边界已测；不同邻居长度和真实混合流量下的准入上限仍未覆盖。
 - 新引擎进入 GPU A/B 前必须用 T-probe 证明 running engine/server hash；版本戳已不再从旧目录猜路径。
-- RoPE 省显存已有短测证据，但真实流量 soak 尚未完成；不得把噪声内吞吐说成提升。
+- RoPE 省显存已经过一小时混合 soak；只能宣称显存与 expert 容量收益，不能把噪声内吞吐说成提升。
 - 满槽请求仍没有配置固定准入超时；6/8 槽上界只覆盖受控的 400-token 邻居负载。
 - P3 的 lead-in 只针对 `piped && !STRATA_PIPED_READ_PIECE` 的并发冷读；读到新的长请求时
   仍会增加一次有界解码窗口。1200 ms 已证明超过旧长档门限，后续不能用任意加长代替调度。
 - 短/中请求可能在冷读已占流水线前仍未取得控制行或槽；仅延长 lead-in 无法覆盖这类准入竞争。
-- P4 的 wave 与单请求门限给出不同裁决；在固定判据并完成边界 A-B-A 前，1600 ms 只能算候选，
-  不能把 4.424 s 的用户收益写成“方案已验收”。
+- P4 已通过但余量小：短 JSON 3.980 s 接近 4 s，96K by_kind +2.761% 接近 3%；生产监控若靠近
+  边界，应优先用同口径复测，不能继续无证据扩大 lead-in 或短请求优先范围。
+- 新引擎 soak 的短 JSON 混合中位为 6.025 s，高于 fairness 的 4 s；混合 soak 与 fairness 是
+  不同口径，不能互相替代。
 - 当前公平性测试只覆盖 14/41-token 输出和 96K 冷读；32K/64K、多长读、取消与真实外部流量未覆盖。
+- `STRATA_PA_V2T=1` 改变 prompt-attention 的求和/暂存顺序，即使性能提升也必须先通过 greedy parity
+  与 needle；哈希变化不能自动判为正确或错误。
+- P7 已暂停且没有有效样本；恢复后必须新建完整 A-B-A，不能复用被中断的首请求或把“实验已启动”
+  当作部分结果。`STRATA_PF_WMMA=1` 走 FP16 tensor-core prompt experts，输出可能变化；
+  速度达标后仍必须有质量门。
 
-- 最后更新：2026-10-26T09:06+08:00（P4 候选 soak 与 QSA 否决入档；下一步验证合并后 HEAD 引擎）
+- 最后更新：2026-10-26T15:04+08:00（文档与记录整理；P7 标记为暂停/待做，无有效结果）

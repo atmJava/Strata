@@ -3,6 +3,189 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261026-20 · P7 在 A1 首个请求期间中断，暂停而非进行中
+
+- 目标 / 指标：验证 `STRATA_PF_WMMA=1` 能否让 96K 冷读的 engine read 与 wall 均改善 ≥3%，
+  同时 A2 回到 A1 的 3% 内，并通过 parity、needle 与质量门。
+- 假设与预期：P5 显示 `gemm gate/up` 是最大 phase；若 FP16 tensor-core prompt experts 在该
+  形状更有效，完整请求应出现超过 3% 的同 boot 改善。
+- 为什么选这条路线：P6 仅改善约 2.3%，继续调 attention 的收益不足；P7 是现有二进制中的
+  env-only 开关，回滚成本低，并直接针对最大 GEMM phase。
+- 改动与实验：预先写入判据并建立 `/opt/ai/tmp/pre-P7-pf-wmma-20261026T065341Z` 快照，随后
+  启动 A1。用户在该臂首个请求期间中断，未产生有效 A1 JSONL/summary，B 与 A2 未执行。
+- 结果：没有可比较的 engine read、wall、parity、needle 或质量结果；因此没有采纳/否决判决。
+- 判决：**暂停/待做**。P7 不是进行中，也不是部分通过。
+- 预期被推翻：没有；本次只形成“执行被中断”的事实，不能推断开关速度或正确性。
+- 生产状态与回滚：只读核对 `strata.service` active、health 200，生产配置已恢复，未发现残余
+  soak 或 P7 输出；P7 前快照保留。
+- 证据：L-087；预注册判据 sha256
+  `1ae40a8142a7a056e5d36c03902533c3119b896297f5510e4de0ca822ea650b6`。
+- 学到什么：中断的 A1 不能作为部分样本复用；恢复实验必须重新建立干净的 A 基线。
+- 下一步与理由：当前不自动恢复 P7。用户明确恢复目标后，从全新 A1 重跑完整同 boot A-B-A；
+  在此之前只维护文档、记录和生产基线。
+
+## I-20261026-19 · P6 Turing attention v2 只快约 2.3%，未过 3% 门槛
+
+- 目标 / 指标：在同 boot A-B-A 中验证 `STRATA_PA_V2T=1` 是否能把 96K 冷读的 engine read 和
+  request wall 都改善至少 3%，同时 A2 回到 A1 的 3% 内且正确性通过。
+- 假设与预期：P5 的 `qsa attn` 中位为 3.422 s（10.5%）；替换 Turing 的 prompt-attention
+  v1 暂存路径若有效，整段 96K wall 应出现可跨过噪声地板的改善。
+- 为什么选这条路线：它是现有二进制中的 env-only 开关，只影响目标 phase，回滚成本低；
+  比继续修改 host staging 或 lead-in 更贴近 P5 证据。
+- 改动与实验：预注册 3 臂、每臂 3 个唯一 96K prompt，B 只增加 `STRATA_PA_V2T=1`。切换后从
+  `/proc` 和 T-probe 证明运行环境，A1/B/A2 各跑同一顺序生成器；B 与 A2 运行后恢复生产。
+- 结果：A1/B/A2 的 engine read 中位为 `37.3342/36.4583/37.5456 s`，wall 中位为
+  `37.609/36.745/37.856 s`。B 相对 A1 分别为 `−2.346%/−2.297%`，相对 A1/A2 合并中位为
+  `−2.622%/−2.617%`；A2 相对 A1 只漂移 `+0.566%/+0.657%`。三臂均 0 错误、needle 3/3，
+  greedy parity 文本 sha 都是 `b17bc92de6ba8a97`。
+- 判决：**未定，生产不采纳**。方向和正确性都正常，但未达到预先写下的 3% 改善门槛；
+  没有足够证据把它写成稳定生产收益。
+- 预期被推翻：即使 parity 完全一致，2.3% 的方向性收益仍可能是平台内波动；固定阈值必须
+  在结果出来前保留，不能因为“看着更快”事后放宽。
+- 生产状态与回滚：已恢复原配置并验证 T-probe `problems=[]`；engine `a09d78b1`、server
+  `de09cffd`、launcher `34271059`、config `05c9d253`，health 200、`loaded=true`。
+- 证据：L-086；预注册判据、三臂 JSONL/summary、三份 parity、B/A2/最终 T-probe。
+- 学到什么：低风险开关能给出方向性信息，但不到 3% 就不应进入生产；下一步应直接瞄准 P5 中
+  最大的 `gemm gate/up`，而不是在同一 1 s 范围内继续调 attention。
+- 下一步与理由：P7 测试 `STRATA_PF_WMMA=1`，用相同 96K A-B-A 判断 FP16 tensor-core prompt
+  experts 是否能触及最大 GEMM phase；若输出变化则必须追加质量门。
+
+## I-20261026-18 · P5 把 96K 冷读定位到 GPU 计算，host staging 不是主瓶颈
+
+- 目标 / 指标：解释 96K 冷 prefill 的约 38–42 s 墙钟，量化 21 个 phase、host staging 和 timing
+  工装开销；要求 3 个唯一 prompt、零执行错误、needle 全对，并在恢复后保持 T-probe 无问题。
+- 假设与预期：如果 host staging 是主瓶颈，phase 之外应有大量拷贝或等待；否则 GPU event timeline
+  应占据大部分墙钟，成本集中在 attention、专家 GEMM 与固定 step。
+- 为什么选这条路线：P4 已解决中短请求公平性，但 96K 冷读本身仍约 42 s；不先区分 host 与 GPU，
+  继续调 staging/lead-in 只会重复已经否决的窗口实验。
+- 改动与实验：临时启用 `STRATA_PREFILL_TIMING=1`，用唯一 96K prompt 跑 timing/plain A-B；旧
+  `cold-prefill.py --96K` 生成 312,025 tokens 被 HTTP 400 拒绝，未计入结果，正式数据改用
+  `mixed-soak.task_long`。恢复原配置后再跑 3 个 plain prompt 和 T-probe。
+- 结果：timing 的 GPU timeline 中位 `32.653 s`、phase 总墙钟 `35.441 s`、host staging
+  `0.341 s`；最大 phase 为 `gemm gate/up` 5.807 s（17.8%）、`embed+steps` 3.692 s（11.4%）、
+  `qsa attn` 3.422 s（10.5%）、`gemm down` 3.031 s（9.3%）。timing/plain 的 engine read
+  中位为 37.841/37.571 s，工装 `+0.72%`；两臂 3/3 needle 正确、零执行错误。
+- 判决：**P5 结论成立**；96K 主成本在 GPU 计算，host staging 不是当前长读主瓶颈。timing 保留为
+  诊断工装，不进入生产默认。
+- 预期被推翻：原计划担心 timing 本身可能带来 2.5–8% 开销；同形状对照只有 `+0.72%`，在 3%
+  噪声内，足以用于相位排序。
+- 生产状态与回滚：已恢复生产配置；T-probe `problems=[]`，engine `a09d78b1`、server
+  `de09cffd`、launcher `34271059`、config `05c9d253`，health 200、`loaded=true`。
+  P5 前快照为 `/opt/ai/tmp/pre-P5-timing-20261026T061726Z/`。
+- 证据：L-085；P5 timing JSONL/summary、plain JSONL 与恢复 T-probe，哈希见台账。
+- 学到什么：96K 的固定成本不是单一“读写慢”，而是多个 GPU phase 叠加；优化必须命中真实 phase，
+  并同时观察 wall、质量与恢复证据。
+- 下一步与理由：启动 P6，只开 `STRATA_PA_V2T=1`，用同 boot A-B-A 验证 Turing prompt-attention
+  v2 寄存器暂存能否降低 96K 的 `qsa attn` 成本；它是现有二进制 env-only 开关，回滚成本低。
+
+## I-20261026-17 · P4 严格 A-B-A 通过：代码请求降 87.7%，长档代价低于 3%
+
+- 目标 / 指标：在新引擎同一 boot 上确认 `1600 ms lead-in + STRATA_ADMIT_SHORT_FIRST=2048`
+  是否真实改善 96K 邻居下的中等请求，同时让代码 ≤10 s、短 JSON ≤4 s，并守住 96K wave 与
+  by_kind 单请求中位相对 A 臂均 ≤+3%。
+- 假设与预期：A 臂没有短请求优先时，代码请求会被 96K 冷读压到约 41 s；B 臂应复制历史
+  4–6 s 结果。代价是 96K 略慢，但必须同时低于 3% 的 wave 和单请求门限。
+- 为什么选这条路线：新引擎自身 soak 与 staged 2048 已通过，但历史 P4 数据来自旧引擎；
+  不做同一 boot 的 400 ms 无障碍对照，就无法把收益归因给 P4 而不是版本或 boot 噪声。
+- 改动与实验：在 `/opt/ai/tmp/pre-P4-strict-20261026T054515Z` 建完整快照，固定判据文件
+  sha256 `c3a208a6f37ba957153577159b360be1b0e33a792e932a67efba50f4caf56663`。
+  A1/A2 移除短请求优先 drop-in，设 lead-in 400 ms；B1 恢复 `STRATA_ADMIT_SHORT_FIRST=2048`
+  并设 lead-in 1600 ms；三臂都保持 staged 2048，各跑 5 个 fairness wave。每次切换都从
+  `/proc` 核对实际 env、engine md5 和 health。
+- 结果：
+
+| 臂 | 代码 wall | 短 JSON wall | 96K by_kind | 96K wave |
+|---|---:|---:|---:|---:|
+| A1 | 41.173 s | 3.418 s | 41.009 s | 41.176 s |
+| B1 | **5.074 s** | **3.980 s** | 42.092 s | 42.098 s |
+| A2 | 41.202 s | 3.396 s | 40.913 s | 41.206 s |
+| A 合并 / B 变化 | 41.1875 s / **−87.681%** | 3.407 s / +16.818% | 40.961 s / **+2.761%** | 41.191 s / **+2.202%** |
+
+  三臂各 20 请求、5 波，HTTP/执行错误 0、意外 `length` 0、needle 失败 0。
+- 判决：**采纳 P4 组合**。代码收益巨大，短 JSON 未越过 4 s，96K 两种口径都未越过 3%；
+  但 96K 余量约 0.24 个百分点、短 JSON 余量约 20 ms，属于“通过但不应继续加码”的配置。
+- 预期被推翻：短 JSON 并非继续下降，而是从 A 的 3.407 s 升到 3.980 s；它仍满足绝对门槛，
+  但说明 P4 用短 JSON 尾延迟余量换了中请求完成时间，不能写成所有请求都加速。
+- 生产状态与回滚：已恢复 B 配置；T-probe `problems=[]`，engine `a09d78b1` / `0.1.51`、
+  staged 2048、lead-in 1600、短请求优先 2048、health 200。回滚快照
+  `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/` 的 6 个文件清单全部 OK。
+- 证据：L-084；三臂 JSONL/summary 与最终 T-probe，哈希见台账。
+- 学到什么：公平性组合的价值必须用“无障碍 A 臂”直接证明；只看候选自身绝对延迟会把
+  boot 基线缺失误当成机制收益。配置已经接近两个门槛，后续变更需要更保守。
+- 下一步与理由：结束 P4 参数线，进入任务 8 的发现轮。汇总本次 soak/fairness 的 queue、TTFT、
+  decode、wall、expert cache 和 VRAM headroom，列出前三项用户可感知成本后只选一个实验；
+  不重复已经否决的 QSA、groups=1、固定 read piece、S0b 或更长 lead-in。
+
+## I-20261026-16 · 修复版 `0.1.51` 通过自身一小时 soak，P4 组合仍需严格归因
+
+- 目标 / 指标：验证实际部署的修复版 `0.1.51` 能否在 1600 ms lead-in、staged 2048 和短请求
+  优先 2048 的组合下连续运行一小时；要求零 HTTP/执行错误、零意外 `length`、needle 全对、
+  swap 未使用，并且 RSS 与可用内存最终进入平台而不是持续恶化。
+- 假设与预期：`a09d78b1` 已通过测试、输出 parity 和五臂 A-B-A；在真实 2/3/4 路混合流量下，
+  它应保持与旧基线相同的稳定性，同时让 staged 读取和短/中请求公平性开关实际进入运行路径。
+- 为什么选这条路线：旧引擎和旧 P4 候选的 soak 不能证明新二进制；部署后如果缺少自身 soak，
+  就无法把生产基线与候选调度开关安全分开。
+- 改动与实验：原子部署 engine `a09d78b1`，保持 server `de09cffd`、launcher `34271059`、
+  config `05c9d253`；运行态启用 `STRATA_MP_STAGED_READ_MIN_TOKENS=2048`、
+  `STRATA_PIPED_DECODE_LEADIN_MS=1600` 与 `STRATA_ADMIT_SHORT_FIRST=2048`。执行 3600 秒
+  `mixed-soak.py`，随后跑 post-soak health 与 T-probe。第一次 T-probe 正确发现远端期望 profile
+  仍是 4096；只同步这份无密钥 profile 后重跑，未放宽探针。
+- 结果：618 请求、206 waves，HTTP/执行错误 0，意外 `finish_reason=length` 0，needle 失败 0；
+  finish 为 530 个 `stop`、88 个 `tool_calls`。357 个资源样本中最大 running 与 outside slots
+  都是 4。RSS 从启动期 `38.612` GiB 增至末值 `51.706` GiB，后三段中位约
+  `51.33/51.65/51.81` GiB，最大值 `52.026` GiB 后回落；MemAvailable 末值 `7.477` GiB、
+  最小值 `7.159` GiB，swap 全程 4096 MiB 未使用。分档 wall 中位：短 JSON `6.025 s`、
+  1.85K 代码 `6.794 s`、32K/64K/96K `19.297/27.222/41.780 s`。
+- 判决：**修复版引擎与 staged 2048 基线通过一小时稳定性门，可作为新生产基线**；
+  P4 的 lead-in + 短请求优先组合仍是候选，必须在同一新引擎 boot 上补 400 ms 无障碍对照后
+  才能写成无争议采纳。
+- 预期被推翻：一小时混合 soak 的短 JSON 中位为 `6.025 s`，不能拿它替代已固定判据的 fairness
+  arm 中约 4 秒结果；soak 证明稳定性，不自动证明单请求性能门槛。
+- 生产状态与回滚：health 200、`loaded=true`；T-probe `problems=[]`，engine
+  `a09d78b13c39378d1532a024b983d286`、version `0.1.51`，server
+  `de09cffdac39ff150a689bd3a44cc242`、launcher `342710595d34936f40e40233f5b62837`、
+  config `05c9d2539cd92b6c8e0b93ff8a48ce0e`。回滚快照仍为
+  `/opt/ai/tmp/pre-v026-20261026T025109Z/`，清单已通过。
+- 证据：L-083；`P4-newengine-soak2048-20261026T044100Z.*`、
+  `T-probe-v026-postsoak-synced-20261026T054252Z.json` 与 profile 备份。
+- 学到什么：启动后资源会先进入工作集，随后稳定在约 52 GiB RSS；判断泄漏必须看后段趋势，
+  不能只看首尾差。部署门禁也需要把“运行态正确”和“期望 profile 正确”分别验证。
+- 下一步与理由：同 boot 比较 A=`400 ms`、不启用短请求优先，B=`1600 ms` + 2048 短请求优先，
+  两臂都保持 staged 2048；预注册代码 ≤10 s、短 JSON ≤4 s、96K wave 与单请求中位均不退 >3%。
+  只有 A-B-A 通过才正式收口 P4，否则恢复 A 并保留已通过的引擎/阈值基线。
+
+## I-20261026-15 · sm_75 合并引擎通过测试、正确性和五臂 A-B-A，进入部署与独立 soak
+
+- 目标 / 指标：把已完成源码合并的 `0.1.51` 从“构建成功”推进到可部署候选；测试只允许外部资产缺失
+  造成的显式例外，输出 parity、版本戳、运行路径和性能门必须通过。
+- 假设与预期：先前 `0.1.51` 的吞吐回退来自具体 sm_75、TQ overlay 测试和构建脚本问题，不是整个
+  合并版本不可用；修复后应恢复单路吞吐，并至少不伤 4 路聚合和 cold prefill。
+- 为什么选这条路线：生产仍运行旧 `0.1.49.1`，继续在旧二进制上追 P4 会把结论锁在即将淘汰的基线上。
+  先完成合并引擎门禁，才能把后续优化迁到维护中的源码。
+- 改动与实验：修复 `pf_wmma_parity` 对 sm_75 共享内存容量的误判，查询真实
+  `cudaDevAttrMaxSharedMemoryPerBlockOptin` 并拒绝不支持的 `WK=256` tile；修复 IQ tile 设置失败后
+  污染 prompt 路径的 CUDA sticky error；为 `ggml_tq_overlay` 独立 CMake 脚本启用 `CMP0057`。
+  构建后运行全量 CTest、server 离线测试、旧/新/旧/新/旧五臂 A-B-A、temperature 0 答案 parity
+  和 high-effort reasoning 对照。
+- 结果：CTest 为 `151 passed / 8 skipped / 1 failed`，唯一失败 `ple_parity` 是因为服务器缺少 Q2_0 PLE
+  模型和捕获夹具，不是本轮代码失败；离线 server 为 `73 passed / 10 skipped`。五臂 A-B-A 合并中位：
+  单路旧 `68.8`、新 `71.3`（`+3.6%`）；4 路旧 `130.4`、新 `130.0`（`-0.3%`）；
+  cold prefill 约 `+0.4%`。temperature 0 的 answer hash 五次均为 `b17bc92de6ba8a97`；
+  修复后引擎 md5 为 `a09d78b13c39378d1532a024b983d286`。
+- 判决：**合并后 `0.1.51` 可部署候选通过测试、正确性与性能门禁**；`ple_parity` 与 8 个 skip
+  作为外部资产/平台覆盖例外保留，不能写成“全测试绿”。先前把所有 0.1.51 吞吐回退归因于整个候选的
+  结论撤回，具体历史回退仍需由本轮修复后的证据替代。
+- 预期被推翻：high-effort reasoning hash 在旧引擎 A/A2 之间本身也会变化，因此不能作为该版本的
+  正确性失败依据；temperature 0 答案 hash 和数值 parity 才是本轮可用的稳定门。
+- 生产状态与回滚：本轮验证结束时仍恢复旧生产 `8d680c69`，health 200；随后再原子部署修复版。
+  部署前快照 `/opt/ai/tmp/pre-v026-20261026T025109Z` 的 `MANIFEST.sha256` 全部通过。
+- 证据：L-082；全量 CTest 日志、五臂 `arm-v026-*.log`、最终 A2 T-probe、答案 parity 输出。
+- 学到什么：sm_75 的 opt-in shared memory 上限必须按设备查询，不能在启动时无条件为 `WK=256`
+  设置 83 KiB；失败路径也要消费 CUDA error，否则会在后续 prompt 阶段制造看似无关的故障。
+- 下一步与理由：先部署 md5 `a09d78b1` 并用运行路径 T-probe 证明版本，再在新基线上复测 P4
+  1500/1550/1600 ms 与 staged 阈值，最后运行该二进制自己的 mixed soak。现有旧引擎/P4 历史 soak
+  不能替代这一步。
+
 ## I-20261026-14 · `STRATA_QSA_SLOTS=1` 的交错复测不复现首次收益，否决
 
 - 目标 / 指标：在 4/6 路真实 batch window 中确认 QSA slots 合并 launch 是否能稳定提高聚合 tok/s。

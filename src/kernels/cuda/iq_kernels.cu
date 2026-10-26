@@ -5648,12 +5648,12 @@ bool w2_on() {
 bool gemm_iq_f16_grouped(int ty, const void* W, size_t expert_bytes, int n_out, int K, const void* X, int ldx,
                          const int32_t* bounds, int n_experts, int max_rows, float* Y, int ldy, void* stream) {
     if (n_out % WG_BN != 0 || n_experts <= 0 || max_rows <= 0 || ldy % 4 != 0) return false;
-    {   // the tiles are tensor-core kernels: a pre-Volta card has no body for them (the sm_60 pass compiles them empty)
-        int cur = 0, major = 0;
-        if (cudaGetDevice(&cur) != cudaSuccess || cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, cur) != cudaSuccess ||
-            major < 7)
-            return false;
-    }
+    int dev = 0, major = 0, smem_optin = 0;
+    // the tiles are tensor-core kernels: a pre-Volta card has no body for them (the sm_60 pass compiles them empty)
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64 ||
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess || major < 7 ||
+        cudaDeviceGetAttribute(&smem_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) != cudaSuccess)
+        return false;
     // STRATA_PF_WMMA2=1 (opt-in): IQ2_S gate/up and IQ4_NL down through gemm_iq_f16_w2_kernel (above)
     if (w2_on() && n_out % W2_RB == 0 && ldx % 8 == 0 && ldy % 8 == 0 && (uintptr_t) X % 16 == 0 && (uintptr_t) Y % 32 == 0 &&
         (uintptr_t) W % 4 == 0 && expert_bytes % 4 == 0 && ((ty == 22 && K % 512 == 0) || (ty == 20 && K % 128 == 0))) {
@@ -5677,15 +5677,24 @@ bool gemm_iq_f16_grouped(int ty, const void* W, size_t expert_bytes, int n_out, 
     const dim3 grid((unsigned) (n_out / WG_BN), (unsigned) (n_experts * mt));
     cudaStream_t s = (cudaStream_t) stream;
     auto smem = [](int wk) { return (size_t) WG_BN * (wk + 8) * 2 + (size_t) WG_BM * (WG_XK + 8) * 2; };
+    // WK=256 needs about 83 KiB: Volta's 96 KiB opt-in fits it, but Turing's 64 KiB does not.  Reject the shape
+    // here instead of letting the launch fail and leave cudaGetLastError() sticky in the prompt path.
+    if (!q20 && !nl && smem_optin < (int) smem(256)) return false;
     // the shared-memory attribute belongs to the current device, so it is set on each card: with one flag for the
     // process a layer split's second card launched without it and the prompt stopped ("the WMMA expert tiles could not launch")
     static bool attr[64];
-    int dev = 0;
-    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) return false;
     if (!attr[dev]) {
-        cudaFuncSetAttribute(gemm_iq_f16_grouped_kernel<256, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem(256));
-        cudaFuncSetAttribute(gemm_iq_f16_grouped_kernel<128, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem(128));
-        cudaFuncSetAttribute(gemm_iq_f16_grouped_kernel<128, false, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem(128));
+        const bool attr256 = smem_optin < (int) smem(256) ||
+            cudaFuncSetAttribute(gemm_iq_f16_grouped_kernel<256, false>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 (int) smem(256)) == cudaSuccess;
+        const bool attr128 = cudaFuncSetAttribute(gemm_iq_f16_grouped_kernel<128, true>,
+                                                  cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem(128)) == cudaSuccess;
+        const bool attr128nl = cudaFuncSetAttribute(gemm_iq_f16_grouped_kernel<128, false, true>,
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem(128)) == cudaSuccess;
+        if (!attr256 || !attr128 || !attr128nl) {
+            cudaGetLastError();
+            return false;
+        }
         attr[dev] = true;
     }
     if (q20)
