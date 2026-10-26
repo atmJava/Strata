@@ -33,6 +33,25 @@ class ConnectionTests(unittest.TestCase):
             code = main(list(argv))
         return code, json.loads(output.getvalue())
 
+    def test_connection_lock_fdopen_failure_closes_descriptor(self):
+        descriptors = []
+        real_open = os.open
+
+        def record_open(*args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(connections.os, "open", side_effect=record_open), \
+                mock.patch.object(connections._atomic_mod.os, "fdopen", side_effect=OSError("fdopen failed")):
+            with self.assertRaisesRegex(OSError, "fdopen failed"):
+                with connections._lock("edge"):
+                    self.fail("connection lock unexpectedly entered")
+        self.assertTrue(descriptors)
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
     def test_create_edit_precedence_and_private_storage(self):
         code, created = self._cli("connection", "create", "edge", "--url", "https://Example.COM:443",
                                   "--prefix", "/proxy/strata", "--credential-env", "STRATA_READ_KEY",

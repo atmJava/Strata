@@ -44,6 +44,15 @@ class AtomicWriteTests(unittest.TestCase):
             atomic.write_new(target, b"replacement")
         self.assertEqual(target.read_bytes(), b"new")
 
+    def test_owned_fdopen_closes_the_descriptor_when_transfer_fails(self):
+        descriptor, path = tempfile.mkstemp(dir=self.root)
+        self.addCleanup(Path(path).unlink, missing_ok=True)
+        with mock.patch.object(atomic.os, "fdopen", side_effect=OSError("fdopen failed")):
+            with self.assertRaisesRegex(OSError, "fdopen failed"):
+                atomic.fdopen_owned(descriptor, "wb")
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
+
     def test_exclusive_create_fdopen_failure_leaves_no_file_or_descriptor(self):
         target = self.root / "new.json"
         descriptors = []

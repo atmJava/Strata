@@ -26,7 +26,7 @@ import time
 import uuid
 from pathlib import Path
 
-from strata_control import owner_transport, paths, posix_owner, procs, profiles, readiness
+from strata_control import atomic, owner_transport, paths, posix_owner, procs, profiles, readiness
 from strata_control.private_files import private_mkdir
 from serve import launch_identity
 from strata_control.profiles import ProfileError
@@ -283,7 +283,7 @@ def _write_new(path: Path, data: bytes) -> int:
         # after SIGKILL, unlike a PID file or a stale Unix socket.
         if not _lock_file(descriptor, exclusive=True):
             raise OSError(errno.EWOULDBLOCK, "the runtime lease is held")
-        with os.fdopen(os.dup(descriptor), "wb") as stream:
+        with atomic.fdopen_owned(os.dup(descriptor), "wb") as stream:
             stream.write(data)
             stream.flush()
         os.fsync(descriptor)
@@ -436,7 +436,7 @@ def start(name: str, *, wait: float = 300, shutdown_timeout: float = 30,
         if _read_state(name) is not None:
             _recover_stale(name, wait=wait)
         descriptor = os.open(log_path, flags, 0o600)
-        with os.fdopen(descriptor, "ab") as stream:
+        with atomic.fdopen_owned(descriptor, "ab") as stream:
             command = [sys.executable, "-m", "strata_control.runtime", "--host", name,
                        "--shutdown-timeout", str(shutdown_timeout),
                        "--startup-wait", str(wait if wait else 300)]
@@ -732,7 +732,7 @@ class Host:
         child_env["STRATA_RUNTIME_PROFILE"] = self.name   # the records of its engine say which profile they belong to
         stream = None
         try:
-            stream = os.fdopen(descriptor, "ab")
+            stream = atomic.fdopen_owned(descriptor, "ab")
             with stream:
                 self.child = subprocess.Popen([sys.executable, "-m", "serve.server", *server_args],
                                               cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stream,
@@ -743,8 +743,6 @@ class Host:
             raise
         finally:
             os.close(reader)
-            if stream is None:
-                os.close(descriptor)
         self.owner_write_fd = writer
         try:
             procs.write_record(self.child.pid, "server", profile=self.name)

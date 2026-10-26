@@ -26,12 +26,17 @@ def _sync_parent(path: Path) -> None:
         pass
 
 
-def _write_owned_descriptor(descriptor: int, data: bytes) -> None:
+def fdopen_owned(descriptor: int, mode: str, **kwargs):
+    """Wrap a descriptor and close it if ownership transfer fails."""
     try:
-        stream = os.fdopen(descriptor, "wb")
+        return os.fdopen(descriptor, mode, **kwargs)
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def _write_owned_descriptor(descriptor: int, data: bytes) -> None:
+    stream = fdopen_owned(descriptor, "wb")
     with stream:
         stream.write(data)
         stream.flush()

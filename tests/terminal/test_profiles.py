@@ -226,6 +226,26 @@ class OperatorProfileTests(unittest.TestCase):
         self.assertEqual(draft_path.read_text(encoding="utf-8"), "{invalid")
         self.assertEqual(profiles.load("local")[1], current_revision)
 
+    def test_edit_fdopen_failure_closes_descriptor_and_removes_draft(self):
+        profiles.create("local", str(self.config))
+        created = []
+        real_mkstemp = tempfile.mkstemp
+
+        def capture(*args, **kwargs):
+            descriptor, name = real_mkstemp(*args, **kwargs)
+            created.append((descriptor, Path(name)))
+            return descriptor, name
+
+        with mock.patch.dict(os.environ, {"EDITOR": "fake-editor", "VISUAL": ""}), \
+                mock.patch.object(profiles.tempfile, "mkstemp", side_effect=capture), \
+                mock.patch.object(profiles._atomic_mod.os, "fdopen", side_effect=OSError("fdopen failed")):
+            with self.assertRaisesRegex(OSError, "fdopen failed"):
+                profiles.edit("local")
+        descriptor, draft = created[-1]
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
+        self.assertFalse(draft.exists())
+
     def test_plan_then_history_and_rollback_restore_saved_settings_only(self):
         before = self.config.read_bytes()
         profiles.create("local", str(self.config))

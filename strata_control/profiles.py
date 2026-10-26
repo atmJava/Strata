@@ -320,7 +320,7 @@ def edit(name: str) -> tuple[dict, str, str]:
     fd, temp_name = tempfile.mkstemp(prefix=f".{name}-edit-", suffix=".json", dir=profile_dir())
     keep_draft = False
     try:
-        with os.fdopen(fd, "wb") as stream:
+        with _atomic_mod.fdopen_owned(fd, "wb") as stream:
             stream.write(_bytes(current))
         result = subprocess.run([*command, temp_name], check=False)
         if result.returncode:

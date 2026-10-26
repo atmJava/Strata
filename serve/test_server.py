@@ -609,6 +609,27 @@ class VisionTempFiles(unittest.TestCase):
             finally:
                 path.unlink(missing_ok=True)
 
+    def test_combined_file_fdopen_failure_closes_descriptor(self):
+        from serve import server
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "part.sve"
+            target = Path(d) / "combined.sve"
+            source.write_bytes(b"data")
+            descriptors = []
+            real_open = os.open
+
+            def record_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            with mock.patch.object(server.os, "open", side_effect=record_open), \
+                    mock.patch.object(server._atomic_mod.os, "fdopen", side_effect=OSError("fdopen failed")):
+                with self.assertRaisesRegex(OSError, "fdopen failed"):
+                    server.write_temporary(target, [source])
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[-1])
+
     def test_combined_file_stays_off_a_small_shm(self):
         from serve.server import combined_embeddings_path
         with tempfile.TemporaryDirectory() as d:

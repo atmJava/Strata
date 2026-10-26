@@ -139,6 +139,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(host.child)
         self.assertIsNone(host.owner_write_fd)
 
+    def test_start_log_fdopen_failure_closes_descriptor(self):
+        descriptors = []
+        real_open = os.open
+
+        def record_open(*args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(runtime.os, "open", side_effect=record_open), \
+                mock.patch.object(runtime.atomic.os, "fdopen", side_effect=OSError("fdopen failed")):
+            with self.assertRaisesRegex(OSError, "fdopen failed"):
+                runtime.start("local", wait=0, shutdown_timeout=2)
+        self.assertTrue(descriptors)
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
+    def test_runtime_record_fdopen_failure_closes_descriptor_and_removes_path(self):
+        path = self.root / "runtime" / "record.json"
+        path.parent.mkdir(parents=True)
+        descriptors = []
+        real_open = os.open
+
+        def record_open(*args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(runtime.os, "open", side_effect=record_open), \
+                mock.patch.object(runtime.atomic.os, "fdopen", side_effect=OSError("fdopen failed")):
+            with self.assertRaisesRegex(OSError, "fdopen failed"):
+                runtime._write_new(path, b"state")
+        with self.assertRaises(OSError):
+            os.fstat(descriptors[-1])
+        self.assertFalse(path.exists())
+
     def test_kill_child_tree_ignores_an_already_exited_child(self):
         host = runtime.Host("local", shutdown_timeout=2)
         child = mock.Mock(pid=987654)

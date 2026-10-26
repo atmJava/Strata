@@ -65,6 +65,7 @@ from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthro
                             tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
+from strata_control import atomic as _atomic_mod  # noqa: E402
 from strata_control import engine_component  # noqa: E402
 from strata_control import tls  # noqa: E402
 
@@ -168,7 +169,8 @@ def combined_embeddings_path(vision_dir: Path, nbytes: int) -> Path:
 def write_temporary(path: Path, parts: list) -> None:
     """Write files one after another into a private temporary file."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    with os.fdopen(os.open(path, flags, 0o600), "wb") as f:
+    descriptor = os.open(path, flags, 0o600)
+    with _atomic_mod.fdopen_owned(descriptor, "wb") as f:
         for part in parts:
             f.write(Path(part).read_bytes())
 # #458: the trailing effort turn ("effort_position": "end"); low is the template's own sentence, medium (which the

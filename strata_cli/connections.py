@@ -151,7 +151,7 @@ def _replace(path: Path, data: bytes) -> None:
 def _lock(name: str):
     path = connection_dir(create=True) / f".{_name(name)}.lock"
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(descriptor, "r+b") as stream:
+    with _atomic_mod.fdopen_owned(descriptor, "r+b") as stream:
         details = os.fstat(stream.fileno())
         if not stat.S_ISREG(details.st_mode) or posix_owner.owner_only_wrong(path, details):
             raise ConnectionError(posix_owner.owner_only_text("connection lock must be owner-only", path), 5)

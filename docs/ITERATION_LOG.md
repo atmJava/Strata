@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-14 · 描述符所有权转移失败统一关闭，覆盖 runtime、编辑草稿、锁与临时图片
+
+- 目标 / 指标：`os.open()` 成功后，若 `fdopen()` 在包装既有描述符时失败，调用方仍必须关闭原 fd；
+  runtime 启动日志、保留 lease、profile 编辑草稿、connection 锁和组合图片文件不能泄漏描述符或残留临时路径。
+- 假设与预期：这些入口都直接调用 `os.fdopen(fd)`，而 fd 在 `fdopen` 抛错时尚未进入文件对象所有权；
+  Python 不会替调用方关闭它。把失败关闭收敛到共享 helper 后，各入口应只负责路径和更高层事务清理。
+- 为什么选这条路线：它们共享同一个资源所有权边界，能以一个小 helper 消除重复且不改变正常文件格式或并发语义；
+  失败注入可用真实 `fstat` 断言，不需要 GPU 或模型。
+- 改动与实验：`atomic.fdopen_owned()` 统一包装 fd，转移失败即关闭；原子写入复用该边界。runtime 启动日志、
+  runtime lease 写副本、profile 编辑器草稿、connection 锁与 `serve.server.write_temporary()` 均改用该 helper。
+  新增 helper、runtime 启动/记录、profile 编辑、connection 锁和组合图片的 `fdopen` 失败测试。
+- 结果：atomic/profile/connection `37 passed / 5 subtests`，runtime `48 passed / 11 subtests`，
+  组合图片目标测试 `3 passed`，合计 `88 passed / 16 subtests`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。描述符从打开到成功包装或失败关闭只有一个共享契约。
+- 生产状态与回滚：未改生产；正常文件内容、权限、锁顺序和日志写入方式不变，可按单个提交回退。
+- 学到什么：`fdopen` 不是一个普通构造调用，而是资源所有权转移点；即使调用处在 `with` 语句中，构造失败也需单独兜底。
+- 下一步与理由：继续审查 C++ 线程/进程和缓冲区的部分构造失败路径；这些与 Python fd 路径独立，适合下一阶段集中验证。
+
 ## I-20261027-13 · Exclusive-create 记录统一走不泄漏 fd 的原子创建
 
 - 目标 / 指标：connections、operation journal 和 ready file 的新建路径必须使用同一套 owner-only、
