@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-135 · ForesightSwap 与 Verifier 跨卡生命周期收口
+
+- 目标 / 指标：Foresight swap 的分配、后台拷贝、event 查询和析构必须在 layer 所属 CUDA device；Verifier 析构
+  也必须在自身 device 清理，切换失败时不得继续释放。
+- 假设与预期：Foresight 初始化忽略 `OnDevice.ok`，后台线程忽略 `cudaSetDevice`，`take()` 在调用者 context 查询
+  event；失败后可能把未落地 slot 标为 ready。Verifier 有同类析构问题，且一次失败会清空大量句柄。
+- 改动与实验：初始化显式报错返回；后台切卡失败关闭 swap 并停止该次拷贝；只在未 ready 的少见路径进入 owner device
+  查询 event，避免给 cache-hit 热路径增加每 expert 的驱动调用；析构按卡跳过不可用设备。Verifier 析构在进入设备失败时
+  保留全部资源供后续重试。GCC 严格语法和 Clang 语法检查通过。
+- 判决：采纳。跨卡拷贝与查询不再依赖调用者当前 context。
+- 生产状态与回滚：Foresight 默认关闭；开启时热路径仅在等待未完成拷贝时增加一次原有必要的作用域检查。单提交可回退。
+- 未验证：当前无 CUDA/GPU，未执行 Foresight verify 模式、双卡延迟下降或真实 device 切换故障注入。
+- 下一步与理由：停止扩展改动，执行最终回归与临时产物清理。
+
 ## I-20261027-134 · Native dense/head/embedding 析构遵守设备归属
 
 - 目标 / 指标：`NativeDense`、`NativeHead`、`NativeEmbed` 析构时若无法进入分配所属 device，不得释放权重、scratch

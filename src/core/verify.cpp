@@ -481,6 +481,7 @@ void Verifier::diag(std::FILE* f) const {
 Verifier::~Verifier() {
     // A layer-split stage's verifier owns handles on device_, while teardown commonly runs with device 0 current.
     const OnDevice on_device(device_);
+    if (!on_device.ok) return;   // keep every handle for a later retry; none may be released in the caller's context
     const Verifier* self = this;
     g_diag_verifier.compare_exchange_strong(self, nullptr);
     for (auto& slot : g_live) {

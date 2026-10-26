@@ -5794,6 +5794,10 @@ bool ForesightSwap::init(int slots_per_layer, int64_t layers, int64_t experts, c
         }
         if (bytes == 0) continue;
         const OnDevice on(devices[c]);
+        if (!on.ok) {
+            err = "cannot enter CUDA" + std::to_string(devices[c]) + " for the foresight swap allocation";
+            return false;
+        }
         cudaStream_t s = nullptr;
         if (cudaMalloc(&card_mem[c], bytes) != cudaSuccess ||
             cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) != cudaSuccess) {
@@ -5841,6 +5845,7 @@ ForesightSwap::~ForesightSwap() {
     if (filler_.joinable()) filler_.join();
     for (size_t c = 0; c < card_dev.size(); ++c) {
         const OnDevice on(card_dev[c]);
+        if (!on.ok) continue;   // do not destroy this card's stream, events or allocation in another context
         if (card_stream[c]) cudaStreamSynchronize((cudaStream_t) card_stream[c]);
         // Events belong to the card that created them. Destroy them before leaving its context and before the
         // arena/stream they were recorded on disappears.
@@ -5873,7 +5878,15 @@ void ForesightSwap::fill_loop() {
         Slot& sl = slot[(size_t) idx];
         const int64_t l = idx / slots;
         const int dev = layer_dev[(size_t) l];
-        if (dev != cur_dev) { cudaSetDevice(dev); cur_dev = dev; }
+        if (dev != cur_dev) {
+            if (cudaSetDevice(dev) != cudaSuccess) {
+                cudaGetLastError();
+                if (!failed.exchange(true))
+                    std::fprintf(stderr, "strata serve: foresight swap: cannot enter CUDA%d - swap space off\n", dev);
+                continue;
+            }
+            cur_dev = dev;
+        }
         cudaStream_t s = (cudaStream_t) card_stream[(size_t) layer_card[(size_t) l]];
         if (cudaMemcpyAsync((void*) sl.dptr, sl.src, sl.bytes, cudaMemcpyHostToDevice, s) != cudaSuccess ||
             cudaEventRecord((cudaEvent_t) sl.ev, s) != cudaSuccess) {
@@ -5893,6 +5906,11 @@ bool ForesightSwap::take(int64_t layer, int32_t expert, unsigned long long& ptr)
     Slot& sl = slot[(size_t) (layer * slots + s)];
     if (!sl.ready) {
         if (!sl.loading || !sl.issued.load(std::memory_order_acquire)) { ++pending; return false; }
+        const OnDevice on(layer_dev[(size_t) layer]);
+        if (!on.ok) {
+            ++pending;
+            return false;   // the event and slot can only be inspected on their owning device
+        }
         const cudaError_t q = cudaEventQuery((cudaEvent_t) sl.ev);
         if (q != cudaSuccess) {
             if (q != cudaErrorNotReady) cudaGetLastError();
@@ -5903,7 +5921,6 @@ bool ForesightSwap::take(int64_t layer, int32_t expert, unsigned long long& ptr)
         sl.loading = false;
         if (verify) {   // test mode: the bytes the GPU will read must be the expert's own
             std::vector<uint8_t> back((size_t) sl.bytes);
-            const OnDevice on(layer_dev[(size_t) layer]);
             const bool same = cudaMemcpy(back.data(), (const void*) sl.dptr, (size_t) sl.bytes, cudaMemcpyDeviceToHost) ==
                                   cudaSuccess && std::memcmp(back.data(), sl.src, (size_t) sl.bytes) == 0;
             if (same) ++verify_ok;
