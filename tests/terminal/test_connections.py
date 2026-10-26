@@ -113,6 +113,20 @@ class ConnectionTests(unittest.TestCase):
         self.assertTrue(effective["ok"])
         self.assertEqual(effective["effective"]["url"], "http://127.0.0.1:8095")
 
+    def test_telemetry_http_error_response_is_closed(self):
+        from strata_cli import client
+
+        error = client.urllib.error.HTTPError("http://127.0.0.1:8095/v1/status", 500, "bad", {},
+                                              io.BytesIO(b"detail"))
+        error.close = mock.Mock()
+        opener = mock.Mock()
+        opener.open.side_effect = error
+        with mock.patch.object(client.urllib.request, "build_opener", return_value=opener):
+            with self.assertRaisesRegex(ClientError, "HTTP 500") as raised:
+                Endpoint("http://127.0.0.1:8095").get("/v1/status")
+        self.assertEqual(raised.exception.http_status, 500)
+        error.close.assert_called_once_with()
+
     def test_interactive_monitor_rejects_json_output_before_connecting(self):
         for output_flag in (("--output", "json"), ("--json",)):
             with self.subTest(output_flag=output_flag), mock.patch(

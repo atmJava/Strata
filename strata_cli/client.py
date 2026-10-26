@@ -115,12 +115,14 @@ class Endpoint:
                 if len(body) > MAX_BODY:
                     raise ClientError("telemetry response exceeds the 2 MiB limit")
         except urllib.error.HTTPError as e:
-            if e.code in (401, 403):
-                raise ClientError("telemetry authentication or permission failed", 4, http_status=e.code) from e
-            if e.code in (301, 302, 303, 307, 308):
-                raise ClientError("telemetry endpoint redirected; use the final server root",
-                                  http_status=e.code) from e
-            raise ClientError(f"telemetry request failed: HTTP {e.code}", http_status=e.code) from e
+            with e:
+                if e.code in (401, 403):
+                    raise ClientError("telemetry authentication or permission failed", 4,
+                                      http_status=e.code) from e
+                if e.code in (301, 302, 303, 307, 308):
+                    raise ClientError("telemetry endpoint redirected; use the final server root",
+                                      http_status=e.code) from e
+                raise ClientError(f"telemetry request failed: HTTP {e.code}", http_status=e.code) from e
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as e:
             raise ClientError(f"cannot reach Strata server: {type(e).__name__}") from e
         try:

@@ -3,6 +3,20 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-23 · Terminal telemetry 的 HTTPError 响应显式关闭
+
+- 目标 / 指标：只读 telemetry client 收到 401/403、重定向或不支持的状态码时，在转换成 `ClientError` 前关闭底层
+  `HTTPError` 响应及连接。
+- 假设与预期：旧分支直接读取状态码并 raise，`HTTPError` 依赖垃圾回收；频繁轮询失败端点会短期保留 socket/file 对象。
+- 为什么选这条路线：终端监控是长期运行的只读路径，修复只涉及一个响应 owner，且可用 `HTTPError.close` 精确验证。
+- 改动与实验：`Endpoint.get()` 用 `with e:` 包住所有 HTTP 状态分支；新增 500 响应关闭和 `http_status` 保留测试。
+- 结果：connections、terminal、drain 目标回归为 `36 passed / 12 subtests`（另有 28 个平台/环境跳过）；
+  `compileall` 与 `git diff --check` 通过。
+- 判决：采纳。telemetry 的每个 HTTPError 在错误归一化前都显式关闭。
+- 生产状态与回滚：未改生产；状态码映射、重定向拒绝和错误文本不变，单提交可回退。
+- 学到什么：错误响应仍是响应对象；返回简化 `ClientError` 前必须先结束其传输资源。
+- 下一步与理由：继续把相同原则应用到实际发行包会调用的下载/探测工具，并区分维护用脚本与产品入口。
+
 ## I-20261027-22 · runtime stop 在 wait 异常与强制终止后完成 ready/owner 释放
 
 - 目标 / 指标：runtime host 停止 child 时，普通 wait、TimeoutExpired、OSError 和已退出四种情况都必须关闭 owner pipe、
