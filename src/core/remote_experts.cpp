@@ -96,22 +96,21 @@ bool RemoteExperts::preflight(int device, double& free_gib, std::string& err) {
 void RemoteExperts::close() {
     if (device_ < 0) return;
     DeviceScope scope(device_);
-    if (scope.ok) {
-        if (stream_) cudaStreamSynchronize(stream_);
-        if (read_stream_) cudaStreamSynchronize(read_stream_);
-        cache_.close();
-        if (d_x_) cudaFree(d_x_);
-        if (d_out_) cudaFree(d_out_);
-        if (d_q8_) cudaFree(d_q8_);
-        if (d_scales_) cudaFree(d_scales_);
-        if (d_scratch_) cudaFree(d_scratch_);
-        if (d_meta_) cudaFree(d_meta_);
-        if (h_x_) cudaFreeHost(h_x_);
-        if (h_out_) cudaFreeHost(h_out_);
-        if (h_meta_) cudaFreeHost(h_meta_);
-        if (stream_) cudaStreamDestroy(stream_);
-        if (read_stream_) cudaStreamDestroy(read_stream_);
-    }
+    if (!scope.ok) return;
+    if (stream_) cudaStreamSynchronize(stream_);
+    if (read_stream_) cudaStreamSynchronize(read_stream_);
+    cache_.close();
+    if (d_x_) cudaFree(d_x_);
+    if (d_out_) cudaFree(d_out_);
+    if (d_q8_) cudaFree(d_q8_);
+    if (d_scales_) cudaFree(d_scales_);
+    if (d_scratch_) cudaFree(d_scratch_);
+    if (d_meta_) cudaFree(d_meta_);
+    if (h_x_) cudaFreeHost(h_x_);
+    if (h_out_) cudaFreeHost(h_out_);
+    if (h_meta_) cudaFreeHost(h_meta_);
+    if (stream_) cudaStreamDestroy(stream_);
+    if (read_stream_) cudaStreamDestroy(read_stream_);
     device_ = -1;
     stream_ = nullptr;
     read_stream_ = nullptr;
@@ -131,6 +130,10 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
                          const ExpertCache& primary, ExpertSource& source,
                          std::vector<uint8_t>& claimed, std::string& err, bool auto_size) {
     close();
+    if (device_ >= 0) {
+        err = "CUDA" + std::to_string(device_) + " experts: the previous device resources could not be closed";
+        return false;
+    }
     int count = 0;
     if (!check(cudaGetDeviceCount(&count), "cudaGetDeviceCount", err, device)) return false;
     if (device < 0 || device >= count || slots <= 0 || ranked.empty() ||

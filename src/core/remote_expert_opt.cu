@@ -88,6 +88,7 @@ RemoteExpertOpt::~RemoteExpertOpt() {
 void RemoteExpertOpt::release() {
     for (auto& p : peers_) {
         const OnDevice on(p.device);
+        if (p.device >= 0 && !on.ok) continue;
         if (p.device >= 0 && p.remote->device_ == p.device && p.remote->stream_)
             cudaStreamSynchronize(p.remote->stream_);
         if (p.sum) cudaFree(p.sum);

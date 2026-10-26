@@ -50,6 +50,25 @@
   多卡 context 中制造 `cudaHostGetDevicePointer` / `cudaMalloc` 失败。
 - 下一步与理由：继续检查 peer/remote 的 device switch 失败、adapt 批次失败和跨设备析构；优先只改可静态证明的资源状态。
 
+## I-20261027-122 · device 切换失败不再丢失 peer/remote 资源
+
+- 目标 / 指标：`OnDevice` 必须报告 `cudaGetDevice` / `cudaSetDevice` 的失败；PeerExperts 和 RemoteExperts 在无法切回
+  所属 device 时，不得把仍由该 device 持有的句柄清空或当成已释放。
+- 假设与预期：旧 `OnDevice` 静默吞掉切换错误，peer 的 `close()` 随后会在错误 context 上 free/destroy 并把成员清零；
+  RemoteExperts 虽有 `DeviceScope`，也仍会在切换失败后清空成员，导致所有权丢失。
+- 为什么选这条路线：device 归属是资源释放的前提；先让作用域显式返回状态，再让 close 在失败时保留状态供重试，调用路径
+  的成功分支不变。同时把 P2P 自检中的硬编码 device 0 改为实际 primary device。
+- 改动与实验：`OnDevice` 增加 `ok/error`；peer 的 open/launch/finish/adapt/apply 与 remote 的 close/open 检查切换状态。
+  切换失败时 close 保留原成员，后续 open 明确拒绝覆盖未释放资源。新增 `on_device_test` 覆盖成功切换与恢复、同设备 no-op、
+  `cudaSetDevice` 失败、`cudaGetDevice` 失败和负 device；普通及 ASan/UBSan 通过。peer/remote 严格语法检查和 clang
+  analyzer 通过，新增回滚逻辑未报告告警。
+- 判决：采纳。资源释放现在以成功进入所属设备为前提，切换失败不会再伪造释放完成。
+- 生产状态与回滚：正常切换路径行为不变；P2P 自检从固定 device 0 改为 `primary_device()`，只在非零 primary ordinal
+  下修正原错误。单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动或 GPU；peer/remote 的真实 close 切换失败路径只做严格静态检查，故障注入测试只覆盖
+  `OnDevice` 本体，未在双 RTX 2080 Ti context 中制造 driver 切换失败。
+- 下一步与理由：检查 peer `adapt()` 的批次中途失败，避免未记录的异步复制状态被后续 `apply_pending()` 误发布。
+
 ## I-20261027-118 · PinnedRing 在自有 device 上释放
 
 - 目标 / 指标：PinnedRing 的 event 与 pinned slots 必须在其首次使用的 CUDA device 上释放；成员析构发生在调用者的

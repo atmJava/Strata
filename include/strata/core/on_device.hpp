@@ -9,10 +9,23 @@ namespace strata::core {
 
 struct OnDevice {
     int previous = -1;
+    bool ok = true;
+    cudaError_t error = cudaSuccess;
     explicit OnDevice(int device) {
         int cur = 0;
-        if (device >= 0 && cudaGetDevice(&cur) == cudaSuccess && cur != device && cudaSetDevice(device) == cudaSuccess)
-            previous = cur;
+        if (device < 0) return;
+        error = cudaGetDevice(&cur);
+        if (error != cudaSuccess) {
+            ok = false;
+            return;
+        }
+        if (cur == device) return;
+        error = cudaSetDevice(device);
+        if (error != cudaSuccess) {
+            ok = false;
+            return;
+        }
+        previous = cur;
     }
     ~OnDevice() { if (previous >= 0) cudaSetDevice(previous); }
     OnDevice(const OnDevice&) = delete;
