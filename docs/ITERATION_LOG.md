@@ -3,6 +3,24 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-51 · verify 下一窗口线程失败回退同步预启动
+
+- 目标 / 指标：layer-split verify 链启动下一 stage 的窗口 helper 时，如果系统拒绝新线程，当前窗口必须继续按原协议推进，
+  下一窗口由调用线程同步 `prelaunch`；不能因构造异常跳过 hand-off，也不能留下无人处理的 GPU wait。
+- 假设与预期：`nl.th = std::thread(...)` 直接构造；失败会从 `run()` 抛出，现有 `NextLaunch` 析构只能释放 GPU wait，
+  不会执行下一窗口的预启动，因此一次临时线程配额错误会中止整条验证链。
+- 为什么选这条路线：helper 只把下一窗口的 staging/launch 提前与当前窗口重叠；同步执行 `prelaunch` 保持相同 GPU 顺序、
+  flag hand-off、错误传播和最终 `join`/`run` 协议，只牺牲 overlap。
+- 改动与实验：捕获线程构造异常并记录一次降级信息，随后由调用线程执行同一 `prelaunch`，把结果写入现有 `nl.ok/err`。
+  正常路径仍启动 helper，线程函数、窗口顺序、graph 和 GPU 同步都不变。
+- 结果：`verify.cpp` 通过 C++20 主机侧 `-fsyntax-only -Wall -Wextra -Werror`（CUDA 调用由同步 shim 模拟；
+  DFlash2 未启用，跳过该配置原有的未使用变量告警）。`git diff --check` 通过。没有真实线程创建失败注入、CUDA graph、
+  RTX 2080 Ti、双卡 layer split 或长上下文验证。
+- 判决：采纳。辅助 overlap 失败退化为同步预启动，核心验证协议保持可用。
+- 生产状态与回滚：未改成功路径线程和 graph；单提交可回退。目标机仍需验证真实线程配额耗尽与 graph wait 释放。
+- 学到什么：异步辅助启动失败时，如果后续状态机依赖其副作用，应同步补做副作用，而不是只捕获并继续。
+- 下一步与理由：继续审查 n-gram 与预取线程组，随后集中运行 CPU/Python 回归。
+
 ## I-20261027-50 · sm_75 prefill 恢复缺失的 gfx11 回退符号
 
 - 目标 / 指标：专用 sm_75 CUDA 树必须能编译 `prefill.cpp`。收敛提交删除 gfx11 WMMA 源和头文件后，残留的两个调用不能

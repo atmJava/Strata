@@ -2748,7 +2748,15 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     } nl;
     if (chain) {
         nl.next = next_;
-        nl.th = std::thread([&nl, T, tokens, pos0] { nl.ok = nl.next->prelaunch(T, tokens, pos0, nl.err); });
+        try {
+            nl.th = std::thread([&nl, T, tokens, pos0] { nl.ok = nl.next->prelaunch(T, tokens, pos0, nl.err); });
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "verify: next-window helper did not start (%s); prelaunching inline\n", error.what());
+            nl.ok = nl.next->prelaunch(T, tokens, pos0, nl.err);
+        } catch (...) {
+            std::fprintf(stderr, "verify: next-window helper did not start; prelaunching inline\n");
+            nl.ok = nl.next->prelaunch(T, tokens, pos0, nl.err);
+        }
     }
     volatile uint32_t* const seq = h_seq_;
     volatile uint32_t* const flag = h_flag_;
