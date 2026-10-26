@@ -3,6 +3,27 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-92 · CUDA graph capture 失败不遗留 capture 状态或半成品
+
+- 目标 / 指标：`session_capture()` 为每层记录 pre/post 及可选的 stage graph。capture body、end-capture 或
+  instantiate 任一步失败时，必须结束 stream capture、销毁 stream 和未发布 graph；完整 graph 数组及所有 executable
+  只在全部成功后才交给 `SessionGraphs`。Token graph 使用同一规则。
+- 假设与预期：旧 lambda 在 `block_layer_pre/post` 返回 false 时直接退出，此时 stream 仍处于 capture mode，既没有
+  `cudaStreamEndCapture` 也没有销毁；捕获 late layer 失败时，当前层的 graph executable 已经写入数组，但 `gr.n`
+  还没递增，随后 `session_graphs_free()` 不会覆盖这一格。数组逐个 `new` 发生异常时，前面分配的数组也会丢失。
+- 为什么选这条路线：新增独立 `capture_graph_exec()`，由它创建 stream、开始 capture，并保证 body 异常或失败后仍
+  结束 capture，再销毁 partial graph、stream；instantiate 先写局部句柄，成功才发布。`session_capture()` 在局部
+  `SessionGraphs replacement` 中分配并记录全部 graph，当前层开始前就计入 `n`，任一层失败由作用域回滚清理；
+  全部层完成后才把数组和状态复制到调用者对象。`session_capture_token()` 复用同一事务器。
+- 改动与实验：成功路径的 graph 数量、层顺序、stream 顺序、instantiate 参数和 `parts_dev` 地址不变。新增
+  `graph_capture_test`，覆盖成功、body 返回失败、body 抛异常、stream 创建失败、begin/end capture 失败和
+  instantiate 失败；每臂检查旧 executable 不被覆盖、capture mode 已退出、stream/graph 恰释放一次。
+- 判决：采纳。capture 失败有唯一清理路径，公共 `SessionGraphs` 不再暴露半构建资源。
+- 生产状态与回滚：未改 graph 内容、节点顺序、launch 顺序、推理输出或数值；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动和 RTX 2080 Ti，未真实注入 `cudaStreamEndCapture` 或
+  `cudaGraphInstantiate` 故障；link-wrap 验证调用顺序，不能替代驱动的 capture 状态检查。
+- 下一步与理由：继续处理 `session_init()` 的成功所有权以及 QSA 初始化中途失败后的 pinned host/KV 资源。
+
 ## I-20261027-91 · Doorbell 初始化失败整体回滚
 
 - 目标 / 指标：`doorbell_init()` 为 embedding、token ids、routing weights、sequence 和 acknowledgement flag

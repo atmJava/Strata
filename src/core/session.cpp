@@ -1,5 +1,6 @@
 // src/core/session.cpp - one token through all 48 layers.  See the header for why the graphs are per-layer.
 #include "strata/core/session.hpp"
+#include "strata/core/graph_capture.hpp"
 #include "strata/core/pin_budget.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/core/progress.hpp"
@@ -279,28 +280,53 @@ void stage_token(const ModelGeometry& g, int64_t pos, int32_t pos_base, SessionS
 bool session_capture(const WeightTable& tables, const ModelGeometry& g, SessionState& s, const float* parts,
                      SessionGraphs& gr, std::string& err, bool split, int64_t layer_lo, int64_t layer_hi) {
     if (gr.captured) return true;
+    if (gr.execs != nullptr || gr.posts != nullptr || gr.preA != nullptr || gr.preB != nullptr ||
+        gr.preP[0] != nullptr || gr.preP[1] != nullptr || gr.preP[2] != nullptr ||
+        gr.preP[3] != nullptr || gr.preP[4] != nullptr) {
+        err = "session_capture: an incomplete graph set already owns resources";
+        return false;
+    }
     if (layer_hi < 0 || layer_hi > g.n_layers) layer_hi = g.n_layers;
     if (layer_lo < 0) layer_lo = 0;
-    gr.execs = new cudaGraphExec_t[(size_t) g.n_layers]();
-    gr.posts = new cudaGraphExec_t[(size_t) g.n_layers]();
-    for (int64_t i = 0; i < g.n_layers; ++i) gr.posts[i] = nullptr;
-    if (split) {
-        gr.preA = new cudaGraphExec_t[(size_t) g.n_layers]();
-        gr.preB = new cudaGraphExec_t[(size_t) g.n_layers]();
-        for (int64_t i = 0; i < g.n_layers; ++i) { gr.preA[i] = nullptr; gr.preB[i] = nullptr; }
-        for (int k = 0; k < 5; ++k) {
-            gr.preP[k] = new cudaGraphExec_t[(size_t) g.n_layers]();
-            for (int64_t i = 0; i < g.n_layers; ++i) gr.preP[k][i] = nullptr;
+    SessionGraphs replacement;
+    try {
+        auto execs = std::make_unique<cudaGraphExec_t[]>((size_t) g.n_layers);
+        auto posts = std::make_unique<cudaGraphExec_t[]>((size_t) g.n_layers);
+        std::unique_ptr<cudaGraphExec_t[]> preA;
+        std::unique_ptr<cudaGraphExec_t[]> preB;
+        std::unique_ptr<cudaGraphExec_t[]> preP[5];
+        if (split) {
+            preA = std::make_unique<cudaGraphExec_t[]>((size_t) g.n_layers);
+            preB = std::make_unique<cudaGraphExec_t[]>((size_t) g.n_layers);
+            for (auto& prefixes : preP)
+                prefixes = std::make_unique<cudaGraphExec_t[]>((size_t) g.n_layers);
         }
+        replacement.execs = execs.release();
+        replacement.posts = posts.release();
+        replacement.preA = preA.release();
+        replacement.preB = preB.release();
+        for (int k = 0; k < 5; ++k) replacement.preP[k] = preP[k].release();
+    } catch (const std::bad_alloc&) {
+        err = "session_capture: graph array allocation failed";
+        return false;
     }
-    gr.split_captured = split;
-    gr.n = 0;
+    replacement.split_captured = split;
+    struct Rollback {
+        SessionGraphs& graphs;
+        bool published = false;
+        ~Rollback() {
+            if (!published) session_graphs_free(graphs);
+        }
+    } rollback{replacement};
 
     int64_t qsa_index = s.qsa_ord0;
     for (int64_t l = layer_lo; l < layer_hi; ++l) {
         gdn_point_at(g, l, s);
         const bool qsa = is_qsa_layer(g, l);
         QsaState& qst = qsa ? s.qsa_states[qsa_index] : s.qsa_states[s.qsa_primary()];
+        // `session_graphs_free` uses this count while rolling back a failure: the current layer must already be
+        // in range before its first executable is published into the replacement set.
+        ++replacement.n;
 
         // **TWO GRAPHS PER LAYER, SPLIT AT THE ROUTER.**  `pre` ends with the doorbell rung; the host then runs
         // the CPU pool on what it published; `post` combines those experts with THIS layer's weights.  Capturing
@@ -308,58 +334,43 @@ bool session_capture(const WeightTable& tables, const ModelGeometry& g, SessionS
         // `moe_combine` needs the pool's answer and the pool needs the router's.
         auto capture = [&](bool post, cudaGraphExec_t* out, const char* what, int half = 0,
                            int stage_prefix = 0) -> bool {
-            cudaStream_t cs = nullptr;
-            if (cudaStreamCreate(&cs) != cudaSuccess) {
-                err = std::string("session_capture: stream create failed");
-                return false;
-            }
-            if (cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
-                err = "session_capture: begin failed at layer " + std::to_string(l);
-                return false;
-            }
-            err.clear();
-            // R0.9: `half` is 0 for every mode except the split capture, where it selects a prefix of the
-            // stages so the mixer and the FFN-front-plus-router can be timed separately.
-            const bool ok = post
-                                ? block_layer_post(tables, g, l, s.k, s.moe, s.block, parts, (void*) cs, err)
-                                : block_layer_pre(tables, g, l, 0, 0, s.gdn, qst, s.qsa_bufs, s.moe, s.k,
-                                                  s.block, (void*) cs, err, s.db, s.ple.ready() ? &s.ple : nullptr,
-                                                  half, stage_prefix);
-            if (!ok) {
-                err = "session_capture: " + std::string(what) + " layer " + std::to_string(l) + ": " + err;
-                return false;
-            }
-            cudaGraph_t graph = nullptr;
-            const cudaError_t ce = cudaStreamEndCapture(cs, &graph);
-            cudaStreamDestroy(cs);
-            if (ce != cudaSuccess) {
-                err = "session_capture: " + std::string(what) + " layer " + std::to_string(l) + ": " +
-                      cudaGetErrorString(ce) + " (a synchronous call in the layer?)";
-                return false;
-            }
-            if (cudaGraphInstantiate(out, graph, 0) != cudaSuccess) {
-                err = "session_capture: instantiate failed at layer " + std::to_string(l);
-                return false;
-            }
-            cudaGraphDestroy(graph);
-            return true;
+            const std::string label = "session_capture: " + std::string(what) + " layer " + std::to_string(l);
+            return capture_graph_exec(
+                label,
+                [&](cudaStream_t cs, std::string& body_err) {
+                    // R0.9: `half` is 0 for every mode except the split capture, where it selects a prefix of the
+                    // stages so the mixer and the FFN-front-plus-router can be timed separately.
+                    return post
+                               ? block_layer_post(tables, g, l, s.k, s.moe, s.block, parts, (void*) cs, body_err)
+                               : block_layer_pre(tables, g, l, 0, 0, s.gdn, qst, s.qsa_bufs, s.moe, s.k,
+                                                 s.block, (void*) cs, body_err, s.db,
+                                                 s.ple.ready() ? &s.ple : nullptr, half, stage_prefix);
+                },
+                *out, err);
         };
-        if (!capture(/*post=*/false, &gr.execs[l], "pre")) return false;
-        if (!capture(/*post=*/true, &gr.posts[l], "post")) return false;
+        if (!capture(/*post=*/false, &replacement.execs[l], "pre")) return false;
+        if (!capture(/*post=*/true, &replacement.posts[l], "post")) return false;
         if (split) {
-            if (!capture(/*post=*/false, &gr.preA[l], "preA", /*half=*/1)) return false;
-            if (!capture(/*post=*/false, &gr.preB[l], "preB", /*half=*/2)) return false;
+            if (!capture(/*post=*/false, &replacement.preA[l], "preA", /*half=*/1)) return false;
+            if (!capture(/*post=*/false, &replacement.preB[l], "preB", /*half=*/2)) return false;
             // Prefixes 1..5, ALL through the new parameter - including the fifth, so that it and the fourth
             // differ only in the one stage between them and not in how many nodes their graphs carry.
             for (int k = 1; k <= 5; ++k)
-                if (!capture(/*post=*/false, &gr.preP[k - 1][l], "preP", /*half=*/0, /*stage_prefix=*/k))
+                if (!capture(/*post=*/false, &replacement.preP[k - 1][l], "preP", /*half=*/0, /*stage_prefix=*/k))
                     return false;
         }
-        ++gr.n;
         if (qsa) ++qsa_index;
     }
+    gr.execs = replacement.execs;
+    gr.posts = replacement.posts;
+    gr.preA = replacement.preA;
+    gr.preB = replacement.preB;
+    for (int k = 0; k < 5; ++k) gr.preP[k] = replacement.preP[k];
+    gr.split_captured = replacement.split_captured;
+    gr.n = replacement.n;
     gr.captured = true;
     gr.parts_dev = const_cast<float*>(parts);   // the address the graphs baked in; the loop copies here
+    rollback.published = true;
     return true;
 }
 
@@ -950,55 +961,49 @@ bool session_capture_token(const WeightTable& tables, const ModelGeometry& g, Se
         err = "session_capture_token: the parts staging is not mapped pinned memory";
         return false;
     }
-    cudaStream_t cs = nullptr;
-    if (cudaStreamCreate(&cs) != cudaSuccess) { err = "session_capture_token: stream create failed"; return false; }
-    if (cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
-        cudaStreamDestroy(cs);
-        err = "session_capture_token: begin capture failed";
-        return false;
-    }
     int64_t qsa_index = 0;
-    bool ok = true;
-    for (int64_t l = 0; l < g.n_layers && ok; ++l) {
-        gdn_point_at(g, l, s);
-        const bool qsa = is_qsa_layer(g, l);
-        QsaState& qst = qsa ? s.qsa_states[qsa_index] : s.qsa_states[0];
-        err.clear();
-        ok = block_layer_pre(tables, g, l, 0, 0, s.gdn, qst, s.qsa_bufs, s.moe, s.k, s.block, (void*) cs, err, s.db,
-                             s.ple.ready() ? &s.ple : nullptr);
-        if (!ok) { err = "session_capture_token: pre layer " + std::to_string(l) + ": " + err; break; }
-        if (hits != nullptr) {
-            // After the ring (and the shared expert): the GPU's experts run while the CPU computes the misses.
-            strata::kernels::moe_hit_select(s.moe.ids, hits->d_res + l * hits->n_expert, (int) s.k,
-                                            (int) hits->n_expert, hits->d_slot, hits->d_dst, hits->d_count, (void*) cs);
-            strata::kernels::quantize_q8_0_scaled(s.block.mixed, hits->x_q8, hits->x_scale, g.n_embd, (void*) cs);
-            strata::kernels::moe_hit_grouped_s2_dev(hits->cache_base, hits->d_slot, hits->d_dst, hits->d_count, s.k,
-                                                    hits->blob, hits->x_q8, hits->scratch, hits->hit_out, (void*) cs,
-                                                    hits->x_scale);
-        }
-        strata::kernels::doorbell_wait(s.db->d_flag, s.db->d_seq, (void*) cs);
-        // A kernel, not a memcpy node: a copy-engine node splits the WDDM submission (measured 67 flushes/token).
-        strata::kernels::copy_from_mapped(parts_dev, y_dev, (int64_t) (parts_bytes / sizeof(float)), (void*) cs);
-        if (hits != nullptr)
-            strata::kernels::moe_hit_add(parts_dev, hits->hit_out, hits->d_dst, hits->d_count, s.k, g.n_embd, (void*) cs);
-        ok = block_layer_post(tables, g, l, s.k, s.moe, s.block, parts_dev, (void*) cs, err);
-        if (!ok) { err = "session_capture_token: post layer " + std::to_string(l) + ": " + err; break; }
-        if (qsa) ++qsa_index;
-    }
-    cudaGraph_t graph = nullptr;
-    const cudaError_t ce = cudaStreamEndCapture(cs, &graph);
-    cudaStreamDestroy(cs);
-    if (!ok) { if (graph) cudaGraphDestroy(graph); return false; }
-    if (ce != cudaSuccess) {
-        err = std::string("session_capture_token: end capture: ") + cudaGetErrorString(ce);
+    if (!capture_graph_exec(
+            "session_capture_token",
+            [&](cudaStream_t cs, std::string& body_err) {
+                for (int64_t l = 0; l < g.n_layers; ++l) {
+                    gdn_point_at(g, l, s);
+                    const bool qsa = is_qsa_layer(g, l);
+                    QsaState& qst = qsa ? s.qsa_states[qsa_index] : s.qsa_states[0];
+                    if (!block_layer_pre(tables, g, l, 0, 0, s.gdn, qst, s.qsa_bufs, s.moe, s.k, s.block,
+                                         (void*) cs, body_err, s.db, s.ple.ready() ? &s.ple : nullptr)) {
+                        body_err = "pre layer " + std::to_string(l) + ": " + body_err;
+                        return false;
+                    }
+                    if (hits != nullptr) {
+                        // After the ring (and the shared expert): the GPU's experts run while the CPU computes the
+                        // misses.
+                        strata::kernels::moe_hit_select(s.moe.ids, hits->d_res + l * hits->n_expert, (int) s.k,
+                                                        (int) hits->n_expert, hits->d_slot, hits->d_dst,
+                                                        hits->d_count, (void*) cs);
+                        strata::kernels::quantize_q8_0_scaled(s.block.mixed, hits->x_q8, hits->x_scale, g.n_embd,
+                                                              (void*) cs);
+                        strata::kernels::moe_hit_grouped_s2_dev(
+                            hits->cache_base, hits->d_slot, hits->d_dst, hits->d_count, s.k, hits->blob,
+                            hits->x_q8, hits->scratch, hits->hit_out, (void*) cs, hits->x_scale);
+                    }
+                    strata::kernels::doorbell_wait(s.db->d_flag, s.db->d_seq, (void*) cs);
+                    // A kernel, not a memcpy node: a copy-engine node splits the WDDM submission (measured 67
+                    // flushes/token).
+                    strata::kernels::copy_from_mapped(parts_dev, y_dev, (int64_t) (parts_bytes / sizeof(float)),
+                                                      (void*) cs);
+                    if (hits != nullptr)
+                        strata::kernels::moe_hit_add(parts_dev, hits->hit_out, hits->d_dst, hits->d_count, s.k,
+                                                     g.n_embd, (void*) cs);
+                    if (!block_layer_post(tables, g, l, s.k, s.moe, s.block, parts_dev, (void*) cs, body_err)) {
+                        body_err = "post layer " + std::to_string(l) + ": " + body_err;
+                        return false;
+                    }
+                    if (qsa) ++qsa_index;
+                }
+                return true;
+            },
+            tg.exec, err))
         return false;
-    }
-    const cudaError_t ie = cudaGraphInstantiate(&tg.exec, graph, 0);
-    cudaGraphDestroy(graph);
-    if (ie != cudaSuccess) {
-        err = std::string("session_capture_token: instantiate: ") + cudaGetErrorString(ie);
-        return false;
-    }
     tg.captured = true;
     tg.n_layers = g.n_layers;
     tg.y_src = y_miss_host;
