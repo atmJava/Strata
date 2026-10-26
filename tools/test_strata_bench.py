@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -167,6 +168,23 @@ class SuiteTests(unittest.TestCase):
 
 
 class RedactionTests(unittest.TestCase):
+    def test_http_error_is_closed_after_its_body_is_read(self):
+        error = urllib.error.HTTPError("http://example.invalid", 503, "busy", {},
+                                       io.BytesIO(b"try later"))
+        closed = False
+        original_close = error.close
+
+        def count_close():
+            nonlocal closed
+            closed = True
+            original_close()
+
+        error.close = count_close
+        with mock.patch.object(B.urllib.request, "urlopen", side_effect=error):
+            result = B.chat("http://example.invalid", "", [{"role": "user", "content": "x"}], 1)
+        self.assertIn("HTTP 503", result["err"])
+        self.assertTrue(closed)
+
     def test_paths_names_ips_and_keys(self):
         red = B.redactor(extra=["Jane Roe Laptop"], key="sk-secret-123456")
         user = os.environ.get("USERNAME") or os.environ.get("USER") or "tester"

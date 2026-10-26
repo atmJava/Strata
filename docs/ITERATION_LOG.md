@@ -3,6 +3,22 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-30 · strata_bench 的 HTTPError 正文读取后关闭
+
+- 目标 / 指标：流式基准请求收到 4xx/5xx 时，保留 `HTTP <code>: <body>` 错误文本，并在返回结果前关闭
+  `HTTPError` 的响应和连接。
+- 假设与预期：`chat()` 读取 `HTTPError` 正文后只生成字符串，未显式关闭；连续采样失败端点会把 socket/TLS 的释放
+  推迟到 GC，和此前 Terminal telemetry、MCP HTTP 修正是同类问题。
+- 为什么选这条路线：基准工具有现成 HTTP fake 和无 GPU 测试；修改只影响错误归一化，不改变成功流解析、计时或报告。
+- 改动与实验：`HTTPError` 分支在 `try/finally` 中读取最多 200 字节并 `close()`。新增 mock 503 响应，断言错误文本
+  仍含 `HTTP 503`，且 close 被调用。
+- 结果：`python -m pytest -q tools/test_strata_bench.py` 为 `18 passed`；`compileall` 与 `git diff --check` 通过。
+- 判决：采纳。基准请求的成功体由上下文关闭，失败体也在归一化后显式关闭。
+- 生产状态与回滚：未改服务；仅改维护型基准工具的错误路径，单提交可回退。未访问真实慢速/中断的 benchmark 端点。
+- 学到什么：错误正文也属于响应资源；转成展示字符串和释放连接应放在同一 finally 边界。
+- 下一步与理由：继续检查其他维护工具中 `urlopen(...).read()`、未关闭 key/output 文件，以及图片/模型下载临时文件；
+  保持产品入口优先，再回到 C++ RAM promotion 与 prefill 审查。
+
 ## I-20261027-29 · quant_formats 的 HTTP 响应显式关闭
 
 - 目标 / 指标：Hugging Face 模型树 JSON 和每个 GGUF range 请求都要在读取完成、空响应或解析异常时关闭

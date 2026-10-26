@@ -169,7 +169,10 @@ def chat(base: str, key: str, messages: list, max_tokens: int, think: bool = Fal
                 if j.get("timings"):
                     timings = j["timings"]
     except urllib.error.HTTPError as e:
-        err = f"HTTP {e.code}: {e.read()[:200]!r}"
+        try:
+            err = f"HTTP {e.code}: {e.read()[:200]!r}"
+        finally:
+            e.close()
     except Exception as e:                              # noqa: BLE001
         err = repr(e)[:300]
     total = time.perf_counter() - t0
