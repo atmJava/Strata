@@ -7,6 +7,7 @@
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/graph_capture.hpp"
+#include "strata/core/mapped_host.hpp"
 #include "strata/core/scoped_value_restore.hpp"
 #include "strata/core/spec_prob.hpp"
 #include "strata/platform/worker_guard.hpp"
@@ -297,9 +298,9 @@ bool one_token_self_commit() {
 }
 
 bool mapped(size_t bytes, void** h, void** d) {
-    if (strata::core::host_alloc_guarded(h, bytes, cudaHostAllocMapped | (peer_portable() ? cudaHostAllocPortable : 0)) != cudaSuccess) return false;   // multi-GPU: portable only with a peer - the peer card writes its rows into them
-    std::memset(*h, 0, bytes);
-    return cudaHostGetDevicePointer(d, *h, 0) == cudaSuccess;
+    // multi-GPU: portable only with a peer - the peer card writes its rows into these buffers
+    return strata::core::alloc_mapped_pinned(
+        bytes, h, d, peer_portable() ? cudaHostAllocPortable : 0);
 }
 
 strata::kernels::QsaShapes shapes_of(const ModelGeometry& g) { return qsa_shapes(g); }

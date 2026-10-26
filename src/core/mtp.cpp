@@ -1,6 +1,7 @@
 // src/core/mtp.cpp - see include/strata/core/mtp.hpp.
 #include "strata/core/mtp.hpp"
 #include "strata/core/graph_capture.hpp"
+#include "strata/core/mapped_host.hpp"
 #include "strata/core/pin_budget.hpp"
 #include "strata/core/scoped_value_restore.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
@@ -82,9 +83,8 @@ struct Bump {
 };
 
 bool mapped(size_t bytes, void** h, void** d) {
-    if (strata::core::host_alloc_guarded(h, bytes, cudaHostAllocMapped | (peer_portable() ? cudaHostAllocPortable : 0)) != cudaSuccess) return false;
-    std::memset(*h, 0, bytes);
-    return cudaHostGetDevicePointer(d, *h, 0) == cudaSuccess;
+    return strata::core::alloc_mapped_pinned(
+        bytes, h, d, peer_portable() ? cudaHostAllocPortable : 0);
 }
 
 strata::kernels::QsaShapes shapes_of(const ModelGeometry& g) { return qsa_shapes(g); }

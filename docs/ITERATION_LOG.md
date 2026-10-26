@@ -3,6 +3,29 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-97 · Mapped-pinned 分配在 alias 失败时释放
+
+- 目标 / 指标：`cudaHostAlloc(..., Mapped)` 成功后，如果 `cudaHostGetDevicePointer` 失败，必须立即释放 host
+  分配；不能把半成功结果写入调用者字段，也不能让重试覆盖并丢失前一块。Verifier、MTP 和 DFlash2 应使用同一所有权
+  语义。
+- 假设与预期：Verifier 与 MTP 的本地 `mapped()` 在 device alias 失败时直接返回，host 指针已经写入成员；当前调用
+  通常随后终止加载，但同一对象重试时会覆盖旧指针。DFlash2 已释放该分支，却使用另一套直接 `cudaHostAlloc`
+  实现，容易再次分叉。
+- 为什么选这条路线：新增 `alloc_mapped_pinned()`，先在局部分配 host 并用现有 guarded pin 预算，获取 device alias
+  成功后才发布两个输出。alias 失败调用 guarded host free 并保持输出不变。三个后端入口都改为该函数；Verifier/MTP
+  仍只在 peer 可用时附加 portable flag。
+- 改动与实验：不改变 buffer 大小、清零、mapped/portable flags、成员类型或调用顺序；只统一失败所有权。新增
+  `mapped_host_test`，检查成功分配、清零与 flags，device alias 失败后的 host 释放和输出不变，以及 host 分配失败
+  不触碰任何资源。普通及 ASan/UBSan 通过；`mtp.cpp`、`dflash2.cpp`、`verify.cpp` 通过 C++20 主机侧严格语法检查
+  （仅跳过仓库既有未使用/缩进告警）；`python3 -m pytest tests/terminal -q` 通过（200 passed、46 skipped、
+  93 subtests passed）。
+- 判决：采纳。mapped host 块在 alias 失败和重试时都有确定所有者，三个调用方不再复制这一段恢复逻辑。
+- 生产状态与回滚：成功路径指针、清零结果和 flags 不变，推理与 graph 内容不变；单提交可回退。
+- 未验证：当前无 CUDA 工具链、驱动和 RTX 2080 Ti，未真实触发 `cudaHostGetDevicePointer` 失败或 pin 预算耗尽；
+  link-wrap 验证字节清零、flags、释放与输出发布，不替代驱动级 mapped 内存测试。
+- 下一步与理由：继续检查直接调用 `cudaHostAlloc` 后获取 device alias 的其他入口，特别是 native embedding 与
+  peer/remote staging，确认失败路径是否拥有已取得的 host 块。
+
 ## I-20261027-96 · Capture 异常退出恢复录制状态
 
 - 目标 / 指标：Verifier 的普通窗口和 batch 窗口在 `record_window` 返回失败或抛出异常时，都必须结束 stream

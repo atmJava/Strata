@@ -445,6 +445,16 @@ if(STRATA_ENABLE_CUDA)
       add_test(NAME scoped_value_restore_test COMMAND scoped_value_restore_test)
       set_tests_properties(scoped_value_restore_test PROPERTIES
         ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
+      add_executable(mapped_host_test tests/core/mapped_host_test.cpp)
+      target_include_directories(mapped_host_test PRIVATE
+        include ${_strata_gpu_include_directories})
+      target_link_options(mapped_host_test PRIVATE
+        -Wl,--wrap=cudaHostAlloc -Wl,--wrap=cudaHostGetDevicePointer
+        -Wl,--wrap=cudaFreeHost -Wl,--wrap=cudaGetLastError)
+      target_link_libraries(mapped_host_test PRIVATE strata_warnings)
+      add_test(NAME mapped_host_test COMMAND mapped_host_test)
+      set_tests_properties(mapped_host_test PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 30)
       add_executable(qsa_state_resource_test
         tests/core/qsa_state_resource_test.cpp src/core/qsa_state.cpp)
       target_include_directories(qsa_state_resource_test PRIVATE

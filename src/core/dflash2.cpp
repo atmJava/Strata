@@ -1,6 +1,7 @@
 // src/core/dflash2.cpp - see include/strata/core/dflash2.hpp.
 #include "strata/core/dflash2.hpp"
 #include "strata/core/graph_capture.hpp"
+#include "strata/core/mapped_host.hpp"
 #include "strata/core/scoped_value_restore.hpp"
 
 #include "strata/core/native_head.hpp"
@@ -29,18 +30,7 @@ using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
 bool mapped(size_t bytes, void** h, void** d) {
-    void* host = nullptr;
-    void* device = nullptr;
-    if (cudaHostAlloc(&host, bytes, cudaHostAllocMapped) != cudaSuccess) return false;
-    std::memset(host, 0, bytes);
-    if (cudaHostGetDevicePointer(&device, host, 0) != cudaSuccess) {
-        // No member owns `host` until mapped() succeeds (alloc() uses locals for both pointers below).
-        cudaFreeHost(host);
-        return false;
-    }
-    *h = host;
-    *d = device;
-    return true;
+    return strata::core::alloc_mapped_pinned(bytes, h, d);
 }
 
 constexpr int GGML_Q8_0 = 8;
