@@ -3,9 +3,7 @@
     python -m unittest serve.test_lifeline
 
 Each case runs a small "server" process (a fresh interpreter) that starts a sleeping child through
-`lifeline.popen`, then ends that server the hard way (kill -9 / TerminateProcess), and checks that the child
-is gone. The mechanism under test is Windows' job object, Linux's PR_SET_PDEATHSIG, or the portable watcher
-(forced with STRATA_LIFELINE=watcher so it is proven on every POSIX box, not only on macOS).
+`lifeline.popen`, then kills that server with SIGKILL and checks that the child is gone.
 """
 import json
 import os
@@ -14,12 +12,13 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-POSIX = os.name == "posix"
 
 SERVER = textwrap.dedent("""
     import os, sys, time, threading, subprocess
@@ -85,10 +84,7 @@ class Lifeline(unittest.TestCase):
         return not alive(pid)
 
     def hard_kill(self, proc):
-        if POSIX:
-            os.kill(proc.pid, signal.SIGKILL)
-        else:
-            proc.kill()
+        os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=10)
 
     def _killed_parent_takes_the_child(self, **env):
@@ -99,11 +95,7 @@ class Lifeline(unittest.TestCase):
         return info["mechanism"]
 
     def test_a_child_ends_when_its_server_is_killed(self):
-        self.assertIn(self._killed_parent_takes_the_child(), ("job", "pdeathsig", "watcher"))
-
-    @unittest.skipUnless(POSIX, "the portable watcher is the POSIX path")
-    def test_the_portable_watcher_ends_the_child_when_the_server_is_killed(self):
-        self.assertEqual(self._killed_parent_takes_the_child(STRATA_LIFELINE="watcher"), "watcher")
+        self.assertEqual(self._killed_parent_takes_the_child(), "pdeathsig")
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "PR_SET_PDEATHSIG is Linux")
     def test_a_child_started_on_a_request_thread_outlives_that_thread_but_not_the_server(self):
@@ -122,7 +114,7 @@ class Lifeline(unittest.TestCase):
     def test_the_child_is_recorded_while_it_runs_and_forgotten_after(self):
         from strata_control import procs
         proc, info = self.launch("sleep")
-        base = Path(self.temp.name) / "Strata" / "procs" if not POSIX else Path(self.temp.name) / "strata" / "procs"
+        base = Path(self.temp.name) / "strata" / "procs"
         record = base / f"{info['child']}.json"
         deadline = time.monotonic() + 5
         while not record.exists() and time.monotonic() < deadline:
@@ -132,6 +124,49 @@ class Lifeline(unittest.TestCase):
         self.assertEqual(data["token"], procs.start_token(info["child"]))
         self.hard_kill(proc)
         self.assertTrue(self.wait_gone(info["child"]))
+
+    def test_a_reaper_thread_failure_keeps_the_child_in_the_shutdown_path(self):
+        from serve import lifeline
+
+        real_start = threading.Thread.start
+
+        def start(thread):
+            if thread.name == "strata-lifeline-reaper":
+                raise RuntimeError("no reaper thread")
+            return real_start(thread)
+
+        with mock.patch.object(threading.Thread, "start", autospec=True, side_effect=start), \
+                mock.patch.dict(os.environ, self.env):
+            child = lifeline.popen([sys.executable, "-c", "import time; time.sleep(600)"], "engine")
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.assertIn(child, lifeline._children)
+        record = Path(self.temp.name) / "strata" / "procs" / f"{child.pid}.json"
+        self.assertTrue(record.is_file())
+
+        with mock.patch.dict(os.environ, self.env):
+            lifeline.end_children(grace=1)
+        self.assertIsNotNone(child.poll())
+        self.assertNotIn(child, lifeline._children)
+        self.assertFalse(record.exists())
+
+    def test_end_children_waits_after_killing_a_child_that_ignores_sigterm(self):
+        from serve import lifeline
+
+        child = subprocess.Popen([
+            sys.executable, "-c",
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(600)",
+        ], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.addCleanup(child.stdout.close)
+        self.assertEqual(child.stdout.readline(), "ready\n")
+        with lifeline._children_lock:
+            lifeline._children.add(child)
+            lifeline._child_tokens[child] = None
+
+        lifeline.end_children(grace=0.1)
+        self.assertIsNotNone(child.poll())
+        self.assertNotIn(child, lifeline._children)
 
 
 if __name__ == "__main__":
@@ -154,7 +189,7 @@ class HardFallback(unittest.TestCase):
         from serve import server
         engine = server.StrataEngine("missing-executable", [], lazy=True)
         engine.proc = subprocess.Popen([sys.executable, "-c", STUBBORN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                                       text=True)
         engine.proc.stdout.readline()
         victim = engine.proc
         t0 = time.monotonic()
@@ -166,3 +201,18 @@ class HardFallback(unittest.TestCase):
         self.assertIsNone(engine.proc)
         if os.name == "posix":
             self.assertEqual(victim.returncode, -signal.SIGKILL, "it ignored SIGTERM, so only the kill ended it")
+
+
+class OwnerGuardFallback(unittest.TestCase):
+    def test_guard_thread_failure_closes_the_inherited_descriptor(self):
+        from serve import owner_guard
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(lambda: os.close(write_fd))
+        with mock.patch.object(owner_guard.os, "getpgrp", return_value=123), \
+                mock.patch.object(owner_guard.os, "getpid", return_value=123), \
+                mock.patch.object(threading.Thread, "start",
+                                  side_effect=RuntimeError("thread limit")):
+            with self.assertRaisesRegex(ValueError, "guard thread did not start"):
+                owner_guard.start(read_fd)
+        with self.assertRaises(OSError):
+            os.fstat(read_fd)

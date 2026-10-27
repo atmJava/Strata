@@ -3,15 +3,14 @@
 //
 // Header-only and GPU-free: the engine, the tools and the unit tests (tests/core/model_family_test.cpp) share it.
 //
-//   * geometry_from_gguf: fills core::ModelGeometry from "<arch>.*" keys.  For qwen4exp the keys a file does not
-//     carry keep Flash-Next's values (the struct defaults, which every published qwen4exp file matches); for
-//     qwen35moe every key is required (check_architecture_qwen35moe).
+//   * geometry_from_gguf: fills core::ModelGeometry from "qwen4exp.*" keys.  Keys a file does not carry keep
+//     Flash-Next's compiled defaults.
 //   * compiled_geometry_mismatch: the first field where a geometry differs from the shapes this engine's kernels
 //     are built for (the expert count and top-k are run-time values and are not compared).
 //   * layer_tensors / global_tensors: the layout tables.  Names are GGUF names (blk.N.<suffix>), shapes are in
 //     GGUF order (dim 0 contiguous), as tools/gguf_reader.py prints them.
 //   * check_gguf_layout: every table entry present with its shape, inside its file, of a type with a known block
-//     size; and, for a family whose table is complete (qwen35moe), no blk.* tensor the table does not name.
+//     size.
 #pragma once
 
 #include "strata/artifact/gguf_reader.hpp"
@@ -20,7 +19,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -60,17 +58,11 @@ inline bool geometry_from_gguf(const strata::GgufFile& meta, ModelGeometry& g, i
     num("ssm.inner_size", g.ssm_value_dim);
     num("full_attention_interval", g.qsa_interval);
     g.head_dim = key_length;
-    if (family == strata::ModelFamily::Qwen35Moe) {
-        num("nextn_predict_layers", g.n_mtp_layers);
-        g.hc = g.hc_lr = 0;                 // a plain pre-norm residual
-        g.idx_q_heads = g.idx_key_dim = 0;  // dense attention, no sparse indexer
-    } else {
-        num("hyper_connection.count", g.hc);
-        num("hyper_connection.low_rank", g.hc_lr);
-        num("attention.indexer.head_count", g.idx_q_heads);
-        num("attention.indexer.key_length", g.idx_key_dim);
-    }
-    g.n_layers = block_count - g.n_mtp_layers;
+    num("hyper_connection.count", g.hc);
+    num("hyper_connection.low_rank", g.hc_lr);
+    num("attention.indexer.head_count", g.idx_q_heads);
+    num("attention.indexer.key_length", g.idx_key_dim);
+    g.n_layers = block_count;
     g.ssm_conv_channels = 2 * g.ssm_state_size * g.ssm_k_heads + g.ssm_value_dim;
     if (const strata::MetaValue* v = meta.get("tokenizer.ggml.tokens"))
         if (v->type == strata::MetaType::ARRAY && v->count > 0) g.n_vocab = (int64_t) v->count;
@@ -124,7 +116,6 @@ inline std::string compiled_geometry_mismatch(const ModelGeometry& g) {
         {"hyper_connection.low_rank", g.hc_lr, c.hc_lr},
         {"expert_feed_forward_length", g.n_ff, c.n_ff},
         {"expert_shared_feed_forward_length", g.n_ff_shexp, c.n_ff_shexp},
-        {"the in-file MTP layers", g.n_mtp_layers, c.n_mtp_layers},
     };
     for (const F& f : fields)
         if (f.got != f.want) {
@@ -136,10 +127,9 @@ inline std::string compiled_geometry_mismatch(const ModelGeometry& g) {
     return {};
 }
 
-enum class LayerKind { Gdn, Attention, Mtp };
+enum class LayerKind { Gdn, Attention };
 
 inline LayerKind layer_kind(const ModelGeometry& g, int64_t layer) {
-    if (layer >= g.n_layers) return LayerKind::Mtp;
     return is_qsa_layer(g, layer) ? LayerKind::Attention : LayerKind::Gdn;
 }
 
@@ -165,22 +155,16 @@ inline std::vector<TensorWant> layer_tensors(const ModelGeometry& g, int64_t lay
     add("ffn_gate_exps.weight", {N, FF, NE});
     add("ffn_up_exps.weight", {N, FF, NE});
     add("ffn_down_exps.weight", {FF, N, NE});
-    if (g.has_hyper_connections()) {
-        // gated residual (Flash-Next): `gr_read` transposes, so the file's orientation is [hc_dim, hc_lr] / [hc_lr, hc_dim]
-        const int64_t H = g.hc_dim();
-        add("hc_attn_down.weight", {H, g.hc_lr});
-        add("hc_attn_up.weight", {g.hc_lr, H});
-        add("hc_attn_inject.weight", {H, g.hc});
-        add("hc_attn_norm.weight", {H});
-        add("hc_ffn_down.weight", {H, g.hc_lr});
-        add("hc_ffn_up.weight", {g.hc_lr, H});
-        add("hc_ffn_inject.weight", {H, g.hc});
-        add("hc_ffn_norm.weight", {H});
-    } else {
-        // plain pre-norm residual (qwen35moe): x += mixer(rms(x)); x += moe(rms(x))
-        add("attn_norm.weight", {N});
-        add("post_attention_norm.weight", {N});
-    }
+    // gated residual: `gr_read` transposes, so the file's orientation is [hc_dim, hc_lr] / [hc_lr, hc_dim]
+    const int64_t H = g.hc_dim();
+    add("hc_attn_down.weight", {H, g.hc_lr});
+    add("hc_attn_up.weight", {g.hc_lr, H});
+    add("hc_attn_inject.weight", {H, g.hc});
+    add("hc_attn_norm.weight", {H});
+    add("hc_ffn_down.weight", {H, g.hc_lr});
+    add("hc_ffn_up.weight", {g.hc_lr, H});
+    add("hc_ffn_inject.weight", {H, g.hc});
+    add("hc_ffn_norm.weight", {H});
     if (kind == LayerKind::Gdn) {
         add("attn_qkv.weight", {N, g.ssm_conv_channels});
         add("attn_gate.weight", {N, g.ssm_value_dim});
@@ -207,13 +191,6 @@ inline std::vector<TensorWant> layer_tensors(const ModelGeometry& g, int64_t lay
             add("indexer.k_norm.weight", {g.idx_key_dim});
         }
     }
-    if (kind == LayerKind::Mtp) {
-        // the GGUF-native MTP block: eh_proj over concat(enorm(embedding), hnorm(hidden))
-        add("nextn.eh_proj.weight", {2 * N, N});
-        add("nextn.enorm.weight", {N});
-        add("nextn.hnorm.weight", {N});
-        add("nextn.shared_head_norm.weight", {N});
-    }
     return t;
 }
 
@@ -223,26 +200,17 @@ inline std::vector<TensorWant> global_tensors(const ModelGeometry& g) {
     std::vector<TensorWant> t;
     t.push_back({"token_embd.weight", {g.n_embd, g.n_vocab}});
     t.push_back({"output.weight", {g.n_embd, g.n_vocab}});
-    if (g.has_hyper_connections()) {
-        t.push_back({"output_hc_down.weight", {g.hc_dim(), g.hc_lr}});
-        t.push_back({"output_hc_up.weight", {g.hc_lr, g.hc_dim()}});
-        t.push_back({"output_hc_norm.weight", {g.hc_dim()}});
-    } else {
-        t.push_back({"output_norm.weight", {g.n_embd}});
-    }
+    t.push_back({"output_hc_down.weight", {g.hc_dim(), g.hc_lr}});
+    t.push_back({"output_hc_up.weight", {g.hc_lr, g.hc_dim()}});
+    t.push_back({"output_hc_norm.weight", {g.hc_dim()}});
     return t;
 }
-
-/// Whether the family's table names every blk.* tensor its files carry (then an unnamed one is an error).
-inline bool layout_table_complete(const ModelGeometry& g) { return g.family == strata::ModelFamily::Qwen35Moe; }
 
 /// Checks the model `m` (all shards) against the layout table of `g`.  `checked` counts the tensors found.
 inline bool check_gguf_layout(const strata::GgufModel& m, const ModelGeometry& g, std::string& err,
                               size_t* checked = nullptr) {
-    std::set<std::string> named;
     size_t n = 0;
     auto check = [&](const std::string& name, const std::vector<int64_t>& shape) {
-        named.insert(name);
         size_t s = 0;
         const strata::TensorInfo* t = m.find(name, &s);
         if (!t) {
@@ -267,17 +235,9 @@ inline bool check_gguf_layout(const strata::GgufModel& m, const ModelGeometry& g
     };
     for (const TensorWant& w : global_tensors(g))
         if (!check(w.name, w.shape)) return false;
-    for (int64_t l = 0; l < g.n_layers + g.n_mtp_layers; ++l)
+    for (int64_t l = 0; l < g.n_layers; ++l)
         for (const TensorWant& w : layer_tensors(g, l))
             if (!check("blk." + std::to_string(l) + "." + w.name, w.shape)) return false;
-    if (layout_table_complete(g)) {
-        for (size_t s = 0; s < m.size(); ++s)
-            for (const strata::TensorInfo& t : m.shard(s).tensors())
-                if (!named.count(t.name)) {
-                    err = t.name + " is not in the " + std::string(strata::model_family_title(g.family)) + " layout";
-                    return false;
-                }
-    }
     if (checked) *checked = n;
     return true;
 }

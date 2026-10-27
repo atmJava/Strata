@@ -1,5 +1,5 @@
-// include/strata/kernels/cpu/iq_avx2.hpp - AVX-2 multi-token dot products for the i-quant expert
-// formats (IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS) against Q8_K activations (ggml's block_q8_K).
+// include/strata/kernels/cpu/iq_avx2.hpp - AVX-2 multi-token IQ3_XXS gate/up products against Q8_K activations
+// (ggml's block_q8_K), plus the IQ4_NL down rows.
 //
 // The AVX-512 kernel's scheme on the CPUs without it (AMD Zen 2/3, Intel Core 12th-14th gen): the weights of a
 // 32-value chunk are decoded once per verify window and every token applies them with five instructions.
@@ -11,7 +11,7 @@
 namespace strata::kernels::cpu {
 
 bool iq256_supported(int ggml_type) noexcept;
-/// Bit-identical to ggml's singleton gate/up for IQ2_XXS, IQ2_XS, IQ3_XXS and IQ3_S.
+/// Bit-identical to ggml's singleton IQ3_XXS gate/up.
 /// The caller checks AVX2 support and passes one Q8_K activation.
 void iq256_gu_rows_exact_one(int ggml_type, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
                              const void* act, float* ff, int r0, int r1);
@@ -23,15 +23,8 @@ void iq256_gu_rows(int ggml_type, const uint8_t* blob, size_t gu_row, size_t up_
 void iq256_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt,
                 float* const* out, int r0, int r1);
 
-/// The DeepSeek-V4.1 CPU lane's rows (src/dsv41/ds4_gg_cpu.cpp).  The same loops as iq256_rows / iq256_gu_rows with ggml's float
-/// order, so a token's dot is ggml-cpu's vec_dot bit for bit at any number of tokens (the main engine's iq256_* are unchanged),
-/// and IQ1_M (29), whose ggml dot is single-token.  The caller checks AVX2 support.
-bool iq256x_supported(int ggml_type) noexcept;
-void iq256x_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt,
-                 float* const* out, int r0, int r1);
-
 /// The kernels' variants, a mask.  Every variant computes the same bits; they differ in speed from core to core.
-/// kIq256Gather: IQ3_XXS, IQ3_S and IQ2_S read their grid entries with one gather (STRATA_IQ256_GATHER).
+/// kIq256Gather: IQ3_XXS reads its grid entries with one gather (STRATA_IQ256_GATHER).
 /// kIq256Vnni: AVX-VNNI's vpdpwssd / vpdpbusd, every format and iq4nl256_down_rows (cpu_avxvnni_ok).
 inline constexpr int kIq256Gather = 1;
 inline constexpr int kIq256Vnni = 2;

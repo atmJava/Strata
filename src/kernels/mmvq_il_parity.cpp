@@ -114,14 +114,15 @@ int run_case(const Case& c, bool bench, cudaStream_t s) {
         void *xq = nullptr, *xil = nullptr;
         float *yref = nullptr, *yil = nullptr;
         const std::size_t ybytes = (std::size_t) T * c.n_out * 4;
+        const std::size_t ilbytes = T >= 2 && T <= 4 ? native_q8_1_il_bytes(c.n_in, T) : sizeof(int);
         if (!ck(cudaMalloc(&dx, x.size() * 4), "malloc x") ||
             !ck(cudaMalloc(&xq, native_q8_1_bytes(c.n_in, T)), "malloc xq") ||
-            !ck(cudaMalloc(&xil, native_q8_1_il_bytes(c.n_in, T)), "malloc xil") ||
+            !ck(cudaMalloc(&xil, ilbytes), "malloc xil") ||
             !ck(cudaMalloc((void**) &yref, ybytes), "malloc yref") || !ck(cudaMalloc((void**) &yil, ybytes), "malloc yil"))
             return 1;
         ck(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "copy x");
         quantize_q8_1_rows(dx, T, c.n_in, xq, s);
-        if (T >= 2) native_q8_1_interleave(xq, xil, c.n_in, T, s);
+        if (T >= 2 && T <= 4) native_q8_1_interleave(xq, xil, c.n_in, T, s);
         native_mmvq(c.type, dw[0], xq, yref, c.n_in, c.n_out, T, s);
         ck(cudaStreamSynchronize(s), "ref");
         std::vector<uint32_t> a((std::size_t) T * c.n_out), b(a.size());
@@ -233,63 +234,27 @@ void emit_table() {
         }
         std::printf("}},   // %s\n", names[ti]);
     }
-    std::printf("// 5-8 columns (kIlRows58_<cc>; rows 4 runs as 2 there):\n");
-    for (int ti = 0; ti < 5; ++ti) {
-        std::printf("    {%d, {", types[ti]);
-        for (int nc = 5; nc <= 8; ++nc) {
-            int prev = 0;
-            std::printf("{");
-            for (int cls = 0; cls < 5; ++cls) {
-                prev = pick_cell(types[ti], nc, cls, prev);
-                std::printf("%d%s", prev, cls < 4 ? ", " : "");
-            }
-            std::printf("}%s", nc < 8 ? ", " : "");
-        }
-        std::printf("}},   // %s\n", names[ti]);
-    }
-    std::printf("// one column (kIl1RowsShared):\n");
-    for (int ti = 0; ti < 5; ++ti) {
-        std::printf("    {%d, {", types[ti]);
-        int prev = 0;
-        for (int cls = 0; cls < 5; ++cls) {
-            prev = pick_cell(types[ti], 1, cls, prev);
-            std::printf("%d%s", prev, cls < 4 ? ", " : "");
-        }
-        std::printf("}},   // %s\n", names[ti]);
-    }
 }
 
-// the per-architecture lookup, no GPU needed for its answers
+// The sm75 lookup needs no GPU for its answers.
 int check_tables() {
     int bad = 0;
     for (int type : {23, 12, 13, 14, 11})
         for (int nc = 2; nc <= 4; ++nc)
             for (int n_out : {512, 2560, 6144, 10240, 12288, 248320}) {
-                const int a = native_mmvq_il_rows_for(86, type, nc, n_out);
-                // sm_89 has no table of its own: it answers the shared table (what sm_86 answered before its own
-                // 143-dense table, which differs only in Q3_K, a type the shared table does not use); sm_120 has its own
-                // since 147-verify
-                const int b = native_mmvq_il_rows_for(89, type, nc, n_out);
-                if ((type != 11 && b != a) || (type == 11 && b != 0)) {
-                    ++bad;
-                    std::printf("FAIL table: sm_89 differs from sm_86 at type %d ncols %d n_out %d\n", type, nc, n_out);
-                }
+                const int a = native_mmvq_il_rows_for(75, type, nc, n_out);
                 if (a != 0 && a != 1 && a != 2 && a != 4) { ++bad; std::printf("FAIL table: rows %d\n", a); }
             }
-    // Volta has its own table (PR 1401): Q6_K at 2 columns, 2560 rows -> 1 row a warp; the Ampere table says 0 there
-    if (native_mmvq_il_rows_for(70, 14, 2, 2560) != 1 || native_mmvq_il_rows_for(86, 14, 2, 2560) != 0) {
+    if (native_mmvq_il_rows_for(75, 14, 2, 2560) != 2) {
         ++bad;
-        std::printf("FAIL table: the sm_70 table is not the V100's\n");
+        std::printf("FAIL table: the sm_75 Q6_K cell changed\n");
     }
-    // Pascal has its own table too (the P100's): Q6_K, 3 columns, 12288 rows -> 4 rows a warp; sm_75 still has none (the shared one)
-    if (native_mmvq_il_rows_for(60, 14, 3, 12288) != 4 || native_mmvq_il_rows_for(60, 23, 2, 512) != 0) {
+    if (native_mmvq_il_rows_for(86, 14, 2, 2560) != 0 ||
+        native_mmvq_il_rows_for(75, 99, 2, 2560) != 0 ||
+        native_mmvq_il_rows_for(75, 12, 1, 2560) != 0 ||
+        native_mmvq_il_rows_for(75, 12, 5, 2560) != 0) {
         ++bad;
-        std::printf("FAIL table: the sm_60 table is not the P100's\n");
-    }
-    if (native_mmvq_il_rows_for(89, 99, 2, 2560) != 0 || native_mmvq_il_rows_for(89, 12, 5, 2560) != 0 ||
-        native_mmvq_il_rows_for(86, 12, 5, 2560) != 0 || native_mmvq_il_rows_for(120, 12, 9, 2560) != 0) {
-        ++bad;
-        std::printf("FAIL table: an unknown type or ncols must be 0\n");
+        std::printf("FAIL table: a non-sm75 card, unknown type or unsupported ncols must be 0\n");
     }
     return bad;
 }

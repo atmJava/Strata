@@ -98,6 +98,7 @@ private:
     std::deque<int64_t> queue_;              ///< slot indices whose copy the filler issues
     bool stop_ = false;
     std::thread filler_;
+    bool init_started_ = false;
     void fill_loop();
 };
 

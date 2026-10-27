@@ -21,12 +21,5 @@ class VisionGgufMetaTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("GGUF-META PASS", done.stdout)
 
-    def test_the_gyro_sizes_read_pictures(self):
-        import setup
-        for model in ("Gyro-S", "Gyro-M"):
-            self.assertIs(setup.MODELS[model].get("vision"), True)
-        self.assertIs(setup.FAMILIES["gyro"].get("vision"), True)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -51,12 +51,11 @@ class Roles(unittest.TestCase):
         cfg = {"gpu_roles": {"0": "off", "1": "off"}, "gpu": [], "gpu_none": True, "args": []}
         self.assertEqual(gpu_list(cfg), [])
         env = child_env(cfg)
-        self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["HIP_VISIBLE_DEVICES"]), ("", ""))
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "")
+        self.assertNotIn("HIP_VISIBLE_DEVICES", env)
         with self.assertRaises(SystemExit) as e:
             card_roles_lines(cfg)                                                   # a CUDA engine cannot start without a card: said plainly
         self.assertIn("Turn a card on", str(e.exception))
-        cpu = card_roles_lines({**cfg, "backend": "cpu"})
-        self.assertIn("Performance is degraded on CPU only.", cpu[0])
 
 
 if __name__ == "__main__":

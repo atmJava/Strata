@@ -274,11 +274,7 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
         if (cudaMalloc((void**) &tmp, max_bytes) != cudaSuccess) { err = "dflash2: upload scratch"; return false; }
         struct TmpFree { uint8_t* p; ~TmpFree() { cudaFree(p); } } tmp_free{tmp};
         for (const Tensor& t : tensors_) {
-#if defined(_WIN32)
-            _fseeki64(f, data_off + (long long) t.off, SEEK_SET);
-#else
             fseeko(f, data_off + (off_t) t.off, SEEK_SET);
-#endif
             if (std::fread(stage.data(), 1, t.bytes, f) != t.bytes) { err = "dflash2: the pack is shorter than its index"; return false; }
             if (t.dtype == "q8_0") {   // GGUF blocks -> the tiled qs plane at the tensor's offset, then the d plane (same total bytes)
                 if (cudaMemcpy(tmp, stage.data(), t.bytes, cudaMemcpyHostToDevice) != cudaSuccess) { err = "dflash2: weight upload failed"; return false; }
@@ -293,17 +289,10 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
     // the draft round runs while the verifier's async commit still has work on the card: a high-priority stream keeps it from queueing behind that
     // (CUDA by default; on HIP only with STRATA_DF2_PRIO=1, where the engine's other streams keep the default priority)
     int prio_lo = 0, prio_hi = 0;
-#if defined(STRATA_USE_HIP)
-    static const bool hi_prio = [] { const char* e = std::getenv("STRATA_DF2_PRIO"); return e && e[0] == '1'; }();
-    if (hi_prio) hipDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
-    if (hipStreamCreateWithPriority(&cs_, hipStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess ||
-        hipStreamCreateWithPriority(&cs2_, hipStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess) {
-#else
     static const bool hi_prio = [] { const char* e = std::getenv("STRATA_DF2_PRIO"); return !(e && e[0] == '0'); }();
     cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
     if (cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess ||
         cudaStreamCreateWithPriority(&cs2_, cudaStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess) {
-#endif
         err = "dflash2: stream";
         return false;
     }
@@ -591,11 +580,7 @@ bool Dflash2Drafter::capture(int n, const float* taps, std::string& err) {
     kernels::copy_i32_from_mapped(d_meta_, m_meta_, 32, cs_);
     // the context update (fc, the keys and values) and the block's front run side by side: they meet before each layer's attention
     // measured: -0.3 ms a round on an RTX 3060, +0.0..0.7 on a Strix Halo (gfx1151), so the HIP builds keep one stream (STRATA_DF2_FORK=1 / 0 overrides)
-#if defined(STRATA_USE_HIP)
-    static const bool fork_default = false;
-#else
     static const bool fork_default = true;
-#endif
     static const bool fork_on = [] { const char* e = std::getenv("STRATA_DF2_FORK"); return e && e[0] ? e[0] == '1' : fork_default; }();
     fork_ = fork_on && prof_ == nullptr && cs2_ != nullptr;
     if (fork_) {

@@ -6,7 +6,9 @@ the fake MCP server in serve/mcp_fake_server.py (no GPU, no pack, no MCP SDK).
 from __future__ import annotations
 
 import json
+import io
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -15,12 +17,13 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import mcp_fake_server as fake  # noqa: E402
-from serve.frontend import ChatTemplate  # noqa: E402
+from serve.frontend import ChatTemplate, Event, ToolCall  # noqa: E402
 from serve.mcp import McpCancelled, McpHub, hub_from_config  # noqa: E402
-from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
+from serve.server import ByteTokenizer, MockEngine, Service, run_with_mcp, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE = str(ROOT / "serve" / "mcp_fake_server.py")
@@ -35,6 +38,161 @@ def call_script(name, **params):
     """The model's text for one tool call, as Qwen's template asks for it."""
     body = "".join(f"<parameter={k}>\n{v}\n</parameter>\n" for k, v in params.items())
     return f"</think>\n\nLet me check.\n\n<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+
+
+class StartupCleanup(unittest.TestCase):
+    def _process(self):
+        proc = mock.Mock(pid=12345)
+        proc.stdin = io.BytesIO()
+        proc.stdout = io.BytesIO()
+        proc.stderr = io.BytesIO()
+        proc.wait.return_value = 0
+        return proc
+
+    def test_stdio_reader_thread_failure_stops_the_child_and_joins_started_reader(self):
+        from serve import mcp
+        transport = mcp.StdioTransport("fake", stdio())
+        proc = self._process()
+        real_start = threading.Thread.start
+        calls = 0
+
+        def fail_second(thread):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("thread limit")
+            return real_start(thread)
+
+        with mock.patch.object(mcp.lifeline, "popen", return_value=proc), \
+                mock.patch.object(mcp.threading.Thread, "start", fail_second):
+            with self.assertRaisesRegex(mcp.McpError, "thread limit"):
+                transport.start()
+        self.assertTrue(proc.stdin.closed)
+        proc.wait.assert_called()
+        self.assertTrue(proc.stdout.closed)
+        self.assertTrue(proc.stderr.closed)
+        self.assertTrue(transport.ended)
+        self.assertFalse(transport._err_reader.is_alive())
+        self.assertIsNone(transport._read_thread.ident)
+
+    def test_stdio_start_after_close_does_not_create_a_child(self):
+        from serve import mcp
+
+        transport = mcp.StdioTransport("fake", stdio())
+        transport.close()
+        with mock.patch.object(mcp.lifeline, "popen") as popen:
+            with self.assertRaisesRegex(mcp.McpError, "closed"):
+                transport.start()
+        popen.assert_not_called()
+
+    def test_hub_start_failure_closes_started_servers_and_skips_unstarted_joins(self):
+        from serve import mcp
+        entered, released = threading.Event(), threading.Event()
+
+        class FakeServer:
+            def __init__(self, name):
+                self.name = name
+                self.closed = False
+
+            def start(self):
+                entered.set()
+                released.wait(2)
+
+            def close(self):
+                self.closed = True
+                released.set()
+
+        hub = mcp.McpHub({})
+        first, second = FakeServer("first"), FakeServer("second")
+        hub.servers = {"first": first, "second": second}
+        real_start = threading.Thread.start
+        calls = 0
+
+        def fail_second(thread):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("thread limit")
+            return real_start(thread)
+
+        with mock.patch.object(mcp.threading.Thread, "start", fail_second):
+            with self.assertRaisesRegex(RuntimeError, "thread limit"):
+                hub.start()
+        self.assertTrue(entered.wait(2))
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+        self.assertFalse(hub.threads[0].is_alive())
+        self.assertIsNone(hub.threads[1].ident)
+
+    def test_close_escalates_to_sigkill_and_reaps_the_stdio_group(self):
+        import signal
+        from serve import mcp
+
+        transport = mcp.StdioTransport("fake", stdio())
+        proc = self._process()
+        proc.wait.side_effect = [subprocess.TimeoutExpired("mcp", 2),
+                                 subprocess.TimeoutExpired("mcp", 2), 0]
+        transport.proc = proc
+        with mock.patch.object(mcp.os, "killpg") as killpg:
+            transport.close()
+        self.assertEqual(killpg.call_args_list, [
+            mock.call(proc.pid, signal.SIGTERM),
+            mock.call(proc.pid, signal.SIGKILL),
+        ])
+        proc.kill.assert_called_once_with()
+        self.assertEqual(proc.wait.call_count, 3)
+        self.assertTrue(proc.stdin.closed)
+        self.assertTrue(proc.stdout.closed)
+        self.assertTrue(proc.stderr.closed)
+
+    def test_an_http_error_response_is_closed_after_reading_its_detail(self):
+        from serve import mcp
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        error = urllib.error.HTTPError(transport.url, 500, "bad", {}, io.BytesIO(b"detail"))
+        error.close = mock.Mock()
+        with mock.patch.object(mcp.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(mcp.McpError, "HTTP 500 bad: detail"):
+                transport._post({"jsonrpc": "2.0", "method": "ping"}, None, 5, None)
+        error.close.assert_called_once_with()
+
+    def test_session_delete_error_response_is_closed(self):
+        from serve import mcp
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        transport.session = "s-1"
+        error = urllib.error.HTTPError(transport.url, 405, "not allowed", {}, io.BytesIO())
+        error.close = mock.Mock()
+        with mock.patch.object(mcp.urllib.request, "urlopen", side_effect=error):
+            transport.close()
+        error.close.assert_called_once_with()
+
+    def test_http_request_thread_start_failure_is_an_mcp_error(self):
+        from serve import mcp
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        with mock.patch.object(mcp.threading.Thread, "start", side_effect=RuntimeError("thread limit")):
+            with self.assertRaisesRegex(mcp.McpError, "could not start the HTTP request: thread limit"):
+                transport.request("ping", {}, 5)
+
+    def test_cancel_thread_start_failure_keeps_the_original_timeout(self):
+        from serve import mcp
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        real_start = threading.Thread.start
+        calls = 0
+
+        def fail_second(thread):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("thread limit")
+            return real_start(thread)
+
+        with mock.patch.object(transport, "_post"), \
+                mock.patch.object(mcp.threading.Thread, "start", fail_second):
+            with self.assertRaisesRegex(mcp.McpTimeout, "ping timed out"):
+                transport.request("ping", {}, 0.01)
 
 
 class ScriptedEngine(MockEngine):
@@ -222,11 +380,133 @@ class Config(unittest.TestCase):
         for cfg in ({"mcp_servers": {"x": {}}}, {"mcp_servers": {"x": {"command": "a", "args": "b"}}},
                     {"mcp_servers": ["x"]}, {"mcpServers": {"x": {"url": "http://a", "type": "sse"}}},
                     {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"timeout_s": 0}},
-                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"max_rounds": 1.5}}):
+                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"max_rounds": 1.5}},
+                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": "fast"}):
             with self.subTest(cfg=cfg), self.assertRaises(SystemExit):
                 hub_from_config(cfg)
         with self.assertRaises(SystemExit):
             hub_from_config({}, os.path.join(tempfile.gettempdir(), "strata-no-such-mcp.json"))
+
+
+class Closing(unittest.TestCase):
+    def test_close_interrupts_a_start_and_joins_its_thread(self):
+        from serve import mcp
+        entered, released = threading.Event(), threading.Event()
+
+        class BlockingTransport:
+            def __init__(self, _name, _cfg):
+                self.protocol = None
+
+            def start(self):
+                pass
+
+            def request(self, *_args, **_kwargs):
+                entered.set()
+                released.wait(5)
+                raise mcp.McpError("closed")
+
+            def notify(self, *_args, **_kwargs):
+                pass
+
+            def close(self):
+                released.set()
+
+            def alive(self):
+                return not released.is_set()
+
+        with mock.patch.object(mcp, "HttpTransport", BlockingTransport):
+            hub = mcp.McpHub({"slow": {"url": "http://example.invalid/mcp"}},
+                             {"start_timeout_s": 30})
+            hub.start()
+            self.assertTrue(entered.wait(2), "the fake transport did not enter initialize")
+            started = time.monotonic()
+            hub.close()
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertTrue(all(not thread.is_alive() for thread in hub.threads))
+            self.assertEqual(hub.servers["slow"].status, "stopped")
+
+    def test_an_http_answer_arriving_after_close_is_discarded(self):
+        from serve import mcp
+        entered, release = threading.Event(), threading.Event()
+
+        class Answer:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                entered.set()
+                release.wait(2)
+                return b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
+
+        transport = mcp.HttpTransport("web", {"url": "http://example.invalid/mcp"})
+        slot = mcp._Slot()
+        with mock.patch.object(mcp.urllib.request, "urlopen", return_value=Answer()):
+            worker = threading.Thread(target=transport._post,
+                                      args=({"jsonrpc": "2.0", "id": 1, "method": "ping"}, 1, 5, slot))
+            worker.start()
+            self.assertTrue(entered.wait(2))
+            transport.close()
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(slot.done.is_set())
+        self.assertIsNone(slot.msg)
+        self.assertEqual(str(slot.error), "the MCP server is closed")
+
+
+class ToolLoopFallback(unittest.TestCase):
+    def test_tool_runs_here_when_its_heartbeat_thread_cannot_start(self):
+        from serve import server as server_module
+
+        class Engine:
+            def __init__(self):
+                self.rounds = 0
+
+            def run(self, *_args, **_kwargs):
+                self.rounds += 1
+                if self.rounds == 1:
+                    yield "event", Event("tool_call", call=ToolCall("fake__echo", {"text": "hello"}))
+                else:
+                    yield "event", Event("content", "done")
+                yield "done", {"completion_tokens": 1, "finish": "stop"}
+
+            @staticmethod
+            def prepare(*_args, **_kwargs):
+                return [1], False, 4
+
+        class Hub:
+            settings = {"max_rounds": 1}
+            class Server:
+                name = "fake"
+
+            def __init__(self):
+                self.calls = []
+
+            @staticmethod
+            def routes():
+                return {"fake__echo": (Hub.Server(), "echo")}
+
+            def call(self, name, arguments, _cancel):
+                self.calls.append((name, arguments))
+                return {"ok": True, "text": "hello", "chars": 5, "truncated": False, "ms": 0}
+
+        svc, hub = Engine(), Hub()
+        with mock.patch.object(server_module.threading.Thread, "start",
+                               side_effect=RuntimeError("thread limit")):
+            events = list(run_with_mcp(svc, hub, [], [], {}, [1], False, 4, 4, {}, threading.Event(),
+                                       {"fake__echo"}))
+        self.assertEqual(hub.calls, [("fake__echo", {"text": "hello"})])
+        result = next(value for kind, value in events if kind == "mcp" and value.get("event") == "result")
+        self.assertEqual({key: result[key] for key in ("ok", "text", "chars", "truncated", "ms")},
+                         {"ok": True, "text": "hello", "chars": 5, "truncated": False, "ms": 0})
+        self.assertIsInstance(result["id"], str)
+        self.assertEqual(svc.rounds, 2)
+        self.assertEqual(events[-1][1]["finish"], "stop")
 
 
 # ------------------------------------------------------------------------------------------------ the tool loop

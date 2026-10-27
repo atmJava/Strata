@@ -381,7 +381,7 @@ Strata 现网（`STATE.md` 快照，2026-10-25）：单路 71.0、4 路聚合 12
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| P1 DFlash2 轨道 | **A1 已实现（opt-in）·A2/B1 待做** | 库层已就位：`load(shared)` 共享 pack/blob/head、`draft_launch/collect` 异步、`set_lazy_capture`（`dflash2.hpp:52,72,75,83`）；taps 支持多 stage（`tap_layers_local()/tap_layers()`，`STRATA_TAP_FILE` 的 `%d` 给每 stage 一份 dump）；批窗只填 `tap_dev_`，**不写 dump**（`verify.cpp:3240` 仍限非批窗）；`--draft dflash2` 已接 serve solo 解码环、gate 去掉 `o.serve`（`generate.cpp:5478,9167-9211,15396-15418`）。`ENGINE_SERVES_DFLASH2=False`（`strata_control/drafting.py:146`）。A2 batch（每槽实例+共享权重+异步）→B1 层切分→B2 管道隐藏；验证前置=drafter 权重（服务器没有） |
+| P1 DFlash2 轨道 | **A1 已保留并接入（opt-in）·A2/B1 待做** | 库层已就位：`load(shared)` 共享 pack/blob/head、`draft_launch/collect` 异步、`set_lazy_capture`（`dflash2.hpp:52,72,75,83`）；taps 支持多 stage（`tap_layers_local()/tap_layers()`，`STRATA_TAP_FILE` 的 `%d` 给每 stage 一份 dump）；批窗只填 `tap_dev_`，**不写 dump**（`verify.cpp:3240` 仍限非批窗）；`--draft dflash2` 已接 serve solo 解码环、gate 去掉 `o.serve`（`generate.cpp:5478,9167-9211,15396-15418`）。`ENGINE_SERVES_DFLASH2=True`；缺包或不适配时回落 MTP。A2 batch（每槽实例+共享权重+异步）→B1 层切分→B2 管道隐藏；验证前置=drafter 权重（服务器没有） |
 | P2 accounting 审计 | 已完成（只读）；回收 ①③ 已实现，②④⑤待做 | 无统一预算器、真双扣 2 处（双 head、每 slot RoPE；`--mtp-q4` 是反向增，不算双扣）；6×192K session 10,126 MiB/卡、8×128K 8,873；MTP 839 MiB 在 cache 定容前扣；split 搜索按 1 session 定价 → 预测偏大 ~8.7 GiB/卡；回收清单见 §P2。已落地：①RoPE 跨 session 借用（`ca4d6e85`，48 MiB/session、288 MiB/stage，含 split range 的 release 漏释放修复）、③`head_logits_` 按子词表宽度（`ab7b682a`，30.34 MiB/7 drafter）；**接线（把 slot session 的 donor 传进去）留到 C1 部署窗口**，因为那会改默认显存账 |
 | P3 GDN recurrent 移植 | 降级为研究项 | L030 实测 gdn 全部阶段 ≈10%（45K prompt），2× 上限省 ~5% |
 | P3b 专家管线定性 | 已完成（数字已复现校正） | bench：IQ3_XXS gate/up R=160 = **31.9 TOPS**（7.0% 峰值 / 10% HBM，二次复现；原表 39.0 复现不出）⇒ 反量化受限 |
@@ -468,13 +468,15 @@ drain 上限 10 s）。本文其余章节凡是写"W3 未提交"的地方，按�
 
 本机（不是服务器、不是生产）实测的两条：`serve/test_staged_wedge.py` **3 passed / 2.22 s**；
 `pytest tools/server/tests -q` **2 failed / 55 passed / 10 skipped**，两条红的是
-`tools/server/tests/staged_patch_harness.py:56` 把补丁打在仓库 `serve/server.py` 上（补丁里的代码已在仓库里），
+旧 `tools/server/tests/staged_patch_harness.py` 曾把补丁打在仓库 `serve/server.py` 上（补丁里的代码已在仓库里），
 不是移植代码坏。细节与修法写在 `tools/server/patches/README.md`。
 
 **遗留的两件事**（都在 `tools/server/patches/README.md` 记着，不在本文做）：
 
 1. **补丁落后**：`mp-w3-server-0.2.2.patch` 里没有 `46d12fa9` 的两处（`BCANCEL_DRAIN_S`、BRDY 严格解析），
    而 R12/R13 两处修复只在补丁的**工作区副本**里（`HEAD` 的副本没有）。从干净 checkout 部署会拿到更旧的行为。
-2. **harness 基准要改**：让 `staged_patch_harness.py` 指向一份 0.2.2 的 `serve/server.py` 副本，而不是仓库文件，
+2. **harness 已移除**：sm_75 发行树不再保留 0.2.2 基线和补丁测试夹具；当前行为直接由
+   `serve/test_staged_wedge.py` 与 `serve/test_staged_protocol.py` 覆盖。历史补丁若需重验，应从外部
+   0.2.2 源码副本开始，而不是仓库文件，
    这样"补丁本身"才真的在被测。
 

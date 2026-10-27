@@ -1,10 +1,8 @@
 """How Strata's own programs check the certificate of a server they download from (#3722).
 
 Python's OpenSSL checks a server against a list of root certificates it carries (certifi) and does not fetch a missing intermediate
-certificate. Chrome and curl.exe use the operating system's certificate store and its chain building (Windows schannel, macOS Security,
-the system bundle on Linux): they also trust the roots that antivirus HTTPS scanning, a company proxy or a Windows Insider build adds
-there, and they fetch a missing intermediate from the address inside the certificate. So a PC where the browser works could still
-fail with CERTIFICATE_VERIFY_FAILED ("unable to get local issuer certificate") in Strata.
+certificate. Browsers and curl use the Linux system certificate store, which may include a private CA or a proxy certificate.
+So a machine where the browser works could still fail with CERTIFICATE_VERIFY_FAILED in Strata.
 
 `install()` makes every later HTTPS connection of this process use the operating system's store, through the `truststore` package
 (pure Python, Python 3.10 and newer, pinned in requirements.txt and the runtime locks). Where it is not installed (an older Python, a
@@ -54,18 +52,16 @@ def is_certificate_error(exc: BaseException | None) -> bool:
     return False
 
 
-TRY = ("Things to try, in this order: 1) check that the date and time of this PC are right; 2) in your antivirus or security suite, switch off "
-       "'HTTPS scanning' / 'web shield' for Strata, or add Strata and its Python to its exceptions, then try again; 3) if you use a company "
-       "or school network or proxy, ask the person who runs it to trust the download addresses, or try another network (a phone hotspot "
-       "is enough to tell); 4) run Windows Update, which refreshes the certificates the PC trusts. Strata will not skip the check: "
-       "an unchecked download could be a different file.")
+TRY = ("Things to try, in this order: 1) check the system clock; 2) switch off HTTPS inspection in a local "
+       "security suite for Strata; 3) on a managed network, ask the administrator to trust the download "
+       "addresses; 4) refresh the Linux CA bundle. Strata will not skip the check.")
 
 
 def explain(host: str | None = None) -> str:
     """The plain sentence for a certificate failure: no urlopen text, the likely causes, no offer to turn the check off."""
     where = f"the server {host}" if host else "the download server"
     return (f"Strata could not confirm that it is really talking to {where}: its security certificate was not accepted. "
-            "Something between this PC and the internet is probably intercepting secure (HTTPS) connections, most often antivirus "
+            "Something between this machine and the internet is probably intercepting secure (HTTPS) connections, often local security software "
             "web scanning or a company or school proxy. " + TRY)
 
 

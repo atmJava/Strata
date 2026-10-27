@@ -17,6 +17,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import fcntl
 from strata_control import atomic as _atomic_mod
 from contextlib import contextmanager
 from pathlib import Path
@@ -39,9 +40,6 @@ def profile_dir() -> Path:
     explicit = os.environ.get("STRATA_PROFILE_DIR")
     if explicit:
         return Path(explicit).expanduser()
-    if os.name == "nt":
-        base = os.environ.get("APPDATA")
-        return (Path(base) if base else Path.home() / "AppData" / "Roaming") / "Strata" / "profiles"
     return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "strata" / "profiles"
 
 
@@ -152,8 +150,7 @@ def load(name: str) -> tuple[dict, str]:
     try:
         if not stat.S_ISREG(path.lstat().st_mode):
             raise ProfileError("profile must be a regular file", 5)
-        from strata_control import private_files
-        data = private_files.read_bytes_repairing(path)      # a profile an elevated run locked is repaired once, in place
+        data = path.read_bytes()
         if len(data) > 1024 * 1024:
             raise ProfileError("profile is larger than 1 MiB", 5)
         value = json.loads(data.decode("utf-8-sig"))
@@ -188,49 +185,15 @@ def _lock(name: str):
     _private_mkdir(directory, parents=True, exist_ok=True)
     lock = directory / f".{_name(name)}.lock"
     with open(lock, "a+b") as stream:
-        if os.name == "nt":
-            import msvcrt
-            stream.seek(0)
-            if not stream.read(1):
-                stream.write(b"0")
-                stream.flush()
-            stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _atomic(path: Path, data: bytes) -> None:
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        _atomic_mod.replace(temp_name, path)
-        if os.name != "nt":
-            try:
-                parent_fd = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(parent_fd)
-                finally:
-                    os.close(parent_fd)
-            except OSError:
-                # Replacement already succeeded; do not report a failed save after it changed the profile.
-                pass
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
+    _atomic_mod.write_bytes(path, data)
 
 
 def create(name: str, source_config: str) -> tuple[dict, str]:
@@ -351,13 +314,13 @@ def edit(name: str) -> tuple[dict, str, str]:
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not editor:
         raise ProfileError("set VISUAL or EDITOR, or use strata profile set")
-    command = shlex.split(editor, posix=os.name != "nt")
+    command = shlex.split(editor)
     if not command:
         raise ProfileError("VISUAL or EDITOR is empty")
     fd, temp_name = tempfile.mkstemp(prefix=f".{name}-edit-", suffix=".json", dir=profile_dir())
     keep_draft = False
     try:
-        with os.fdopen(fd, "wb") as stream:
+        with _atomic_mod.fdopen_owned(fd, "wb") as stream:
             stream.write(_bytes(current))
         result = subprocess.run([*command, temp_name], check=False)
         if result.returncode:

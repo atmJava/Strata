@@ -1,5 +1,6 @@
 // include/strata/prefill/moe_fused.hpp - #136 (prompt speed): the routed experts of a Q2_0 pack in the prompt path on
-// Strata's own int8 tensor-core kernels, opt-in with STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; sm_75 and HIP: MMQ).
+// Strata's own int8 tensor-core kernels for sm_75, opt-in with STRATA_PF_FUSED=1 and
+// STRATA_PF_FUSED_SM75=1.
 //
 // The MMQ path (moe_mmq.hpp) per MoE layer: a host sync to group the (token, k) pairs by expert, a gather of each
 // expert into a 16-expert group buffer, then per group the q8_1 activations of every routed slot, gate/up, SwiGLU,
@@ -10,7 +11,8 @@
 //   - one launch per batch of up to kMaxBatch experts reads each expert where it already is (a resident cache slot
 //     or a slot of the streamed ring: a pointer per expert, no gather) - gate/up with SwiGLU and the int8 rounding
 //     of H in its epilogue, then down into the per-slot rows the existing combine reads.
-// The 2-bit codes are unpacked in registers and multiplied with mma.sync m16n8k32 (s8 x s8 -> s32); Q2_0's offset
+// The 2-bit codes are unpacked in registers and multiplied with four mma.sync m8n8k16 operations (s8 x s8 -> s32);
+// Q2_0's offset
 // (w = d * (q - 1)) is folded into the activation blocks' sums.  The numbers differ from MMQ's (another int8
 // rounding of the activations and of H) by about as much as MMQ differs from FP32 (tests/cuda/prefill_fused_moe_test).
 #pragma once
@@ -25,15 +27,13 @@ constexpr int kTileRows = 64;
 /// Experts per launch: their blob pointers travel in the launch's parameters (1 KB).
 constexpr int kMaxBatch = 128;
 
-/// This build has the kernels (a CUDA build; HIP and builds without MMQ do not).
+/// This build has the kernels (the CUDA server build; a build without MMQ does not).
 bool built();
-/// built(), and the current device is sm_80 or newer (mma.sync with s8 operands at m16n8k32).
+/// built(), and the sm_75 fused path has been enabled on the current device.
 bool available();
 /// available(), unless STRATA_PF_FUSED=0 (read once): the Q2_0 pack's fused experts, on by default since 0.1.36.
 bool enabled();
-/// STRATA_PF_FUSED=1 given explicitly, and available(): the native IQ packs' fused kernels (opt-in).  On gfx12 (RDNA4)
-/// only the native kernels exist: available() / enabled() / requested() stay false there and
-/// native_supported() (moe_fused_iq.hpp) reads the same opt-in itself.
+/// STRATA_PF_FUSED=1 given explicitly, and available(): the native IQ packs' fused kernels (opt-in).
 bool requested();
 
 /// Bytes of `rows` activation rows of `cols` values (a multiple of 64) in the kernels' int8 form: per 64 values 64

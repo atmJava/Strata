@@ -80,7 +80,6 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `thinking-budget-ab.sh` | thinking-budget arms on the self-scoring eval | L-002/L-005 |
 | `trace_admission_phases.sh` | `STRATA_TRACE=1`: per-step read phases | L-027/L-028 |
 | `prefill_phase_timing.sh` | `STRATA_PREFILL_TIMING=1`: the read as 21 GPU phases | L-030 |
-| `mmq_direct_ab.sh` | MMQ pointer-table build, `STRATA_MMQ_DIRECT=1` on/off | L-031 |
 | `park_gain_ab.sh` | `--conversation-cache-park-gain`, is parking on the hot path | L-032 |
 | `experiments/` | P4 short-admission + 1600 ms lead-in candidate: service drop-in, evidence, reproduce and rollback | L-080 |
 
@@ -137,7 +136,6 @@ trace_admission_phases.sh [ctx] [tag suffix]
 prefill_phase_timing.sh [ctx] [small,large blocks] [reps]
 stage_repeat_probe.py [ctx] [block] [pairs]
 park_gain_ab.sh [ctx] [sizes] [reps]
-mmq_direct_ab.sh                                     # takes no arguments
 ```
 
 ## Deliberately **not** in git
@@ -146,19 +144,6 @@ mmq_direct_ab.sh                                     # takes no arguments
   They are left out on purpose: bringing them in would bury the ~40 that are actually used.
 - `restart-strata.sh` and `swap-engine.sh` stay on the box only: both contain the sudo password in plain text, and
   the fork is public. Until that is decided (HANDOVER §12), they are server-only.
-
-## The second engine build (kept, unused)
-
-`/opt/ai/src/strata-0.2.2/build-mmqtab/` is the pointer-table MMQ build that L-031 measured and rejected:
-
-```
-cmake -S . -B build-mmqtab -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.0/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=75 \
-  -DSTRATA_ENABLE_CUDA=ON -DSTRATA_GGML_DIR=/opt/ai/src/llama.cpp-3cf03257 \
-  -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_MMQ_KQUANTS=ON -DSTRATA_MMQ_TQ_OVERLAY=ON \
-  -DSTRATA_MMQ_TAB=ON -DSTRATA_BUILD_TESTS=ON
-cmake --build build-mmqtab --target strata prefill_mmq_tab_test -j6      # ~10.6 min
-```
 
 `build/` is the production build: do not reconfigure it. A new variant gets its own directory, and if it needs to
 run under `use-config.sh` the binary is copied to a path containing `build/strata` (see the trap in HANDOVER §9.28).

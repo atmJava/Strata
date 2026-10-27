@@ -54,7 +54,7 @@ def _can_run(c: dict) -> bool:
 
 def short_name(c: dict) -> str:
     n = str(c.get("name") or f"GPU {_idx(c) + 1}")
-    for junk in ("NVIDIA GeForce ", "NVIDIA ", "GeForce ", "AMD Radeon ", "AMD ", "Intel(R) ", "Intel "):
+    for junk in ("NVIDIA GeForce ", "NVIDIA ", "GeForce "):
         if n.startswith(junk):
             n = n[len(junk):]
             break
@@ -434,9 +434,8 @@ def nvidia_speeds(timeout: float = 20.0) -> dict[int, float]:
     import os
     import subprocess
     import sys
-    code = ("import ctypes,sys,os\n"
-            "os.environ['CUDA_DEVICE_ORDER']='PCI_BUS_ID'\n"
-            "lib=ctypes.CDLL('nvcuda.dll' if os.name=='nt' else 'libcuda.so.1')\n"
+    code = ("import ctypes\n"
+            "lib=ctypes.CDLL('libcuda.so.1')\n"
             "assert lib.cuInit(0)==0\n"
             "n=ctypes.c_int()\n"
             "assert lib.cuDeviceGetCount(ctypes.byref(n))==0\n"

@@ -31,7 +31,7 @@ _ASCII_BOXES = False
 
 
 def _rounded():
-    """Panel corners: rounded where the font has them, square (Consolas has these) in the classic Windows console."""
+    """Panel corners for the selected glyph mode."""
     return box.SQUARE if _ASCII_BOXES else box.ROUNDED
 
 

@@ -1,10 +1,8 @@
 // include/strata/kernels/cpu/native_expert.hpp - plan v0.3 P6: one routed expert in its GGUF form on the CPU.
 //
-// The IQ2_XS / IQ3_XXS model files keep their experts in i-quant formats (IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS,
-// IQ3_S gate/up; Q2_0 or IQ4_NL down) whose values cannot be re-expressed in the Q2_0 pack form.  A native expert
-// blob is the three GGUF slices back to back, [gate rows | up rows | down rows], and the arithmetic is ggml-cpu's
-// own (`ggml_get_type_traits_cpu`): the activation is quantized with the weight type's `vec_dot_type` and each row
-// is one `vec_dot`, exactly what llama.cpp's CPU backend computes for the same tensor.
+// The production Qwen3.8-Flash-Next pack keeps routed experts in IQ3_XXS gate/up with IQ4_NL or Q2_0 down.  A native
+// expert blob is the three GGUF slices back to back, [gate rows | up rows | down rows], and the arithmetic is
+// ggml-cpu's own: the activation is quantized with the weight type's `vec_dot_type` and each row is one `vec_dot`.
 #pragma once
 
 #include <cstddef>
@@ -27,30 +25,17 @@ struct NativeFmt {
     size_t up_off = 0, down_off = 0;    ///< inside the blob
     size_t bytes = 0;                   ///< the whole blob
     size_t act_bytes = 0, h_bytes = 0;  ///< quantized activation sizes (n_embd of gu_act, n_ff of d_act)
-    /// NVFP4 (ggml type 40) only: the blob ends with {s_gate, s_up, s_down, 0} at this offset, the per-expert
-    /// weight_scale_2 the block format has no room for (tools/iq_pack.py). 0 = no tail. Each scale goes on its own
-    /// projection's FP32 output: gate * s_gate, up * s_up, down * s_down. Do not fold s_down into up: the hidden
-    /// drops to ~1e-5 and its q8 block scale becomes an FP16 subnormal (expert error 2-12% instead of 1.1%).
-    size_t tail_off = 0;
-    /// prism.hadamard (hadamard.hpp): the experts of this layer are stored in a rotated basis, and
-    /// native_quant_act / native_quant_h apply y = H_block (signs * x) before quantizing.  had_block 0 = none.
-    int had_block = 0;
-    bool had_gu = false, had_d = false;
     int layer = -1;                     ///< the layer this format belongs to (set by expert_layout_load; STRATA_ACT_DUMP only)
-    const float* gu_signs = nullptr;    ///< n_embd signs for x (nullptr: identity)
-    const float* d_signs = nullptr;     ///< n_ff signs for h (nullptr: identity)
 };
-constexpr int kNvfp4Type = 40;
-constexpr size_t kNvfp4Tail = 16;
 
 /// Whether this build has the ggml-cpu path.
 bool native_experts_available() noexcept;
 /// Fills `f` for a layer; false (with a reason) when ggml-cpu has no dot product for a type.
 bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt& f, std::string& err);
 
-/// x (n_embd floats) -> the gate/up activation (act_bytes), rotated first when the layer is Hadamard-folded.
+/// x (n_embd floats) -> the gate/up activation (act_bytes).
 void native_quant_act(const NativeFmt& f, const float* x, void* dst);
-/// h (n_ff floats) -> the down activation (h_bytes), rotated first when the layer is Hadamard-folded.
+/// h (n_ff floats) -> the down activation (h_bytes).
 void native_quant_h(const NativeFmt& f, const float* h, void* dst);
 
 /// From how many tokens native_gu_rows gives this gate/up type to a multi-token kernel (#152; ggml-cpu's per-token dot

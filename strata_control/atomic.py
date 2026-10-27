@@ -1,42 +1,75 @@
-"""Replace a file that another program may be reading, on Windows as well as everywhere else.
-
-A job record (a Time-skip `run.json`, a tuning `job.json`) is rewritten at every phase and READ by the app's host every couple of seconds.
-On Windows, `os.replace` onto a file that is open in another process fails with PermissionError ("Access is denied") for as long as the
-reader holds it. That is a split second, but a job saves many times, so a Time-skip or a tune died at random with that error. The fix is
-to wait that split second and try again; any other error, and a PermissionError that does not go away, is raised as before.
-"""
+"""Atomic file replacement for Linux records."""
 
 from __future__ import annotations
 
 import os
-import time
+import tempfile
 from pathlib import Path
 from typing import Union
 
 PathLike = Union[str, "os.PathLike[str]"]
 
-#: how long a held file is waited for, in total (seconds) and between tries
-PATIENCE_S = 5.0
-STEP_S = 0.02
+
+def replace(src: PathLike, dst: PathLike) -> None:
+    os.replace(src, dst)
 
 
-def replace(src: PathLike, dst: PathLike, *, patience: float = PATIENCE_S, sleep=time.sleep, clock=time.monotonic) -> None:
-    deadline = clock() + patience
-    step = STEP_S
-    while True:
+def _sync_parent(path: Path) -> None:
+    try:
+        parent_fd = os.open(path.parent, os.O_RDONLY)
         try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if os.name != "nt" or clock() >= deadline:
-                raise
-            sleep(step)
-            step = min(step * 1.5, 0.25)
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except OSError:
+        # The record already reached its committed name; a parent sync failure must not report the save as failed.
+        pass
+
+
+def fdopen_owned(descriptor: int, mode: str, **kwargs):
+    """Wrap a descriptor and close it if ownership transfer fails."""
+    try:
+        return os.fdopen(descriptor, mode, **kwargs)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _write_owned_descriptor(descriptor: int, data: bytes) -> None:
+    stream = fdopen_owned(descriptor, "wb")
+    with stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def write_bytes(path: PathLike, data: bytes) -> None:
+    """Durably replace `path` without exposing a partial record or a temporary file on failure."""
+    target = Path(path)
+    descriptor, temp_name = tempfile.mkstemp(prefix=f".{target.stem}-", suffix=".tmp", dir=target.parent)
+    try:
+        _write_owned_descriptor(descriptor, data)
+        replace(temp_name, target)
+        _sync_parent(target)
+    finally:
+        Path(temp_name).unlink(missing_ok=True)
+
+
+def write_new(path: PathLike, data: bytes) -> None:
+    """Create a new owner-only record; on any failure, no path or descriptor is left behind."""
+    target = Path(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        _write_owned_descriptor(descriptor, data)
+        _sync_parent(target)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
 
 
 def write_text(path: PathLike, text: str, *, encoding: str = "utf-8") -> None:
     """Write `text` to `path` through a neighbouring temporary file, so a reader never sees half a record."""
-    target = Path(path)
-    tmp = target.with_suffix(target.suffix + ".tmp") if target.suffix else target.with_name(target.name + ".tmp")
-    tmp.write_text(text, encoding=encoding)
-    replace(tmp, target)
+    write_bytes(path, text.encode(encoding))

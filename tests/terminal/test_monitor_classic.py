@@ -1,20 +1,21 @@
-"""The monitor in the classic Windows console (Cascadia Mono switch, the solid look, the tip) and with several cards / CPUs."""
+"""The monitor's Linux glyph modes and several-card layout."""
 
 from __future__ import annotations
 
 import io
-import os
-import time
 import unittest
-from unittest import mock
 
 from rich.console import Console
 
-from strata_cli import consoleinfo, monitor, overview
+from strata_cli import overview
+
+try:
+    from strata_cli import monitor
+except ImportError:
+    monitor = None
+
+MONITOR_AVAILABLE = monitor is not None
 from tests.terminal.test_overview import GIB, metrics
-
-TIP = "For the full look, use Windows Terminal (built into Windows 11)"
-
 
 def draw(model, width=110, height=40, **kw) -> str:
     c = Console(width=width + 2, record=True, file=io.StringIO(), force_terminal=False, legacy_windows=False)
@@ -31,70 +32,7 @@ def three_cards(sockets=2):
     return m
 
 
-class WhichLook(unittest.TestCase):
-    def setUp(self):
-        consoleinfo.forget_style()
-        self.addCleanup(consoleinfo.forget_style)
-
-    def test_decide_style_by_the_facts(self):
-        d = consoleinfo.decide_style(legacy=False, cascadia_ok=False, font=None)
-        self.assertEqual((d["mode"], d["tip"]), ("none", None))                       # Windows Terminal, Linux, macOS: nothing changes
-        d = consoleinfo.decide_style(legacy=True, cascadia_ok=True, font="Cascadia Mono")
-        self.assertEqual((d["mode"], d["tip"]), ("full", TIP))                        # the font was switched: the full Unicode look, the tip anyway
-        d = consoleinfo.decide_style(legacy=True, cascadia_ok=False, font="Consolas")
-        self.assertEqual((d["mode"], d["bullet"], d["tip"]), ("solid", "●", TIP))
-        d = consoleinfo.decide_style(legacy=True, cascadia_ok=False, font="Lucida Console")
-        self.assertEqual((d["mode"], d["bullet"]), ("solid", "•"))                    # Lucida has no ●
-        self.assertEqual(consoleinfo.decide_style(legacy=True, cascadia_ok=False, font=None)["bullet"], "•")
-
-    def test_classic_style_switches_the_font_once_when_cascadia_is_installed(self):
-        with mock.patch.object(consoleinfo, "legacy_console", return_value=True), mock.patch.object(consoleinfo.os, "name", "nt"), \
-                mock.patch.dict(os.environ, {"STRATA_GLYPHS": ""}), mock.patch.object(consoleinfo, "cascadia_installed", return_value=True), \
-                mock.patch.object(consoleinfo, "console_font", side_effect=["Consolas", "Cascadia Mono"]), \
-                mock.patch.object(consoleinfo, "switch_font", return_value=True) as sw:
-            s = consoleinfo.classic_style()
-            self.assertEqual(s["mode"], "full")
-            sw.assert_called_once_with("Cascadia Mono")
-            consoleinfo.classic_style()
-            sw.assert_called_once()                                                   # cached: the font API is not called again
-
-    def test_without_cascadia_or_when_the_switch_fails_the_solid_look_with_the_font_it_has(self):
-        for installed, switched in ((False, False), (True, False)):
-            consoleinfo.forget_style()
-            with mock.patch.object(consoleinfo, "legacy_console", return_value=True), mock.patch.object(consoleinfo.os, "name", "nt"), \
-                    mock.patch.dict(os.environ, {"STRATA_GLYPHS": ""}), mock.patch.object(consoleinfo, "cascadia_installed", return_value=installed), \
-                    mock.patch.object(consoleinfo, "console_font", return_value="Lucida Console"), \
-                    mock.patch.object(consoleinfo, "switch_font", return_value=switched):
-                s = consoleinfo.classic_style()
-                self.assertEqual((s["mode"], s["bullet"]), ("solid", "•"))
-
-    def test_never_in_windows_terminal_linux_or_mac(self):
-        with mock.patch.object(consoleinfo, "legacy_console", return_value=False), mock.patch.object(consoleinfo, "switch_font") as sw:
-            self.assertEqual(consoleinfo.classic_style()["mode"], "none")
-            sw.assert_not_called()
-        env = {k: v for k, v in os.environ.items() if k not in ("WT_SESSION", "TERM_PROGRAM", "STRATA_GLYPHS")}
-        env["WT_SESSION"] = "x"
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(consoleinfo.os, "name", "nt"), mock.patch.object(consoleinfo.sys, "platform", "win32"):
-            self.assertFalse(consoleinfo.legacy_console())                            # Windows Terminal
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(consoleinfo.os, "name", "posix"), mock.patch.object(consoleinfo.sys, "platform", "linux"):
-            self.assertFalse(consoleinfo.legacy_console())
-        with mock.patch.object(consoleinfo.os, "name", "posix"):
-            self.assertIsNone(consoleinfo.console_font())
-            self.assertFalse(consoleinfo.switch_font())
-            self.assertFalse(consoleinfo.cascadia_installed())
-
-    def test_choose_glyphs(self):
-        with mock.patch.object(consoleinfo, "legacy_console", return_value=True), mock.patch.object(consoleinfo, "classic_style", return_value={"mode": "full"}):
-            self.assertEqual(monitor.choose_glyphs("auto", "utf-8", "xterm"), "unicode")
-        with mock.patch.object(consoleinfo, "legacy_console", return_value=True), mock.patch.object(consoleinfo, "classic_style", return_value={"mode": "solid"}):
-            self.assertEqual(monitor.choose_glyphs("auto", "utf-8", None), "solid")
-            with mock.patch.dict(os.environ, {"STRATA_GLYPHS": "ascii"}):
-                self.assertEqual(monitor.choose_glyphs("auto", "utf-8", None), "ascii")      # forced ASCII stays ASCII
-            self.assertEqual(monitor.choose_glyphs("unicode", "utf-8", None), "unicode")      # an explicit --glyphs wins
-        with mock.patch.object(consoleinfo, "legacy_console", return_value=False):
-            self.assertEqual(monitor.choose_glyphs("auto", "utf-8", "xterm"), "unicode")
-
-
+@unittest.skipUnless(MONITOR_AVAILABLE, "optional Textual monitor dependency is not installed")
 class SolidLook(unittest.TestCase):
     def test_solid_blocks_only_no_dithered_shades_and_no_eighth_blocks(self):
         text = draw(overview.build(metrics("generating")), glyphs="solid")
@@ -127,6 +65,7 @@ class SolidLook(unittest.TestCase):
         self.assertNotIn("╭", draw(m, glyphs="ascii"))
 
 
+@unittest.skipUnless(MONITOR_AVAILABLE, "optional Textual monitor dependency is not installed")
 class SeveralCards(unittest.TestCase):
     def test_one_card_looks_exactly_as_before(self):
         base = metrics("generating")
@@ -190,35 +129,25 @@ class SeveralCards(unittest.TestCase):
                 self.assertLessEqual(len(ln.rstrip()), 102, (glyphs, ln))
 
 
+@unittest.skipUnless(MONITOR_AVAILABLE, "optional Textual monitor dependency is not installed")
 class FooterAndViews(unittest.TestCase):
-    def screen_text(self, classic):
+    def screen_text(self):
         import asyncio
         from tests.terminal.test_overview import Source
 
         async def go():
-            consoleinfo.forget_style()
-            style = consoleinfo.decide_style(legacy=bool(classic), cascadia_ok=classic == "full", font="Consolas")
-            with mock.patch.object(consoleinfo, "legacy_console", return_value=bool(classic)), mock.patch.object(consoleinfo, "classic_style", return_value=style):
-                app = monitor.MonitorApp(Source(three_cards()), None, interval=30)
-                async with app.run_test(size=(120, 40)) as pilot:
-                    await pilot.pause(0.5)
-                    return "\n".join(s.text for s in app.screen._compositor.render_strips())
-        try:
-            return asyncio.run(go())
-        finally:
-            consoleinfo.forget_style()
+            app = monitor.MonitorApp(Source(three_cards()), None, interval=30)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.5)
+                return "\n".join(s.text for s in app.screen._compositor.render_strips())
 
-    def test_the_tip_is_in_the_classic_console_only(self):
-        self.assertIn(TIP, self.screen_text("solid"))
-        self.assertIn(TIP, self.screen_text("full"))                  # also when the font was switched: one line, always
-        self.assertNotIn(TIP, self.screen_text(None))                  # Windows Terminal, Linux, macOS
+        return asyncio.run(go())
 
-    def test_the_monitor_draws_the_several_cards_in_every_look(self):
-        for classic in ("solid", "full", None):
-            shown = self.screen_text(classic)
-            self.assertIn("busiest of 3 cards", shown, classic)
-            self.assertIn("Cards", shown, classic)
-            self.assertIn("2 CPUs", shown, classic)
+    def test_the_monitor_draws_the_several_cards(self):
+        shown = self.screen_text()
+        self.assertIn("busiest of 3 cards", shown)
+        self.assertIn("Cards", shown)
+        self.assertIn("2 CPUs", shown)
 
     def test_view_5_shows_the_whole_card_name(self):
         from strata_cli.render import _device

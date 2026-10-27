@@ -1,20 +1,29 @@
-// src/platform/memory_test.cpp - plan v0.3 P0.1: lock_resident on a 256 MiB region (CPU only, no GPU, no model).
+// src/platform/memory_test.cpp - plan v0.3 P0.1: lock_resident within the process's mlock limit.
 #include "strata/platform/memory.hpp"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <psapi.h>
-#pragma comment(lib, "psapi.lib")
-#endif
+#include <sys/resource.h>
+#include <unistd.h>
 
 namespace {
 uint64_t gib(double g) { return (uint64_t) (g * 1073741824.0); }
+
+// A normal test asks for 256 MiB, but locked-memory limits are commonly much lower (8 MiB on Debian).
+// Stay below the current soft limit so the test exercises a real successful mlock without requiring
+// the runner to raise a system policy. The size is page-aligned for mlock.
+uint64_t lock_test_bytes() {
+    uint64_t bytes = 256ull << 20;
+    rlimit limit{};
+    if (getrlimit(RLIMIT_MEMLOCK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY) {
+        const uint64_t usable = (uint64_t) limit.rlim_cur / 2;
+        if (usable < bytes) bytes = usable;
+    }
+    const long page = sysconf(_SC_PAGE_SIZE);
+    if (page > 0) bytes = bytes / (uint64_t) page * (uint64_t) page;
+    return bytes;
+}
 
 // #577: the file tier's unbuffered choice (true = the file cache keeps its reads, so they stay buffered)
 int file_cache_keeps_cases() {
@@ -103,20 +112,20 @@ int file_tier_prefers_direct_cases() {
 
 int main() {
     int fail_keeps = file_cache_keeps_cases() | file_tier_prefers_direct_cases();
-    const uint64_t bytes = 256ull << 20;
+    const uint64_t bytes = lock_test_bytes();
+    if (bytes == 0) {
+        std::printf("platform_memory_test: SKIP (mlock limit is below one page)\n");
+        return fail_keeps == 0 ? 77 : 1;
+    }
     void* p = std::malloc(bytes);
     if (p == nullptr) return 2;
     std::memset(p, 1, bytes);
     const strata::platform::LockResult r = strata::platform::lock_resident(p, bytes);
-    std::printf("lock_resident: ok=%d locked=%llu MiB (%s)\n", (int) r.ok, (unsigned long long) (r.locked_bytes >> 20),
-                r.note.c_str());
-    int fail = !(r.ok && r.locked_bytes == bytes) | fail_keeps;
-#if defined(_WIN32)
-    PROCESS_MEMORY_COUNTERS pmc{};
-    GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc);
-    std::printf("working set %llu MiB\n", (unsigned long long) (pmc.WorkingSetSize >> 20));
-    fail |= pmc.WorkingSetSize < bytes;
-#endif
+    std::printf("lock_resident: requested=%llu MiB ok=%d locked=%llu MiB (%s)\n",
+                (unsigned long long) (bytes >> 20), (int) r.ok,
+                (unsigned long long) (r.locked_bytes >> 20), r.note.c_str());
+    int fail = (r.ok && r.locked_bytes == bytes) ? 0 : 1;
+    fail |= fail_keeps;
     strata::platform::unlock_resident(p, bytes);
     std::free(p);
     std::printf("platform_memory_test: %s\n", fail ? "FAILED" : "OK");

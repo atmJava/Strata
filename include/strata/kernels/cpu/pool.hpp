@@ -153,11 +153,7 @@ std::vector<int> physical_cores(bool skip_first, PoolAffinity affinity = PoolAff
 /// all-group eligibility) untouched. An empty selection restores inheritance from the process defaults.
 /// Linux stores the complete, dynamically sized native CPU mask, including CPU IDs above 63.
 struct ThreadAffinity {
-#if defined(_WIN32)
-    std::vector<unsigned long> cpu_sets;
-#else
     std::vector<unsigned long> mask;
-#endif
     bool valid = false;
 };
 
@@ -298,6 +294,8 @@ private:
     void wait_done(int n);
     /// Bump `epoch_`, and wake the workers that went to sleep.  Every publish goes through here.
     void publish();
+    /// Idempotent shutdown used by the destructor and by constructor failure after a partial thread start.
+    void stop_workers();
 
     int n_ = 0;
     bool explicit_cores_ = false;

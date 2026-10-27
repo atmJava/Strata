@@ -19,6 +19,7 @@ breaking.
 from __future__ import annotations
 
 import collections
+import contextlib
 import json
 import os
 import re
@@ -83,6 +84,8 @@ class StdioTransport:
     def __init__(self, name: str, cfg: dict):
         self.name, self.cfg = name, cfg
         self.proc = None
+        self.ended = False
+        self.lifecycle = threading.Lock()               # publishing proc and closing it are one ownership handoff
         self.lock = threading.Lock()                    # the pending requests
         self.write_lock = threading.Lock()              # stdin; separate, so a full pipe can't block the reader
         self.pending: dict[int, _Slot] = {}
@@ -94,25 +97,33 @@ class StdioTransport:
         env = dict(os.environ)
         env.update({str(k): str(v) for k, v in (self.cfg.get("env") or {}).items()})
         command = str(self.cfg["command"])
-        # On Windows `npx`, `uvx` and friends are .cmd files that CreateProcess finds only with their extension
         exe = shutil.which(command, path=env.get("PATH")) or command
-        extra = {}
-        if os.name == "nt":
-            extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        else:
-            extra["start_new_session"] = True           # its own process group, so close() ends its children too
         try:
-            self.proc = lifeline.popen([exe, *[str(a) for a in self.cfg.get("args") or []]], "mcp", stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.cfg.get("cwd") or None,
-                                       env=env, **extra)
+            with self.lifecycle:
+                if self.ended:
+                    raise McpError("the MCP server is closed")
+                self.proc = lifeline.popen([exe, *[str(a) for a in self.cfg.get("args") or []]], "mcp",
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           cwd=self.cfg.get("cwd") or None, env=env, start_new_session=True)
         except OSError as e:
             raise McpError(f"could not start {command!r}: {e}") from None
-        self._err_reader = threading.Thread(target=self._read_stderr, daemon=True)
-        self._err_reader.start()
-        threading.Thread(target=self._read, daemon=True).start()
+        self._err_reader = threading.Thread(
+            target=self._read_stderr, daemon=True, name=f"mcp-{self.name}-stderr",
+        )
+        self._read_thread = threading.Thread(
+            target=self._read, daemon=True, name=f"mcp-{self.name}-stdout",
+        )
+        try:
+            self._err_reader.start()
+            self._read_thread.start()
+        except BaseException as exc:
+            self.close()
+            if isinstance(exc, McpError):
+                raise
+            raise McpError(f"could not start {command!r} readers: {exc}") from None
 
     def alive(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None and not getattr(self, "ended", False)
+        return self.proc is not None and self.proc.poll() is None and not self.ended
 
     @staticmethod
     def _lines(f):
@@ -210,41 +221,52 @@ class StdioTransport:
 
     def close(self):
         """As the spec says: close its stdin, give it a moment to exit, then end it (and what it started)."""
-        p = self.proc
+        with self.lifecycle:
+            self.ended = True
+            p = self.proc
         if p is None:
             return
         try:
             p.stdin.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
         try:
             p.wait(timeout=2)
-        except subprocess.TimeoutExpired:
+        except (OSError, subprocess.TimeoutExpired):
             self._kill_tree(p)
         for f in (p.stdout, p.stderr):
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 f.close()
-            except OSError:
-                pass
+        threads = [getattr(self, "_read_thread", None), getattr(self, "_err_reader", None)]
+        for thread in threads:
+            if (thread is not None and thread.ident is not None and
+                    thread is not threading.current_thread()):
+                thread.join(timeout=2.0)
 
     @staticmethod
     def _kill_tree(p):
+        def wait(timeout):
+            try:
+                p.wait(timeout=timeout)
+                return True
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+
         try:
-            if os.name == "nt":                          # npx.cmd -> node: end the whole tree
-                subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, timeout=10)
-            else:
-                os.killpg(p.pid, signal.SIGTERM)
-                try:
-                    p.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    os.killpg(p.pid, signal.SIGKILL)
-        except (OSError, subprocess.SubprocessError):
+            os.killpg(p.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        if wait(2):
+            return
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
             pass
         try:
             p.kill()
         except OSError:
             pass
+        wait(2)
 
 
 class HttpTransport:
@@ -260,12 +282,13 @@ class HttpTransport:
         self.next_id = 0
         self.lock = threading.Lock()
         self.broken = None
+        self.closed = False
 
     def start(self):
         pass
 
     def alive(self) -> bool:
-        return self.broken is None
+        return self.broken is None and not self.closed
 
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
@@ -278,9 +301,13 @@ class HttpTransport:
 
     def _post(self, msg: dict, rid, timeout: float, slot: _Slot | None):
         try:
+            if self.closed:
+                raise McpError("the MCP server is closed")
             req = urllib.request.Request(self.url, data=json.dumps(msg, ensure_ascii=False).encode("utf-8"),
                                          headers=self._headers(), method="POST")
             with urllib.request.urlopen(req, timeout=timeout) as r:
+                if self.closed:
+                    raise McpError("the MCP server is closed")
                 if r.headers.get("Mcp-Session-Id"):
                     self.session = r.headers["Mcp-Session-Id"]
                 if slot is None:                         # a notification: 202, nothing to read
@@ -297,13 +324,16 @@ class HttpTransport:
                             found = m
                 if found is None:
                     raise McpError("the server's answer did not contain a response")
+                if self.closed:
+                    raise McpError("the MCP server is closed")
                 slot.msg = found
         except urllib.error.HTTPError as e:
             detail = ""
-            try:
-                detail = e.read().decode("utf-8", "replace")[:300]
-            except OSError:
-                pass
+            with e:
+                try:
+                    detail = e.read().decode("utf-8", "replace")[:300]
+                except OSError:
+                    pass
             if e.code == 404 and self.session:           # the session expired: a restart starts a new one
                 self.broken = McpError("the server ended the session")
             err = McpError(f"HTTP {e.code} {e.reason}{': ' + detail if detail else ''}")
@@ -339,6 +369,8 @@ class HttpTransport:
         return None
 
     def request(self, method: str, params: dict, timeout: float, cancel=None):
+        if self.closed:
+            raise McpError("the MCP server is closed")
         if self.broken:
             raise self.broken
         with self.lock:
@@ -346,13 +378,23 @@ class HttpTransport:
             rid = self.next_id
         slot = _Slot()
         # the POST runs on its own thread so the stop button and the deadline are noticed while it waits
-        threading.Thread(target=self._post, args=({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
-                                                  rid, timeout + 5, slot), daemon=True).start()
+        worker = threading.Thread(target=self._post,
+                                  args=({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
+                                        rid, timeout + 5, slot), daemon=True)
+        try:
+            worker.start()
+        except BaseException as exc:
+            raise McpError(f"could not start the HTTP request: {exc}") from None
         try:
             return _wait(slot, timeout, cancel, method)
         except (McpTimeout, McpCancelled) as e:
-            threading.Thread(target=self._quiet_notify, args=("notifications/cancelled",
-                                                              {"requestId": rid, "reason": str(e)}), daemon=True).start()
+            # Cancellation is best effort. A second thread-start failure must not replace the timeout or Stop result.
+            try:
+                threading.Thread(target=self._quiet_notify, args=("notifications/cancelled",
+                                                                  {"requestId": rid, "reason": str(e)}),
+                                 daemon=True).start()
+            except BaseException:
+                pass
             raise
 
     def _quiet_notify(self, method, params):
@@ -366,11 +408,17 @@ class HttpTransport:
                    None, 10, None)
 
     def close(self):
+        self.closed = True
+        self.broken = McpError("the MCP server is closed")
         if not self.session:
             return
         try:                                             # end the session on the server (it may not allow that)
             req = urllib.request.Request(self.url, headers=self._headers(), method="DELETE")
-            urllib.request.urlopen(req, timeout=3).close()
+            with urllib.request.urlopen(req, timeout=3):
+                pass
+        except urllib.error.HTTPError as e:
+            with e:
+                pass
         except (OSError, ValueError):
             pass
 
@@ -388,6 +436,7 @@ class McpServer:
         self.info: dict = {}
         self.transport = None
         self.lock = threading.Lock()
+        self.closed = threading.Event()
         self.last_start = 0.0
 
     def start(self) -> bool:
@@ -395,6 +444,9 @@ class McpServer:
             return self._start()
 
     def _start(self) -> bool:
+        if self.closed.is_set():
+            self.status, self.error = "stopped", "the server is closing"
+            return False
         if self.transport is not None:
             self.transport.close()
         self.status, self.error, self.last_start = "starting", None, time.monotonic()
@@ -423,18 +475,28 @@ class McpServer:
                 if not cursor:
                     break
             self.tools, self.status = tools, "ready"
+            if self.closed.is_set():
+                t.close()
+                self.status, self.error = "stopped", "the server is closing"
+                return False
             names = ", ".join(x["name"] for x in tools[:8]) + (", ..." if len(tools) > 8 else "")
             print(f"[strata] MCP server {self.name!r}: {len(tools)} tool{'s' * (len(tools) != 1)}"
                   f"{' (' + names + ')' if tools else ''}", flush=True)
             return True
         except McpError as e:
-            self.status, self.error, self.tools = "failed", str(e), []
+            if self.closed.is_set():
+                self.status, self.error = "stopped", "the server is closing"
+            else:
+                self.status, self.error, self.tools = "failed", str(e), []
             t.close()
-            print(f"[strata] MCP server {self.name!r} did not start: {e}. Its tools are left out; the chat works "
-                  "without them.", flush=True)
+            if not self.closed.is_set():
+                print(f"[strata] MCP server {self.name!r} did not start: {e}. Its tools are left out; the chat works "
+                      "without them.", flush=True)
             return False
 
     def call(self, tool: str, arguments: dict, timeout: float, cancel=None) -> dict:
+        if self.closed.is_set():
+            raise McpError("the MCP server is closing")
         with self.lock:
             if self.transport is None or not self.transport.alive():
                 # it stopped since its last call (a crash, an expired session): start it again; one that failed to
@@ -453,11 +515,12 @@ class McpServer:
             raise
 
     def close(self):
-        with self.lock:
-            if self.transport is not None:
-                self.transport.close()
-            if self.status in ("ready", "starting"):
-                self.status = "stopped"
+        self.closed.set()
+        transport = self.transport
+        if transport is not None:
+            transport.close()
+        if self.status in ("ready", "starting"):
+            self.status = "stopped"
 
 
 # ------------------------------------------------------------------------------------------------ the hub
@@ -503,8 +566,12 @@ class McpHub:
         """Start every server on its own thread (npx may download a package first: that must not delay the chat)."""
         self.threads = [threading.Thread(target=s.start, daemon=True, name=f"mcp-{s.name}")
                         for s in self.servers.values()]
-        for t in self.threads:
-            t.start()
+        try:
+            for t in self.threads:
+                t.start()
+        except BaseException:
+            self.close()
+            raise
         if wait:
             self.wait(None)
 
@@ -512,6 +579,8 @@ class McpHub:
         """Wait (up to `timeout` s in all) for servers that are still starting."""
         end = None if timeout is None else time.monotonic() + timeout
         for t in self.threads:
+            if t.ident is None:
+                continue
             t.join(None if end is None else max(0.0, end - time.monotonic()))
 
     def routes(self) -> dict[str, tuple[McpServer, str]]:
@@ -594,6 +663,7 @@ class McpHub:
                 s.close()
             except Exception:  # noqa: BLE001 - closing is best effort
                 pass
+        self.wait(3.0)
 
 
 # ------------------------------------------------------------------------------------------------ config
@@ -629,7 +699,12 @@ def servers_from(block, where: str) -> dict[str, dict]:
 def settings_from(cfg: dict) -> dict:
     """The run config's optional `"mcp"` block: timeout_s, max_result_chars, max_rounds, start_timeout_s."""
     out = {}
-    for key, value in (cfg.get("mcp") or {}).items():
+    block = cfg.get("mcp")
+    if block is None:
+        return out
+    if not isinstance(block, dict):
+        raise SystemExit(f"[strata] config mcp={block!r}: expected an object")
+    for key, value in block.items():
         number = isinstance(value, (int, float)) and not isinstance(value, bool)
         if key in ("timeout_s", "start_timeout_s"):
             if not number or value <= 0:
@@ -666,8 +741,15 @@ def hub_from_config(cfg: dict, mcp_config_path: str | None = None) -> McpHub | N
 
 
 if __name__ == "__main__":                               # python -m serve.mcp config.json: list what a config offers
-    hub = hub_from_config(json.load(open(sys.argv[1], encoding="utf-8-sig")) if len(sys.argv) > 1 else {},
-                          sys.argv[2] if len(sys.argv) > 2 else None)
+    if len(sys.argv) > 1:
+        try:
+            with open(sys.argv[1], encoding="utf-8-sig") as f:
+                config = json.load(f)
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"[strata] {sys.argv[1]}: {e}") from None
+    else:
+        config = {}
+    hub = hub_from_config(config, sys.argv[2] if len(sys.argv) > 2 else None)
     if hub is None:
         sys.exit("no MCP servers configured")
     hub.start(wait=True)

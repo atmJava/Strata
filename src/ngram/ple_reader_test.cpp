@@ -16,6 +16,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <new>
 #include <random>
 #include <sstream>
 #include <string>
@@ -407,6 +409,43 @@ int selftest(const std::string& dir, uint32_t rb) {
         CHECK(now_us() - t0 >= 3000, "injected delay not observed (%.0f us)", now_us() - t0);
         CHECK(rd.stats().late_injected > 0, "no read was held back");
     }
+    {   // A cache request too large for this process is an open failure, not an exception or a half-open reader.
+        ng::PleReader rd;
+        std::string err;
+        CHECK(!rd.open(path, HEADER, N, 8, std::numeric_limits<uint64_t>::max(), err, false, rb),
+              "an impossible row-cache allocation was accepted");
+        CHECK(!err.empty(), "the row-cache allocation failure has no message");
+        CHECK(!rd.is_open(), "the reader stayed open after its row-cache allocation failed");
+        // The table range must be validated without overflowing offset + rows * row_bytes.
+        const uint64_t max = std::numeric_limits<uint64_t>::max();
+        CHECK(!rd.open(path, max, 1, 8, 0, err, false, rb), "a table offset at UINT64_MAX was accepted");
+        CHECK(!err.empty(), "the overflowing table offset has no message");
+        CHECK(!rd.is_open(), "the reader stayed open after the table offset overflow");
+        CHECK(!rd.open(path, HEADER, max, 8, 0, err, false, rb), "a UINT64_MAX row count was accepted");
+        CHECK(!err.empty(), "the overflowing row count has no message");
+        CHECK(!rd.is_open(), "the reader stayed open after the row-count overflow");
+        // Queue allocation failure rolls back rows already appended and leaves no ticket that its caller cannot collect.
+        CHECK(rd.open(path, HEADER, N, 8, 0, err, false, rb), "open before queue-failure: %s", err.c_str());
+        std::vector<uint32_t> queue_rows{11, N / 2, N - 1};
+        std::vector<uint8_t> queue_out(queue_rows.size() * rb);
+        setenv("STRATA_TEST_PLE_QUEUE_FAIL", "1", 1);
+        bool failed = false;
+        try {
+            (void) rd.issue(queue_rows.data(), queue_rows.size(), queue_out.data());
+        } catch (const std::bad_alloc&) {
+            failed = true;
+        }
+        unsetenv("STRATA_TEST_PLE_QUEUE_FAIL");
+        CHECK(failed, "the queue allocation failure was not injected");
+        check_rows(rd, queue_rows, N, rb, "after queue failure");
+        // An incomplete caller-thread ticket can be abandoned without leaving buffers or a worker behind.
+        CHECK(rd.open(path, HEADER, N, 8, 0, err, false, rb), "open before close-with-ticket: %s", err.c_str());
+        const uint32_t row = 7;
+        uint8_t raw[rb];
+        (void) rd.issue(&row, 1, raw);
+        rd.close();
+        CHECK(!rd.is_open(), "close left the caller-thread reader open");
+    }
     // keep-alive: while rows are asked for, a page goes out after `period` without a read; it stops once the
     // window after the last issue has passed, starts again with the next issue (even one the row cache serves),
     // and never shows up as a row read or changes a row
@@ -556,12 +595,21 @@ int main(int argc, char** argv) {
         else { std::fprintf(stderr, "usage: ple_reader_test --selftest [--dir D] | --gguf SHARD2 [--rows N] [--tokens F]\n"); return 2; }
     }
     if (self) {
+        // Sanitizer and normal runs may execute concurrently under the same --dir. Give every process its own
+        // directory: the table-writing helpers use fixed names within it.
+        const std::string run_dir = (std::filesystem::path(dir) /
+                                     ("ple_reader_selftest_" + std::to_string((uint64_t) now_us()))).string();
+        std::filesystem::create_directories(run_dir);
         // ng::ROW_BYTES (90, IQ4_NL, production default) and 110 (#296, OrcaRouter's Q5_0 PLE rows) through the
         // same generic row_bytes path -- see the comment on selftest().
-        all_formats_round_trip(dir);               // every format of k::ple_formats(), both readers, vs its dequantizer
-        if (g_fail != 0) return 1;
-        const int r90 = selftest(dir, ng::ROW_BYTES);
-        const int r110 = selftest(dir, 110);
+        all_formats_round_trip(run_dir);           // every format of k::ple_formats(), both readers, vs its dequantizer
+        if (g_fail != 0) {
+            std::filesystem::remove_all(run_dir);
+            return 1;
+        }
+        const int r90 = selftest(run_dir, ng::ROW_BYTES);
+        const int r110 = selftest(run_dir, 110);
+        std::filesystem::remove_all(run_dir);
         return r90 != 0 ? r90 : r110;
     }
     if (!make_path.empty()) {                      // a big synthetic table, for timing --ple-io ram's fault-in

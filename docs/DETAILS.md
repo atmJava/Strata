@@ -898,7 +898,7 @@ them on your own card.
 | `STRATA_NO_AVXVNNI=1` | CPUs with AVX-VNNI | Turns the AVX-VNNI row forms off (they give the same bits, 4-25% faster rows). | A diagnostic. |
 | `STRATA_PREFILL_EQUAL=1` | CUDA | A prompt segment is read in chunks of equal size, not full chunks and a short last one. Changes rounding. | |
 | `STRATA_OWNED_PRICE=exact` | CUDA | The cache sizing prices the prompt path's own buffers by their real allocation. | |
-| `STRATA_IQ_MT_MIN=1`, `STRATA_IQ3S_MT1=1` | CPU | See [Draft layer](#draft-layer) (reproducible output; the second gives IQ3_S the multi-token kernel for one token on Alder Lake and later without AVX-512). | |
+| `STRATA_IQ_MT_MIN=1` | CPU | See [Draft layer](#draft-layer) (reproducible output: IQ3_XXS uses the multi-token kernel for one token). | |
 | `STRATA_ROUTE_PRIOR`, `STRATA_ROUTE_RESIDENT`, `STRATA_ROUTE_RESIDENT_MTP` | CUDA | Routing changes that add speed and also add KL. | Not recommended. |
 | `STRATA_HOST_CORE=last\|sibling` (or `--host-core`) | Windows | `last` puts the host thread on the last physical core, away from the core that gets the GPU's interrupts. `sibling` keeps it on the first core's other hardware thread, so the workers keep every core. The default `first` leaves a hybrid CPU as it is. | One layer-split box went from a ±6% swing to steady and 8% faster. |
 | `--pool-affinity measure` | Hybrid CPUs, native packs | Times the `all` and `p-cores` layouts at start (about a second) and takes the faster. The measurement is taken once; where the E-cores' speed changes while the engine runs, `--pool-affinity p-cores` is the steady choice. | |

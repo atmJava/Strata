@@ -1,7 +1,7 @@
 // src/kernels/cpu/q8k_quant_parity.cpp - the AVX-2 Q8_K activation quantizer (q8k_quant_avx2, iq_avx2.cpp) against
 // ggml's, byte for byte: the reference (ggml-base's from_float_ref) and what ggml-cpu runs (its from_float), over
-// rows of random, scaled, sparse and degenerate values; then the same through native_quant_act / native_quant_h with
-// an IQ3_S expert's format, which is what the engine calls.  No GPU, no model.
+// rows of random, scaled, sparse and degenerate values; then the same through native_quant_act with the production
+// IQ3_XXS gate/up format, which is what the engine calls.  No GPU, no model.
 //
 //     q8k_quant_parity            (STRATA_FORCE_ISA=avx: the AVX-2 copy is skipped, native_quant_* must equal ggml's)
 //     q8k_quant_parity --bench    ns per 2560-value row, ggml-cpu's and the AVX-2 copy
@@ -84,7 +84,6 @@ bool same(const char* tag, int n, int ci, ggml_from_float_t a, void (*b)(const f
 
 const cpu::NativeFmt* g_fmt = nullptr;
 void via_act(const float* x, void* y, int64_t) { cpu::native_quant_act(*g_fmt, x, y); }
-void via_h(const float* x, void* y, int64_t) { cpu::native_quant_h(*g_fmt, x, y); }
 
 }  // namespace
 
@@ -106,18 +105,16 @@ int main(int argc, char** argv) {
             ++checked;
         }
     }
-    // the engine's entry points: an IQ3_S expert (type 21) quantizes both of its activations to Q8_K
+    // the engine's entry point: an IQ3_XXS expert quantizes its gate/up activation to Q8_K
     cpu::NativeFmt f;
     std::string err;
-    if (!cpu::native_fmt(21, 21, 2560, 512, f, err)) {
+    if (!cpu::native_fmt(18, 20, 2560, 512, f, err)) {
         std::printf("native_fmt: %s\n", err.c_str());
         return 1;
     }
     g_fmt = &f;
     for (const auto& x : cases(2560))
         failures += !same("native_quant_act", 2560, 0, ref, via_act, x, ggml_row_size(GGML_TYPE_Q8_K, 2560));
-    for (const auto& x : cases(512))
-        failures += !same("native_quant_h", 512, 0, ref, via_h, x, ggml_row_size(GGML_TYPE_Q8_K, 512));
     std::printf("q8k_quant_parity: %d rows x 4 sizes, AVX-2 copy %s, AVX1 copy %s: %s\n", checked / 4,
                 avx2 ? "checked" : "skipped (no AVX2, or STRATA_FORCE_ISA)",
                 avx1 ? "checked" : "skipped (AVX2 present, no AVX, or STRATA_FORCE_ISA)", failures ? "FAILED" : "identical");

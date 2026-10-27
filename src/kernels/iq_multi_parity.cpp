@@ -8,9 +8,9 @@
 //     the old one (iq_set_old_kernels), and within float rounding of a double reference built from the GPU's own
 //     dequantizer (validated against gguf-py by iq_parity) and the dequantized q8_1 activations - a gross-error
 //     guard, not the contract.
-// (2) native_expert_grouped, every gate/up format with the down formats: groups of 0..11 entries (more than a pass
-//     of GRP_NC), unused grid rows (cap_groups > groups), scattered destinations; bitwise, new vs old, the rows it
-//     must not write included.
+// (2) native_expert_grouped, production gate/up formats (IQ3_XXS, Q8_0) with every production down format (IQ4_NL,
+//     Q2_0, Q8_0): groups of 0..11 entries (more than a pass of GRP_NC), unused grid rows (cap_groups > groups),
+//     scattered destinations; bitwise, new vs old, the rows it must not write included.
 //
 // Random bytes are valid codes for every format here (all grid indices are in range); only the fp16 block scales
 // are set, small enough that the grouped path's SwiGLU output keeps a finite fp16 q8_1 scale.
@@ -53,23 +53,14 @@ T* dalloc(size_t n) {
 
 const char* name_of(int t) {
     switch (t) {
-        case 16: return "IQ2_XXS";
-        case 17: return "IQ2_XS";
         case 18: return "IQ3_XXS";
         case 20: return "IQ4_NL";
-        case 21: return "IQ3_S";
-        case 22: return "IQ2_S";
-        case 23: return "IQ4_XS";
-        case 29: return "IQ1_M";
         case 42: return "Q2_0";
-        case 12: return "Q4_K";
-        case 13: return "Q5_K";
-        case 7: return "Q5_1";
         case 8: return "Q8_0";
         default: return "?";
     }
 }
-int block_values(int t) { return (t == 20 || t == 7 || t == 8) ? 32 : t == 42 ? 64 : 256; }
+int block_values(int t) { return (t == 20 || t == 8) ? 32 : t == 42 ? 64 : 256; }
 
 // `rows` rows of `n` values of format t: random bytes, then a finite fp16 scale in every block
 std::vector<uint8_t> random_rows(int t, int64_t rows, int64_t n, std::mt19937& rng) {
@@ -78,19 +69,9 @@ std::vector<uint8_t> random_rows(int t, int64_t rows, int64_t n, std::mt19937& r
     std::uniform_int_distribution<int> byte(0, 255), ex(2, 8), man(0, 1023), sgn(0, 3);
     for (auto& b : w) b = (uint8_t) byte(rng);
     for (size_t o = 0; o < w.size(); o += bs) {
-        if (t == 29) {
-            // IQ1_M: the fp16 scale is the top nibbles of the four scale words (bytes 48..55); nibble 3 carries the
-            // sign and the exponent's top bits: 0x1 / 0x2 (or 0x9 / 0xA) keeps it in 2^-11 .. 2^-3
-            const uint8_t nib = (uint8_t) ((sgn(rng) == 0 ? 0x8 : 0x0) | (1 + (byte(rng) & 1)));
-            w[o + 55] = (uint8_t) ((w[o + 55] & 0x0F) | (nib << 4));
-        } else {
-            const uint16_t h = (uint16_t) ((sgn(rng) == 0 ? 0x8000 : 0) | (ex(rng) << 10) | man(rng));   // 2^-13 .. 2^-6
-            std::memcpy(&w[o], &h, 2);
-            if (t == 12 || t == 13 || t == 7) {   // Q4_K / Q5_K (d, dmin) and Q5_1 (d, m): the second half is finite too
-                const uint16_t h2 = (uint16_t) ((sgn(rng) == 0 ? 0x8000 : 0) | (ex(rng) << 10) | man(rng));
-                std::memcpy(&w[o + 2], &h2, 2);
-            }
-        }
+        // every production format starts its block with a finite fp16 scale: 2^-13 .. 2^-6
+        const uint16_t h = (uint16_t) ((sgn(rng) == 0 ? 0x8000 : 0) | (ex(rng) << 10) | man(rng));
+        std::memcpy(&w[o], &h, 2);
     }
     return w;
 }
@@ -297,7 +278,7 @@ float time_ms(cudaStream_t s, int it, const auto& fn) {
 void bench(cudaStream_t s, std::mt19937& rng) {
     std::printf("\n--bench: microseconds per call, old (per-column decode) / new (decode once), idle GPU assumed\n");
     const int n_in = 2560, n_out = 8192, it = 200;
-    for (int t : {16, 17, 18, 21, 22, 29}) {
+    for (int t : {18, 20, 42, 8}) {
         const auto w = random_rows(t, n_out, n_in, rng);
         uint8_t* dw = dalloc<uint8_t>(w.size());
         ck(cudaMemcpy(dw, w.data(), w.size(), cudaMemcpyHostToDevice), "w");
@@ -321,7 +302,7 @@ void bench(cudaStream_t s, std::mt19937& rng) {
         cudaFree(dw); cudaFree(dx); cudaFree(dxq); cudaFree(dy);
     }
     // the verify window's shape: 2560 x 640 experts, 16 groups of m entries each
-    for (int gu : {16, 17, 18, 21, 22, 29}) {
+    for (int gu : {18, 8}) {
         std::printf("%-8s/Q2_0 grouped, 16 groups of m entries:", name_of(gu));
         for (int m : {1, 2, 3, 4, 8}) {
             Grouped G(gu, 42, 2560, 640, std::vector<int>(16, m), 8, rng);
@@ -417,19 +398,12 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     ck(cudaStreamCreate(&s), "stream");
     std::mt19937 rng(18);
-    for (int t : {16, 17, 18, 20, 21, 22, 23, 29, 42, 12, 13, 7, 8}) {
+    for (int t : {18, 20, 42, 8}) {
         check_mmvq(t, 2560, 67, s, rng);   // the model's n_embd; 67 rows: a partial block of 4 rows
         check_mmvq(t, 1024, 5, s, rng);
     }
-    for (int gu : {16, 17, 18, 21, 22, 23, 29, 42}) {
-        for (int dt : {20, 42}) check_grouped(gu, dt, 2560, 640, s, rng);   // the model's shape
-        check_grouped(gu, 23, 1024, 512, s, rng);                           // IQ4_XS down needs n_ff % 256 == 0
-    }
-    // UD-Q4_K_XL (run with STRATA_KQ_SPLIT=1 to compare the Split path with the old kernels; STRATA_EXPERT_V2K=0 / 1 picks
-    // the generic multi kernel or the V2K one on gfx12: both are bitwise the old kernels)
-    for (int gu : {12, 13})
-        for (int dt : {7, 8}) check_grouped(gu, dt, 2560, 640, s, rng);
-    for (int gu : {12, 13}) check_grouped(gu, 13, 2048, 512, s, rng);   // Qwen3.6-35B-A3B's geometry
+    for (int gu : {18, 8})
+        for (int dt : {20, 42, 8}) check_grouped(gu, dt, 2560, 640, s, rng);   // the model's shape
     check_q8_1_finite(s, rng);
     if (do_bench) bench(s, rng);
     std::printf("iq_multi_parity: %d failures\n", g_fail);

@@ -25,10 +25,6 @@ void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float*
               int64_t T, void* stream, uint16_t* mixed_h = nullptr, uint16_t* mixed16_lo = nullptr);
 /// F-2: gr_write, then gr_norm_rs of the next half (its norm weights) over the rows just written - the same bits as
 /// the two calls, without reading R back.
-/// S23 (opt-in STRATA_HC_UPMIX=1): the up projection (lo16 x w_up^T, BF16, FP32 accumulate) with gr_mix_r as its
-/// epilogue - `gated` is never written.  gfx11 and CUDA sm_80+; false (nothing launched) elsewhere.
-bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const float* rs, const float* w_norm,
-              float* mixed, uint16_t* mixed16, uint16_t* mixed_h, int64_t T, void* stream);
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
                       float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr,
                       int64_t ldx = 0, bool f16img = false);
@@ -83,8 +79,6 @@ void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t
 void blob_dequant(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* stream);
 /// h16[n, r] = fp16(silu(gu[n, 2r]) * gu[n, 2r + 1])   (the interleaved expert gate/up)
 void swiglu_interleaved(const float* gu, uint16_t* h16, int64_t n, void* stream);
-/// the Volta prompt experts: SwiGLU of gate/up rows (gate first, or interleaved) to FP16, saturated like swiglu_interleaved
-void swiglu_split_f16(const float* gu, uint16_t* h16, int64_t rows, int n_ff, bool interleaved, void* stream);
 /// h16[n, r] = fp16(silu(g[n, r]) * u[n, r])   (the shared expert, gate and up separate, width 640)
 void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream);
 /// dst[i] = src[i] for n int32s, as a kernel: either side may be mapped host memory, and the copy never waits
@@ -97,7 +91,7 @@ void copy_f32_wide(float* dst, const float* src, int64_t n, void* stream);
 void gather_rows16(const uint16_t* x16, const int32_t* src, uint16_t* dst16, int64_t n, int64_t width, void* stream);
 /// bo[t, :] = shared[t, :] * sigmoid(sg[t]) + sum_k w[t, k] * D[slot[t, k], :]
 void moe_combine(const float* D, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
-                 int64_t T, void* stream, const float* row_sd = nullptr);
+                 int64_t T, void* stream);
 /// --peer-device's prompt share as sums: bo[t, :] = (sum over the k with slot[t, k] < rows_local of w[t, k] *
 /// D[slot[t, k], :], in k order) + peer[t, :] + shared[t, :] * sigmoid(sg[t]).  `peer` (the peer's per-token sums)
 /// may be mapped host memory.

@@ -3,22 +3,15 @@
 import io
 import json
 import os
-import subprocess
-import sys
-import tempfile
 import threading
 import unittest
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from unittest import mock
 
 from strata_cli.cli import main
 from strata_cli.client import sanitize_telemetry
 from strata_cli.logs import ActivityContinuity, activity_delta
-
-
-ROOT = Path(__file__).resolve().parents[2]
 
 
 def sample(instance, last, seqs):
@@ -107,7 +100,7 @@ class LogsTests(unittest.TestCase):
             self.assertEqual(main(["logs", "--output", "json"]), 5)
             self.assertIn("unavailable", json.loads(stream.getvalue())["error"]["message"])
 
-    def test_one_shot_source_and_portable_use_read_only_key(self):
+    def test_one_shot_source_uses_read_only_key(self):
         requests = []
         raw = {"schema_version": 1, "instance": {"id": "fixture"},
                "activity": {"last_seq": 1, "events": [
@@ -135,23 +128,14 @@ class LogsTests(unittest.TestCase):
         worker.start()
         try:
             url = f"http://127.0.0.1:{server.server_port}"
-            with tempfile.TemporaryDirectory() as directory:
-                bundle = Path(directory) / "strata-monitor.pyz"
-                subprocess.run([sys.executable, str(ROOT / "packaging/monitor_bundle.py"), "build", str(bundle)],
-                               check=True, capture_output=True, text=True)
-                clean_env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
-                clean_env["STRATA_TELEMETRY_KEY"] = "read-key"
-                with mock.patch.dict(os.environ, {"STRATA_TELEMETRY_KEY": "read-key"}), \
-                     redirect_stdout(io.StringIO()) as source:
-                    self.assertEqual(main(["logs", "--url", url, "--credential-env",
-                                           "STRATA_TELEMETRY_KEY", "--json"]), 0)
-                portable = subprocess.run([sys.executable, "-S", str(bundle), "logs", "--url", url,
-                                           "--credential-env", "STRATA_TELEMETRY_KEY", "--output", "json"],
-                                          cwd=directory, env=clean_env, check=True, capture_output=True, text=True)
-                self.assertEqual(json.loads(source.getvalue()), json.loads(portable.stdout))
-                self.assertEqual(json.loads(portable.stdout)["events"][0]["event"], "finished")
-                self.assertNotIn("private", portable.stdout)
-                self.assertEqual(requests, [("/v1/telemetry", "Bearer read-key")] * 2)
+            with mock.patch.dict(os.environ, {"STRATA_TELEMETRY_KEY": "read-key"}), \
+                 redirect_stdout(io.StringIO()) as source:
+                self.assertEqual(main(["logs", "--url", url, "--credential-env",
+                                       "STRATA_TELEMETRY_KEY", "--json"]), 0)
+            output = json.loads(source.getvalue())
+            self.assertEqual(output["events"][0]["event"], "finished")
+            self.assertNotIn("private", source.getvalue())
+            self.assertEqual(requests, [("/v1/telemetry", "Bearer read-key")])
         finally:
             server.shutdown()
             server.server_close()

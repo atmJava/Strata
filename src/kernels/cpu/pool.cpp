@@ -4,15 +4,11 @@
 #include "strata/platform/aux_cpus.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/numa_pool.hpp"
-
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <chrono>
 #include <immintrin.h>
-#if defined(_MSC_VER)
-#include <intrin.h>   // __cpuidex, __rdtsc (STRATA_POOL_UMWAIT)
-#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,55 +17,14 @@
 #include <string>
 #include <thread>
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include "pool_affinity_win.hpp"
-#else
 #include <pthread.h>
 #include <sched.h>
 #include <unistd.h>
 #include "pool_affinity_linux.hpp"
-#endif
 
 namespace strata::kernels::cpu {
 
 namespace {
-// STRATA_POOL_UMWAIT=<TSC cycles> (experimental, x86 WAITPKG only): a parked worker waits with UMONITOR/UMWAIT on the
-// epoch's cache line instead of spinning on _mm_pause.  It wakes when the host publishes (a write to that line) or
-// after the cycles, in the light C0.1 state; on a laptop the CPU then gives back the power the spin took, which the
-// GPU's share of the budget gets.  0 or unset (or no WAITPKG): the spin, unchanged.  STRATA_POOL_UMWAIT_C02=1: the
-// deeper C0.2 state (slower wake).  MSVC x64 only for now (the intrinsics need no target flag there); other builds spin.
-uint64_t umwait_cycles() {
-    static const uint64_t c = [] {
-        const char* e = std::getenv("STRATA_POOL_UMWAIT");
-        if (e == nullptr || std::atoll(e) <= 0) return (uint64_t) 0;
-#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)   // MSVC proper: clang-cl (the Windows HIP build) has no WAITPKG intrinsics by default
-        int r[4] = {0, 0, 0, 0};
-        __cpuidex(r, 7, 0);
-        if (((r[2] >> 5) & 1) == 0) {
-            std::fprintf(stderr, "strata: STRATA_POOL_UMWAIT: this CPU has no WAITPKG, the workers spin\n");
-            return (uint64_t) 0;
-        }
-        std::fprintf(stderr, "strata: STRATA_POOL_UMWAIT: parked workers wait with UMWAIT (%lld cycles)\n", std::atoll(e));
-        return (uint64_t) std::atoll(e);
-#else
-        return (uint64_t) 0;
-#endif
-    }();
-    return c;
-}
-unsigned umwait_state() {
-    static const unsigned s = [] { const char* e = std::getenv("STRATA_POOL_UMWAIT_C02"); return e && *e == '1' ? 0u : 1u; }();
-    return s;   // 1 = C0.1 (light), 0 = C0.2
-}
-// STRATA_POOL_UMWAIT_ESC=<TSC cycles> (experimental): an escalating wait - C0.1 for the first cycles of a park, C0.2 after
-// (a wait that has lasted that long is a GPU phase, a draft or a prompt read, where a slower wake costs little).
-uint64_t umwait_escalate() {
-    static const uint64_t c = [] { const char* e = std::getenv("STRATA_POOL_UMWAIT_ESC"); return e ? (uint64_t) (std::max)(0LL, std::atoll(e)) : (uint64_t) 0; }();
-    return c;
-}
-
 constexpr uint64_t pack_head(uint32_t epoch, uint32_t n, uint32_t i) {
     return ((uint64_t) epoch << 32) | ((uint64_t) n << 16) | (uint64_t) i;
 }
@@ -90,29 +45,7 @@ const std::vector<int>& pool_cores_setting() { return g_pool_cores; }
 
 std::vector<LogicalCpuInfo> logical_cpu_layout() {
     std::vector<LogicalCpuInfo> out;
-#if defined(_WIN32)
-    DWORD len = 0;
-    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
-    if (len == 0) return out;
-    std::vector<char> buf(len);
-    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) buf.data(), &len))
-        return out;
-    // a `start /affinity` or a job limit on a PC with one processor group: only those processors are the process's
-    DWORD_PTR proc_mask = 0, sys_mask = 0;
-    const bool limited = GetActiveProcessorGroupCount() == 1 && GetProcessAffinityMask(GetCurrentProcess(), &proc_mask, &sys_mask);
-    long core = 0;
-    for (const char* p = buf.data(); p < buf.data() + len; p += ((const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) p)->Size) {
-        const auto* e = (const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) p;
-        if (e->Relationship != RelationProcessorCore) continue;
-        for (WORD group = 0; group < e->Processor.GroupCount; ++group) {
-            const GROUP_AFFINITY& g = e->Processor.GroupMask[group];
-            for (int bit = 0; bit < 64; ++bit)
-                if ((g.Mask & (KAFFINITY(1) << bit)) && (!limited || (proc_mask & (DWORD_PTR(1) << bit))))
-                    out.push_back({(int) (g.Group * 64 + bit), core});
-        }
-        ++core;
-    }
-#elif defined(__linux__)
+#if   defined(__linux__)
     std::vector<unsigned long> mask;
     std::vector<int> allowed;
     if (detail::get_thread_affinity(mask, &allowed) != 0) return out;
@@ -144,15 +77,6 @@ static CpuTopology detect_cpu_topology_impl(bool skip_first, PoolAffinity affini
 static void fill_plan_fields(CpuTopology& topo, bool skip_first) {
     topo.cpu_quota = container_cpu_quota();
     topo.worker_package.assign(topo.worker_cores.size(), -1);
-#if defined(_WIN32)
-    (void) skip_first;
-    topo.logical = (int) GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-    return;   // (the sockets of a Windows box are not told apart: one package)
-#elif defined(__APPLE__)
-    (void) skip_first;
-    topo.logical = (int) std::thread::hardware_concurrency();
-    return;   // no SMT on Apple silicon and no sysfs: the cores are the processors
-#else
     std::vector<unsigned long> mask;
     std::vector<int> allowed;
     topo.logical = detail::get_thread_affinity(mask, &allowed) == 0 ? (int) allowed.size()
@@ -188,7 +112,6 @@ static void fill_plan_fields(CpuTopology& topo, bool skip_first) {
         topo.worker_cores = std::move(cores);
         topo.worker_package = std::move(pkgs);
     }
-#endif
 }
 
 CpuTopology detect_cpu_topology(bool skip_first, PoolAffinity affinity) {
@@ -267,137 +190,6 @@ int planned_host_core(PoolAffinity affinity) { return detect_cpu_topology(true, 
 
 static CpuTopology detect_cpu_topology_impl(bool skip_first, PoolAffinity affinity) {
     CpuTopology topo;
-#if defined(_WIN32)
-    // Ask the OS rather than assuming a layout.  `hardware_concurrency()` returns LOGICAL processors, and on
-    // every SMT machine half of them are siblings - pinning one worker to each of the first N would put two
-    // workers on each physical core and halve the bandwidth the expert kernel is bound by.
-    DWORD len = 0;
-    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
-    if (len == 0) {
-        // Preserve group identity even when detailed core topology is unavailable.
-        const WORD groups = GetActiveProcessorGroupCount();
-        for (WORD group = 0; group < groups; ++group) {
-            const DWORD count = GetActiveProcessorCount(group);
-            if (count == 0 || count == (DWORD) -1 || count > 64) continue;
-            for (DWORD i = 0; i < count; ++i) topo.worker_cores.push_back((int) group * 64 + (int) i);
-        }
-        if (skip_first && !topo.worker_cores.empty()) {
-            topo.host_core = topo.worker_cores.front();
-            topo.worker_cores.erase(topo.worker_cores.begin());
-        }
-        // The OS did not say which logical processors share a core, and every one is listed as a core above: the default
-        // worker count must not count them as cores (30 workers on a 16c/32t PC would sit two to a core).  With the layout
-        // unknown the plan takes half the logical processors (pool_plan.hpp), as on Linux without sysfs.
-        topo.layout_known = false;
-        return topo;
-    }
-    std::vector<char> buf(len);
-    if (GetLogicalProcessorInformationEx(RelationProcessorCore,
-                                         (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) buf.data(), &len)) {
-        const char* p = buf.data();
-        const char* end = p + len;
-        struct CoreDesc {
-            uint8_t efficiency = 0;
-            bool has_smt = false;
-            std::vector<int> lps;
-        };
-        std::vector<CoreDesc> descs;
-        while (p < end) {
-            const auto* e = (const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) p;
-            if (e->Relationship == RelationProcessorCore) {
-                CoreDesc cd;
-                cd.efficiency = e->Processor.EfficiencyClass;
-                cd.has_smt = (e->Processor.Flags & LTP_PC_SMT) != 0;
-                for (WORD group = 0; group < e->Processor.GroupCount; ++group) {
-                    const GROUP_AFFINITY& g = e->Processor.GroupMask[group];
-                    for (int bit = 0; bit < 64; ++bit) {
-                        if (g.Mask & (KAFFINITY(1) << bit)) {
-                            cd.lps.push_back((int) (g.Group * 64 + bit));
-                        }
-                    }
-                }
-                if (!cd.lps.empty()) {
-                    descs.push_back(std::move(cd));
-                }
-            }
-            p += e->Size;
-        }
-
-        uint8_t min_eff = 255, max_eff = 0;
-        for (const auto& c : descs) {
-            min_eff = (std::min)(min_eff, c.efficiency);
-            max_eff = (std::max)(max_eff, c.efficiency);
-        }
-
-        topo.is_hybrid = (max_eff > min_eff);
-        if (topo.is_hybrid) {
-            for (const auto& c : descs) {
-                if (c.efficiency == max_eff) {
-                    topo.p_cores++;
-                    topo.p_threads += (int) c.lps.size();
-                } else {
-                    topo.e_cores++;
-                }
-            }
-        } else {
-            topo.p_cores = (int) descs.size();
-            for (const auto& c : descs) topo.p_threads += (int) c.lps.size();
-        }
-
-        if (affinity == PoolAffinity::All || !topo.is_hybrid) {
-            // #642 (from Hardin22's fork): on a hybrid CPU the P-cores first (the host takes the first of them), so a
-            // pool smaller than the core count (setup's --pool-workers for a hybrid CPU) runs on the P-cores and the
-            // first E-cores rather than on whatever the OS numbered first.  All cores alike: the order is unchanged.
-            if (topo.is_hybrid)
-                std::stable_sort(descs.begin(), descs.end(),
-                                 [](const CoreDesc& x, const CoreDesc& y) { return x.efficiency > y.efficiency; });
-            for (const auto& c : descs) topo.worker_cores.push_back(c.lps[0]);
-            if (skip_first && !topo.worker_cores.empty()) {
-                topo.host_core = topo.worker_cores.front();
-                topo.worker_cores.erase(topo.worker_cores.begin());
-                if (descs.front().lps.size() > 1) topo.host_sibling = descs.front().lps[1];
-            }
-            return topo;
-        }
-
-        // Hybrid CPU with Auto or PCores affinity:
-        // Prioritize Performance cores:
-        // 1. Primary logical processor of each P-core (avoids SMT resource contention)
-        // 2. SMT sibling logical processors of P-cores
-        // 3. E-cores (only as overflow in Auto mode)
-        std::vector<int> p_primaries;
-        std::vector<int> p_siblings;
-        std::vector<int> e_cores;
-
-        for (const auto& c : descs) {
-            if (c.efficiency == max_eff) {
-                p_primaries.push_back(c.lps[0]);
-                for (size_t s = 1; s < c.lps.size(); ++s) {
-                    p_siblings.push_back(c.lps[s]);
-                }
-            } else {
-                for (int lp : c.lps) e_cores.push_back(lp);
-            }
-        }
-
-        if (skip_first && !p_primaries.empty()) {
-            topo.host_core = p_primaries.front();
-            p_primaries.erase(p_primaries.begin());
-            for (const auto& c : descs)
-                if (c.lps[0] == topo.host_core) {
-                    if (c.lps.size() > 1) topo.host_sibling = c.lps[1];
-                    break;
-                }
-        }
-
-        for (int cpu : p_primaries) topo.worker_cores.push_back(cpu);
-        for (int cpu : p_siblings) topo.worker_cores.push_back(cpu);
-        if (affinity != PoolAffinity::PCores) {
-            for (int cpu : e_cores) topo.worker_cores.push_back(cpu);
-        }
-        return topo;
-    }
-#else
     // The logical CPUs this process may run on, ONE PER PHYSICAL CORE (issue #40): SMT siblings share a core's
     // load/store bandwidth, so a worker on each would put two workers on one core, as the Windows branch above
     // explains.  sysfs names each CPU's (package, core); the first allowed CPU of each pair is kept, so a taskset
@@ -567,7 +359,6 @@ static CpuTopology detect_cpu_topology_impl(bool skip_first, PoolAffinity affini
         for (int cpu : e_cores) topo.worker_cores.push_back(cpu);
     }
     return topo;
-#endif
     return topo;
 }
 
@@ -579,15 +370,11 @@ namespace {
 
 bool pin_this_thread(int core, [[maybe_unused]] int worker = -1) {
     if (core < 0) return false;
-#if defined(_WIN32)
-    return detail::set_thread_group_affinity(core, worker);
-#else
     const int error = detail::pin_thread_to_cpu(core);
     if (error != 0)
         std::fprintf(stderr, "strata cpu pool: affinity for worker %d (CPU %d) failed: %d; previous affinity kept\n",
                      worker, core, error);
     return error == 0;
-#endif
 }
 
 #if defined(__linux__)
@@ -616,9 +403,6 @@ int cpu_numa_node(int cpu) {
 int numa_node_count() {
 #if defined(__linux__)
     return (std::max)(1, numa_cpu_node_count_at(sysfs_root() + "/devices/system/node"));
-#elif defined(_WIN32)
-    ULONG highest = 0;
-    return GetNumaHighestNodeNumber(&highest) ? (int) highest + 1 : 1;
 #else
     return 1;
 #endif
@@ -643,18 +427,6 @@ NumaSplitDecision decide_real_numa_split([[maybe_unused]] const std::vector<int>
 
 ThreadAffinity pin_current_thread(int core) {
     if (core < 0) return {};
-#if defined(_WIN32)
-    ThreadAffinity previous;
-    ULONG target = 0;
-    if (!detail::get_thread_cpu_sets(previous.cpu_sets) || !detail::cpu_set_for_core(core, target) ||
-        !SetThreadSelectedCpuSets(GetCurrentThread(), &target, 1)) {
-        std::fprintf(stderr, "strata cpu pool: host CPU Set selection for processor %d failed: %lu; previous placement kept\n",
-                     core, (unsigned long) GetLastError());
-        return {};
-    }
-    previous.valid = true;
-    return previous;
-#else
     ThreadAffinity previous;
     int error = detail::get_thread_affinity(previous.mask);
     if (error == 0) error = detail::pin_thread_to_cpu(core);
@@ -664,23 +436,13 @@ ThreadAffinity pin_current_thread(int core) {
     }
     previous.valid = true;
     return previous;
-#endif
 }
 
 void restore_thread_affinity(const ThreadAffinity& previous) {
     if (!previous.valid) return;
-#if defined(_WIN32)
-    // Clearing an originally empty selection restores process-default/all-group eligibility without
-    // turning the caller's implicit Windows 11 affinity into an explicit single-group hard mask.
-    if (!SetThreadSelectedCpuSets(GetCurrentThread(), previous.cpu_sets.empty() ? nullptr : previous.cpu_sets.data(),
-                                 (ULONG) previous.cpu_sets.size()))
-        std::fprintf(stderr, "strata cpu pool: host CPU Set restoration failed: %lu\n",
-                     (unsigned long) GetLastError());
-#else
     const int error = detail::set_thread_affinity(previous.mask);
     if (error != 0)
         std::fprintf(stderr, "strata cpu pool: host affinity restoration failed: %d\n", error);
-#endif
 }
 
 namespace {
@@ -849,8 +611,6 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     wstate_.reset(new std::atomic<int32_t>[(size_t) n_]);
     for (int i = 0; i < n_; ++i) wstate_[(size_t) i].store(kParked);
     hstate_ms_.store(now_ms());
-    g_diag_pool.store(this);
-    strata::core::diag_pool_fn().store(&diag_active_pool);
     split_.resize((size_t) kMaxSplit);
     split_multi_.resize((size_t) kMaxSplitMulti);
     // STRATA_NUMA_SPLIT: decided here, before any worker starts (a worker counts into its slice's `parked` from its
@@ -918,20 +678,39 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
         const std::string why = pool_workers_warning(n_workers, warn_in, plan_pool_workers(warn_in));
         if (!why.empty() && !warned.exchange(true)) std::fprintf(stderr, "strata cpu pool: warning: %s\n", why.c_str());
     }
-    g_numa_plan = std::move(plan);
-    g_numa_owner = this;
     threads_.reserve((size_t) n_);
-    for (int i = 0; i < n_; ++i) {
-        const int core = pin ? (i < (int) topo_.worker_cores.size() ? topo_.worker_cores[(size_t) i] : -1) : -1;
-        threads_.emplace_back([this, i, core] {
-            strata::platform::name_this_thread("strata-pool", i);
-            strata::aux_cpus::note_owned_thread();   // --aux-cpus never moves a worker
-            // a failed pin only costs locality under the split: the worker keeps the slice it was given
-            if (!pin_this_thread(core, i) && core >= 0 && numa_n_ > 0)
-                std::fprintf(stderr, "strata cpu pool: NUMA split: worker %d not pinned to CPU %d, its slice's rows may "
-                                     "be read remotely\n", i, core);
-            worker(i);
-        });
+    // Test knob: fail before creating worker N, after N workers are already running. The catch path below must
+    // stop and join that partial set without leaving globals pointing at a failed construction.
+    int fail_thread = -1;
+    if (const char* e = std::getenv("STRATA_TEST_POOL_THREAD_FAIL_AT"))
+        fail_thread = std::atoi(e);
+    try {
+        g_numa_plan = std::move(plan);
+        g_numa_owner = this;
+        g_diag_pool.store(this);
+        strata::core::diag_pool_fn().store(&diag_active_pool);
+        for (int i = 0; i < n_; ++i) {
+            if (i == fail_thread) throw std::runtime_error("expert pool thread start injected failure");
+            const int core = pin ? (i < (int) topo_.worker_cores.size() ? topo_.worker_cores[(size_t) i] : -1) : -1;
+            threads_.emplace_back([this, i, core] {
+                strata::platform::name_this_thread("strata-pool", i);
+                strata::aux_cpus::note_owned_thread();   // --aux-cpus never moves a worker
+                // a failed pin only costs locality under the split: the worker keeps the slice it was given
+                if (!pin_this_thread(core, i) && core >= 0 && numa_n_ > 0)
+                    std::fprintf(stderr, "strata cpu pool: NUMA split: worker %d not pinned to CPU %d, its slice's rows may "
+                                         "be read remotely\n", i, core);
+                worker(i);
+            });
+        }
+    } catch (...) {
+        const ExpertPool* self = this;
+        g_diag_pool.compare_exchange_strong(self, nullptr);
+        if (g_numa_owner == this) {
+            g_numa_plan = NumaSplitPlan{};
+            g_numa_owner = nullptr;
+        }
+        stop_workers();
+        throw;
     }
 }
 
@@ -952,10 +731,15 @@ ExpertPool::~ExpertPool() {
         g_numa_plan = NumaSplitPlan{};
         g_numa_owner = nullptr;
     }
+    stop_workers();
+}
+
+void ExpertPool::stop_workers() {
     stop_.store(true, std::memory_order_release);
     // Bump the epoch so a PARKED worker notices the stop flag rather than sleeping through it.
     publish();
     for (auto& t : threads_) t.join();
+    threads_.clear();
 }
 
 void ExpertPool::publish() {
@@ -992,27 +776,10 @@ void ExpertPool::worker(int id) {
         // every 1024 pauses, so the spin itself is unchanged.
         const auto parked_at = std::chrono::steady_clock::now();
         uint32_t spins = 0;
-        const uint64_t um = umwait_cycles();
-#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)   // MSVC proper: clang-cl (the Windows HIP build) has no WAITPKG intrinsics by default
-        const uint64_t um_esc = umwait_escalate();
-        const uint64_t um_t0 = um != 0 && um_esc != 0 ? __rdtsc() : 0;
-#endif
         while (epoch_.load(std::memory_order_acquire) == seen) {
             if (stop_.load(std::memory_order_relaxed)) return;
-#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)   // MSVC proper: clang-cl (the Windows HIP build) has no WAITPKG intrinsics by default
-            if (um != 0) {   // STRATA_POOL_UMWAIT: wake on the publish's write to epoch_, or after `um` cycles
-                _umonitor((void*) &epoch_);
-                if (epoch_.load(std::memory_order_acquire) != seen) break;
-                const uint64_t now = __rdtsc();
-                const unsigned st = um_esc != 0 ? (now - um_t0 < um_esc ? 1u : 0u) : umwait_state();
-                _umwait(st, now + um);
-                if ((++spins & 15u) != 0) continue;   // each wait is ~um cycles: look at the clock more often
-            } else
-#endif
-            {
-                _mm_pause();
-                if ((++spins & 1023u) != 0) continue;
-            }
+            _mm_pause();
+            if ((++spins & 1023u) != 0) continue;
             if (std::chrono::steady_clock::now() - parked_at < spin_before_sleep_) continue;
             std::unique_lock<std::mutex> lk(sleep_mu_);
             wstate_[(size_t) id].store(kSleeping, std::memory_order_relaxed);
@@ -1447,23 +1214,3 @@ void ExpertPool::run(ExpertJob* jobs, int n) {
 }
 
 }  // namespace strata::kernels::cpu
-
-#if defined(_WIN32)
-// strata/platform/thread_name.hpp: the Windows half lives here, where <windows.h> is already included.  SetThreadDescription
-// (Windows 10 1607 and later) is looked up, not linked: older SDKs and toolchains lack the import.
-namespace strata::platform {
-void name_this_thread(const char* base, int index) {
-    char name[64];
-    if (index >= 0) std::snprintf(name, sizeof name, "%s-%d", base, index);
-    else std::snprintf(name, sizeof name, "%s", base);
-    using SetDesc = HRESULT(WINAPI*)(HANDLE, PCWSTR);
-    static const SetDesc fn = (SetDesc) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription");
-    if (fn == nullptr) return;
-    wchar_t wide[64];
-    int i = 0;
-    for (; name[i] != '\0' && i < 63; ++i) wide[i] = (wchar_t) (unsigned char) name[i];
-    wide[i] = L'\0';
-    (void) fn(GetCurrentThread(), wide);
-}
-}  // namespace strata::platform
-#endif

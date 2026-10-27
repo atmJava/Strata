@@ -10,7 +10,12 @@ import unittest
 from rich.console import Console
 
 from strata_cli import overview
-from strata_cli.monitor import MonitorApp
+try:
+    from strata_cli.monitor import MonitorApp
+except ModuleNotFoundError as exc:
+    if exc.name != "textual":
+        raise
+    MonitorApp = None
 
 GIB = 2 ** 30
 
@@ -146,6 +151,7 @@ class Source:
                 "topology": {}, "quality": {}}
 
 
+@unittest.skipIf(MonitorApp is None, "optional monitor dependency textual is not installed")
 class InTheMonitor(unittest.TestCase):
     def test_view_one_is_the_new_overview_and_the_others_stay(self):
         async def go():

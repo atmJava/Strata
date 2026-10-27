@@ -1,9 +1,8 @@
 // include/strata/kernels/cpu/expert_layout.hpp - plan v0.3 P6: where each routed expert lives in experts.bin.
 //
-// A Q2_0 pack (tools/strata_pack.py) has one blob size for every layer, `BLOB`, in the Strata expert form.  A
-// native pack (tools/iq_pack.py, the IQ2_XS / IQ3_XXS files) keeps each expert's raw GGUF slices, so the blob
-// size and the formats change from layer to layer; `native_experts.txt` says how.  Everything that touches an
-// expert blob - the arena, the VRAM tier, the prompt path, the CPU pool, the GPU window - asks this table.
+// A native pack (tools/iq_pack.py) keeps each expert's raw GGUF slices, so the blob size and the formats can change
+// from layer to layer; `native_experts.txt` says how. Everything that touches an expert blob - the arena, the VRAM
+// tier, the prompt path, the CPU pool, the GPU window - asks this table.
 #pragma once
 
 #include "strata/kernels/cpu/expert.hpp"
@@ -49,7 +48,7 @@ bool cpu_avx512bw_ok();
 /// Whether this CPU (and its OS) runs the AVX2 kernels (AVX, AVX2, FMA, F16C): the floor of every expert kernel
 /// (q2_avx2.cpp, iq_avx2.cpp, and ggml-cpu in the portable build).  STRATA_FORCE_AVX2 does not change it.
 bool cpu_avx2_ok();
-/// Whether this CPU (and its OS) runs AVX (Sandy Bridge and newer): the AVX1 router dot (kq_avx1.cpp) and ggml-cpu in
+/// Whether this CPU (and its OS) runs AVX (Sandy Bridge and newer): the AVX1 router dot (router_avx1.cpp) and ggml-cpu in
 /// a STRATA_ISA_FLOOR=avx build.  The other expert rows then run on ggml-cpu (experimental, slow).
 bool cpu_avx1_ok();
 /// SSE4.2 + POPCNT: ggml-cpu in a STRATA_ISA_FLOOR=none build.
@@ -94,10 +93,7 @@ const ExpertLayout& expert_layout();
 /// Reads `<pack_dir>/native_experts.txt` when it exists (a native pack), else sets the canonical layout.
 /// Versions up to kExpertLayoutVersion are read; a newer one is refused (a newer packer wrote it).
 bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, std::string& err);
-/// The newest native_experts.txt this engine reads.  v4 = v3 plus the per-role shard column `gate,up,down`,
-/// written only when some layer's roles are in different shards (every other pack stays v3, byte for byte).
-/// v5 = v4 plus `hadamard.txt` beside it: Hadamard-folded experts (hadamard.hpp), written only for such models,
-/// so an engine that cannot rotate the activations refuses the pack instead of running it wrong.
-inline constexpr int kExpertLayoutVersion = 5;
+/// The newest native_experts.txt this engine reads: v4 adds the per-role shard column `gate,up,down`.
+inline constexpr int kExpertLayoutVersion = 4;
 
 }  // namespace strata::kernels::cpu

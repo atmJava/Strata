@@ -89,11 +89,7 @@ inline void free_locked(State& s, void* p) {
 inline uint64_t soft_reserve_default_mib() {
     if (const char* e = std::getenv("STRATA_PIN_RESERVE_MIB"); e != nullptr && *e != '\0')
         return (uint64_t) std::strtoull(e, nullptr, 10);
-#if defined(_WIN32) && !defined(STRATA_USE_HIP)   // CUDA on Windows (WDDM); the AMD build keeps its pinning as it was
-    return 640;
-#else
     return st().sim_budget != 0 ? 640 : 0;   // Linux: only when the test ceiling is on
-#endif
 }
 }  // namespace pin_detail
 

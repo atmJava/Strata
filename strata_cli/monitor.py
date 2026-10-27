@@ -27,17 +27,8 @@ def choose_glyphs(requested: str, encoding: str | None, term: str | None) -> str
     """Prefer readable Unicode when the output stream can encode its graph cells."""
     if requested != "auto":
         return requested
-    from strata_cli import consoleinfo
     if term == "dumb" or not encoding:
         return "ascii"
-    if consoleinfo.legacy_console():
-        forced = os.environ.get("STRATA_GLYPHS", "").strip().lower()
-        if forced in ("ascii", "legacy"):
-            return "ascii"
-        if forced == "solid":
-            return "solid"
-        # the classic Windows console: the full Unicode look when the window's font could be switched to Cascadia Mono, else solid blocks
-        return "unicode" if consoleinfo.classic_style()["mode"] == "full" else "solid"
     try:
         "▁█░".encode(encoding)
     except (LookupError, UnicodeEncodeError):
@@ -138,9 +129,7 @@ class MonitorApp(App):
         self.theme_choice = "terminal" if theme == "auto" else theme
         self.color_choice = "never" if os.environ.get("NO_COLOR") is not None else color
         self.glyph_choice = choose_glyphs(glyphs, sys.stdout.encoding, os.environ.get("TERM"))
-        from strata_cli import consoleinfo
-        self.classic = consoleinfo.classic_style() if consoleinfo.legacy_console() else None
-        self.margin = 3 if self.classic else 2        # one more column of room in the classic Windows console (its scroll bar)
+        self.margin = 2
         self.history = MonitorHistory()
         self.activity_continuity = ActivityContinuity()
         self.displayed_activity_continuity = self.activity_continuity.status()
@@ -202,7 +191,7 @@ class MonitorApp(App):
                 connection=getattr(self.endpoint, "base_url", getattr(self.endpoint, "root", "")),
                 connection_state=self.connection_state, frozen=self.frozen, glyphs=self.glyph_choice,
                 color=self.color_choice != "never", theme=self.theme_choice, connect=self.connect_enabled,
-                bullet=(self.classic or {}).get("bullet", "●"))
+                bullet="●")
         elif self.view == 0 and size.width >= 78 and size.height >= 23:
             display = render_dashboard(
                 snapshot, width=max(30, size.width - self.margin), height=max(8, size.height - 2),
@@ -247,8 +236,6 @@ class MonitorApp(App):
         self.query_one("#content", Static).update(display)
         idle_message = ("Read only  |  q keeps server on" if size.width < 60 else
                         "Read only  |  q detaches without stopping Strata")
-        if self.classic and self.classic.get("tip"):             # the classic Windows console: one line about the full look
-            idle_message = ("Read only  |  q detaches  |  " if size.width >= 100 else "") + self.classic["tip"]
         msg = self.error or self.selection_notice or ("Connecting to Strata" if self.connection_state == "connecting" else
                              "Telemetry unavailable; status only" if self.connection_state == "telemetry_unavailable" else
                              "Frozen display; collection continues" if self.frozen else

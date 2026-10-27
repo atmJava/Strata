@@ -20,11 +20,7 @@
 namespace cpu = strata::kernels::cpu;
 
 static void put_env(const char* k, const char* v) {
-#if defined(_WIN32)
-    _putenv_s(k, v);
-#else
     setenv(k, v, 1);
-#endif
 }
 // a synthetic Strata-form (s2) expert: random codes, fp16 scales ~0.004-0.016 (as expert_multi_test's)
 static void make_s2_blob(uint8_t* b, std::mt19937& rng) {
@@ -37,21 +33,39 @@ static void make_s2_blob(uint8_t* b, std::mt19937& rng) {
 static bool same_h(const float* a, const float* b) { return std::memcmp(a, b, (size_t) cpu::H * sizeof(float)) == 0; }
 static void nan_h(float* a) { std::fill(a, a + cpu::H, std::numeric_limits<float>::quiet_NaN()); }
 static void unset_env(const char* k) {
-#if defined(_WIN32)
-    _putenv_s(k, "");
-#else
     unsetenv(k);
-#endif
 }
 
 int main(int argc, char** argv) {
     if (argc != 1 && argc != 4) return 2;
     // its activation quantiser is the AVX one at least (act_quant_any): a CPU without AVX (Westmere) would stop on an illegal instruction
     if (!cpu::cpu_avx1_ok()) { std::printf("pool_tasks_test: no AVX on this CPU, skipped\n"); return 0; }
+    {
+        // Start two workers, then fail the third. A constructor that leaves joinable std::thread members behind
+        // terminates the process when construction unwinds; stale NUMA state would also leak into the next pool.
+        setenv("STRATA_NUMA_POOL", "1", 1);
+        setenv("STRATA_NUMA_SPLIT", "test", 1);
+        setenv("STRATA_TEST_POOL_THREAD_FAIL_AT", "2", 1);
+        bool failed = false;
+        try {
+            cpu::ExpertPool pool(4, false, true, cpu::PoolAffinity::All, 0);
+        } catch (const std::exception&) {
+            failed = true;
+        }
+        unsetenv("STRATA_TEST_POOL_THREAD_FAIL_AT");
+        unsetenv("STRATA_NUMA_SPLIT");
+        unsetenv("STRATA_NUMA_POOL");
+        if (!failed || cpu::active_numa_split().on) {
+            std::fprintf(stderr, "partial worker start did not clean up constructor state\n");
+            return 1;
+        }
+        cpu::ExpertPool replacement(1, false);
+        if (replacement.workers() != 1) return 1;
+    }
     cpu::NativeFmt f;
     std::string err;
-    if (!cpu::native_fmt(argc == 4 ? std::atoi(argv[1]) : GGML_TYPE_Q4_0,
-                         argc == 4 ? std::atoi(argv[2]) : GGML_TYPE_Q4_0, cpu::H, cpu::FF, f, err)) {
+    if (!cpu::native_fmt(argc == 4 ? std::atoi(argv[1]) : GGML_TYPE_IQ3_XXS,
+                         argc == 4 ? std::atoi(argv[2]) : GGML_TYPE_IQ4_NL, cpu::H, cpu::FF, f, err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
@@ -65,9 +79,9 @@ int main(int argc, char** argv) {
     } else {
         std::vector<float> weights((size_t) cpu::H * cpu::FF);
         for (size_t i = 0; i < weights.size(); ++i) weights[i] = 0.02f * std::sin((float) i * 0.17f);
-        ggml_quantize_chunk(GGML_TYPE_Q4_0, weights.data(), blob.data(), 0, cpu::FF, cpu::H, nullptr);
-        ggml_quantize_chunk(GGML_TYPE_Q4_0, weights.data(), blob.data() + f.up_off, 0, cpu::FF, cpu::H, nullptr);
-        ggml_quantize_chunk(GGML_TYPE_Q4_0, weights.data(), blob.data() + f.down_off, 0, cpu::H, cpu::FF, nullptr);
+        ggml_quantize_chunk(GGML_TYPE_IQ3_XXS, weights.data(), blob.data(), 0, cpu::FF, cpu::H, nullptr);
+        ggml_quantize_chunk(GGML_TYPE_IQ3_XXS, weights.data(), blob.data() + f.up_off, 0, cpu::FF, cpu::H, nullptr);
+        ggml_quantize_chunk(GGML_TYPE_IQ4_NL, weights.data(), blob.data() + f.down_off, 0, cpu::H, cpu::FF, nullptr);
     }
     for (int tasks : {-1, cpu::ExpertPool::kMaxTasks + 1}) {
         try { cpu::ExpertPool invalid(1, false, true, cpu::PoolAffinity::All, tasks); return 1; }

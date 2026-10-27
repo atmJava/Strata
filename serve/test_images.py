@@ -4,8 +4,10 @@ over HTTP with a stand-in sd-cli (serve/fixtures/fake_sd_cli.py) and the mock en
     python -m serve.test_images
 """
 import base64
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -36,7 +38,7 @@ def image_cfg(d, **kw):
         p = Path(d) / f"{k}.bin"
         p.write_bytes(b"x" * 1024)
         files[k] = str(p)
-    return {"exe": str(FAKE), "backend": "vulkan", "quant": "Q8_0", "args": ["--diffusion-fa"],
+    return {"exe": str(FAKE), "backend": "cuda", "quant": "Q8_0", "args": ["--diffusion-fa"],
             "out_dir": str(Path(d) / "out"), **files, **kw}
 
 
@@ -98,17 +100,103 @@ class Command(unittest.TestCase):
         self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["CUDA_DEVICE_ORDER"], env["X"]), ("1", "PCI_BUS_ID", "2"))
         self.assertEqual(images_api.image_env({"backend": "cuda", "gpu": [1, 0]}, {})["CUDA_VISIBLE_DEVICES"], "1,0")     # a list is a device list
         with tempfile.TemporaryDirectory() as d:
-            env = images_api.image_env({"backend": "hip", "gpu": 0, "lib_dirs": [d, d + "-missing"]}, {})
-            self.assertEqual(env["HIP_VISIBLE_DEVICES"], "0")
-            self.assertEqual(env["PATH" if os.name == "nt" else "LD_LIBRARY_PATH"], d)
-        self.assertEqual(images_api.image_env({"backend": "vulkan", "gpu": 2}, {})["GGML_VK_VISIBLE_DEVICES"], "2")
+            env = images_api.image_env({"backend": "cuda", "gpu": 0, "lib_dirs": [d, d + "-missing"]}, {})
+            self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0")
+            self.assertEqual(env["LD_LIBRARY_PATH"], d)
+        for backend in ("hip", "vulkan", "cpu", None):
+            with self.subTest(backend=backend), self.assertRaises(ValueError):
+                images_api.image_env({"backend": backend, "gpu": 0}, {})
 
     def test_config_checked(self):
         with self.assertRaises(ValueError):
             images_api.ImageGen({"exe": "x", "diffusion_model": "d", "vae": "v"})
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(ValueError):
+                images_api.ImageGen(image_cfg(d, backend="hip"))
+            with self.assertRaises(ValueError):
                 images_api.ImageGen(image_cfg(d, gpu_policy="sometimes"))
+
+    def test_shutdown_releases_the_owned_log_and_scratch_directory(self):
+        log = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d, out_dir=None), log=log)
+            scratch = gen.dir
+            self.assertTrue(scratch.is_dir())
+            gen.shutdown()
+            gen.shutdown()
+            self.assertTrue(log.closed)
+            self.assertFalse(scratch.exists())
+
+    def test_shutdown_keeps_an_explicit_output_directory(self):
+        log = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d), log=log)
+            output = gen.dir
+            gen.shutdown()
+            self.assertTrue(log.closed)
+            self.assertTrue(output.is_dir())
+
+    def test_a_failed_start_removes_the_job_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d))
+            job = images_api.parse_request({"prompt": "x"}, gen.cfg)
+            with mock.patch("serve.lifeline.popen", side_effect=OSError("cannot start")):
+                with self.assertRaisesRegex(images_api.ImageJobFailed, "cannot start"):
+                    gen.run(job)
+            self.assertEqual(list(gen.dir.glob("job-*")), [])
+            self.assertIsNone(gen.progress)
+
+    def test_a_reader_start_failure_stops_the_child_and_removes_the_job(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d))
+            job = images_api.parse_request({"prompt": "x"}, gen.cfg)
+            proc = mock.Mock()
+            proc.stdout = io.StringIO()
+            with mock.patch("serve.lifeline.popen", return_value=proc), \
+                    mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("no thread")):
+                with self.assertRaisesRegex(images_api.ImageJobFailed, "output reader did not start"):
+                    gen.run(job)
+            proc.kill.assert_called_once_with()
+            proc.wait.assert_called_once_with(timeout=5)
+            self.assertTrue(proc.stdout.closed)
+            self.assertEqual(list(gen.dir.glob("job-*")), [])
+            self.assertIsNone(gen.progress)
+
+    def test_a_child_that_survives_kill_closes_its_pipe_and_removes_the_job(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d, timeout_s=0.001))
+            job = images_api.parse_request({"prompt": "x"}, gen.cfg)
+            proc = mock.Mock()
+            proc.poll.return_value = None
+            proc.wait.side_effect = [subprocess.TimeoutExpired("sd-cli", 30),
+                                     subprocess.TimeoutExpired("sd-cli", 5)]
+            proc.returncode = -9
+            proc.stdout = io.StringIO()
+            with mock.patch("serve.lifeline.popen", return_value=proc):
+                with self.assertRaisesRegex(images_api.ImageJobFailed, "after being killed"):
+                    gen.run(job)
+            self.assertEqual(proc.kill.call_count, 2)
+            self.assertTrue(proc.stdout.closed)
+            self.assertEqual(list(gen.dir.glob("job-*")), [])
+            self.assertIsNone(gen.progress)
+
+    def test_a_wait_os_error_still_kills_and_releases_the_child(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen = images_api.ImageGen(image_cfg(d))
+            job = images_api.parse_request({"prompt": "x"}, gen.cfg)
+            proc = mock.Mock()
+            proc.poll.return_value = 0
+            proc.wait.side_effect = [OSError("wait failed"), 0]
+            proc.returncode = 0
+            proc.stdout = io.StringIO()
+            with mock.patch("serve.lifeline.popen", return_value=proc):
+                with self.assertRaisesRegex(images_api.ImageJobFailed, "could not be waited for"):
+                    gen.run(job)
+            proc.kill.assert_called_once_with()
+            self.assertEqual([call.kwargs["timeout"] for call in proc.wait.call_args_list], [30, 5])
+            self.assertTrue(proc.stdout.closed)
+            self.assertEqual(list(gen.dir.glob("job-*")), [])
+            self.assertIsNone(gen.progress)
 
 
 class FakeEngine:

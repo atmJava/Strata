@@ -7,7 +7,6 @@
 //   1. against FP64, the new kernel's error is no larger than a small multiple of the old kernel's (both FP32 math);
 //   2. the new and old outputs agree to a relative 1e-4 of the output scale;
 // then times both over a prompt chunk (the old one in batches of 32, as prefill.cpp calls it).
-// HIP builds (S6): the same checks for the RDNA4 matrix-core kernel (STRATA_HIP_WMMA), skipped (77) off gfx12.
 // Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5]
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
@@ -41,18 +40,7 @@ float h2f(uint16_t b) { __half h; *reinterpret_cast<uint16_t*>(&h) = b; return _
 uint16_t f2h(float f) { __half h = __float2half(f); return *reinterpret_cast<uint16_t*>(&h); }
 
 int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2 q4_0
-#if !defined(__HIPCC__) && !defined(STRATA_USE_HIP)
-    if (fmt == 2) {   // mode 4 (Q4_0 KV) runs on sm_80 and newer only: below that the dispatcher keeps the old kernel
-        int dev = 0, major = 0;
-        ck(cudaGetDevice(&dev), "device");
-        ck(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev), "cc");
-        if (major < 8) {
-            std::printf("SKIP q4_0 ctx %lld: the tensor-core kernel takes Q4_0 KV on sm_80+ only (this device: sm_%d)\n",
-                        (long long) ctx, major);
-            return 0;
-        }
-    }
-#endif
+    if (fmt == 2) setenv("STRATA_PROMPT_ATTN_Q4_TC", "1", 1);
     const k::QsaShapes s = k::qsa_real_shapes();
     const int64_t HD = s.head_dim, NKV = s.n_head_kv, NH = s.n_head, PS = s.page_size;
     const int64_t pages = (ctx + PS - 1) / PS, rows = pages * NKV * PS;
@@ -209,28 +197,16 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
             k::qsa_decode_attn_batch(d_q + t0 * NH * HD, pl, d_ids + t0 * cap, d_steps + t0 * k::kStepCount, cap, s,
                                      scratch, d_old + t0 * NH * HD, std::min(batch, nq - t0), nullptr);
     };
-    // int8 KV: v2 here, and the opt-in INT8-MMA kernel (STRATA_PROMPT_ATTN_IMMA) checked and timed below beside it
-    if (fmt == 1) k::qsa_prompt_attn_set_imma(0);
     auto new_run = [&]() {
         if (!k::qsa_prompt_attn_batch(d_q, pl, d_ids, d_steps, cap, s, d_new, nq, nullptr)) {
             std::fprintf(stderr, "qsa_prompt_attn_batch refused the pools\n");
             std::exit(2);
         }
     };
-    float* d_im = nullptr;
-    ck(cudaMalloc(&d_im, nq * NH * HD * 4), "malloc");
-    auto imma_run = [&]() {
-        k::qsa_prompt_attn_set_imma(1);
-        const bool ok = k::qsa_prompt_attn_batch(d_q, pl, d_ids, d_steps, cap, s, d_im, nq, nullptr);
-        k::qsa_prompt_attn_set_imma(0);
-        if (!ok) { std::fprintf(stderr, "qsa_prompt_attn_batch refused the pools (imma)\n"); std::exit(2); }
-    };
     old_run();
     new_run();
-    if (fmt == 1) imma_run();
     ck(cudaDeviceSynchronize(), "run");
-    std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size()), im(fmt == 1 ? o.size() : 0);
-    if (fmt == 1) ck(cudaMemcpy(im.data(), d_im, im.size() * 4, cudaMemcpyDeviceToHost), "down");
+    std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size());
     ck(cudaMemcpy(o.data(), d_old, o.size() * 4, cudaMemcpyDeviceToHost), "down");
     ck(cudaMemcpy(nw.data(), d_new, nw.size() * 4, cudaMemcpyDeviceToHost), "down");
     {   // a hash of the new kernel's output bits (bitwise A/B of two builds / switches)
@@ -239,7 +215,7 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
         std::printf("NEWHASH %016llx\n", (unsigned long long) hh);
     }
     // 1. FP64 reference on a sample of queries
-    double err_old = 0, err_new = 0, err_im = 0, ref_scale = 0;
+    double err_old = 0, err_new = 0, ref_scale = 0;
     for (int64_t i = 0; i < nq; i += std::max<int64_t>(1, nq / 16)) {
         const int64_t w = steps[i * k::kStepCount + k::kStepWidth];
         const int32_t* sel = ids.data() + i * cap;
@@ -273,7 +249,6 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
                 ref_scale = std::max(ref_scale, std::fabs(r));
                 err_old = std::max(err_old, std::fabs(o[at] - r));
                 err_new = std::max(err_new, std::fabs(nw[at] - r));
-                if (fmt == 1) err_im = std::max(err_im, std::fabs(im[at] - r));
             }
         }
     }
@@ -298,31 +273,7 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     cudaEventRecord(e1);
     ck(cudaEventSynchronize(e1), "time");
     cudaEventElapsedTime(&ms_new, e0, e1);
-    bool ok_im = true;
-    if (fmt == 1) {   // the INT8-MMA kernel: the same bounds as v2's, against FP64 and against v2
-        double d_iv = 0;
-        for (size_t i = 0; i < o.size(); ++i) d_iv = std::max(d_iv, (double) std::fabs(im[i] - nw[i]));
-        float ms_im = 0, ms_v2 = 0;
-        for (int round = 0; round < 2; ++round) {   // alternating, v2 then imma, twice; the second round counts
-            cudaEventRecord(e0);
-            for (int r = 0; r < reps; ++r) new_run();
-            cudaEventRecord(e1);
-            ck(cudaEventSynchronize(e1), "time");
-            cudaEventElapsedTime(&ms_v2, e0, e1);
-            cudaEventRecord(e0);
-            for (int r = 0; r < reps; ++r) imma_run();
-            cudaEventRecord(e1);
-            ck(cudaEventSynchronize(e1), "time");
-            cudaEventElapsedTime(&ms_im, e0, e1);
-        }
-        ok_im = err_im <= std::max(4.0 * err_old, 1e-6 * ref_scale) && d_iv <= 1e-4 * scale;
-        std::printf("%s int8 IMMA ctx %lld, %lld queries: vs FP64 %.3g (v2 %.3g, FP32 %.3g); IMMA vs v2 %.3g (%.2g of scale); "
-                    "v2 %.3f -> IMMA %.3f ms per chunk (%.2fx)\n", ok_im ? "PASS" : "FAIL", (long long) ctx, (long long) nq,
-                    err_im, err_new, err_old, d_iv, d_iv / scale, ms_v2 / reps, ms_im / reps, ms_v2 / ms_im);
-    }
-    k::qsa_prompt_attn_set_imma(-1);
-    cudaFree(d_im);
-    const bool ok1 = err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale) && ok_im;
+    const bool ok1 = err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale);
     const bool ok2 = diff <= 1e-4 * scale;
     uint64_t sum = 1469598103934665603ull;   // the new kernel's output bits: two builds of it compare by this
     for (float f : nw) {
@@ -344,33 +295,14 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
 }  // namespace
 
 int main(int argc, char** argv) {
-#if defined(__HIP_PLATFORM_AMD__)
-    // S6: on AMD the kernel under test is the RDNA4 matrix-core one (opt-in in the engine); other cards skip
-    {
-        int dev = 0;
-        hipDeviceProp_t prop{};
-        if (hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&prop, dev) != hipSuccess) return 2;
-        if (std::strncmp(prop.gcnArchName, "gfx12", 5) != 0 && std::strncmp(prop.gcnArchName, "gfx11", 5) != 0) {
-            std::printf("SKIP: %s is not gfx11 / gfx12 (the matrix-core prompt attention)\n", prop.gcnArchName);
-            return 77;
-        }
-#if defined(_WIN32)
-        _putenv_s("STRATA_HIP_WMMA", "1");
-#else
-        setenv("STRATA_HIP_WMMA", "1", 1);
-#endif
-    }
-#endif
     const int64_t ctx = argc > 1 ? std::atoll(argv[1]) : 32768;
     const int64_t nq = argc > 2 ? std::atoll(argv[2]) : 2048;
     const int reps = argc > 3 ? std::atoi(argv[3]) : 5;
     int fails = 0;
     fails += run(1, ctx, nq, reps);
-#if !defined(__HIP_PLATFORM_AMD__)
     fails += run(0, ctx, nq, reps);   // FP16 KV: the RDNA4 kernel takes int8 KV only
     fails += run(2, ctx, nq, reps);   // Q4_0 KV (mode 4)
     fails += run(2, 1500, std::min<int64_t>(nq, 1500), reps);
-#endif
     fails += run(1, 1500, std::min<int64_t>(nq, 1500), reps);   // short context: the selection is every cell
     fails += run(1, 2100, std::min<int64_t>(nq, 256), reps);    // the identity-to-sparse edge
     std::printf("FAILURES: %d\n", fails);

@@ -35,10 +35,6 @@ class StartError(unittest.TestCase):
         self.assertIn("some last words", m)
         self.assertIn("ggml_cuda_init: failed", m)
 
-    def test_a_windows_crash_status_is_named(self):
-        m = server.vision_start_error("", None, 0xC0000135)
-        self.assertIn("0xC0000135", m)
-
     def test_kernel_image_error_names_the_card_and_the_way_out(self):
         for sign in ("CUDA error: device kernel image is invalid", "IM2COL failed", "no kernel image is available for execution"):
             with self.subTest(sign=sign):

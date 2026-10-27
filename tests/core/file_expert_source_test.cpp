@@ -49,6 +49,8 @@ void require(bool ok, const std::string& message) {
     if (!ok) throw std::runtime_error(message);
 }
 
+void set_env(const char* name, const char* value);
+
 struct TempDirectory {
     fs::path path;
 
@@ -188,6 +190,63 @@ void test_canonical_layout() {
     require(source.release(0, 0) == 0, "a closed file source released pages");
 }
 
+void test_fill_thread_fallback() {
+    using namespace strata::core;
+    using namespace strata::kernels::cpu;
+    constexpr int64_t layers = 1;
+    constexpr int64_t experts = 34;
+    const uint64_t total = (uint64_t) experts * BLOB;
+    TempDirectory dir;
+    std::string err;
+    require(expert_layout_load(dir.path.string(), layers, experts, err), "could not load the fill layout: " + err);
+    std::vector<uint8_t> bytes((size_t) total);
+    uint64_t x = 0xD1B54A32D192ED03ull;
+    for (uint8_t& b : bytes) {
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        b = (uint8_t) (x >> 56);
+    }
+    {
+        std::ofstream out(dir.path / "experts.bin", std::ios::binary | std::ios::trunc);
+        out.write((const char*) bytes.data(), (std::streamsize) bytes.size());
+        require((bool) out, "could not write the fill-thread experts.bin");
+    }
+    FileExpertSource source;
+    require(source.open(dir.path.string(), layers, experts, err), "could not open the fill-thread pack: " + err);
+    set_env("STRATA_UNBUFFERED_LOAD", "1");
+    std::string why;
+    const bool unbuffered = source.set_unbuffered(0, why);
+    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
+    if (!unbuffered) {
+        std::cout << "file_expert_source_test: fill-thread test skipped (" << why << ")\n";
+        return;
+    }
+    std::vector<int64_t> ids(experts);
+    for (int64_t e = 0; e < experts; ++e) ids[(size_t) e] = e;
+    set_env("STRATA_TEST_FILL_THREAD_FAIL", "1");
+    source.prefetch(0, ids.data(), experts);
+    set_env("STRATA_TEST_FILL_THREAD_FAIL", nullptr);
+    for (int64_t e : {int64_t(0), int64_t(15), int64_t(16), int64_t(33)}) {
+        const uint8_t* got = source.blob(0, e);
+        require(got != nullptr && std::memcmp(got, bytes.data() + (size_t) e * BLOB, BLOB) == 0,
+                "a fill-thread fallback left a wrong expert");
+    }
+    source.close();
+}
+
+void test_lookahead_thread_fallback() {
+    using namespace strata::core;
+    FileExpertSource source;
+    RouterLookahead lookahead;
+    std::string err;
+    std::vector<std::vector<uint16_t>> routers(1, std::vector<uint16_t>(16, 0));
+    set_env("STRATA_TEST_LOOKAHEAD_THREAD_FAIL", "1");
+    const bool started = lookahead.start(std::move(routers), 8, 2, 1, &source, err, true);
+    set_env("STRATA_TEST_LOOKAHEAD_THREAD_FAIL", nullptr);
+    require(!started, "router look-ahead accepted a refused helper thread");
+    require(err.find("cannot start its prefetch thread") != std::string::npos,
+            "router look-ahead thread failure did not explain the fallback");
+}
+
 #if defined(STRATA_NATIVE_EXPERTS)
 void test_native_variable_layout() {
     using namespace strata::core;
@@ -203,8 +262,8 @@ void test_native_variable_layout() {
     const bool first_ok = native_fmt(GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_NL, embedding, feed_forward, first_fmt, err);
     require(first_ok, "IQ3_XXS/IQ4_NL synthetic format is unavailable: " + err);
     err.clear();
-    const bool second_ok = native_fmt(GGML_TYPE_IQ2_XS, GGML_TYPE_IQ4_NL, embedding, feed_forward, second_fmt, err);
-    require(second_ok, "IQ2_XS/IQ4_NL synthetic format is unavailable: " + err);
+    const bool second_ok = native_fmt(GGML_TYPE_Q8_0, GGML_TYPE_IQ4_NL, embedding, feed_forward, second_fmt, err);
+    require(second_ok, "Q8_0/IQ4_NL synthetic format is unavailable: " + err);
     require(first_fmt.bytes != second_fmt.bytes, "chosen native formats do not exercise variable layer sizes");
 
     const uint64_t layer0_bytes = (uint64_t) first_fmt.bytes * experts;
@@ -213,7 +272,7 @@ void test_native_variable_layout() {
         std::ofstream metadata(dir.path / "native_experts.txt");
         require((bool) metadata, "could not create synthetic native_experts.txt");
         metadata << "0 " << GGML_TYPE_IQ3_XXS << ' ' << GGML_TYPE_IQ4_NL << " 0 " << first_fmt.bytes << '\n';
-        metadata << "1 " << GGML_TYPE_IQ2_XS << ' ' << GGML_TYPE_IQ4_NL << ' ' << layer0_bytes << ' '
+        metadata << "1 " << GGML_TYPE_Q8_0 << ' ' << GGML_TYPE_IQ4_NL << ' ' << layer0_bytes << ' '
                  << second_fmt.bytes << '\n';
         require((bool) metadata, "could not write synthetic native_experts.txt");
     }
@@ -336,6 +395,14 @@ void test_split_lend_regions() {
     require(append_stage_lend_regions(2, 3, blobs, offsets, bytes, 100, {{{0, 2}, {2, 0}}}, err) == -1 &&
                 !err.empty() && bytes == 5 && offsets[2] == kNoCacheComplement,
             "an out-of-range lend-region pair was accepted, or a rejected walk touched the plan");
+    require(append_stage_lend_regions(std::numeric_limits<int64_t>::max(), 3, {}, offsets, bytes, 100, {}, err) == -1 &&
+                !err.empty(),
+            "an overflowing lend-region geometry was accepted");
+    offsets = {kNoCacheComplement, 0, kNoCacheComplement, kNoCacheComplement, kNoCacheComplement, kNoCacheComplement};
+    bytes = 11;
+    require(append_stage_lend_regions(2, 3, blobs, offsets, bytes, 10, regions, err) == 0 && bytes == 11 &&
+                offsets[2] == kNoCacheComplement,
+            "a plan already past its cap appended experts");
 }
 
 void test_resident_exchange() {
@@ -380,6 +447,9 @@ void test_pin_pacing() {
     require(!pin_depends_on_reclaim(0, 0, 4 * GiB), "no complement, nothing to pin");
     require(pin_step_fits(6 * GiB, 1 * GiB, 4 * GiB) && !pin_step_fits(4 * GiB, 1 * GiB, 4 * GiB),
             "a step must leave the reserve");
+    constexpr uint64_t max = std::numeric_limits<uint64_t>::max();
+    require(pin_depends_on_reclaim(1, max, max), "an overflowing reserve made an oversized pin look safe");
+    require(!pin_step_fits(max, 1, max), "an overflowing reserve made a pin step look safe");
     const std::string info =
         "MemTotal:       65011484 kB\nMemFree:         1284096 kB\nMemAvailable:   33463296 kB\nCached:         54507520 kB\n";
     require(meminfo_bytes(info, "MemFree") == 1284096ull * 1024, "MemFree was misread");
@@ -391,6 +461,7 @@ void test_pin_pacing() {
     require(numa_pin_free(90 * GiB, {88 * GiB, 2 * GiB}) == 4 * GiB, "an emptied node did not lower the figure");
     require(numa_pin_free(40 * GiB, {20 * GiB, 20 * GiB}) == 40 * GiB, "balanced nodes changed the figure");
     require(numa_pin_free(10 * GiB, {50 * GiB, 50 * GiB}) == 10 * GiB, "the total must still bound it");
+    require(numa_pin_free(max, {max, max}) == max, "the per-node estimate overflowed");
     require(pin_depends_on_reclaim(numa_pin_free(90 * GiB, {88 * GiB, 2 * GiB}), 26 * GiB, 4 * GiB),
             "an unbalanced two-node host was not paced");
     require(page_cache_hint(info).find("drop_caches") != std::string::npos &&
@@ -598,7 +669,48 @@ void test_unbuffered_reads() {
                 std::memcmp(copy.data(), bytes.data() + (size_t) (2 * BLOB), (size_t) BLOB) == 0,
             "an unbuffered copy_blob differs from the file");
     require(source.direct_fallbacks() == 0, "an unbuffered read fell back to the mapping");
+    FileExpertSource cold_source;
+    require(cold_source.open(dir.path.string(), layers, experts, err), "could not reopen the synthetic pack: " + err);
+    set_env("STRATA_UNBUFFERED_LOAD", "1");
+    require(cold_source.set_unbuffered(0, why), "could not reopen the synthetic pack unbuffered: " + why);
+    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
+    const int64_t cold_ids[experts] = {0, 1, 2};
+    uint8_t pending[experts] = {0, 0, 0};
+    set_env("STRATA_TEST_COLD_THREAD_FAIL", "1");
+    const int64_t cold_pending = cold_source.prefetch_begin(0, cold_ids, experts, pending);
+    set_env("STRATA_TEST_COLD_THREAD_FAIL", nullptr);
+    require(cold_pending == 0 && pending[0] == 0 && pending[1] == 0 && pending[2] == 0,
+            "a background read thread failure did not fall back to the caller");
+    for (int64_t e = 0; e < experts; ++e) {
+        const uint8_t* b = cold_source.blob(0, e);
+        require(b != nullptr && std::memcmp(b, bytes.data() + (size_t) (e * (int64_t) BLOB), (size_t) BLOB) == 0,
+                "a background read fallback left a wrong blob");
+    }
+    cold_source.close();
     source.close();
+}
+
+void test_expert_load_thread_fallback() {
+    TempDirectory dir;
+    constexpr uint64_t chunk = 8;
+    std::vector<uint8_t> expected((size_t) (3 * chunk));
+    for (size_t i = 0; i < expected.size(); ++i) expected[i] = (uint8_t) (i * 17 + 3);
+    {
+        std::ofstream out(dir.path / "expert-ranges.bin", std::ios::binary | std::ios::trunc);
+        out.write((const char*) expected.data(), (std::streamsize) expected.size());
+        require((bool) out, "could not write synthetic expert ranges");
+    }
+    const std::vector<uint64_t> offsets{0, chunk, 2 * chunk};
+    const std::vector<uint64_t> lengths{chunk, chunk, chunk};
+    std::vector<uint8_t> actual(expected.size(), 0);
+    set_env("STRATA_TEST_EXPERT_LOAD_THREAD_FAIL", "1");
+    const strata::core::LoadStats stats = strata::core::load_experts_ranges(
+        (dir.path / "expert-ranges.bin").string(), actual.data(), offsets, lengths, 4, chunk);
+    set_env("STRATA_TEST_EXPERT_LOAD_THREAD_FAIL", nullptr);
+    require(stats.ok, "expert range load failed during thread fallback: " + stats.error);
+    require(stats.bytes == expected.size(), "expert range fallback reported the wrong byte count");
+    require(std::memcmp(actual.data(), expected.data(), expected.size()) == 0,
+            "expert range fallback changed the destination bytes");
 }
 
 // #633: the host RAM probe with fake /proc and cgroup trees: v2 (a limit, "max", a missing or malformed limit), v1
@@ -720,10 +832,32 @@ void test_io_prefetch() {
     require(c.cached_bytes + c.uncached_bytes > 0, "no residency counted");
     std::cout << "io prefetch: " << c.pf_read_blobs << " read ahead, " << c.pf_used << " used, " << c.pf_resident_skips
               << " skipped, pread " << c.pread_bytes << " B: bytes PASS\n";
+    source.set_io_prefetch(false, 0);
+    require(!source.io_prefetch() && !source.io_stats() && !source.io_sched(),
+            "disabling io prefetch retained its worker configuration");
+    source.set_io_prefetch(true, 1);
+    require(source.io_prefetch() && source.io_stats(), "io prefetch did not restart");
+    require(source.blob(0, 0) != nullptr, "an io-prefetch lookup failed after restart");
 #else
     require(!source.io_prefetch(), "io prefetch on a platform without it");
 #endif
     source.close();
+}
+
+void test_foresight_init_validation() {
+    using namespace strata::core;
+    ForesightSwap swap;
+    std::string err;
+    require(!swap.init(0, 1, 1, {0}, {0}, err), "foresight accepted zero slots");
+    require(!swap.init(1, 0, 1, {}, {0}, err), "foresight accepted zero layers");
+    require(!swap.init(1, 1, 1, {}, {0}, err), "foresight accepted a missing layer card");
+    require(!swap.init(1, 1, 1, {1}, {0}, err), "foresight accepted an unknown card");
+    require(!swap.init(1, 1, 1, {0}, {}, err), "foresight accepted no device");
+    require(!swap.init(1, std::numeric_limits<int64_t>::max(), 2, {}, {0}, err),
+            "foresight accepted overflowing layer geometry");
+    unsigned long long ptr = 0;
+    require(!swap.take(0, 0, ptr), "uninitialised foresight served an expert");
+    std::cout << "foresight init validation: PASS\n";
 }
 
 void test_rotating_source(bool rotate, bool pin) {
@@ -996,8 +1130,12 @@ int main(int argc, char** argv) {
         test_cgroup_memory_budget();
         test_host_memory();
         test_canonical_layout();
+        test_fill_thread_fallback();
+        test_lookahead_thread_fallback();
+        test_expert_load_thread_fallback();
         test_unbuffered_reads();
         test_io_prefetch();
+        test_foresight_init_validation();
 #if defined(STRATA_NATIVE_EXPERTS)
         test_native_variable_layout();
 #endif

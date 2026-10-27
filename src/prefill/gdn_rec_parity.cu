@@ -119,37 +119,15 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_pipe_kernel(float* __res
 // and the two cross-row-group sums have their own arrays, so a token needs 2 __syncthreads instead of 5: the second
 // one of a token orders every read of rkv before the next token's writes, the next token's first one every read of ro
 // before the writes after it.  64 blocks instead of 192.  Per value head and column the same arithmetic in the same
-// order: the same bits (src/prefill/gdn_rec_parity.cu checks them and times the variants: 1.41x on a 4080 Super).
-// sm_80+ (gdn_keyhead_ok); STRATA_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-#define STRATA_GDN_CP_ASYNC 0   // Turing builds: plain copies (never launched there, see gdn_keyhead_ok)
-#else
-#define STRATA_GDN_CP_ASYNC 1
-#endif
+// order: the same bits (src/prefill/gdn_rec_parity.cu checks them and times the variants).
 __device__ __forceinline__ void gdn_cp4(float* smem, const float* gmem) {
-#if STRATA_GDN_CP_ASYNC
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"((unsigned) __cvta_generic_to_shared(smem)), "l"(gmem));
-#else
     *smem = *gmem;
-#endif
 }
 __device__ __forceinline__ void gdn_cp16(float* smem, const float* gmem) {
-#if STRATA_GDN_CP_ASYNC
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(smem)), "l"(gmem));
-#else
     *reinterpret_cast<float4*>(smem) = *reinterpret_cast<const float4*>(gmem);
-#endif
 }
-__device__ __forceinline__ void gdn_cp_commit() {
-#if STRATA_GDN_CP_ASYNC
-    asm volatile("cp.async.commit_group;\n" ::);
-#endif
-}
-__device__ __forceinline__ void gdn_cp_wait_prev() {   // every group but the newest has landed
-#if STRATA_GDN_CP_ASYNC
-    asm volatile("cp.async.wait_group 1;\n" ::);
-#endif
-}
+__device__ __forceinline__ void gdn_cp_commit() {}
+__device__ __forceinline__ void gdn_cp_wait_prev() {}
 constexpr int GDN_TB = 8, VPK = HV / HK;   // tokens per staged block, value heads per key head
 __global__ void __launch_bounds__(CB * RG) gdn_rec_kh_kernel(float* __restrict__ state, const float* __restrict__ h,
                                                                const float* __restrict__ gate,
@@ -358,9 +336,6 @@ __global__ void __launch_bounds__(256) gdn_chunk_prep_kernel(const float* __rest
 
 __device__ __forceinline__ void gdn_pf_l2(const float* p) { asm volatile("prefetch.global.L2 [%0];" ::"l"(p)); }
 __device__ __forceinline__ void gdn_cp_wait_all() {
-#if STRATA_GDN_CP_ASYNC
-    asm volatile("cp.async.wait_all;\n" ::);
-#endif
 }
 // A block per (key head, 16 value columns): 128 threads for each of the key head's three value heads, which share the
 // staged k and q rows.  128 blocks, one an SM, in one wave (each walks every chunk: a second wave would double the

@@ -122,14 +122,14 @@ class CompatibilityTests(unittest.TestCase):
         self.assertFalse(iq_pack.needs_bf16("blk.1.ple_key.weight", "Q2_0"))
         self.assertFalse(iq_pack.needs_bf16("blk.1.ple_key.weight", "Q8_0"))
         self.assertFalse(iq_pack.needs_bf16("blk.1.ple_key.weight", "IQ3_XXS"))
-        self.assertFalse(iq_pack.needs_bf16("blk.1.ple_key.weight", "IQ4_XS"))
+        self.assertTrue(iq_pack.needs_bf16("blk.1.ple_key.weight", "IQ4_XS"))
         self.assertTrue(iq_pack.needs_bf16("blk.1.ple_key.weight", "Q6_K"))
         for name in ["blk.0.ffn_gate_exps.weight", "token_embd.weight", "output.weight",
                      "per_layer_token_embd.weight", "blk.0.attn_qkv.weight"]:
             self.assertFalse(iq_pack.needs_bf16(name, "IQ3_XXS"))
 
     def test_iq_ple_keys_are_indexed_without_conversion(self):
-        for kind, block_bytes in [(Q.IQ3_XXS, 98), (Q.IQ4_XS, 136)]:
+        for kind, block_bytes in [(Q.IQ3_XXS, 98)]:
             with self.subTest(kind=kind), tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
                 root = Path(tmp)
                 source = root / "model.gguf"
@@ -370,7 +370,7 @@ def split_model(root, name="model", split_layer=True, dup=False, split_no=None, 
           for i, r in enumerate(("gate", "up", "down"))]
     l1_gu = [("blk.1.ffn_gate_exps.weight", expert(seed + 20, gu), gate1),
              ("blk.1.ffn_up_exps.weight", expert(seed + 21, gu), Q.Q8_0)]
-    l1_d = [("blk.1.ffn_down_exps.weight", expert(seed + 22, dn), Q.F32)]
+    l1_d = [("blk.1.ffn_down_exps.weight", expert(seed + 22, dn), Q.Q8_0)]
     shards = [[], router + l0 + (l1_d if split_layer else []), l1_gu + ([] if split_layer else l1_d),
               [("output_norm.weight", np.ones(32, np.float32), Q.F32)]]
     if dup:
@@ -635,103 +635,38 @@ class SplitArtifactTests(unittest.TestCase):
             (pack / "experts.bin").write_bytes(stale)
             rc, log = run_pack(paths[0], pack, "--experts-bin")
             self.assertEqual((pack / "experts.bin").read_bytes(), want)
+class LegacyFormatRejectionTests(unittest.TestCase):
+    """The sm_75 packer accepts only the production expert formats and never emits rotation sidecars."""
 
+    def test_production_expert_formats_are_accepted(self):
+        self.assertIsNone(iq_pack.expert_type_error(0, ["IQ3_XXS", "IQ3_XXS", "IQ4_NL"]))
+        self.assertIsNone(iq_pack.expert_type_error(0, ["IQ3_XXS", "IQ3_XXS", "Q2_0"]))
+        self.assertIsNone(iq_pack.expert_type_error(0, ["Q8_0", "Q8_0", "Q8_0"]))
 
-class HadamardTests(unittest.TestCase):
-    """prism.hadamard (Agention's APR files) -> hadamard.txt; anything the engine cannot rotate is refused."""
-    N_EMBD, N_FF = 256, 128
+    def test_nvfp4_experts_are_refused(self):
+        got = iq_pack.expert_type_error(7, ["NVFP4", "NVFP4", "Q8_0"])
+        self.assertIn("layer 7", got)
+        self.assertIn("NVFP4", got)
+        self.assertIn("IQ3_XXS", got)
 
-    def meta(self, **kw):
-        names = ["blk.%d.ffn_%s_exps.weight" % (l, r) for l in range(2) for r in ("gate", "up", "down")]
-        m = {"prism.hadamard.version": 1, "prism.hadamard.block_size": 128,
-             "prism.hadamard.transform": "normalized-sylvester-walsh-hadamard",
-             "prism.hadamard.axis": "input-last-dimension", "prism.hadamard.sign_mode": "explicit",
-             "prism.hadamard.weight_names": names,
-             "prism.hadamard.sign_widths": [self.N_FF, self.N_EMBD],
-             "prism.hadamard.sign_values": [1, -1] * (self.N_FF // 2) + [-1, 1] * (self.N_EMBD // 2)}
-        m.update(kw)
-        return m
+    def test_other_historical_experts_are_refused(self):
+        for kind in ("IQ3_S", "IQ4_XS", "Q4_K", "F32", "IQ2_XXS"):
+            with self.subTest(kind):
+                got = iq_pack.expert_type_error(2, [kind, kind, kind])
+                self.assertIn("unsupported expert type", got)
+                self.assertIn(kind, got)
 
-    def layout(self, gu=145, d=146):
-        return [(l, gu, d, 0, 0, None) for l in range(2)]
+    def test_expert_types_are_restricted_by_role(self):
+        got = iq_pack.expert_type_error(3, ["Q2_0", "Q2_0", "IQ4_NL"])
+        self.assertIn("gate/up must be IQ3_XXS or Q8_0", got)
+        got = iq_pack.expert_type_error(3, ["IQ3_XXS", "IQ3_XXS", "IQ3_XXS"])
+        self.assertIn("down must be IQ4_NL, Q2_0 or Q8_0", got)
 
-    def test_no_metadata(self):
-        self.assertIsNone(iq_pack.hadamard_spec({}, self.layout(), self.N_EMBD, self.N_FF))
-
-    def test_explicit_signs_written(self):
-        text = iq_pack.hadamard_spec(self.meta(), self.layout(), self.N_EMBD, self.N_FF)
-        lines = text.splitlines()
-        self.assertTrue(lines[0].startswith("# strata hadamard v1"))
-        self.assertEqual(lines[1], "block 128")
-        self.assertEqual(lines[2].split()[:4], ["signs", str(self.N_FF), "1", "-1"])
-        self.assertEqual(len(lines[3].split()), 2 + self.N_EMBD)
-        self.assertEqual(lines[4:], ["layer 0 1 1 1", "layer 1 1 1 1"])
-
-    def test_refusals(self):
-        bad = {
-            "transform": self.meta(**{"prism.hadamard.transform": "dct"}),
-            "dense weight": self.meta(**{"prism.hadamard.weight_names": ["blk.0.attn_q.weight"]}),
-            "inverse": self.meta(**{"prism.hadamard.inverse_weight_names": ["token_embd.weight"]}),
-            "gate only": self.meta(**{"prism.hadamard.weight_names": ["blk.0.ffn_gate_exps.weight"]}),
-            "missing width": self.meta(**{"prism.hadamard.sign_widths": [self.N_EMBD],
-                                          "prism.hadamard.sign_values": [1] * self.N_EMBD}),
-            "bad sign": self.meta(**{"prism.hadamard.sign_values": [2] * (self.N_FF + self.N_EMBD)}),
-            "block": self.meta(**{"prism.hadamard.block_size": 96}),
-        }
-        for what, m in bad.items():
-            with self.subTest(what):
-                got = iq_pack.hadamard_spec(m, self.layout(), self.N_EMBD, self.N_FF)
-                self.assertIsInstance(got, str)
-                self.assertFalse(got.startswith("# strata hadamard"))
-        got = iq_pack.hadamard_spec(self.meta(), self.layout(gu=42), self.N_EMBD, self.N_FF)
-        self.assertIn("Q2_0", got)
-
-
-class NativeExpertsV5Tests(unittest.TestCase):
-    """The v5 mark (Hadamard-folded experts) rewrites only the tables the packer writes, v3 and v4."""
-    ROWS = "0 145 146 0 100 1 2 3\n1 145 146 100 100 4 5 6\n"
-
-    def table(self, version, tail="(n_expert 2, total 200)"):
-        return "# strata native experts v%s: layer gu_type d_type offset ... %s\n" % (version, tail) + self.ROWS
-
-    def test_v3_and_v4_become_v5(self):
-        for v in ("3", "4"):
-            with self.subTest(v):
-                got = iq_pack.native_experts_v5(self.table(v))
-                head, rest = got.split("\n", 1)
-                self.assertTrue(head.startswith("# strata native experts v5: layer gu_type"))
-                self.assertTrue(head.endswith("(n_expert 2, total 200) - v5: Hadamard-folded experts, see hadamard.txt"))
-                self.assertEqual(rest, self.ROWS)
-
-    def test_other_versions_are_refused_by_name(self):
-        for v in ("2", "5", "6", "10"):
-            with self.subTest(v):
-                got = iq_pack.native_experts_v5(self.table(v))
-                self.assertFalse(got.startswith("# strata native experts"))
-                self.assertIn("v%s" % v, got)
-                self.assertIn("v3 and v4", got)
-        got = iq_pack.native_experts_v5("# something else\n" + self.ROWS)
-        self.assertIn("without a version header", got)
-
-    def test_packer_refuses_before_writing(self):
-        real = iq_pack.expert_layout
-
-        def v6_layout(model, src):
-            layout, text, n_expert, offset = real(model, src)
-            return layout, text.replace("native experts v3:", "native experts v6:", 1), n_expert, offset
-
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            paths = split_model(root, split_layer=False)
-            out = root / "pack"
-            with patch.object(iq_pack, "expert_layout", v6_layout), \
-                    patch.object(iq_pack, "hadamard_spec", return_value="# strata hadamard v1\nblock 32\n"):
-                rc, log = run_pack(paths[0], out)
-            self.assertEqual(rc, 1)
-            self.assertIn("native_experts.txt v6", log)
-            self.assertIn("only v3 and v4", log)
-            self.assertFalse((out / "native_experts.txt").exists())
-            self.assertFalse((out / "hadamard.txt").exists())
+    def test_prism_hadamard_is_refused(self):
+        self.assertIsNone(iq_pack.hadamard_error({}))
+        got = iq_pack.hadamard_error({"prism.hadamard.version": 1})
+        self.assertIn("prism.hadamard", got)
+        self.assertIn("sm_75", got)
 
 
 if __name__ == "__main__":

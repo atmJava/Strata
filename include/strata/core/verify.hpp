@@ -465,9 +465,6 @@ private:
     int32_t* d_spec_ = nullptr;          ///< device: kVerifyMaxT draft ids, then kVerifyMaxT q rows
     int hist_len_ = 0;
     bool head_sampling_ = true;          ///< set_head_sampling
-#if defined(STRATA_GPU_METAL)
-    void* metal_ = nullptr;              ///< the Metal decode window (metal/src/engine/window.cpp): init/run/commit go there
-#endif
     std::vector<float> logit_bias_host_;
     float* logit_bias_device_ = nullptr;
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
@@ -653,10 +650,6 @@ private:
     static constexpr int64_t kPcieGroupRows = 4;                  // the PCIe call's groups side by side (of <= 16)
     uint8_t* hit_xq_ = nullptr;
     uint8_t* nat_xq_ = nullptr;   // plan v0.3 P6: q8_1 activations for a native pack's grouped experts
-    float* nat_xr_ = nullptr;     // APR: the Hadamard-rotated expert input (the shared expert and the CPU keep xm); nullptr
-                                  // unless some layer's gate/up is folded
-    const float* had_sx_ = nullptr;   // APR: device sign vectors for x (n_embd) and h (n_ff); nullptr = identity
-    const float* had_sh_ = nullptr;
     float* hit_xs_ = nullptr;
     void* hit_scratch_ = nullptr;
     float *head_mixed_ = nullptr, *head_inj_ = nullptr, *head_logits_ = nullptr;

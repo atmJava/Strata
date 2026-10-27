@@ -169,7 +169,10 @@ def chat(base: str, key: str, messages: list, max_tokens: int, think: bool = Fal
                 if j.get("timings"):
                     timings = j["timings"]
     except urllib.error.HTTPError as e:
-        err = f"HTTP {e.code}: {e.read()[:200]!r}"
+        try:
+            err = f"HTTP {e.code}: {e.read()[:200]!r}"
+        finally:
+            e.close()
     except Exception as e:                              # noqa: BLE001
         err = repr(e)[:300]
     total = time.perf_counter() - t0
@@ -475,10 +478,6 @@ def cpu_name() -> str | None:
                 return line.split(":", 1)[1].strip()
     except OSError:
         pass
-    if os.name == "nt":
-        out = run_cmd(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name"])
-        if out.strip():
-            return out.strip()
     return platform.processor() or None
 
 
@@ -494,25 +493,6 @@ def gpu_info_local() -> dict:
     m = re.search(r"CUDA Version:\s*([\d.]+)", head)
     if m:
         info["cuda"] = m.group(1)
-    if not gpus:
-        rocm = run_cmd(["rocm-smi", "--showproductname"])
-        names = re.findall(r"Card [Ss]eries:\s*(.+)", rocm) or re.findall(r"Card [Mm]odel:\s*(.+)", rocm)
-        info["gpus"] = [{"name": n.strip(), "vram_mib": None, "driver": None} for n in names]
-        v = run_cmd(["rocm-smi", "--showdriverversion"])
-        m2 = re.search(r"Driver version:\s*(\S+)", v)
-        if m2:
-            info["rocm_driver"] = m2.group(1)
-    if not info["gpus"] and os.name == "nt":
-        # #1587: Windows with only an AMD card has neither nvidia-smi nor rocm-smi; the display class in the registry
-        # names the card, its VRAM and its driver (the run was labelled "CPU only" before)
-        try:
-            if str(ROOT) not in sys.path:
-                sys.path.insert(0, str(ROOT))
-            from serve.telemetry import windows_amd_cards
-            info["gpus"] = [{"name": c["name"], "vram_mib": (c["vram_bytes"] >> 20) if c["vram_bytes"] else None,
-                             "driver": c["driver"]} for c in windows_amd_cards()]
-        except Exception:   # noqa: BLE001 - a report without the card's name is still a report
-            pass
     return info
 
 
@@ -633,7 +613,7 @@ def collect_machine(base: str, key: str, cfg: dict | None, gpu_arg: str | None =
         n_ctx = (d.get("meta") or {}).get("n_ctx") or n_ctx
     n_ctx = n_ctx or (props.get("default_generation_settings") or {}).get("n_ctx")
     return {
-        "gpu": gpu_names, "gpu_vram_mib": vram_mib, "gpu_driver": (used[0].get("driver") if used else local.get("rocm_driver")),
+        "gpu": gpu_names, "gpu_vram_mib": vram_mib, "gpu_driver": (used[0].get("driver") if used else None),
         "cuda": local.get("cuda"), "cpu": static.get("cpu_name") or cpu_name(), "cpu_cores": static.get("cores"),
         "cpu_threads": static.get("threads") or os.cpu_count(), "ram_gib": total_ram_gib(),
         "os": f"{platform.system()} {platform.release()} ({platform.version()})" if os.name == "nt" else f"{platform.system()} {platform.release()}",
@@ -760,7 +740,7 @@ def gpu_slug(machine: dict) -> str:
             groups.append([name, 1])
     parts = []
     for name, count in groups:
-        n = re.sub(r"(?i)\b(nvidia|geforce|amd|radeon|intel|graphics|corporation)\b", " ", name)
+        n = re.sub(r"(?i)\b(nvidia|geforce|graphics|corporation)\b", " ", name)
         parts.append(slug(n, 30) if count == 1 else f"{count}x-{slug(n, 30)}")
     return "-plus-".join(parts)[:80].strip("-")
 
@@ -871,7 +851,7 @@ def render_readme(res: dict) -> str:
     L += ["", "Per-request data: `results.json`. Engine log lines from the start: `engine-log-excerpt.txt` (when this run started the server).", "",
           "## Correctness and limitations", "",
           "Not measured: this is a speed suite. The conversation uses the model's own replies, so token counts differ a little between runs. "
-          "Machine details come from the server, `nvidia-smi`/`rocm-smi` and the OS; background load and power limits are not recorded. "
+          "Machine details come from the server, `nvidia-smi` and the OS; background load and power limits are not recorded. "
           f"Total time of the suite: {res['elapsed_s']:.0f} s.", ""]
     return "\n".join(L)
 

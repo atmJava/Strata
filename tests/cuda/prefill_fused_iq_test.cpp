@@ -7,12 +7,12 @@
 //     gate/up, SwiGLU, q8_1 of H, down).
 // Both round the activations and H to int8 per 32 values, differently, so this is not a bitwise test: the fused
 // path's error against the reference has to be comparable to MMQ's own (at most 1.5x its RMS and 2x its worst row).
-// The pairs cover every format the kernels take: gate/up IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ4_XS, down Q2_0 IQ4_NL.
+// The production pair is IQ3_XXS gate/up with IQ4_NL down.
 // Part 1 (reference), per pair: 256 tokens over 64 experts, skewed routing - experts with 0 rows, with one, with
 // several 64-row tiles - an all-zero token, per-expert blobs at unrelated (2-byte aligned) addresses, three launches of
 // different expert ranges.  Part 2 (timing): one layer at the engine's chunks (2048, 3584, 8192 tokens; 512 experts,
-// top 10) on both paths and on MMQ's products alone (no gathers), for the IQ2_XS, IQ3_XXS and IQ3_S packs' most
-// common layers, with the grouping checked and a sample of rows against the reference.  --no-ref, --no-timing,
+// top 10) on both paths and on MMQ's products alone (no gathers), with the grouping checked and a sample of rows
+// against the reference.  --no-ref, --no-timing,
 // --only=NAME, --chunks=A,B.  Exit 77 without a CUDA device of sm_80 or newer.
 #include "strata/prefill/moe_fused_iq.hpp"
 #include "strata/prefill/moe_mmq.hpp"
@@ -88,18 +88,12 @@ bool f16_on() {
 void fill_matrix(uint8_t* m, ggml_type t, int64_t rows, int64_t cols, std::mt19937& rng) {
     const size_t bs = ggml_type_size(t), nb = (size_t) rows * (size_t) (cols / ggml_blck_size(t));
     std::uniform_int_distribution<int> byte(0, 255);
-    const float lo = t == GGML_TYPE_Q4_K || t == GGML_TYPE_Q5_K ? 0.00004f : t == GGML_TYPE_Q5_1 ? 0.0006f
-                   : t == GGML_TYPE_Q8_0 ? 0.0001f : t == GGML_TYPE_IQ3_S ? 0.0004f : t == GGML_TYPE_IQ4_XS ? 0.00005f
-                   : t == GGML_TYPE_IQ4_NL ? 0.0002f : t == GGML_TYPE_Q2_0 ? 0.004f : 0.0008f;
+    const float lo = t == GGML_TYPE_IQ4_NL ? 0.0002f : 0.0008f;
     std::uniform_real_distribution<float> sc(lo, 6.0f * lo);
     for (size_t i = 0; i < nb * bs; ++i) m[i] = (uint8_t) byte(rng);
     for (size_t b = 0; b < nb; ++b) {
         const ggml_fp16_t h = ggml_fp32_to_fp16(sc(rng));
         std::memcpy(m + b * bs, &h, 2);
-        if (t == GGML_TYPE_Q4_K || t == GGML_TYPE_Q5_K || t == GGML_TYPE_Q5_1) {   // the minimum's scale, either sign
-            const ggml_fp16_t h2 = ggml_fp32_to_fp16(sc(rng) * ((rng() & 1) ? 1.0f : -1.0f) * (t == GGML_TYPE_Q5_1 ? 4.0f : 1.0f));
-            std::memcpy(m + b * bs + 2, &h2, 2);
-        }
     }
 }
 std::vector<uint8_t> make_blob(const Pair& p, const Geo& g, std::mt19937& rng) {
@@ -653,28 +647,16 @@ int main(int argc, char** argv) {
         _putenv_s("STRATA_PF_FUSED", "1");
 #else
         setenv("STRATA_PF_FUSED", "1", 1);
-        setenv("STRATA_PF_FUSED_KQ", "1", 1);   // (the HIP build's Q4_K / Q5_K / Q5_1 / Q8_0 pairs)
 #endif
         int n = 0;
         if (cudaGetDeviceCount(&n) != cudaSuccess || n == 0) { std::printf("no CUDA device: skipped\n"); return 77; }
-        // gfx12: only the native kernels exist (fused::available() is the Q2_0 pack's), so they decide there
         if (!fused::available() && !fused::native_supported(GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_NL)) {
-            std::printf("the fused kernels need sm_80 or newer (or gfx11 / gfx12 matrix cores): skipped\n");
+            std::printf("the fused kernels are unavailable on this device: skipped\n");
             return 77;
         }
         if (!mmq::built()) { std::printf("no MMQ in this build\n"); return 1; }
         const std::vector<Pair> pairs = {
-            {GGML_TYPE_IQ2_S, GGML_TYPE_Q2_0, "IQ2_S / Q2_0"},       {GGML_TYPE_IQ2_XXS, GGML_TYPE_Q2_0, "IQ2_XXS / Q2_0"},
-            {GGML_TYPE_IQ2_XS, GGML_TYPE_IQ4_NL, "IQ2_XS / IQ4_NL"}, {GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_NL, "IQ3_XXS / IQ4_NL"},
-            {GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_NL, "IQ3_S / IQ4_NL"},   {GGML_TYPE_IQ4_XS, GGML_TYPE_Q2_0, "IQ4_XS / Q2_0"},
-            // (HIP only) UD-Q4_K_XL's: 47 layers Q4_K / Q5_1, 4 Q4_K / Q8_0, and the one Q5_K layer
-            {GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, "Q4_K / Q5_1"},         {GGML_TYPE_Q4_K, GGML_TYPE_Q8_0, "Q4_K / Q8_0"},
-            {GGML_TYPE_Q5_K, GGML_TYPE_Q5_1, "Q5_K / Q5_1"},         {GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, "Q5_K / Q8_0"},
-            // the Coder IQ1_M pack's other pairs (appended: the default timing set takes pairs 0, 1, 4, 3 by index)
-            {GGML_TYPE_IQ2_S, GGML_TYPE_IQ4_NL, "IQ2_S / IQ4_NL"},   {GGML_TYPE_IQ3_XXS, GGML_TYPE_Q2_0, "IQ3_XXS / Q2_0"},
-            {GGML_TYPE_IQ3_S, GGML_TYPE_Q2_0, "IQ3_S / Q2_0"},       {GGML_TYPE_IQ4_XS, GGML_TYPE_IQ4_NL, "IQ4_XS / IQ4_NL"},
-            // the canonical Q2_0 pack (gate/up and down Q2_0; CUDA)
-            {GGML_TYPE_Q2_0, GGML_TYPE_Q2_0, "Q2_0 / Q2_0"}};
+            {GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_NL, "IQ3_XXS / IQ4_NL"}};
         const char* only = nullptr;   // --only=NAME: the pairs whose name contains NAME
         for (int i = 1; i < argc; ++i)
             if (std::strncmp(argv[i], "--only=", 7) == 0) only = argv[i] + 7;
@@ -695,24 +677,22 @@ int main(int argc, char** argv) {
         cudaStream_t s = nullptr;
         ck(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), "stream");
         for (const Pair& p : pairs) {
-            if (only ? std::string(p.name).find(only) == std::string::npos : p.gu == GGML_TYPE_Q4_K || p.gu == GGML_TYPE_Q5_K) continue;
+            if (only && std::string(p.name).find(only) == std::string::npos) continue;
             if (!fused::native_supported((int) p.gu, (int) p.d)) {
-                // this test always sets STRATA_PF_FUSED=1, so a 7.5 card runs the pairs dev_info set up there (Q2_0/Q2_0
-                // and the production pack's IQ3_XXS / IQ4_NL, both opt-in); skip what this device does not take
+                // this test always sets STRATA_PF_FUSED=1, so a 7.5 card runs the production IQ3_XXS / IQ4_NL pair;
+                // skip what this device does not take
                 // (--only=NAME still insists)
-                const bool turing_pair = p.gu == GGML_TYPE_Q2_0 && p.d == GGML_TYPE_Q2_0;
                 int major = 0;
                 cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, 0);
-                if ((major < 8 || turing_pair) && !only) { std::printf("%s: not set up on this device (skipped)\n", p.name); continue; }
+                if (major < 8 && !only) { std::printf("%s: not set up on this device (skipped)\n", p.name); continue; }
                 throw std::runtime_error(std::string(p.name) + ": not covered by the native kernels");
             }
             if (ref) reference_part(p, s);
         }
         if (timing) {
-            // the IQ2_XS pack's layers (34 of 48 IQ2_S / Q2_0, 11 IQ2_XXS / Q2_0), the IQ3_S pack's most common, IQ3_XXS's
-            for (const Pair& p : only ? pairs : std::vector<Pair>{pairs[0], pairs[1], pairs[4], pairs[3]}) {
+            for (const Pair& p : pairs) {
                 if (only && std::string(p.name).find(only) == std::string::npos) continue;
-                if (!fused::native_supported((int) p.gu, (int) p.d)) continue;   // (Turing: the Q2_0 pair and IQ3_XXS / IQ4_NL only)
+                if (!fused::native_supported((int) p.gu, (int) p.d)) continue;
                 for (int T : chunks) timing_part(p, T, s);
             }
         }

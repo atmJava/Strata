@@ -1,4 +1,5 @@
 #include "strata/platform/direct_file.hpp"
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -17,12 +18,16 @@ int main() {
     if (fd < 0) return 1;
     close(fd);
     void* memory = DirectFile::alloc_aligned(4096 * 18);
+    void* race_memory = nullptr;
     try {
         check(memory != nullptr, "buffer allocation");
         { std::ofstream f(name, std::ios::binary); std::string bytes(4096 * 16 + 17, 'x'); f.write(bytes.data(), bytes.size()); }
         DirectFile f;
         std::string error;
         setenv("STRATA_IO_THREADS", "4", 1);   // the pool's size (out-of-range values are clamped to 1..64)
+        check(!f.is_open(), "new handle reports open");
+        check(!f.submit(0, memory, 4096, 0, error) && error.find("not open") != std::string::npos,
+              "closed handle accepted a request");
         check(f.open(name, error), error.c_str());
         check(!f.submit(1, memory, 4096, 0, error), "unaligned request accepted");
         for (unsigned i = 0; i < 17; ++i)
@@ -50,11 +55,39 @@ int main() {
         check(f.submit(0, memory, 4096, 100, error), error.c_str());
         check(f.wait(&c, 1, 5000) == 1 && c.ok && c.tag == 100, "reopened read failed");
         f.close();
+        check(!f.is_open(), "closed handle still reports open");
+        check(!f.submit(0, memory, 4096, 101, error) && error.find("not open") != std::string::npos,
+              "closed handle accepted a request");
+
+        DirectFile contended;
+        race_memory = DirectFile::alloc_aligned(4096 * 4096);
+        check(race_memory != nullptr, "concurrent buffer allocation");
+        check(contended.open(name, error), error.c_str());
+        std::atomic<size_t> accepted{0};
+        std::thread producer([&] {
+            for (size_t i = 0; i < 4096; ++i) {
+                auto* buffer = static_cast<char*>(race_memory) + i * 4096;
+                if (!contended.submit(0, buffer, 4096, i, error)) break;
+                accepted.store(i + 1, std::memory_order_release);
+            }
+        });
+        while (accepted.load(std::memory_order_acquire) == 0) std::this_thread::yield();
+        contended.close();
+        producer.join();
+        check(accepted.load(std::memory_order_acquire) > 0 && !contended.is_open(),
+              "concurrent submit/close");
+        DirectFile::free_aligned(race_memory);
+        race_memory = nullptr;
+
+        check(!f.open("/tmp/strata-direct-test-no-such-file", error), "missing file opened");
+        check(!f.is_open() && !f.submit(0, memory, 4096, 102, error), "failed open left the handle usable");
         DirectFile::free_aligned(memory); unlink(name);
-        std::cout << "direct_file_async: passed queued reads, short EOF, wake, close drain, reopen\n";
+        std::cout << "direct_file_async: passed closed submit, queued reads, short EOF, wake, close drain, reopen\n";
         return 0;
     } catch (const std::exception& e) {
-        DirectFile::free_aligned(memory); unlink(name);
+        DirectFile::free_aligned(race_memory);
+        DirectFile::free_aligned(memory);
+        unlink(name);
         std::cerr << e.what() << '\n'; return 1;
     }
 }

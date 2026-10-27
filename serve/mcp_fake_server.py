@@ -87,7 +87,7 @@ def handle(msg: dict):
 
 
 def stdio():
-    for f in (sys.stdin, sys.stdout, sys.stderr):      # MCP's stdio is UTF-8, whatever the Windows code page is
+    for f in (sys.stdin, sys.stdout, sys.stderr):
         f.reconfigure(encoding="utf-8")
     out = threading.Lock()
 

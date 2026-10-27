@@ -1,11 +1,12 @@
 // src/kernels/cpu/router_dot_parity.cpp - the router lookahead's BF16 dot on each rung this CPU has: the AVX2 kernel
-// (kq_avx2.cpp) and the AVX1 one for older CPUs (kq_avx1.cpp), against a double-precision reference, plus the time
+// (router_avx2.cpp) and the AVX1 one for CPUs without AVX2 (router_avx1.cpp), against a double-precision reference,
+// plus the time
 // of one layer's router.  No GPU, no model: random BF16 rows of the model's router shape [512 x 2560], 1..8 tokens.
 //
 //     router_dot_parity            (STRATA_FORCE_ISA=avx leaves out the AVX2 kernel, as on an AVX-only CPU)
 #include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/cpu/kq_avx1.hpp"
-#include "strata/kernels/cpu/kq_avx2.hpp"
+#include "strata/kernels/cpu/router_avx1.hpp"
+#include "strata/kernels/cpu/router_avx2.hpp"
 
 #include <algorithm>
 #include <chrono>

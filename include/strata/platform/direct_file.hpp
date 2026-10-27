@@ -33,8 +33,8 @@ public:
     uint64_t size() const;
     static constexpr uint32_t alignment() { return 4096; }
 
-    /// Queue one read. Returns false (and sets `err`) if the request could not be queued; a queued request
-    /// always produces exactly one completion.
+    /// Queue one read. Returns false (and sets `err`) if the handle is closed or the request could not be queued;
+    /// a queued request always produces exactly one completion.
     bool submit(uint64_t offset, void* buffer, uint32_t length, uint64_t tag, std::string& err);
 
     /// Wait for up to `max` completions; returns how many were written to `out`. `timeout_ms` < 0 waits

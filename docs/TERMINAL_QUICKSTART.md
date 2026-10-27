@@ -1,100 +1,75 @@
 # Terminal quick start
 
-This page is for people who already have a model and want to read a running server, rerun it from a saved profile, or measure it.
-To set up and serve a new model, use [`strata launch`](TERMINAL_LAUNCH.md).
+Use `strata` from an installed local command, or `python3 strata.py` from this checkout.
 
-The commands use the `strata` command from the [Terminal install](INSTALL.md#the-terminal), which carries its own Python.
-In a source checkout, type `python strata.py` in place of `strata`, from the repository root. These commands read, prepare
-and rerun a model you already have; they do not download one. All options, permissions and limits are in [TERMINAL.md](TERMINAL.md).
+## 1. Check the server profile
 
-## Read a running server
+```sh
+strata doctor --profile /opt/ai/src/strata-0.2.2/strata-022.json --live
+strata check-production --config /opt/ai/src/strata-0.2.2/strata-022.json
+strata serve --config /opt/ai/src/strata-0.2.2/strata-022.json --plan
+```
 
-With Strata already serving locally, get one machine-readable snapshot:
+The plan does not start the engine, load the model or change files.
+
+## 2. Save a management profile
+
+```sh
+strata profile create production \
+  --from-config /opt/ai/src/strata-0.2.2/strata-022.json
+strata profile validate production
+```
+
+A saved profile is a revisioned reference to the source config plus typed serving overrides. The source config
+remains the owner of model, engine and engine-environment details.
+
+## 3. Start the owned server
+
+```sh
+strata runtime start --profile production --plan
+strata runtime start --profile production
+strata runtime status --profile production
+strata runtime verify --profile production --load
+```
+
+`runtime verify --load` proves that the bound API answered a one-token generation through the loaded model. It does
+not prove 256K stability or sustained throughput.
+
+## 4. Read telemetry
 
 ```sh
 strata status --url http://127.0.0.1:8080 --json
+strata monitor --url http://127.0.0.1:8080 --once
+strata logs --url http://127.0.0.1:8080 --output json
 ```
 
-The interactive monitor comes with the installed Terminal. Open the one-screen Overview:
+Save a URL separately when the server is behind a reverse proxy:
 
 ```sh
-strata monitor --url http://127.0.0.1:8080
+strata connection create edge \
+  --url https://server.example \
+  --prefix /strata \
+  --credential-env STRATA_TELEMETRY_KEY
+strata config show --connection edge --output json
+strata status --connection edge --json
 ```
 
-The Overview puts serving state, prompt and answer speed, batch/queue pressure, four selected GPU rows, requests and activity on one screen. Press `1`–`7` for the views (`7` is Connect), `Space` to freeze the display, `r` to refresh, and `q` to detach. Detach leaves the server running. On a machine without a terminal, use `status --json` or `monitor --once --json`.
+The connection file stores the environment variable name, never its value.
 
-For a remote server, use HTTPS or a local SSH tunnel. A saved connection stores only the credential environment variable's **name**:
+## 5. Stop or restart
 
 ```sh
-strata connection create work --url https://example.invalid --credential-env STRATA_TELEMETRY_KEY
-strata monitor --connection work
+strata runtime restart --profile production --plan
+strata runtime restart --profile production
+strata runtime stop --profile production --plan
+strata runtime stop --profile production
 ```
 
-Set `STRATA_TELEMETRY_KEY` in the environment before connecting. Replace `example.invalid` with your own server root. The monitor client never needs a management credential.
+The local owner checks the profile revision, source digest, owner ID and instance ID from an execution plan before
+mutating a running service. Use a fresh plan when a precondition has changed.
 
-## Prepare and rerun a local model
+## DFlash2
 
-Use the run config written by setup. Start by reviewing its components and effective launch; neither command starts an engine:
-
-```sh
-strata doctor --profile /absolute/path/to/strata-model.json --components --output json
-strata serve --profile /absolute/path/to/strata-model.json --plan --output json
-```
-
-For repeatable local management, create a named profile from that config. Review changes before saving them:
-
-```sh
-strata profile create four-gpu --from-config /absolute/path/to/strata-model.json
-strata profile set four-gpu parallel=8 batch_groups=auto max_queue=32 queue_timeout=15 batch_telemetry=true --plan
-strata profile set four-gpu parallel=8 batch_groups=auto max_queue=32 queue_timeout=15 batch_telemetry=true
-strata profile show four-gpu --effective --output json
-strata runtime start --profile four-gpu --plan --output json
-strata runtime start --profile four-gpu
-strata runtime verify --profile four-gpu --output json
-```
-
-Choose slot and queue settings for the actual model and card memory. A requested `parallel=8` does not prove the engine loaded eight effective slots. Check the reported values after start. To change a running profile, save the edit, review the restart, then execute it:
-
-```sh
-strata profile set four-gpu parallel=4 --plan
-strata profile set four-gpu parallel=4
-strata runtime restart --profile four-gpu --plan --output json
-strata runtime restart --profile four-gpu
-```
-
-The restart is an explicit operation. `profile set` alone does not restart or retune a running model. `runtime stop --profile four-gpu` stops only the owned instance; `q` in Monitor does not. The desktop app starts its models through the same runtime host on every system.
-
-## Check cards, calibrate and benchmark
-
-Read installed components without launching the engine. The `--live` forms also probe host GPUs:
-
-```sh
-strata components verify --profile four-gpu --output json
-strata doctor --profile four-gpu --live --output json
-```
-
-Calibration is separate from serving. Review the plan and measure a decode sweep only when the selected devices are available for exclusive use. Measuring writes a report but does not apply settings:
-
-```sh
-strata engine calibrate --profile four-gpu --plan --output json
-strata engine calibrate --profile four-gpu --measure --exclusive --out /absolute/path/to/calibration.json
-strata engine calibrate --profile four-gpu --review-result /absolute/path/to/calibration.json --output json
-```
-
-After reviewing the report, applying and rolling back remain separate explicit actions. Both require exclusive device access:
-
-```sh
-strata engine calibrate --profile four-gpu --apply-result /absolute/path/to/calibration.json --exclusive
-strata engine calibrate --profile four-gpu --review-rollback /absolute/path/to/calibration.json --output json
-strata engine calibrate --profile four-gpu --rollback-result /absolute/path/to/calibration.json --exclusive
-```
-
-Check the candidate report and owner state before either action. The full preconditions and rollback behavior are in [TERMINAL.md](TERMINAL.md).
-
-After the model is loaded, save an explicit serving benchmark report:
-
-```sh
-strata bench run --profile four-gpu --suite serving-smoke --concurrency 4 --out /absolute/path/to/new-bench-report
-```
-
-The benchmark writes into a new output directory and does not publish its result. Synthetic screenshots and local fake-engine tests do not establish performance on a four-card host. Capture the exact GPU generation, model, driver and workload before comparing real runs.
+Set `"drafting": "dflash2"` in the source config after placing the compatible pack at the documented path. The
+server adds the DFlash2 engine flags when the pack is present and falls back to MTP with a reason when it is not.
+Keep `"auto"` while the target host lacks a measured `sm_75` DFlash2 sweep.

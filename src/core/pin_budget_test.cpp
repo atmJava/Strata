@@ -12,11 +12,7 @@ static int g_fail = 0;
         if (!(c)) { std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); ++g_fail; } \
     } while (0)
 
-#ifdef _WIN32
-#define SETENV(k, v) _putenv_s(k, v)
-#else
 #define SETENV(k, v) setenv(k, v, 1)
-#endif
 
 int main() {
     // the singleton reads its environment on first use: set everything first

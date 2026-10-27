@@ -172,11 +172,8 @@ class Slots(unittest.TestCase):
         self.assertEqual(self.engine.proc.sent, [])
 
     def test_filename_cannot_leave_the_directory(self):
-        for bad in ("../x.bin", "/etc/passwd", "a/b.bin", "", ".", "..", "x\ny.bin",
-                    # Windows: another drive, a stream, devices with and without an extension, names Windows trims
-                    "D:escape.bin", "C:\\x.bin", "a.bin:stream", "NUL", "nul.txt", "CON.bin", "com1.x", "LPT9",
-                    "a.bin.", "a.bin ", ".hidden", ".a.bin.0123456789abcdef.tmp", "x\x7fy", "a*b", "a?b", 'a"b',
-                    "a<b", "a>b", "a|b", "x" * 201, None, 5, ["a"]):
+        for bad in ("../x.bin", "/etc/passwd", "a/b.bin", "", ".", "..", "x\ny.bin", ".hidden",
+                    ".a.bin.0123456789abcdef.tmp", "x\x7fy", "x" * 201, None, 5, ["a"]):
             s, b = self.post("/slots/0?action=save", {"filename": bad})
             self.assertEqual(s, 400, (bad, b))
         self.assertEqual(self.engine.proc.sent, [])
@@ -191,8 +188,7 @@ class Slots(unittest.TestCase):
             got = slot_save_dir("sessions", base)
             self.assertEqual(got, os.path.join(base, "sessions"))
             self.assertTrue(os.path.isabs(got) and os.path.isdir(got))
-            if os.name != "nt":
-                self.assertEqual(os.stat(got).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(got).st_mode & 0o777, 0o700)
             self.assertEqual(slot_save_dir(got, "/elsewhere"), got)     # an absolute path stays as it is
             cwd = os.getcwd()
             try:

@@ -77,12 +77,5 @@ class Repair(unittest.TestCase):
         self.assertEqual(posix_owner.owner_only_text("x must be owner-only", d), "x must be owner-only")
 
 
-class Windows(unittest.TestCase):
-    def test_nothing_changes_off_posix(self):
-        with mock.patch.object(posix_owner, "POSIX", False):
-            self.assertFalse(posix_owner.owner_only_wrong(".", os.stat(".")))
-            self.assertEqual(posix_owner.owner_only_text("x", "."), "x")
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ real StrataEngine and Service, so the server's side is tested without a GPU: req
 wait for a slot, /metrics shows the slots, each request's history row is its own, and a conversation's next turn
 goes back to the slot that holds it."""
 import json
+import queue
 import sys
 import tempfile
 import threading
@@ -17,7 +18,6 @@ from unittest import mock
 
 from serve.frontend import ChatTemplate
 from serve.server import ByteTokenizer, Service, StrataEngine, engine_args, parallel_args, serve
-from strata_cli import bench
 from strata_cli.client import Endpoint
 
 # The fake engine: one token every STEP seconds per active slot (a "window" serves every active slot at once);
@@ -247,6 +247,7 @@ class PickSlot(unittest.TestCase):
         e.slot_used = [0.0] * n
         e.slot_live = [None] * n
         e.slot_group = [0] * n
+        e._orphan_seen = {}
         return e
 
     def test_the_slot_that_holds_the_conversation(self):
@@ -315,6 +316,35 @@ class PickSlot(unittest.TestCase):
         self.assertEqual(v[0]["state"], "decoding")
         self.assertEqual(v[0]["generated"], 4)
         self.assertEqual(v[1], {"slot": 1, "state": "idle", "held_tokens": 2})
+
+    def test_slot_release_thread_failure_finishes_the_bounded_wait(self):
+        e = self.engine(1)
+        e.slot_q = [queue.Queue()]
+        e.slot_releasing = set()
+        e.slot_cv = threading.Condition()
+        e._send = lambda _line: None
+        e.slot_q[0].put("BDONE 0 1 stop 1.0")
+        with mock.patch.object(threading.Thread, "start",
+                               side_effect=RuntimeError("thread limit")):
+            e._release_slot_when_done(0, [1, 2, 3])
+        self.assertEqual(e.slot_busy, [False])
+        self.assertEqual(e.slot_releasing, set())
+        self.assertEqual(e.slot_held, [[1, 2]])
+
+    def test_slot_park_timer_failure_is_recovered_by_orphan_reaper(self):
+        e = self.engine(1)
+        e.slot_claims = {0}
+        e.slot_releasing = set()
+        e.slot_cv = threading.Condition()
+        with mock.patch.object(threading.Timer, "start",
+                               side_effect=RuntimeError("thread limit")):
+            e._park_slot(0)
+        self.assertTrue(e.slot_busy[0])
+        self.assertNotIn(0, e.slot_claims)
+        e.ORPHAN_SLOT_S = 0
+        with e.slot_cv:
+            self.assertEqual(e._reap_orphan_slots(), [0])
+        self.assertFalse(e.slot_busy[0])
 
 
 class FakeEngineCase(unittest.TestCase):
@@ -537,53 +567,6 @@ class ParallelService(FakeEngineCase):
                 self.engine.slot_busy[:] = [False, False]
                 self.engine.slot_cv.notify_all()
         self.assertEqual(self.chat("slot freed")["choices"][0]["message"]["content"], "ok, done.")
-
-    def test_benchmark_overload_suite_preserves_batch_recovery(self):
-        self.start(2)
-        self.svc.max_queue = 0
-        self.svc.queue_timeout_s = 0.15
-        out = Path(self.tmp.name) / "overload"
-        report = bench.run(Endpoint(self.base, None), Endpoint(self.base, None), out,
-                           suite="parallel-overload-v1", concurrency=6)
-        self.assertTrue(report["successful"])
-        overload = report["phases"][1]
-        self.assertEqual(overload["kind"], "overload")
-        self.assertGreater(overload["summary"]["expected_overload"], 0)
-        self.assertEqual(overload["summary"]["failed"], 0)
-        self.assertTrue(report["phases"][2]["passed"])
-        self.assertEqual(self.get("/v1/telemetry")["work"]["admission_reserved"], 0)
-
-    def test_benchmark_cancel_suite_releases_batch_queue_and_slots(self):
-        self.start(2)
-        self.svc.max_queue = 1
-        self.svc.queue_timeout_s = 5
-        out = Path(self.tmp.name) / "cancel"
-        report = bench.run(Endpoint(self.base, None), Endpoint(self.base, None), out,
-                           suite="parallel-cancel-v1", concurrency=2, request_timeout=15)
-        self.assertTrue(report["successful"], bench.format_summary(bench.summary(report)))
-        self.assertEqual([row["kind"] for row in report["phases"]],
-                         ["warmup", "cancel_active", "cancel_queued", "recovery"])
-        self.assertEqual(report["phases"][2]["summary"]["companion_successful"], 2)
-        self.assertEqual(self.get("/v1/telemetry")["work"]["admission_reserved"], 0)
-
-    def test_benchmark_prefill_cancel_observes_progress_and_companion_completion(self):
-        self.start(2)
-        out = Path(self.tmp.name) / "prefill-cancel"
-        report = bench.run(Endpoint(self.base, None), Endpoint(self.base, None), out,
-                           suite="parallel-prefill-cancel-v1", concurrency=2, request_timeout=15)
-        self.assertTrue(report["successful"], bench.format_summary(bench.summary(report)))
-        self.assertEqual([row["kind"] for row in report["phases"]],
-                         ["warmup", "cancel_prefill", "recovery"])
-        phase = report["phases"][1]
-        self.assertTrue(phase["summary"]["prompt_read_seen"])
-        self.assertGreater(phase["requests"][0]["prompt_read_at_close"], 0)
-        self.assertLess(phase["requests"][0]["prompt_read_at_close"],
-                        phase["requests"][0]["prompt_tokens_at_close"])
-        self.assertEqual(phase["summary"]["client_disconnect_delta"], 1)
-        self.assertEqual(phase["summary"]["companion_successful"], 1)
-        self.assertEqual(self.get("/v1/telemetry")["work"]["admission_reserved"], 0)
-        data = (out / "results.json").read_text()
-        self.assertNotIn("Explain how a serving system", data)
 
     def test_telemetry_keeps_engine_waiting_age_visible(self):
         self.start(2)

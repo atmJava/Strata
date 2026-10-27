@@ -123,6 +123,9 @@ class Procs(unittest.TestCase):
         deadline = time.monotonic() + 10
         while procs.identify(orphan_pid) is None and time.monotonic() < deadline:
             time.sleep(0.05)
+        parent = procs.parent_of(orphan_pid)
+        if parent != 1:
+            self.skipTest(f"the container adopted the orphan with subreaper PID {parent}, not PID 1")
         live = subprocess.Popen([*SLEEP, "--serve"], creationflags=NO_WINDOW)
         self.started.append(live)
         deadline = time.monotonic() + 10
