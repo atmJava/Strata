@@ -1486,6 +1486,7 @@ __device__ void dq_q2_0(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     }
 }
 
+template<typename dst_t>
 __device__ void dq_q8_0(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     const block_q8_0* x = (const block_q8_0*) vx + ibs * (QK_K / QK8_0);
     const int ib = tid % 8, il = tid / 8;
@@ -2332,7 +2333,6 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #undef STRATA_GU
             default: std::fprintf(stderr, "native_expert_grouped: gate/up type %d\n", L.gu_type); std::exit(1);
         }
-    }
     }
     check("native_expert_grouped/gu");
     const long long nh = (long long) cap_entries * L.n_ff;

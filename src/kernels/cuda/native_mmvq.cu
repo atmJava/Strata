@@ -2763,6 +2763,12 @@ constexpr IlRows kIlRows_75[] = {
     {14, {{0, 0, 1, 2, 1}, {0, 2, 2, 4, 4}, {0, 4, 4, 4, 4}}},   // Q6_K
     {11, {{1, 2, 4, 4, 4}, {1, 2, 4, 4, 4}, {1, 2, 2, 2, 2}}},   // Q3_K
 };
+// Q3_K's IL kernels stay on unless STRATA_MMVQ_IL_Q3K=0 turns them off (the 331f30bf cleanup deleted this helper
+// and left its consumer below behind; the same leading-'0' reading as the rows override).
+bool il_q3k_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_IL_Q3K"); return v == nullptr || v[0] != '0'; }();
+    return on;
+}
 // STRATA_MMVQ_IL_ROWS="type:ncols:r0,r1,r2,r3,r4;..." overrides single rows of the table (type = ggml
 // type 23/12/13/14, ncols 2-4, r* = rows a warp 0/1/2/4 for the five n_out classes).  Parsed once.
 struct IlEnvRow { int type, ncols; uint8_t r[5]; };

@@ -20,6 +20,7 @@
 // are moe_fused.cu's.
 #include "strata/prefill/moe_fused_iq.hpp"
 #include "strata/core/emulate.hpp"
+#include "strata/core/sm75_series.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
