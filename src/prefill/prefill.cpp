@@ -4729,9 +4729,21 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 // other row groupings.  on_chunk reports every sub-chunk in order from the final pass; while it reports one before
 // the super-chunk's end, layer_major_mid() is true (the session state is the super-chunk's end: no checkpoint).
 namespace {
-bool lm_env() {
-    static const bool v = [] { const char* e = std::getenv("STRATA_PREFILL_LAYER_MAJOR"); return e && std::atoi(e) != 0; }();
-    return v;
+const char* lm_env_text() {   // STRATA_PREFILL_LAYER_MAJOR as set (nullptr: unset); the rule for unset is strata::prefill_layer_major_default
+    static const char* const e = std::getenv("STRATA_PREFILL_LAYER_MAJOR");
+    return e;
+}
+bool lm_env_explicit() { const char* e = lm_env_text(); return e != nullptr && e[0] != '\0'; }
+
+// 上游把"未设置环境变量时的默认值"放在 sm120_series.hpp（本 fork 已退役该文件），这里就地实现同一条规则：
+// 仅 CUDA 分层切分（stages >= 2）默认开启；HIP 构建与单卡保持关闭；显式设置 STRATA_PREFILL_LAYER_MAJOR 总是赢。
+bool lm_default_on(int stages) {
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+    (void) stages;
+    return false;
+#else
+    return stages >= 2;
+#endif
 }
 
 bool lm_even_env() {   // even super-chunks (STRATA_PREFILL_LM_EVEN=0: the largest that fits, then the rest)
@@ -4752,14 +4764,18 @@ int lm_r_env() {            // 0 auto, 1 vram, 2 host
     }();
     return v;
 }
-int64_t lm_margin_bytes() {  // VRAM left free while a prompt runs (the verify windows, the driver)
-    static const int64_t v = [] {
+// VRAM left free while a prompt runs (the verify windows, the driver): 96 MiB when STRATA_PREFILL_LAYER_MAJOR=1 asked for the walk, 512 MiB when
+// it is on by default (a user who set nothing gets the wider margin)
+int64_t lm_margin_bytes(bool by_default) {
+    static const int64_t explicit_v = [] {
         const char* e = std::getenv("STRATA_PREFILL_LM_MARGIN_MIB");
-        return (int64_t) (e ? std::atoll(e) : 96) << 20;
+        return e ? (int64_t) std::atoll(e) << 20 : (int64_t) -1;
     }();
-    return v;
+    return explicit_v >= 0 ? explicit_v : (int64_t) (by_default ? 512 : 96) << 20;
 }
 constexpr int64_t kLmDefaultTokens = 8192;
+// the super-chunk target when the walk is on by default and STRATA_PREFILL_LM_TOKENS is not set: the size measured (2x RTX A4000, 32K prompts)
+constexpr int64_t kLmDefaultOnTokens = 32768;
 // the device tables of one layer, in int32s: row_tok (rows) | bounds (2 E) | u_tok (rows) | u_off (rows + E) |
 // u_rows (rows) | u_w (rows), E = the most entries a layer can split into
 int64_t lm_entries_max(int64_t rows, int64_t G) { return NE + rows / std::max<int64_t>(G, 1) + 2; }
@@ -4846,7 +4862,7 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     // (an explicit STRATA_PREFILL_LM_TOKENS may be one chunk: the A/B against the default path, experts aside)
     const int64_t min_s = lm_tokens_env() > 0 ? m.T : 2 * m.T;
     if (n < min_s) { why = "a short prompt"; return 0; }
-    const int64_t want = lm_tokens_env() > 0 ? lm_tokens_env() : kLmDefaultTokens;
+    const int64_t want = lm_tokens_env() > 0 ? lm_tokens_env() : (lm_by_default_ ? kLmDefaultOnTokens : kLmDefaultTokens);
     int64_t S = std::max<int64_t>(min_s, want / m.T * m.T);
     S = std::min<int64_t>(S, (n + m.T - 1) / m.T * m.T);
     if (cap > 0) {
@@ -4861,7 +4877,7 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     };
     size_t free_b = 0, total_b = 0;
     cudaMemGetInfo(&free_b, &total_b);
-    const int64_t room = (int64_t) free_b - lm_margin_bytes();
+    const int64_t room = (int64_t) free_b - lm_margin_bytes(lm_by_default_);
     m.lm.free_mib = (int64_t) (free_b >> 20);
     auto fit = [&](bool r_dev) {   // the largest super-chunk (a multiple of the chunk) that fits `room`
         int64_t s = S;
@@ -5918,8 +5934,22 @@ bool Prefill::reserve_uploads(int64_t T) {
 }
 
 bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
-    if (lm_env() && hand_in_ == nullptr && impl_) {
+    // layer-major prefill: STRATA_PREFILL_LAYER_MAJOR=1 / 0 win; unset, it is on for a CUDA layer split (sm120_series.hpp
+    // 的 prefill_layer_major_default；本 fork 没有 STRATA_DEFAULTS=026 主开关，HIP 构建与单卡同样保持关闭）
+    if (hand_in_ == nullptr && impl_ &&
+        (lm_env_explicit() ? (lm_env_text()[0] != '0') : lm_default_on(stage_count()))) {
+        const bool by_default = !lm_env_explicit();
+        for (Prefill* p = this; p != nullptr; p = p->next_) p->lm_by_default_ = by_default;
         std::string why;
+        if (by_default) {
+            static bool noted = false;
+            if (!noted) {
+                noted = true;
+                std::fprintf(stderr, "strata prefill: layer-major prefill is on for this layer split (each layer's experts are read once per "
+                                     "super-chunk of up to %lld tokens, not once per chunk; STRATA_PREFILL_LAYER_MAJOR=0 or STRATA_DEFAULTS=026 "
+                                     "turns it off)\n", (long long) kLmDefaultOnTokens);
+            }
+        }
         if (lm_prepare_chain(n, why) > 0) {
             bool ok = run_layer_major(tokens, n, pos0, err);
             std::string drain_err;   // a layer split: the later stages' last super-chunk
@@ -5931,8 +5961,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             lm_release_chain();
             return ok;
         }
-        static std::string said;   // once per reason (a short prompt is the common one)
-        if (why != said) {
+        static std::string said;   // once per reason (a short prompt is the common one; not worth a line when nobody asked for the walk)
+        if (why != said && !(by_default && why == "a short prompt")) {
             said = why;
             std::fprintf(stderr, "strata prefill: layer-major off for this prompt: %s\n", why.c_str());
         }
