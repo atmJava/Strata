@@ -130,7 +130,7 @@ class SpawnFailure(unittest.TestCase):
                     urllib.request.urlopen(req, timeout=30)
                 self.assertEqual(cm.exception.code, 503)
                 self.assertIn('the engine could not be started', cm.exception.read().decode())
-                self.assertTrue(eng.log.closed)                 # our handle on the engine log is given back
+                self.assertTrue(eng.log is None or eng.log.closed)   # the failed start gives the log handle back (4ded23b4 releases it)
         # the start narrator ("still starting ... please wait") ends with the failed start
         deadline = time.monotonic() + 5
         while (narrators := [t for t in set(threading.enumerate()) - before if '(narrate_start)' in t.name]) \
