@@ -2711,7 +2711,6 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
 
 std::size_t native_q8_1_il_bytes(int n_in, int ncols) {
     validate_shape(n_in, ncols);
-    if (ncols < 2 || ncols > 4) throw std::invalid_argument("native_q8_1_il requires 2 <= ncols <= 4");
     return std::size_t(n_in / Q8K) * std::size_t(native_q8_1_il_cp(ncols)) * (16 * sizeof(int) + sizeof(float));
 }
 

@@ -82,4 +82,5 @@ Risks / Unknowns:
 ## 6. 续跑点
 
 - 下一步（A5）：删 `STRATA_ISA_FLOOR`/`STRATA_PORTABLE` 构建层与引擎内 sm<80 回退，复跑服务器构建门与终端套件；随后收尾 A7 的 docs 过期注记。
+- 2026-10-27 追加：收敛树丢失生产 pack 需要的 16/17/21/22 专家格式，已按 I-20261027-60 恢复最小正确路径并通过真实模型验证；Split/CPU AVX2/native_mmvq/prefill 性能路径仍待补，完成后才评估整树替换。
 - 每完成一个切片：更新本文件 §3 的完成状态标记，并在 `docs/ITERATION_LOG.md` 记一条。

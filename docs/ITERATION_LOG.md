@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-60 · 恢复生产 pack 的 IQ2/IQ3_S 专家格式并通过真实模型验证
+
+- 目标 / 指标：让收敛后的源码构建出的引擎直接跑生产 pack `sc117_iq3_xxs`（262144 上下文、parallel 6），
+  完成整树替换前的真实模型端到端验证，而不是只靠单元/合成测试。
+- 假设与预期：收敛提交 `331f30bf` 把 native expert gate/up 裁到 IQ3_XXS(18)/Q8_0(8)，但生产 pack 的
+  `native_experts.txt` 实际使用 16/17/18/21/22（IQ2_XXS、IQ2_XS、IQ3_XXS、IQ3_S、IQ2_S）；生产源码的同类内核
+  支持这些格式，预期可按同一模板补回，不需要重写内核架构。
+- 为什么选这条路线：生产引擎 0.2.2 用同一 pack 能正常 READY，新引擎在专家布局检查处 exit 1；CUDA 侧没有通用
+  兜底，必须补格式。先做最小正确切片（主内核 + 白名单 + dequant 路由），CPU/native_mmvq/prefill 已有回退，
+  性能优化留作后续切片，避免一次性铺开。
+- 改动与实验：`iq_kernels.cu` 新增 IQ2_XXS/IQ2_XS/IQ2_S/IQ3_S 的 dot、Fmt、dq、分派、行字节与白名单，并把
+  四类加入 GU/MMVQ 格式宏；`native_expert.cpp` 与 `dequant_bf16.cu` 同步格式白名单；`native_mmvq.cu` 去掉
+  `native_q8_1_il_bytes` 误加的 2..4 列校验（verify 会按 5–8 列申请缓冲，生产版无此校验）。所有改动均可在
+  服务器验证树增量编译。
+- 结果：服务器 `cmake --build -j20` 全绿；新引擎加载真实 pack 成功，`/health` loaded=true、262144 上下文；
+  chat 返回“正常”、tool call 返回 `get_weather({"city":"北京"})`、流式 SSE 与 256 token 长输出正常；6 路并发全部
+  HTTP 200 且内容正确。`native_expert_parity --synthetic` 9 组格式组合 0 failures；真实权重 layer 0/1/8/12/18
+  （覆盖 17/16/21/22）0 failures。`mmvq_il_parity` 仍报 sm_75 Q6_K 表项过期（源码表返回 0、测试期望 2），
+  `iq_multi_parity` 的 3 个失败全在 Q8_0 gate/up grouped（本轮未改路径，生产 pack 无 Q8_0 gate/up 专家）。
+- 判决：采纳为“功能可用”的整树替换候选；性能替换前还需补齐 Split<16/17/21/22>、CPU AVX2 专家行、
+  native_mmvq 与 prefill fused 路径。预期被推翻处：收敛树的“只保留 IQ3_XXS”假设不适用于本项目生产 pack。
+- 预期被推翻：见上；另发现 verify 的 5–8 列 IL 缓冲与 bytes 函数的 2..4 校验互相矛盾，属收敛基线回归，已修复。
+- 生产状态与回滚：生产 `strata.service` 仍为 stopped（用户授权本时段用于验证）；8080 当前运行验证树
+  （新 serve + 新引擎）。回滚：停止手动实例后 `systemctl start strata` 即回到 0.2.2 生产引擎。
+- 证据：服务器 `~/verify-20261027/`（build-iq2*.log、serve-newengine/、native_expert_parity 输出）；
+  构建命令沿用 `docs/SERVER_HW.md`（CUDA sm_75、`-j20`、`STRATA_GGML_DIR=/opt/ai/src/llama.cpp-3cf03257`）。
+- 学到什么：MoE 模型文件名上的量化标签不等于每个专家张量的类型；替换内核前应先读 `native_experts.txt` 与
+  GGUF tensor type，而不是按文件名推断。
+- 下一步与理由：先补性能路径并做 A/B 吞吐对照，再决定是否把生产 systemd 指向新树；A-A 吞吐与
+  preflight/four-questions 仍未运行，继续保留为未验证项。
+
 ## I-20261027-59 · 合入上游收敛提交并通过服务器构建门与全量套件
 
 - 目标 / 指标：把 origin 的 sm_75 CLI+server 收敛提交 `331f30bf`（约 -86 万行）与本地 A1a 提交 `ee170ab3` 合并落盘，

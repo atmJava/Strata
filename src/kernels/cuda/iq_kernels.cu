@@ -123,6 +123,123 @@ __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(const void* __restrict__ vb
     return d * sumi;
 }
 
+__device__ __forceinline__ float vec_dot_iq2_xxs_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+                                                      const int& kbx, const int& iqs) {
+    const block_iq2_xxs* bq2 = (const block_iq2_xxs*) vbq + kbx;
+    const int q2 = get_int_b2(bq2->qs, iqs);
+    const uint8_t* aux8 = (const uint8_t*) &q2;
+    const uint32_t aux32 = get_int_b2(bq2->qs, iqs + 1);
+    int sumi = 0;
+#pragma unroll
+    for (int k0 = 0; k0 < 8; k0 += 2) {
+        const uint2 grid_pos = ((const uint2*) iq2xxs_grid)[aux8[k0 / 2]];
+        const uint32_t signs = unpack_ksigns(aux32 >> (7 * k0 / 2));
+        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
+        const int grid0 = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, k0 + 0);
+        sumi = ggml_cuda_dp4a(grid0, u0, sumi);
+        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
+        const int grid1 = __vsub4(grid_pos.y ^ signs1, signs1);
+        const int u1 = get_int_b4(bq8_1[iqs / 2].qs, k0 + 1);
+        sumi = ggml_cuda_dp4a(grid1, u1, sumi);
+    }
+    const int ls = aux32 >> 27 | 1;
+    sumi = sumi * ls / 8;
+    const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs / 2].ds);
+    return d * sumi;
+}
+
+__device__ __forceinline__ float vec_dot_iq2_xs_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+                                                     const int& kbx, const int& iqs) {
+    const block_iq2_xs* bq2 = (const block_iq2_xs*) vbq + kbx;
+    const int2 q2_packed = make_int2(get_int_b2(bq2->qs, iqs + 0), get_int_b2(bq2->qs, iqs + 1));
+    const uint16_t* q2 = (const uint16_t*) &q2_packed;
+    const int ls0 = bq2->scales[iqs / 2] & 0x0F;
+    const int ls1 = bq2->scales[iqs / 2] >> 4;
+    int sumi0 = 0, sumi1 = 0;
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const uint2 grid_pos = ((const uint2*) iq2xs_grid)[q2[l0 / 2] & 0x1FF];
+        const uint32_t signs = unpack_ksigns(q2[l0 / 2] >> 9);
+        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
+        const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
+        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
+        const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
+        const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
+        if (l0 < 4) {
+            sumi0 = ggml_cuda_dp4a(grid_l, u0, sumi0);
+            sumi0 = ggml_cuda_dp4a(grid_h, u1, sumi0);
+        } else {
+            sumi1 = ggml_cuda_dp4a(grid_l, u0, sumi1);
+            sumi1 = ggml_cuda_dp4a(grid_h, u1, sumi1);
+        }
+    }
+    const int sumi = (sumi0 * ls0 + sumi1 * ls1 + (sumi0 + sumi1) / 2) / 4;
+    const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs / 2].ds);
+    return d * sumi;
+}
+
+__device__ __forceinline__ float vec_dot_iq2_s_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+                                                    const int& kbx, const int& iqs) {
+    const block_iq2_s* bq2 = (const block_iq2_s*) vbq + kbx;
+    const int qs_packed = get_int_b2(bq2->qs, iqs / 2);
+    const uint8_t* qs = (const uint8_t*) &qs_packed;
+    const int qh = bq2->qh[iqs / 2];
+    const int signs_packed_32 = get_int_b2(bq2->qs, QK_K / 32 + iqs / 2);
+    const uint8_t* signs_packed_8 = (const uint8_t*) &signs_packed_32;
+    const int ls0 = bq2->scales[iqs / 2] & 0x0F;
+    const int ls1 = bq2->scales[iqs / 2] >> 4;
+    int sumi0 = 0, sumi1 = 0;
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const int* grid_pos = (const int*) (iq2s_grid + (qs[l0 / 2] | ((qh << (8 - l0)) & 0x300)));
+        const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
+        const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
+        const int grid_l = __vsub4(grid_pos[0] ^ signs0, signs0);
+        const int grid_h = __vsub4(grid_pos[1] ^ signs1, signs1);
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
+        const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
+        if (l0 < 4) {
+            sumi0 = ggml_cuda_dp4a(grid_l, u0, sumi0);
+            sumi0 = ggml_cuda_dp4a(grid_h, u1, sumi0);
+        } else {
+            sumi1 = ggml_cuda_dp4a(grid_l, u0, sumi1);
+            sumi1 = ggml_cuda_dp4a(grid_h, u1, sumi1);
+        }
+    }
+    const int sumi = (sumi0 * ls0 + sumi1 * ls1 + (sumi0 + sumi1) / 2) / 4;
+    const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs / 2].ds);
+    return d * sumi;
+}
+
+__device__ __forceinline__ float vec_dot_iq3_s_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+                                                    const int& kbx, const int& iqs) {
+    const block_iq3_s* bq3 = (const block_iq3_s*) vbq + kbx;
+    const int2 qs_packed = make_int2(get_int_b2(bq3->qs, iqs + 0), get_int_b2(bq3->qs, iqs + 1));
+    const uint8_t* qs = (const uint8_t*) &qs_packed;
+    const int qh = bq3->qh[iqs / 2];
+    const int signs_packed_32 = get_int_b2(bq3->signs, iqs / 2);
+    const uint8_t* signs_packed_8 = (const uint8_t*) &signs_packed_32;
+    int sumi = 0;
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const int2 grid_pos = make_int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
+                                        iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
+        const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
+        const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
+        const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
+        const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
+        sumi = ggml_cuda_dp4a(grid_l, u0, sumi);
+        sumi = ggml_cuda_dp4a(grid_h, u1, sumi);
+    }
+    sumi *= 1 + 2 * ((bq3->scales[iqs / 4] >> ((iqs << 1) & 0x04)) & 0x0F);
+    const float d = __half2float(bq3->d) * __low2float(bq8_1[iqs / 2].ds);
+    return d * sumi;
+}
+
 constexpr int VDR_Q8_0 = 2;
 
 __device__ __forceinline__ float vec_dot_q8_0_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
@@ -138,10 +255,18 @@ __device__ __forceinline__ float vec_dot_q8_0_q8_1(const void* __restrict__ vbq,
 // ---------------------------------------------------------------- the formats
 // qk = values per block, ipb = dot calls per block (qi / vdr), step = the iqs stride between calls.
 template<int TY> struct Fmt;
+template<> struct Fmt<16> { static constexpr int qk = 256, ipb = 8, step = 2;
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq2_xxs_q8_1(v, y, kbx, iqs); } };
+template<> struct Fmt<17> { static constexpr int qk = 256, ipb = 8, step = 2;
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq2_xs_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<18> { static constexpr int qk = 256, ipb = 8, step = 2;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq3_xxs_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<20> { static constexpr int qk = 32, ipb = 2, step = 2;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq4_nl_q8_1(v, y, kbx, iqs); } };
+template<> struct Fmt<21> { static constexpr int qk = 256, ipb = 8, step = 2;
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq3_s_q8_1(v, y, kbx, iqs); } };
+template<> struct Fmt<22> { static constexpr int qk = 256, ipb = 8, step = 2;
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq2_s_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<42> { static constexpr int qk = 64, ipb = 2, step = 1;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_q2_0_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<8> { static constexpr int qk = 32, ipb = QI8_0 / VDR_Q8_0, step = VDR_Q8_0;
@@ -149,9 +274,9 @@ template<> struct Fmt<8> { static constexpr int qk = 32, ipb = QI8_0 / VDR_Q8_0,
 
 // The formats of each role, one list each so a type cannot be in one switch and missing from another.  Every
 // entry is a kernel template for each CUDA architecture of the build, hence two lists rather than one.
-#define STRATA_GU_FMTS(X) X(18) X(8)
+#define STRATA_GU_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(8)
 #define STRATA_D_FMTS(X) X(20) X(42) X(8)
-#define STRATA_MMVQ_FMTS(X) X(18) X(20) X(42) X(8)
+#define STRATA_MMVQ_FMTS(X) X(16) X(17) X(18) X(20) X(21) X(22) X(42) X(8)
 
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
@@ -1445,6 +1570,40 @@ template<> __device__ __forceinline__ float cvt<float>(float v) { return v; }
 template<> __device__ __forceinline__ __half cvt<__half>(float v) { return __float2half(v); }
 
 template<typename dst_t>
+__device__ void dq_iq2_xxs(const void* vx, int64_t ibs, dst_t* yy, int tid) {
+    const block_iq2_xxs* x = (const block_iq2_xxs*) vx;
+    const int64_t il = tid / 8, ib = tid % 8;
+    dst_t* y = yy + 32 * ib + 8 * il;
+    const uint16_t* q2 = x[ibs].qs + 4 * ib;
+    const uint8_t* aux8 = (const uint8_t*) q2;
+    const uint8_t* grid = (const uint8_t*) (iq2xxs_grid + aux8[il]);
+    const uint32_t aux32 = q2[2] | (q2[3] << 16);
+    const float d = (float) x[ibs].d * (0.5f + (aux32 >> 28)) * 0.25f;
+    const uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * il) & 127];
+    for (int j = 0; j < 8; ++j) y[j] = cvt<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+}
+template<typename dst_t>
+__device__ void dq_iq2_xs(const void* vx, int64_t ibs, dst_t* yy, int tid) {
+    const block_iq2_xs* x = (const block_iq2_xs*) vx;
+    const int64_t il = tid / 8, ib = tid % 8;
+    dst_t* y = yy + 32 * ib + 8 * il;
+    const uint16_t* q2 = x[ibs].qs + 4 * ib;
+    const uint8_t* grid = (const uint8_t*) (iq2xs_grid + (q2[il] & 511));
+    const float d = (float) x[ibs].d * (0.5f + ((x[ibs].scales[ib] >> 4 * (il / 2)) & 0xf)) * 0.25f;
+    const uint8_t signs = ksigns_iq2xs[q2[il] >> 9];
+    for (int j = 0; j < 8; ++j) y[j] = cvt<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+}
+template<typename dst_t>
+__device__ void dq_iq2_s(const void* vx, int64_t ibs, dst_t* yy, int tid) {
+    const block_iq2_s* x = (const block_iq2_s*) vx;
+    const int64_t il = tid / 8, ib = tid % 8;
+    dst_t* y = yy + 32 * ib + 8 * il;
+    const uint8_t* grid = (const uint8_t*) (iq2s_grid + (x[ibs].qs[4 * ib + il] | ((x[ibs].qh[ib] << (8 - 2 * il)) & 0x300)));
+    const float d = (float) x[ibs].d * (0.5f + ((x[ibs].scales[ib] >> 4 * (il / 2)) & 0xf)) * 0.25f;
+    const uint8_t signs = x[ibs].qs[QK_K / 8 + 4 * ib + il];
+    for (int j = 0; j < 8; ++j) y[j] = cvt<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+}
+template<typename dst_t>
 __device__ void dq_iq3_xxs(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     const block_iq3_xxs* x = (const block_iq3_xxs*) vx;
     const int64_t il = tid / 8, ib = tid % 8;
@@ -1456,6 +1615,21 @@ __device__ void dq_iq3_xxs(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     const uint32_t aux32 = gas[0] | (gas[1] << 16);
     const float d = (float) x[ibs].d * (0.5f + (aux32 >> 28)) * 0.5f;
     const uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * il) & 127];
+    for (int j = 0; j < 4; ++j) {
+        y[j + 0] = cvt<dst_t>(d * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f));
+        y[j + 4] = cvt<dst_t>(d * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f));
+    }
+}
+template<typename dst_t>
+__device__ void dq_iq3_s(const void* vx, int64_t ibs, dst_t* yy, int tid) {
+    const block_iq3_s* x = (const block_iq3_s*) vx;
+    const int64_t il = tid / 8, ib = tid % 8;
+    dst_t* y = yy + 32 * ib + 8 * il;
+    const uint8_t* qs = x[ibs].qs + 8 * ib;
+    const uint8_t* grid1 = (const uint8_t*) (iq3s_grid + (qs[2 * il + 0] | ((x[ibs].qh[ib] << (8 - 2 * il)) & 256)));
+    const uint8_t* grid2 = (const uint8_t*) (iq3s_grid + (qs[2 * il + 1] | ((x[ibs].qh[ib] << (7 - 2 * il)) & 256)));
+    const float d = (float) x[ibs].d * (1 + 2 * ((x[ibs].scales[ib / 2] >> 4 * (ib % 2)) & 0xf));
+    const uint8_t signs = x[ibs].signs[4 * ib + il];
     for (int j = 0; j < 4; ++j) {
         y[j + 0] = cvt<dst_t>(d * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f));
         y[j + 4] = cvt<dst_t>(d * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f));
@@ -1507,8 +1681,12 @@ __device__ void dq_bf16(const void* vx, int64_t ibs, dst_t* yy, int tid) {
 template<typename dst_t>
 __device__ __forceinline__ void dq_dispatch(int ty, const void* vx, int64_t ibs, dst_t* y, int tid) {
     switch (ty) {
+        case 16: dq_iq2_xxs(vx, ibs, y, tid); break;
+        case 17: dq_iq2_xs(vx, ibs, y, tid); break;
         case 18: dq_iq3_xxs(vx, ibs, y, tid); break;
         case 20: dq_iq4_nl(vx, ibs, y, tid); break;
+        case 21: dq_iq3_s(vx, ibs, y, tid); break;
+        case 22: dq_iq2_s(vx, ibs, y, tid); break;
         case 42: dq_q2_0(vx, ibs, y, tid); break;
         case 8: dq_q8_0(vx, ibs, y, tid); break;
         case 30: dq_bf16(vx, ibs, y, tid); break;
@@ -1534,7 +1712,7 @@ __global__ void dequant_gu_kernel(int ty, const void* __restrict__ gate, const v
 
 // the types dq_dispatch dequantizes
 bool is_iq(int t) {
-    return t == 18 || t == 20 || t == 42 || t == 8;
+    return t == 16 || t == 17 || t == 18 || t == 20 || t == 21 || t == 22 || t == 42 || t == 8;
 }
 // values per block of the types the grouped expert kernels take (0 = none)
 int gu_qk(int t) {
@@ -1833,8 +2011,12 @@ bool embed_type_supported(int t) noexcept { return is_iq(t) || t == 30; }
 
 size_t iq_row_bytes(int t, int64_t n) noexcept {
     switch (t) {
+        case 16: return (size_t) (n / 256) * sizeof(block_iq2_xxs);
+        case 17: return (size_t) (n / 256) * sizeof(block_iq2_xs);
         case 18: return (size_t) (n / 256) * sizeof(block_iq3_xxs);
         case 20: return (size_t) (n / 32) * sizeof(block_iq4_nl);
+        case 21: return (size_t) (n / 256) * sizeof(block_iq3_s);
+        case 22: return (size_t) (n / 256) * sizeof(block_iq2_s);
         case 42: return (size_t) (n / 64) * sizeof(block_q2_0);
         case 8: return (size_t) (n / 32) * sizeof(block_q8_0);
         case 30: return (size_t) n * 2;   // BF16: the token embedding only (iq_embed_rows, iq_dequant_f32)
@@ -1904,7 +2086,8 @@ void iq_dequant_gu_f16(int t, const void* gate, const void* up, int64_t n_ff, in
 }
 
 bool native_expert_supported(int gu_type, int d_type, int64_t n_embd, int64_t n_ff) noexcept {
-    const bool roles_ok = (gu_type == 18 || gu_type == 8) && (d_type == 20 || d_type == 42 || d_type == 8);
+    const bool gu_ok = gu_type == 16 || gu_type == 17 || gu_type == 18 || gu_type == 21 || gu_type == 22 || gu_type == 8;
+    const bool roles_ok = gu_ok && (d_type == 20 || d_type == 42 || d_type == 8);
     const int qg = gu_qk(gu_type), qd = d_qk(d_type);
     // a type without row bytes would make every row (and the up/down offsets) 0: refused, not run wrong
     return roles_ok && qg > 0 && qd > 0 && iq_row_bytes(gu_type, n_embd) > 0 && iq_row_bytes(d_type, n_ff) > 0 &&

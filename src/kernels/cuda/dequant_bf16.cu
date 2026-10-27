@@ -416,8 +416,9 @@ bool dequant_bf16_supported(int ggml_type) noexcept {
 }
 
 namespace {
-// IQ3_XXS is the only i-quant in the sm_75 production pack.  IQ4_NL, Q2_0 and Q8_0 have their own paths below.
-bool iq_only(int t) { return t == 18; }
+// The production pack's i-quants: IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S and IQ2_S. IQ4_NL, Q2_0 and Q8_0
+// have their own paths below.
+bool iq_only(int t) { return t == 16 || t == 17 || t == 18 || t == 21 || t == 22; }
 }  // namespace
 
 void dequant_bf16(int ggml_type, const void* blocks, int64_t row0, int64_t rows, int64_t cols, uint16_t* out,

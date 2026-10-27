@@ -83,12 +83,15 @@ bool iq256_supported(int type) noexcept {
 
 bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt& f, std::string& err) {
     init_once();
-    // Keep one compatibility boundary for the server: IQ3_XXS gate/up, IQ4_NL or Q2_0 down, and the
-    // Q8_0 fallback for either role. A future format must be added here and in the CUDA whitelist together.
-    const bool gu_ok = gu_type == GGML_TYPE_IQ3_XXS || gu_type == GGML_TYPE_Q8_0;
+    // Keep one compatibility boundary for the server: the production pack's mixed i-quant gate/up
+    // (IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S, IQ2_S) or Q8_0, with IQ4_NL, Q2_0 or Q8_0 down. A future format
+    // must be added here and in the CUDA whitelist together.
+    const bool gu_ok = gu_type == GGML_TYPE_IQ2_XXS || gu_type == GGML_TYPE_IQ2_XS || gu_type == GGML_TYPE_IQ3_XXS ||
+                       gu_type == GGML_TYPE_IQ3_S || gu_type == GGML_TYPE_IQ2_S || gu_type == GGML_TYPE_Q8_0;
     const bool d_ok = d_type == GGML_TYPE_IQ4_NL || d_type == GGML_TYPE_Q2_0 || d_type == GGML_TYPE_Q8_0;
     if (!gu_ok || !d_ok) {
-        err = "native experts: this sm_75 server requires IQ3_XXS or Q8_0 gate/up and IQ4_NL, Q2_0 or Q8_0 down";
+        err = "native experts: this sm_75 server requires IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S, IQ2_S or Q8_0 gate/up "
+              "and IQ4_NL, Q2_0 or Q8_0 down";
         return false;
     }
     const ggml_type_traits_cpu* tg = traits(gu_type);
