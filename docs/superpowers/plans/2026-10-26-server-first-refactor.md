@@ -1,6 +1,6 @@
 # 服务器专用化重构计划（先瘦身，再特化）
 
-日期：2026-10-26。分支：`hw/server-adapt-0.2.3`（HEAD `31082e5e`，领先上游 `upstream/main` 210 个提交，merge-base `4b9e05a2`）。
+日期：2026-10-26，状态更新于 2026-10-27。分支：`hw/server-adapt-0.2.3`（HEAD `a7c62825`，领先上游 `upstream/main` 273 个提交，merge-base `4b9e05a2` 未变）。
 方向由用户裁决：**混合路线——先做保持可 rebase 的轻度瘦身（阶段 A），再逐步走向深度特化（阶段 B）**。
 
 ## 1. 任务定约
@@ -48,7 +48,7 @@ Risks / Unknowns:
 
 ## 2. 事实基线（2026-10-26 实测）
 
-- 服务器：`ubuntu-server`，`atm@192.168.2.223`（无线网卡 wlx 当前地址；`docs/SERVER_HW.md` 中"已迁至 192.168.3.14、2.223 废弃"的记录已过期，另一地址 3.14 仍可 SSH 到达）。
+- 服务器：`ubuntu-server`，`atm@192.168.2.223`（无线网卡 wlx 当前地址，2026-10-27 SSH 实测可达；另一地址 `192.168.3.14` 仍可 SSH 到达；`docs/SERVER_HW.md` 的地址条目已于 2026-10-27 按此修正）。
 - 2× RTX 2080 Ti 22528 MiB，driver 595.71.05，compute_cap 7.5，power.limit 280 W；NVLink NV2 每卡 2 链路 × 25.781 GB/s。
 - Xeon E5-2680 v4（28 线程、单 NUMA），62 GiB RAM，kernel 7.0.0-38，CUDA 13.0（/usr/local/cuda-13.0）。
 - `strata.service` active；`/health`：loaded=true，model=qwen3.8-flash-next-iq3_xxs-abliterated，max_context=262144。
@@ -58,13 +58,13 @@ Risks / Unknowns:
 每个切片 = 一个 commit + 一次局部验证；顺序按风险从低到高。
 
 1. [x] **A0 基线锚点**（2026-10-26 完成）：锚点落盘 `docs/work/evidence/a0-baseline-anchor-20261026.json`（引擎 SHA256、25 个生产开关、/health、回滚快照、硬件实测）。偏差两条：部署树非 git 仓库，指纹改用文件 SHA256；A-A 吞吐对照因内存余量仅约 3 GiB 并入 A1 验证窗口。
-2. [ ] **A1 删桌面产品层**：`apps/`（855 文件 / 136k 行）+ `packaging/mac/` 签名 + 三平台安装器脚本 + `packaging/README.md`、`UPDATES.md` 的 app 段落。验证：`python -m pytest tests/terminal -q`（packaging 相关套件）+ 服务器 `strata update --check` 正常。
-3. [ ] **A2 删 Metal**：`metal/`（100 文件 / 21k 行）、`.github/workflows/metal-build.yml`、`packaging/mac/` 余项、`engine_component.py` 的 metal 分支。验证：CI 语法检查 + 终端测试套件 + 服务器构建门。
-4. [ ] **A3 删 SYCL/Intel Arc**：`sycl/`（254 文件 / 150k 行）、`STRATA_ENABLE_SYCL` 块、`catalog.py` 的 `INTEL_ARC` PCI 表与 Arc 告警分支、`bench_facts.py` 的 sycl 探针。验证：同 A2。
-5. [ ] **A4 删 HIP/AMD**：`STRATA_ENABLE_HIP`/`STRATA_HIP_GFX906`/`STRATA_PREFILL_MMQ` 构建选项、`include/strata/platform/hip_compat/`、`hip_extra.h`、`gfx_arch.hpp`/`dp4a.hpp` 及约 77 个文件里的 gfx 守卫（只删 HIP 分支，CUDA 分支保持逐字节等价）。验证：服务器构建产物与 A0 锚点哈希一致（fatbin/cubin 对比）+ 功能 smoke。
-6. [ ] **A5 删老 CPU 兜底**：`STRATA_ISA_FLOOR`、`STRATA_PORTABLE`、`STRATA_EXPERIMENTAL_SM60` 与 sm<80 回退（Volta GDN chunk、FP16/FP32 GEMM 回退）。`STRATA_NATIVE_EXPERTS` 的 CPU 专家路径保守处理：A5 只删构建层，引擎内 CPU 兜底留给阶段 B。验证：构建门 + 终端套件。
-7. [ ] **A6 CLI/Control 收口**：`cli.py` 的 `BACKENDS` 收敛为 `("cuda", "cpu")`、`engine_component.py` 探测链去 hip/sycl/metal、`bench_facts.py` 探针同步。验证：`tests/terminal` 全绿（服务器）+ `strata doctor --live` 上机。
-8. [ ] **A7 文档与 CI 收口**：`Dockerfile` 注释、`docs/` 过期状态注记（SERVER_HW.md 的 IP 条目等）、workflows 清理。验证：`scripts-test.yml` 本地复跑 + 链接检查。
+2. [x] **A1 删桌面产品层**（2026-10-27 完成）：本地 `ee170ab3` 退役 apps/ 整树与 Terminal 侧 app 对照测试，上游收敛提交 `331f30bf` 收敛其余 packaging/app 段落；残留的未跟踪 `__pycache__` 痕迹已于 2026-10-27 清理。验证：服务器 `tests/terminal` 245 通过 / 1 跳过 / 185 子测试（见 ITERATION_LOG I-20261027-59）；原验证项 `strata update --check` 随 `update` 子命令在收敛提交中删除而作废。
+3. [x] **A2 删 Metal**（由上游收敛提交 `331f30bf` 完成）：`metal/`、`metal-build.yml` 已删，`engine_component.py` 的 metal 分支已不存在（rg 复核）。验证：服务器构建门 + 全量套件（I-20261027-59）。
+4. [x] **A3 删 SYCL/Intel Arc**（由上游收敛提交完成）：`sycl/` 已删，`STRATA_ENABLE_SYCL` 降级为 CMakeLists 的废弃选项，`catalog.py` 的 Arc 分支与 `bench_facts.py` 探针已不存在。验证：同 A2。
+5. [x] **A4 删 HIP/AMD**（由上游收敛提交完成）：HIP 构建选项降级为废弃选项，`hip_compat/`、`hip_extra.h`、`gfx_arch.hpp` 已删；`dp4a.hpp` 保留、现为 CUDA sm_75 专用。验证：服务器构建全绿（`strata 0.1.51`）+ 全量套件；与 A0 锚点的构建产物逐字节对照未做（见 I-20261027-59 风险声明）。
+6. [ ] **A5 删老 CPU 兜底**：`STRATA_ISA_FLOOR`、`STRATA_PORTABLE`、`STRATA_EXPERIMENTAL_SM60` 与 sm<80 回退（Volta GDN chunk、FP16/FP32 GEMM 回退）。`STRATA_NATIVE_EXPERTS` 的 CPU 专家路径保守处理：A5 只删构建层，引擎内 CPU 兜底留给阶段 B。验证：构建门 + 终端套件。（2026-10-27 更新：`STRATA_EXPERIMENTAL_SM60` 已随收敛提交降级为废弃选项，剩余工作集中在 `STRATA_ISA_FLOOR`/`STRATA_PORTABLE` 构建层与引擎内 sm<80 回退。）
+7. [x] **A6 CLI/Control 收口**（由上游收敛提交完成）：`cli.py` 与 `engine_component.py` 已无 hip/sycl/metal 探测分支（rg 复核），`bench_facts.py` 已删除。验证：服务器 `tests/terminal` 全绿（245 通过 / 1 跳过 / 185 子测试）。
+8. [ ] **A7 文档与 CI 收口**（部分完成，2026-10-27）：`.github/workflows/` 与 `Dockerfile` 已随收敛提交删除；`SERVER_HW.md` 的 IP 条目已按实测修正；`docs/` 其余过期状态注记待清。验证：`scripts-test.yml` 已随 workflows 删除而作废，改以服务器套件复跑 + 链接检查为准。
 
 ## 4. 阶段 B：深度特化（hard-fork，A 全部落地并稳定一个上游发布周期后启动）
 
@@ -76,9 +76,10 @@ Risks / Unknowns:
 
 - 本机缺 `jinja2`、`textual`：`tests/terminal` 有 15 个模块收集失败（1480 个可收集）；serve 套件有 63 个收集错误。**终端与 serve 套件的权威执行位是服务器**（只读验证，不重启服务）。
 - 引擎构建只能在服务器做（唯一后端 CUDA/sm_75，一次约 10.6 min）；构建门是 A4/A5 的硬门禁。
+- 服务器已有可复用的只读验证环境：`~/verify-20261027/venv`（pytest/jinja2/textual 等已装齐），serve 套件可在其中全量执行；勿给该 venv 追加 gguf-py 的 PYTHONPATH，会遮蔽仓库 `tests` 包。
 - 生产输出不可复现（ledger L-004）：任何性能断言只用同 boot 内 A-A/B-B 对照，阈值 ±3%。
 
 ## 6. 续跑点
 
-- 下一步（A0）：在服务器落锚点文件，然后开 A1 分支 `codex/refactor-a1-drop-apps`。
+- 下一步（A5）：删 `STRATA_ISA_FLOOR`/`STRATA_PORTABLE` 构建层与引擎内 sm<80 回退，复跑服务器构建门与终端套件；随后收尾 A7 的 docs 过期注记。
 - 每完成一个切片：更新本文件 §3 的完成状态标记，并在 `docs/ITERATION_LOG.md` 记一条。

@@ -3,6 +3,34 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261027-59 · 合入上游收敛提交并通过服务器构建门与全量套件
+
+- 目标 / 指标：把 origin 的 sm_75 CLI+server 收敛提交 `331f30bf`（约 -86 万行）与本地 A1a 提交 `ee170ab3` 合并落盘，
+  并在服务器（2× RTX 2080 Ti, sm_75）通过构建门与全部可跑套件，补上上游约 50 个加固提交只做主机侧 `-fsyntax-only`
+  而缺失的 GPU/serve 回归。全程不重启生产 `strata.service`。
+- 假设与预期：收敛提交自称只保留 CUDA/sm_75 路径，默认行为不变；预期合并后服务器构建与套件应直接全绿。
+- 为什么选这条路线：收敛提交与本地 A1a 在 6 个 tests/terminal 测试上 modify/delete 冲突，接受删除符合"桌面产品层退役"
+  的既定范围；验证放在服务器是因为本机缺 jinja2/textual 且无 CUDA，服务器是唯一权威验证位。
+- 改动与实验：合并提交 `a9bc18e7` 接受 6 处测试删除；构建两轮失败暴露 5 处收敛遗留（均为主机侧语法检查测不到的
+  CUDA 专有代码），由 `4e327a08` 修复：`native_mmvq.cu` 恢复 `il_q3k_on`（默认开，`STRATA_MMVQ_IL_Q3K=0` 关）、
+  `moe_fused_iq.cu` 补 include、`iq_kernels.cu` 修块边界与 `dq_q8_0` 模板头、`qsa_prompt_attn.cu` 补 namespace 闭括号；
+  `a7c62825` 把 `serve/test_ready_timeout.py:133` 断言改为 `eng.log is None or eng.log.closed` 以匹配 `4ded23b4`
+  的句柄释放语义。验证在 `~/verify-20261027` 独立目录 + venv 内做，不碰 /opt/ai 部署树。
+- 结果：第三轮构建全绿，`build/strata --version` = `strata 0.1.51`。tests/terminal 245 通过 / 1 跳过 / 185 子测试；
+  serve 976 通过 / 16 跳过 / 10789 子测试；tools/server/tests 78 通过 / 1 xfailed（`test_mp_prefix` 首轮失败系生产
+  服务并发所致，空闲复跑通过）；strata_control 16 通过。生产服务全程 active、/health 200，引擎 hash 前缀
+  `b46fc8895717f59a` 与 A0 锚点一致。预期被推翻处：收敛提交并非开箱即编译，CUDA 专有代码需要 GPU 构建门才算验证。
+- 判决：采纳。合并与修复进入 HEAD `a7c62825`（领先 origin 5 个提交，未推送）。
+- 预期被推翻：见结果条；另确认 `strata update`、`bench_facts.py`、apps/packaging/metal/sycl 树均已不存在，
+  A1–A4/A6 实际由上游收敛完成，计划文档 §3 已按事实勾选。
+- 生产状态与回滚：生产服务与 /opt/ai 部署树未动；回滚即放弃本地 5 个提交回到 `331f30bf`。
+- 学到什么：主机侧 `-fsyntax-only` 对 `.cu` 专有代码几乎无检出力，收敛类大提交必须过真实 GPU 构建门；venv 里
+  追加 gguf-py 的 PYTHONPATH 会遮蔽仓库 `tests` 包造成假失败。
+- 证据：服务器 `~/verify-20261027/`（build.log、t*/t2-*/t3-* 测试日志、pip*.log）；打包用 `git archive` HEAD，
+  构建命令按 `docs/SERVER_HW.md`（CUDA sm_75、`-j20`、`STRATA_GGML_DIR=/opt/ai/src/llama.cpp-3cf03257`）。
+- 下一步与理由：按计划 §6 开 A5（ISA_FLOOR/PORTABLE 构建层与 sm<80 回退）；A-A 吞吐对照、`preflight.py --offline`、
+  `four-questions.py`、线程失败注入仍未跑，已在 `4e327a08` 提交正文声明为未验证项。
+
 ## I-20261027-58 · spec adaptive helper 线程失败跳过本轮
 
 - 目标 / 指标：batch/serial/pipelined spec 路径的 adaptive tier helper 被系统拒绝时，生成与 commit 必须继续；不能因一个
