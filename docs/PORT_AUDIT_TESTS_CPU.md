@@ -3,6 +3,9 @@
 Added 2026-10-25 for the sm_75 port audit. Two test executables, both registered in CTest, both intended to run on a
 machine with no GPU and no model weights:
 
+> **状态：历史审计记录（2026-10-25）。** 本页记录当时为移植审计新增的两个 CPU 测试；
+> 契约的现行状态看代码与 CTest，不看本页。
+
 | target | file | contracts |
 |---|---|---|
 | `session_rope_share_test` | `tests/core/session_rope_share_test.cpp` | `session_bytes(..., borrow_rope)` is smaller by exactly ONE RoPE table `max_cells*(n_rot/2)*4*2` (48 MiB at 196608 cells, 64 MiB at 262144), for 3 layer ranges x 3 cell counts x 3 k, independent of k, linear in `max_cells`, and unaffected by alignment; a `[0,48)` range holds 12 QSA layers but still saves one table, not 12; `session_rope_owner`'s borrow chain (real-engine mode). |

@@ -3,6 +3,142 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261028-65 · 上游 37 提交部署并整理工作区：保留有效工具，清理冲突与文档噪音
+
+- 目标 / 指标：把上游 v0.2.7 中有用的改动完整合入并部署，同时处理本地暂存区、未暂存修改和
+  未跟踪文件；保留能提高观测与验证能力的内容，不把冲突半成品或无效链接改写带进主线。
+- 依据：暂存区原本只有 4 个文档重命名；真正有独立价值的是 GPU 利用率探针、NCU 启动工具、
+  `ctx256` soak profile、对应测试、资源利用率计划和实测台账。`generate.cpp` 的 629 行本地差异
+  含 8 处冲突标记，并且缺少上游已加入的 logprobs、piped MTP 等功能，不能提交。
+- 改动与实验：从最新 `c219fbca` 建独立 worktree，把本地 tracked 改动三方合入；丢弃损坏的
+  `generate.cpp` 半成品和一组把有效链接改成普通代码的文档噪音；保留归档重命名、历史审计状态、
+  实测证据和新工具。服务器从干净树 `/opt/ai/src/strata-027-picks` 独立构建到
+  `build75-027`，没有复用运行中的二进制。
+- 结果：现役 engine `0.1.51` / md5 `0e4a9596`、server `11fd33f0`、config `023663ba`，health
+  `loaded=true`、`NRestarts=0`。数字序列 6 路聚合 `163.70/165.66 tok/s`，自然语言 6 路
+  `148.94/150.71 tok/s`；3,427-token 冷读 `923.7/931.4 tok/s`。
+- 并发结论：2 路数字序列只有 `94.03/95.67 tok/s`，低于单路 `102.46/105.64`，存在吞吐凹点；
+  8 路为 `137.85/139.66 tok/s`，低于 6 路且 TTFT 约 `5.7–5.8 s`。6 路是当前可接受峰值，
+  但不能据此认定 2 路或 8 路已经优化。
+- 工具验证：新增 NCU 启动器、GPU 利用率探针、版本探针路径修复和 `ctx256` profile 的联合测试为
+  `28 passed, 1 skipped`，脚本 `py_compile` 通过；版本探针在现网识别 `build75-027/strata`
+  并从 server argv 读取实际 config，返回 `problems=[]`。服务器终端最终测试为
+  `1224 passed, 56 skipped, 10894 subtests passed`。
+- 测试缺口：CTest 仍有 6 项失败（Q6_K 表、Q8_0 grouped、OOM、缺 Q2_0 PLE 资产等），
+  因此判决为“运行验收采纳、测试未全绿”。
+- 生产状态与回滚：服务保持 `active/running`、`NRestarts=0`；旧二进制仍在
+  `/opt/ai/src/strata-0.2.2/build/strata`。本地整理前的 tracked 状态保存在
+  `refs/codex-backup/pre-workspace-cleanup-20261028T131909Z`，未跟踪文件另有归档。
+- 学到什么：判断本地改动必须相对最新远端重新分类；旧分支上的大 diff 可能只是上游新代码的
+  反向差异。性能“更好”也不能只看最高聚合值，必须同时看低并发凹点、TTFT 和测试门。
+- 下一步与理由：先完成本轮分支提交与远端同步；后续性能工作从 2 路凹点和 NCU 根因入手，
+  同时补掉已知 CTest 缺口，不直接开始新的参数扫描。
+
+## I-20261027-64 · 资源利用率优先，停止独立参数探索
+
+- 目标 / 指标：把后续主线从“再试一个参数”改为“提高真实资源利用率”，并以瓶颈管线计数和
+  端到端任务时间同时改善作为代码改动门。
+- 依据：L-091 已证明 NVML 高值不可靠；32K 冷 prefill 中多数 SM 参与，但 SM Issue、Tensor
+  和 warp residency 不高，DRAM 也未饱和。仅靠现有计数尚不能指出具体 stall reason。
+- 决策：NCU 继续用于根因归因，但它不是交付物；得到证据后必须落在一个内核或调度代码路径的
+  最小改动上，不能用参数 A/B 代替优化。
+- 路线影响：P7 从“暂停/待做”改为“搁置”，只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复；
+  env 参数、批次大小和既有开关不再作为独立探索方向。代码候选完成后，参数 A/B 只用于部署门。
+- 验证协议：改代码前先固定同一模型、同一 32K 冷 prompt、目标硬件计数和 wall 门限；候选必须在
+  同一负载下改善目标计数，同时不恶化端到端 wall、输出正确性和资源稳定性。
+- 生产状态与回滚：本条只调整路线，未改生产、未重启服务；冻结基线仍为
+  `0.1.51` / `a09d78b1`。
+- 下一步与理由：在独立 engine 实例上用 NCU 找到真实 stall，再提交一个资源利用率代码切片。
+
+## I-20261027-63 · 用 Nsight 硬件计数纠正 NVML 利用率口径
+
+- 目标 / 指标：解释现役 32K 冷 prefill 在 NVML 已显示 95/98% 时，真实 SM、issue、Tensor、
+  warp 和 DRAM 管线各有多少占用，并为后续内核调优建立不误判的观测入口。
+- 假设与预期：`utilization.gpu` 只表示时间窗口内有活动；若真实计算管线也接近饱和，应同时看到
+  高 SM Issue、Tensor Active 和稳定的 DRAM 压力，而不是只有 NVML 高值。
+- 为什么选这条路线：NVML 无法区分算术、Tensor、指令发射和等待；Nsight Systems GPU Metrics
+  可在不重启现役服务的情况下采双卡硬件计数器。NCU 无法安全附加到现役 engine，因此本轮不强行使用。
+- 改动与实验：新增 `probe-gpu-utilization.py` 与 strict pytest；root 启动系统级 Nsight GPU Metrics，
+  1 Hz NVML 交叉核对，执行短 decode 和约 32K 冷 prefill。请求前检查服务 idle、PID、文件和 config，
+  请求后复查 PID/hash/health/idle；HTTP、finish、needle、长度、prompt 尺寸或 cache 重用不合格即拒绝。
+- 结果：两次有效 run 的 32K prefill 中位均为 SMs Active `77%`、Tensor `10%`、Warps `28%`、
+  DRAM read `15%`，SM Issue 为 `13–14%`；最终部署脚本的同窗 NVML 为 `40/99%`，较早 run 为
+  `95/98%`。SMs Active p90 为 `98%`，但 DRAM 最大仅 `41%`，没有证据支持 DRAM 饱和。
+- 判决：**结论**。NVML 95/98% 不是真实计算利用率；当前更像是多数 SM 被调度参与，但 issue、
+  Tensor 和 warp residency 不高，仍不能在没有 NCU stall reason 时指定具体原因。
+- 预期被推翻：SMs Active 并不低，不能把结果写成“GPU 实际只有 14% 在用”；14% 是 SM Issue，
+  与占用 SM 的比例不是同一口径。
+- 生产状态与回滚：探测只读，未重启或替换 engine/server。最终 run 前后 service loaded/idle，
+  PIDs 为 server `186221`、engine `186232`，结束后无 active Nsight session。失败 run
+  `0827Z/0837Z/0844Z` 分别被长度、needle 和截断质量门拒绝。收尾时发现一个遗留约 2 小时 26 分、
+  停在密码提示且从未执行停止的 `sudo systemctl stop` 进程，已单独终止；服务 PID 未变。
+- 证据：L-091；`/opt/ai/logs/gpu-util-final-20261027T0848Z/`、较早的
+  `/opt/ai/logs/gpu-util-20261027T0850Z/` 与
+  `tools/server/tests/test_probe_gpu_utilization.py`。
+- 学到什么：先确认指标口径，再谈优化。单一利用率数字不足以定位瓶颈，失败样本必须保留以证明门禁有效。
+- 下一步与理由：在独立受控 engine 实例上用 NCU 检查 SM throughput、occupancy、Tensor pipe、
+  DRAM throughput 和 warp stall；随后改对应代码，提高资源利用率。没有这层证据前不根据
+  `SMs Active` 或 NVML 改动内核，也不转入独立参数探索。
+
+## I-20261027-62 · CTX256 一小时混合 soak 通过，冻结 `0.1.51` 生产基线
+
+- 目标 / 指标：验证现役 `0.1.51` / `a09d78b1` 在 `6×256K`、6 槽下持续一小时混合负载时，
+  请求正确性、长上下文、needle、槽位配置和 RAM/swap 是否稳定；零意外错误、零意外 length、
+  零 needle 失败后才能冻结。
+- 假设与预期：版本吞吐门已通过，但一次 240K 单请求与一次短并发不足以证明长时间资源稳定；
+  soak 应暴露 RAM 交换、槽位降级或长读回归。
+- 为什么选这条路线：用户要求先验证 256K 的吞吐，再在通过后执行一小时混合 soak；只有现场
+  生产配置和真实请求路径能覆盖 conversation cache、expert cache 与冷读共同作用。
+- 改动与实验：`mixed-soak.py` 增加 `ctx256` profile，在原 mixed wave 后加入约 240K cold read；
+  运行 `3607 s`，覆盖短 JSON、代码、agent tool、32K/64K/96K 和约 240K。
+- 结果：414 请求、133 waves、HTTP 200 414/414、零执行错误、零意外 length；needle 74/74；
+  14 次约 245.9K 长读全部成功，wall 中位 `101.077 s`。batch slots 始终 6、expert slots 始终
+  17248、version 始终 `0.1.51`。RSS 末值 `51,151.7 MiB`，最低 available RAM `2430.4 MiB`，
+  swap 始终未用；GPU 温度/功率最大 `81 °C / 310.87 W`。
+- 判决：**采纳**。`CTX256` 稳定性门通过，当前 engine/server/config 冻结为生产基线；这不是
+  262144 满窗口或六路满载证明。
+- 预期被推翻：持续负载下最低 available RAM 到 `2430.4 MiB`，虽然未触发 swap，但余量仍低，
+  后续多长读或提高并发必须继续监控。
+- 生产状态与回滚：run 结束后 service `active/running`、`NRestarts=0`，engine PID `186232`；
+  T-probe `problems=[]`。当前回滚快照仍为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`，
+  后续实验不得直接覆盖冻结基线。
+- 证据：L-090；`/opt/ai/logs/CTX256-mixed-soak-20261027T065554Z.*` 与
+  `/opt/ai/logs/T-probe-ctx256-post-20261027T075803Z.json`。
+- 学到什么：长期资源结论必须看最低 available RAM、swap、RSS 峰值与槽位数组，不能只看末值；
+  高并发 soak 仍需和“配置未降级”分开表述。
+- 下一步与理由：恢复 P7 前先从真实 GPU 管线证据确定优化方向；P7 仍必须从全新 A1 完整重跑，
+  不复用被中断样本。
+
+## I-20261027-61 · 256K 生产配置下新版吞吐无显著回退，下一步先做长期 soak
+
+- 目标 / 指标：在现役 `6×256K` 生产配置上确认 `0.1.51` / `a09d78b1` 相对 `0.1.49.1` / `8d680c69`
+  是否存在明显吞吐变化；按项目既有门限，单路 decode、4 路聚合和冷读均以 ±3% 判断噪声。
+- 假设与预期：256K 比 192K 少约 2.7% 专家槽，可能带来小幅吞吐代价；若仍落在 3% 内，就不应把
+  版本切换本身当成当前主要瓶颈。
+- 为什么选这条路线：已有五臂 A-B-A 只覆盖 192K，不能直接代表当前 256K 生产形态；先测当前版本影响，
+  避免在错误基线上安排 kernel 或调度实验。
+- 改动与实验：保持同一 server、launcher、config 和 24 个运行态 env，只替换 engine 二进制，执行
+  `新版 B1 → 旧版 A → 新版 B2`。每臂运行固定单路/4 路基准 3 次、greedy parity、thinking parity
+  和 3 次无重复长读；机器上无其他 benchmark 或 soak 进程，三个基准窗口的 `foreign_requests` 都是 0。
+- 结果：旧版单路 decode 中位 `82.7 tok/s`、4 路聚合 `139.6 tok/s`、冷读 `2273 tok/s`；新版依次为
+  `80.45 tok/s`、`136.05 tok/s`、`2267 tok/s`，变化 `−2.72% / −2.54% / −0.26%`，全部在 3% 门内。
+  wall 口径的单路为 `78.95` 对 `72.2 tok/s`（`+9.35%`），但它包含首请求固定开销，不作为吞吐主指标。
+  三个臂的 greedy 输出哈希都是 `b17bc92de6ba8a97`；所有测试请求正常完成，没有 HTTP 或执行错误。
+- 判决：**未发现明显吞吐回退，不接受“新版更快”或“新版整体回退”的概括**；版本吞吐门通过，
+  当前剩余重点转为 256K 长期稳定性。
+- 预期被推翻：4 路没有沿用旧版五臂结果的 `−0.3%`，在 256K 降到 `−2.54%`；方向仍低于 3%，
+  但余量只有约 0.46 个百分点，后续不能忽略配置与 boot 噪声。
+- 生产状态与回滚：已恢复新版 `a09d78b1`，service active、health 200；T-probe `problems=[]`，
+  engine `0.1.51`、`batch_slots=6`、`expert_slots=17248`、`max_context=262144`。切换前新版快照为
+  `/opt/ai/tmp/pre-throughput-ab-20261027T061947Z/`，旧版基线快照为
+  `/opt/ai/tmp/pre-v026-20261026T025109Z/`。
+- 证据：L-089；`/opt/ai/logs/arm-v026-256-{new-B1,old-A,new-B2}.log`、
+  `/opt/ai/logs/T-probe-throughput-final-20261027.json` 与 `/opt/ai/logs/bench-results.jsonl`。
+- 学到什么：比较版本吞吐必须用当前生产上下文和缓存形态；192K 结论只能作为先前证据，
+  不能替代 256K 的现场验收。
+- 下一步与理由：先完成 `CTX256` 一小时混合 soak，覆盖长读、短请求并发、内存与槽位稳定性。
+  soak 通过后再恢复 P7；吞吐门已经通过，不应先做无证据的版本回退或重复 A-B-A。
+
 ## I-20261027-60 · 恢复生产 pack 的 IQ2/IQ3_S 专家格式并通过真实模型验证
 
 - 目标 / 指标：让收敛后的源码构建出的引擎直接跑生产 pack `sc117_iq3_xxs`（262144 上下文、parallel 6），

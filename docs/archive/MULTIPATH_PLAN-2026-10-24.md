@@ -2,14 +2,14 @@
 
 > **归档（2026-10-25）**：W1–W4 战役计划已完成或被 `docs/ROADMAP.md` 接管；本文件只作背景。
 
-> 配套：[`RULES.md`](RULES.md)（怎么干活）、[`HANDOVER.md`](HANDOVER.md)（状态与决策）、
-> [`CODE_CONCLUSIONS.md`](CODE_CONCLUSIONS.md)（已封的路）、[`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)（新标准）、
-> [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md)（执行规则与复盘模板）、[`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)（每轮复盘）、
-> [`FEATURE_PARITY.md`](FEATURE_PARITY.md)（功能清单、测试用例与验收标准）、
-> [`../tools/server/README.md`](../tools/server/README.md)（工装）。
+> 配套：[`RULES.md`](../RULES.md)（怎么干活）、[`HANDOVER.md`](../HANDOVER.md)（状态与决策）、
+> [`CODE_CONCLUSIONS-2026-10-24.md`](CODE_CONCLUSIONS-2026-10-24.md)（已封的路）、[`MULTIPATH_STANDARD.md`](../MULTIPATH_STANDARD.md)（新标准）、
+> [`MULTIPATH_RULES.md`](../MULTIPATH_RULES.md)（执行规则与复盘模板）、[`MULTIPATH_LOG.md`](MULTIPATH_LOG-through-2026-10-25.md)（每轮复盘）、
+> [`FEATURE_PARITY.md`](FEATURE_PARITY-2026-10-24.md)（功能清单、测试用例与验收标准）、
+> [`../../tools/server/README.md`](../../tools/server/README.md)（工装）。
 >
-> **状态：已执行并收口（R0–R8，2026-10-25）。** 判决总表见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md) §8；
-> 每轮复盘见 [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)，证据见 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) L-046…L-052。
+> **状态：已执行并收口（R0–R8，2026-10-25）。** 判决总表见 [`FEATURE_PARITY.md`](FEATURE_PARITY-2026-10-24.md) §8；
+> 每轮复盘见 [`MULTIPATH_LOG.md`](MULTIPATH_LOG-through-2026-10-25.md)，证据见 [`EVIDENCE_LEDGER.md`](../EVIDENCE_LEDGER.md) L-046…L-052。
 > 生产当前运行 **B（W3 已启用，引擎 `383b426a` / server `52b84d54`，health 200）**；回滚见 `MULTIPATH_W3.md` §7。
 
 **执行结果（一句话版）**：
@@ -60,7 +60,7 @@ chunked prefill 与 decode 混批、按路定容），**不搬它的代码**。
 | 单流 decode | 63 tok/s（T≈2.05） | `CODE_PLAN.md` §24 |
 | 三流并发 | 每流 45、聚合 **≈136 tok/s** | `CODE_PLAN.md` §24 |
 | 四流聚合 | 121–125 tok/s（L-019 三臂带内） | L-019/L-020 |
-| 窗口成本 | ≈12 ms 固定 + ≈4.4 ms/token | `CODE_CONCLUSIONS.md` |
+| 窗口成本 | ≈12 ms 固定 + ≈4.4 ms/token | `CODE_CONCLUSIONS-2026-10-24.md` |
 | 满槽冷读排队 | **36–43 s**（读 11.0–14.8 s 在引擎里，其余是排队） | L-020/L-021 |
 | 真实流量 TTFT | 中位 0.80 s、p90 2.46 s、最长 83.82 s（n=34） | L-021 |
 | gate ON 的代价/收益 | 读的人 +21.6%（2 流）/+44.5%（3 流）；邻居停顿 **11.64 → 0.70 s** | L-019/L-020 |
@@ -125,7 +125,7 @@ W3 不按 L-025 的"按槽记账"说法设计。
 ### W3 · 无槽准入 read-ahead（引擎，1 次构建）
 
 - **改动**（最小、默认关、独立 build 目录——`build/` 一字节不动，按 `RULES.md` §9）。
-  **实现细节（协议、暂存结构、v1 限制、行号）见 [`MULTIPATH_W3.md`](MULTIPATH_W3.md)**；下面是方向与门：
+  **实现细节（协议、暂存结构、v1 限制、行号）见 [`MULTIPATH_W3.md`](MULTIPATH_W3-2026-10-24.md)**；下面是方向与门：
   1. **先看清现在的顺序**：BGEN 才是触发读的命令（`generate.cpp:12006-12007` 在 BGEN 分支里做读；没槽就
      `ERR BGEN: no such free slot`）；读今天直接写主会话 `ss`（`13535`；`copy_to_slot` 在 `11427-11433`），
      **没有暂存**；槽只在最后 `copy_to_slot`（`15394`）拿到 K/V。所以"先读后挂"要**新增暂存**，不是复用。
@@ -212,7 +212,7 @@ W3 不按 L-025 的"按槽记账"说法设计。
 - 不做 DFlash2/MTP 的移植（已有 `--spec 8`，热接受率 ~99%，L-026）。
 - 暂缓 SSD 前缀 KV 持久化（B4；重启不频繁，先做 B1/B2）。
 - 不换驱动、不换引擎 0.2.4.1（L-034）、不再碰 MMQ tab / `PF_FUSED_SM75` / `QFUSE` / `HC_PERSIST` /
-  `--pipeline-windows` / parking gain（全部已否决，见 `CODE_CONCLUSIONS.md` §"Closed"）。
+  `--pipeline-windows` / parking gain（全部已否决，见 `CODE_CONCLUSIONS-2026-10-24.md` §"Closed"）。
 
 ## 11. 待确认 / 授权记录
 

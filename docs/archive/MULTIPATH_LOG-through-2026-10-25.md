@@ -2,10 +2,10 @@
 
 > **归档（2026-10-25）**：新复盘写入 `docs/ITERATION_LOG.md`；本文件保留旧格式的完整历史。
 
-> **每轮一条，最新在上。** 复盘格式见 [`PORTING_RULES.md`](PORTING_RULES.md) §11；**从 R11 起**每条必须带
+> **每轮一条，最新在上。** 复盘格式见 [`PORTING_RULES.md`](../PORTING_RULES.md) §11；**从 R11 起**每条必须带
 > `### Gate（本轮）` 的 11 个字段，并过 `python3 tools/server/round_gate.py --round R<n>`；
-> xfail/skip/FAIL 记 FAIL。数字的原始证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)，状态在
-> [`HANDOVER.md`](HANDOVER.md)，计划在 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)。
+> xfail/skip/FAIL 记 FAIL。数字的原始证据在 [`EVIDENCE_LEDGER.md`](../EVIDENCE_LEDGER.md)，状态在
+> [`HANDOVER.md`](../HANDOVER.md)，计划在 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN-2026-10-24.md)。
 > **Gate 不 PASS = 本轮按未发生处理。**
 
 ---
@@ -507,7 +507,7 @@
   ② 全量构建基线：`build-mp/` 333 目标、`ninja -j6` 约 10 分钟，二进制 md5 `57dd3a24…`；
   ③ 打 W3 补丁（`BREAD` / `BADOPT <slot>` / `BCANCEL`，默认关，`STRATA_BATCH_STAGED_READ` 才可达，
   3 个 hunk / 145 行 diff）→ 增量编译链接通过，二进制 md5 `5904997f…`；
-  ④ 设计文档 [`MULTIPATH_W3.md`](MULTIPATH_W3.md)；⑤ 补丁入库 `tools/server/patches/mp-w3-0.1.47.patch`
+  ④ 设计文档 [`MULTIPATH_W3.md`](MULTIPATH_W3-2026-10-24.md)；⑤ 补丁入库 `tools/server/patches/mp-w3-0.1.47.patch`
   （`git apply --check` 在本仓库 0.1.48 上**也通过**）。
 - **数字**：构建 10 分钟（6 并发）；补丁 145 行；**0 重启**；生产 `build/`、`build/strata` 与配置一字节未动。
   基线/补丁二进制的 md5 都记在 `/opt/ai/logs/MP-R3-build.log` 末尾（见"原始日志"）。
@@ -567,9 +567,9 @@
 
 ## R0 · 2026-10-24 · 立项与草稿（本轮无生产改动，无新测量）
 
-- **改了什么**：新增 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)（W1–W4 计划）、
-  [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)（多路口径）、
-  [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md)（执行规则）、[`FEATURE_PARITY.md`](FEATURE_PARITY.md)（功能清单/测试/验收）、
+- **改了什么**：新增 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN-2026-10-24.md)（W1–W4 计划）、
+  [`MULTIPATH_STANDARD.md`](../MULTIPATH_STANDARD.md)（多路口径）、
+  [`MULTIPATH_RULES.md`](../MULTIPATH_RULES.md)（执行规则）、[`FEATURE_PARITY.md`](FEATURE_PARITY-2026-10-24.md)（功能清单/测试/验收）、
   本文件；`docs/README.md` 登记五份文档。参考仓库 `/home/kali/IdeaProjects/vLLM-2080Ti-Definitive` 已拉到本地
   （main = v0.2.2-post3）。**未碰生产。** 目标已建：`goal-402218d9-57d7-4af1-aea0-391a1494acd9`（60 轮上限）。
   新增 `tools/server/tests/` 黑盒验收套件（T1–T4，stdlib，可直接跑；T3 在 W3 前 xfail 记基线）。

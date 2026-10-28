@@ -1,8 +1,8 @@
 # Strata on this server: what is closed, and why
 
 > **历史快照（2026-10-24）**：本页保留当时的生产形状、测量数字和已关闭路线，不能作为当前生产
-> 或指标基线使用。当前事实以 [`STATE.md`](STATE.md)、[`ROADMAP.md`](ROADMAP.md)、
-> [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。文中 `0.1.47`、`parallel 4` 等均为历史值。
+> 或指标基线使用。当前事实以 [`STATE.md`](../STATE.md)、[`ROADMAP.md`](../ROADMAP.md)、
+> [`EVIDENCE_LEDGER.md`](../EVIDENCE_LEDGER.md) 为准。文中 `0.1.47`、`parallel 4` 等均为历史值。
 
 One page. Every line below was measured on this machine on 2026-10-24 (night), with the production build
 unless it says otherwise. The evidence is in `docs/archive/CODE_PLAN-2026-10-24.md` (section numbers given)

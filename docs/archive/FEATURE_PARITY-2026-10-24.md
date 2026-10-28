@@ -2,8 +2,8 @@
 
 > **归档（2026-10-25）**：活跃事项以 `docs/WORK_QUEUE.md` 为准，本文件只保留功能对照与旧验收背景。
 
-> 配套：[`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)（做什么、顺序）、[`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)（口径）、
-> [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md)（执行规则与复盘）、[`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)（每轮复盘）。
+> 配套：[`MULTIPATH_PLAN.md`](MULTIPATH_PLAN-2026-10-24.md)（做什么、顺序）、[`MULTIPATH_STANDARD.md`](../MULTIPATH_STANDARD.md)（口径）、
+> [`MULTIPATH_RULES.md`](../MULTIPATH_RULES.md)（执行规则与复盘）、[`MULTIPATH_LOG.md`](MULTIPATH_LOG-through-2026-10-25.md)（每轮复盘）。
 > 参考仓库：`/home/kali/IdeaProjects/vLLM-2080Ti-Definitive`（fork `main` = `93c9013`，v0.2.2-post3）。
 >
 > **目标**：把 fork 里对多路推理与 serving **有用**的功能完整、可用地融合进 Strata。**"完整"的定义见 §0**：

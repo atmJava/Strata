@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（88 条：L-000…L-087，按编号）
+## 台账索引（93 条：L-000…L-092，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -103,6 +103,10 @@
 | L-086 | 10-26 06:5xZ | P6 `STRATA_PA_V2T=1`：同 boot A-B-A 全门禁通过但 engine read/wall 只改善 2.346%/2.297%，低于 3%，生产不采纳 | **未定** |
 | L-087 | 10-26 06:5xZ | P7 `STRATA_PF_WMMA=1`：A1 首个请求期间被用户中断，无有效 JSONL/summary；实验暂停、待从全新 A1 重跑 | **结论** |
 | L-088 | 10-26 08:0xZ | 生产 `6×192K→6×256K`：6 槽保留，expert slots 17248；222K/253K needle 命中，6 路短并发 6/6；一小时混合 soak 待做 | **采纳·待 soak** |
+| L-089 | 10-27 06:2xZ | 256K 生产 A-B-A：新版单路 decode `80.45` 对旧版 `82.7`（−2.72%），4 路 `136.05` 对 `139.6`（−2.54%），冷读 −0.26%；无显著回退 | **结论** |
+| L-090 | 10-27 06:5xZ | 256K 一小时混合 soak：414 请求、133 waves、0 错误、0 意外 length、74/74 needle；14 次约 245.9K prompt 全通过；swap 未用、最低可用 RAM 2430.4 MiB | **采纳** |
+| L-091 | 10-27 08:5xZ | Nsight 双次硬件计数：32K 冷 prefill 的 SMs Active 77%、SM Issue 13–14%、Tensor 10%、DRAM read 15%；同窗 NVML 40/99% 与 95/98% 均不能代表真实计算利用率 | **结论** |
+| L-092 | 10-28 05:1xZ | v0.2.7 上游 37 提交部署到 `c219fbca`：6 路数字序列约 `164.7 tok/s`、自然语言约 `149.8 tok/s`；2 路低于单路，8 路无吞吐收益且 TTFT 变差；CTest 仍有 6 个已知失败 | **采纳·测试缺口** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -811,7 +815,7 @@ rafatxf 在 [#2197](https://github.com/Niko1221/Strata/issues/2197#issuecomment-
 - **诚实的缺口（本轮先说错了、后更正）**：那次分歧的 **t2 逐次 stdout 没留**（`t2check.py` 当时在 `/tmp`），
   但**同期记录在盘上**：`/opt/ai/docs/strata-tuning-plan-0.2.2-20261022.md` §7.6 的 245–254 行（另有 6 份带日期的
   `.bak`）记着两个哈希、"9/10 一致"的计数、用的工具和当时的生产配置快照名。**本轮把这份 plan 逐字节搬进了仓库**
-  → `docs/TUNING_PLAN_0.2.2-20261022.md`（md5 `1a8c5035ed5bce2da22580ae7fd9a6a4`，与服务器那份一致），
+  → `archive/TUNING_PLAN_0.2.2-20261022-through-2026-10-25.md`（md5 `1a8c5035ed5bce2da22580ae7fd9a6a4`，与服务器那份一致），
   台账里所有"plan §x.y"的引用从此在 git 里查得到。脚本也已进 git（`tools/server/t2check.py`），
   以后这类跑会落到 `/opt/ai/runs`。
 
@@ -844,7 +848,7 @@ rafatxf 在 [#2197](https://github.com/Niko1221/Strata/issues/2197#issuecomment-
 （`hw/server-adapt-0.2.3`、`hw/s1-concurrent-read`），那是我们自己的仓库，不算上游。
 
 **结论不依赖上游采不采纳**：mode 8 的采纳、并发读的价值、#3724 的判定都在 L-011/L-012/L-015/L-016/L-017，
-本篇（`docs/UPSTREAM_DRAFTS.md`）从此只是留档。
+本篇（`archive/UPSTREAM_DRAFTS-through-2026-10-25.md`）从此只是留档。
 
 ---
 
@@ -3301,3 +3305,264 @@ CUDA0 的 6 个 slot session `2.69 GiB`，最终 expert slots 为 `17248`，expe
 - `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/server-tail-final.log`
 - 仓库内规范化副本：`docs/work/evidence/ctx256k-needle-222k-20261026.json`、
   `docs/work/evidence/ctx256k-needle-253k-20261026.json`
+
+## L-089 `6×256K` 生产配置的版本吞吐 A-B-A：没有明显回退
+
+**判定**：**结论**。新版 `0.1.51` / `a09d78b1` 相对旧版 `0.1.49.1` / `8d680c69`
+在单路 decode、4 路聚合和冷读上均落在项目 3% 噪声门内；不能宣称新版整体更快，也没有证据支持回退。
+
+**实验条件**：双 RTX 2080 Ti 22 GB、sm_75、INT8 KV、`6×256K`、`parallel=6`、
+`batch-groups=2`、17248 expert slots。server、launcher、config、systemd 环境和 24 个运行态 env
+三臂相同，只替换 engine 二进制。顺序为 `new B1 → old A → new B2`，每臂 3 次单路、
+3 次 4 路、2 次 parity 和 3 次无重复长读。每个基准窗口的 `foreign_requests` 都是 0。
+
+| 指标 | 旧版 A | 新版 B1+B2 | 变化 |
+|---|---:|---:|---:|
+| 单路 engine decode tok/s（样本中位） | 82.7 | 80.45 | −2.72% |
+| 4 路聚合 tok/s（6 个窗口的中位） | 139.6 | 136.05 | −2.54% |
+| 冷读 tok/s（2 个新版臂的中位） | 2273 | 2267 | −0.26% |
+| wall 口径单路 tok/s（辅助口径） | 72.2 | 78.95 | +9.35% |
+
+单路 wall 口径把 prompt、首请求固定开销和响应结束一起算入分子/分母，不能替代 engine 的
+`predicted_per_second`。旧版单路含一个 `62.5 tok/s` 低样本；新版也含一个 `61.8 tok/s` 低样本，
+因此该列只作辅助，不用于版本判决。
+
+**正确性与运行态**：三臂 greedy parity 都返回 `text_sha=b17bc92de6ba8a97`；thinking 请求均正常
+`stop`。所有基准、parity 与长读请求完成，三份 arm 日志没有 HTTP 或执行错误。最终恢复新版并执行
+T-probe：`problems=[]`，engine `a09d78b1` / `0.1.51`、`batch_slots=6`、`expert_slots=17248`、
+`max_context=262144`，health 200。切换前新版快照
+`/opt/ai/tmp/pre-throughput-ab-20261027T061947Z/` 的 MANIFEST 全项通过；旧版快照为
+`/opt/ai/tmp/pre-v026-20261026T025109Z/`。
+
+**边界**：本轮验证的是吞吐和基本输出门，不是一小时 mixed soak、256K 满窗口、多长读并发、
+取消、图片或多租户稳定性。冷读工具的实际 prompt token 在 39,781–49,720 之间，不能把它写成
+精确 13.2K；`target≈13252` 只是脚本的构造参数。4 路结果距 3% 门限仅约 0.46 个百分点，
+后续配置变化必须重新测量。
+
+**原始证据**：
+
+- `/opt/ai/logs/arm-v026-256-new-B1.log`
+  （sha256 `eec6f847031c820f5eab3dfa812f1974c220e593613730f4b4f1776adf197eac`）
+- `/opt/ai/logs/arm-v026-256-old-A.log`
+  （sha256 `2bfd03eff9da5bac85e584185671c4e022400b13380ffa5a40d060305ce1297b`）
+- `/opt/ai/logs/arm-v026-256-new-B2.log`
+  （sha256 `817edfc1412647ffd3649579ed509b868d2089a67fa31634aa802536f26102ea`）
+- `/opt/ai/logs/T-probe-throughput-final-20261027.json`
+  （sha256 `371be11ae6df8113d0cc82930e112161b16a572e2d9b992cdf43f4a503b8b848`）
+- `/opt/ai/logs/bench-results.jsonl`
+  （sha256 `6ca4090ce1aea13a6f9b00cc8a4555a85b65655a39e0d40d4fb0a0e0ff6c6c45`）
+
+## L-090 `CTX256` 一小时混合 soak 通过：版本冻结为 `0.1.51`
+
+**判定**：**采纳**。现役 `0.1.51` / `a09d78b1` 在 `6×256K`、`parallel=6` 下完成一小时混合负载，
+请求、needle、槽位配置和资源门均通过；只冻结当前生产基线，不把这次结果扩大成 262144 满窗口或
+六路满载证明。
+
+**实验条件**：双 RTX 2080 Ti 22 GB、driver `595.71.05`、engine `0.1.51`、
+`max_context=262144`、`batch_slots=6`、`expert_slots=17248`、INT8 KV。`mixed-soak.py --profile ctx256`
+连续运行 `3607 s`，混合短 JSON、1.85K 代码、agent tool、32K/64K/96K cold needle 和约 240K cold read。
+
+| 指标 | 结果 |
+|---|---:|
+| 请求 / waves | 414 / 133 |
+| HTTP 200 / 执行错误 | 414 / 0 |
+| `finish=length` | 0 |
+| needle | 74/74 |
+| 约 240K 长读 | 14/14；prompt 245,853–245,856；wall 中位 101.077 s |
+| 32K / 64K / 96K wall 中位 | 19.799 / 27.929 / 42.879 s |
+| 短 JSON / 代码 / agent-tool wall 中位 | 6.221 / 7.090 / 7.266 s |
+| max running / outside slots / waiting | 4 / 4 / 3 |
+| engine RSS 首 / 末 / 最大 | 51,183.8 / 51,151.7 / 57,970.6 MiB |
+| available RAM 首 / 末 / 最低 | 9,151.6 / 9,127.8 / 2,430.4 MiB |
+| swap free 首 / 末 / 最低 | 4,095.7 / 4,095.7 / 4,095.7 MiB |
+| expert hit / KV hit / KV block reads（末次） | 100.0% / 63.5% / 21,570 |
+| GPU 温度 / 功率最大 | 81 °C / 310.87 W |
+
+verify 文件中的 `batch_slots` 始终为 `6`、`expert_slots` 始终为 `17248`、version 始终为 `0.1.51`，
+`problems=[]`。run 结束后 T-probe 仍为 `problems=[]`，service `active/running`、`NRestarts=0`，
+engine PID `186232`；本次 soak 后没有替换生产二进制。
+
+**边界**：并发最高为 4，不能声称 6 槽满载 soak；最长 prompt 比 `262144` 少 `16,288` token，
+不能声称满窗口；没有覆盖取消、图片、外部多租户或 conversation cache 的长期淘汰。
+最低 available RAM 为 `2430.4 MiB`，虽然没有 swap，后续多长读或更高并发仍需监控。
+
+**原始证据**：
+
+- `/opt/ai/logs/CTX256-mixed-soak-20261027T065554Z.jsonl`
+  （sha256 `d7f95e617e38c01e6126008fe83a877cb10ebab54b4124d35eeaf81aa34ae9f6`）
+- `/opt/ai/logs/CTX256-mixed-soak-20261027T065554Z.log`
+  （sha256 `ef7b893a84de3ae52da8397f4a580b911004b89dadaa71301a4456611603cfef`）
+- `/opt/ai/logs/CTX256-mixed-soak-20261027T065554Z.summary.json`
+  （sha256 `d5f814b5ddc1c7da8c861637ea47a40f96cc76309d89ffbc2deca96f041a17c2`）
+- `/opt/ai/logs/CTX256-mixed-soak-20261027T065554Z.summary.txt`
+  （sha256 `8827693f78f6fe7491b63d6448e283ac2dfeeab8c694bb85acce695925f8dfd7`）
+- `/opt/ai/logs/CTX256-mixed-soak-20261027T065554Z.verify.json`
+  （sha256 `c5fe1bd3b85e5b6297379ff7a4146d7c52fd0614ff9d1ea0b0699f7703385b09`）
+- `/opt/ai/logs/T-probe-ctx256-post-20261027T075803Z.json`
+  （sha256 `5065e681fef419882c0f477df88ed8f44d34ec9fa14b04e68b22898e84aca4cf`）
+- `/opt/ai/logs/CTX256-dmon-resource-20261027T074818Z.log`
+  （sha256 `6758dfa99b4e2623388f8b2c85fc1fc974a178e2bafea80c472ecff8f4f5d889`）
+
+## L-091 Nsight 硬件计数：NVML 95/98% 不是真实计算利用率
+
+**判定**：**结论**。两次有效 run 中，`nvidia-smi utilization.gpu` 分别给出 95/98% 和 40/99%，
+但同一约 32K 冷 prefill 的 Nsight `SMs Active` 中位都稳定在 77%，`SM Issue` 13–14%、
+Tensor 10%、`Compute Warps in Flight` 28%、`DRAM read` 15%。因此 NVML 数字既不能直接解释成
+算术或 Tensor 达到 95/98%，也不能把任一单独计数称为唯一“真实利用率”。
+
+**方法与质量门**：root 运行 `/opt/ai/bin/probe-gpu-utilization.py`，启动系统级 Nsight Systems
+GPU Metrics（100 Hz，双卡独立 channel）和 1 Hz NVML 采样。请求前检查 service `loaded/idle`、
+双卡、计数器目录、运行 PID/文件/config hash；请求后检查 PID、hash、health 和 idle。有效请求必须
+HTTP 200、`finish_reason=stop`、needle 命中、输出长度合格；长 prompt 还必须通过 token counter
+校准、80% 目标下限和 1% cache 重用上限。失败结果保留，不进入性能汇总。
+
+**短 decode（最终部署脚本）**：prompt 134、output 109、wall `1.281 s`、server prompt
+`489.3 ms`、server decode `784.4 ms`（`139.0 tok/s`）。request 聚合中位：
+`SMs Active 26.5%`、`SM Issue 8%`、Tensor 1%、Warps 18.5%、DRAM read 12%；
+decode 窗口中位为 `SMs Active 38%`、`SM Issue 11%`、Tensor 1%、DRAM read 17%。
+短请求的 prefill 窗口太短，最终脚本不生成该窗口，不能用 0850 报告中错误的短 prefill `0%` 下结论。
+
+**约 32K 冷 prefill**：
+
+| 指标 | 结果 |
+|---|---:|
+| 目标 / counter 校准 / 实际 prompt | 32,768 / 32,886 / 32,846 token |
+| reused token / output | 0 / 15，`stop` |
+| wall / server prompt / decode | 15.866 s / 15,678.7 ms / 140.1 ms |
+| SMs Active 中位 / p90 | 77% / 98% |
+| SM Issue / Tensor Active / Warps in Flight | 13% / 10% / 28% |
+| DRAM read / write 中位 | 15% / 7% |
+| 同窗 NVML GPU0 / GPU1 | util 40% / 99%，power 261.55 / 245.02 W，SM 1560 / 1590 MHz |
+
+分 channel 的 prefill 中位：
+
+| channel | SMs Active | SM Issue | Tensor | Warps | DRAM read | DRAM write |
+|---|---:|---:|---:|---:|---:|---:|
+| `channel_0` | 76% | 12% | 9% | 25% | 8% | 5% |
+| `channel_1` | 78% | 16% | 10.5% | 31% | 17% | 8% |
+
+**可支持的判断**：32K 冷 prefill 不是 DRAM 带宽打满，DRAM read 中位 15%、最大 41%；
+多数 SM 被调度参与（SMs Active 77%，p90 98%），但 issue、Tensor 和 warp residency 不高。
+SM Issue p90 为 29%、Tensor p90 为 30%、Warps p90 为 52%，说明阶段内存在明显峰值，
+但中位仍不高。当前证据支持“存在指令/依赖、访存延迟或阶段串行等待”，**不支持**具体 stall
+reason 的归因。
+
+较早的有效 run `gpu-util-20261027T0850Z` 用同一方法得到 SMs Active 77%、SM Issue 14%、
+Tensor 10%、DRAM read 15%，同窗 NVML 95/98%。两次硬件中位接近，但 NVML 在两卡上的捕获差异
+很大，进一步说明它只能作活动交叉核对，不能当主指标。
+
+**失败样本与更正**：`gpu-util-20261027T0827Z` 短请求撞长度上限且长 prompt 误扩到 147,523 token；
+`0837Z` 短请求缺 needle；`0844Z` 长请求被 `max_tokens=16` 截断。这些 run 都被质量门拒绝。
+最终部署脚本修复了短请求 prefill 窗口和文件属主收尾，并用 `--check-only` 验证 root、双卡、
+全部计数器、服务 `loaded/idle` 与运行态。随后完整 run `gpu-util-final-20261027T0848Z` 返回
+`status=verified`、`problems=[]`、`warnings=[]`；service 仍为原 PID，结束后无 Nsight session。
+收尾复核还发现一个约 2 小时 26 分前遗留、停在密码提示的
+`sudo systemctl stop strata.service` 进程；它没有执行停止，已单独终止。之后 service 仍为
+`active/running`、`NRestarts=0`，server/engine PID 仍为 `186221/186232`。
+
+**边界**：只有两次有效短 decode 和两次约 32K 冷 prefill，不能外推到 240K、持续混合负载或长时间 soak；
+SQLite 没有稳定的 Nsight channel 到 GPU UUID 映射，因此只写 `channel_0/channel_1`。
+Nsight Compute 不能安全附加到现役 engine；若要定位 stall reason，必须另起受控 engine 实例并由 NCU 启动。
+
+**原始证据**：
+
+- `/opt/ai/logs/gpu-util-final-20261027T0848Z/probe.json`
+  （sha256 `45ba1a10b84dd69603a2e82ca8ec4cc85fdc70a937b2172d2b7aa99d1e1870f4`）
+- `/opt/ai/logs/gpu-util-final-20261027T0848Z/probe.nsys-rep`
+  （sha256 `8536d80a557f3119cad0307aa77eaffd244782126be427bdd3eaaf4c5ac3e17e`）
+- `/opt/ai/logs/gpu-util-final-20261027T0848Z/probe.sqlite`
+  （sha256 `271a5ef8ddd8db0f442f4a45a1cac1c13f4db7385ee7578a32d4536fd5f513b7`）
+- `/opt/ai/logs/gpu-util-20261027T0850Z/probe.json`（较早有效 run）
+  （sha256 `de4b9640273a5ead24282b8371994cd476c555b4f478e6065c35f10ccead10fb`）
+- `/opt/ai/logs/gpu-util-20261027T0850Z/probe.nsys-rep`
+  （sha256 `f844058f2d319f709b6834c62b2f93104339dd0f43bd590e5cf0c2be9e0b1bd0`）
+- `/opt/ai/logs/gpu-util-20261027T0850Z/probe.sqlite`
+  （sha256 `521ec284335f3b330b54f94cf68bbaf1fd0fc0e2bb2d711843a0bddd2a41fe48`）
+- 脚本：`tools/server/probe-gpu-utilization.py`
+  （部署 sha256 `3f482fb5f20ed31cbd8c0f8775ec66cb4727d47baf6fcf5543732c8b0702f702`）
+- 回归测试：`tools/server/tests/test_probe_gpu_utilization.py`
+  （`15 passed`）
+
+## L-092 上游 v0.2.7 的 37 个提交已部署：6 路有收益，2 路存在吞吐凹点
+
+**判定**：**采纳·测试缺口**。`codex/upstream-027-picks` 的 37 个提交已 fast-forward 到
+`hw/server-adapt-0.2.3`，远端提交为 `c219fbca`；服务器从干净工作树独立构建并切换后，
+OpenAI/Anthropic 兼容接口、图片、工具调用、并发请求和运行健康均通过。运行验收不能清除下面的
+CTest 缺口，因此本条不写成“全部测试通过”。
+
+**代码与部署**：
+
+- 仓库：`atmJava/Strata`，`codex/upstream-027-picks` 与
+  `origin/hw/server-adapt-0.2.3` 都指向 `c219fbca`。
+- 服务器源码：`/opt/ai/src/strata-027-picks`，`git status --porcelain` 为空。
+- engine：`/opt/ai/src/strata-027-picks/build75-027/strata`，版本 `0.1.51`，
+  md5 `0e4a959662205d3fd18e6283c3b8f2e5`，sha256 `2aaf2751b9…`。
+- server：`/opt/ai/src/strata-027-picks/serve/server.py`，md5 `11fd33f0a7bbc2738cc3104fb959ae19`。
+- config：`/opt/ai/src/strata-027-picks/strata-live.json`，md5 `023663ba9d96f7e3e26821bf9eeb0fdf`。
+- service：`active/running`，`NRestarts=0`，MainPID `96519`，engine PID `96540`；
+  health 200、`loaded=true`、`max_context=262144`；`batch_slots=6`、`expert_slots=17280`、INT8 KV。
+
+**吞吐复测**：双 RTX 2080 Ti 22 GB、sm_75、同一现役服务、每项 2 次、`max_new=512`，
+无外部请求混入。数字序列与自然语言分开，不能把两者混成一个中位数。
+
+| 并发 | 数字序列聚合 tok/s | 自然语言聚合 tok/s | 数字序列 mean TTFT | 自然语言 mean TTFT |
+|---:|---:|---:|---:|---:|
+| 1 | 105.64 / 102.46 | 67.24 / 70.21 | 349 / 340 ms | 419 / 414 ms |
+| 2 | 95.67 / 94.03 | 88.85 / 87.77 | 539 / 542.5 ms | 688 / 684.5 ms |
+| 4 | 141.23 / 138.61 | 128.23 / 129.82 | 914.2 / 943.2 ms | 1140 / 1125.5 ms |
+| 6 | 165.66 / 163.70 | 150.71 / 148.94 | 1312.3 / 1330.7 ms | 1562.7 / 1563.5 ms |
+| 8 | 139.66 / 137.85 | 未测 | 5714.6 / 5826 ms | 未测 |
+
+3,427-token 冷读的 server prompt 为 `923.7/931.4 tok/s`（TTFT
+`3735/3704 ms`）。6 路相对单路明显提高吞吐；8 路数字序列反而低于 6 路，且 TTFT
+约为 6 路的 4.4 倍，因此当前峰值应落在 6 路附近。2 路数字序列聚合低于单路，
+自然语言也只从约 68.7 升到 88.3 tok/s，存在需要单独定位的固定开销或调度凹点。
+
+**测试状态**：
+
+- 新增工具回归：`python -m pytest tools/server/tests/test_probe_version_stamp.py
+  tools/server/tests/test_ncu_exec.py tools/server/tests/test_probe_gpu_utilization.py
+  tools/server/tests/test_mixed_soak_ctx256.py -q` 为 `28 passed, 1 skipped`；
+  四个脚本 `py_compile` 通过。
+- 服务器终端最终测试：`1224 passed, 56 skipped, 1 warning, 10894 subtests passed`。
+- CTest 149 项日志保留了 6 个失败：`mmvq_il_parity`（sm_75 Q6_K 表变化）、
+  `iq_multi_parity`（Q8_0 grouped 差异）、`gdn_rec_parity`（断言通过后 `cudaMalloc` OOM）、
+  `native_grouped_parity`（Q8_0/IQ4_NL 差异）、`ple_parity`（缺外部
+  `Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf`）、
+  `native_expert_parity_q8_0_q8_0`（CPU/GPU 差异）。
+- `ple_reader_stress` 曾失败，独立重建后在 `ple_rerun.log` 中通过 61.41 s；
+  `ple_parity` 仍被外部 Q2_0 文件阻塞。其余 5 项没有找到通过证据，必须保留为未解决。
+- `probe-version-stamp.py` 最初用 `build/strata --serve` 匹配 engine，当前部署路径
+  `build75-027/strata` 返回过 `running engine: not found`。现改为与构建目录无关的
+  `[s]trata --serve`，并从运行 server 的 argv 读取 engine、server 和 config 的实际路径；
+  `mixed-soak.py` 的进程 RSS 采样同步修正。
+- 修复后在现网运行 `probe-version-stamp.py --local` 得到 `problems=[]`：engine
+  `0e4a959662205d3fd18e6283c3b8f2e5`、server `11fd33f0a7bbc2738cc3104fb959ae19`、
+  config `023663ba9d96f7e3e26821bf9eeb0fdf`，PID `96540/96519`，health `loaded=true`，
+  service 仍 `active/running`、`NRestarts=0`。工具联合回归为 `28 passed, 1 skipped`。
+  本轮没有重跑需要 root 的完整 Nsight GPU Metrics；而 `running_stamp()` 已在服务器上以普通用户
+  实读当前 engine/server/config，`mixed-soak.py` 也实读到 engine PID `96540` 与 RSS `48410.8 MiB`。
+- 同一路径规则已同步到 `use-config.sh`、`restore-prod.sh`、`run-arm.sh`、`t2-run.sh`、A/B
+  门禁和已部署的 `ops-v2-arm.sh`；8 个已更新的用户脚本通过 `sh -n`。服务器上的
+  `verify-running-config.sh` 归 root 所有，本轮没有 sudo，因此只更新仓库源文件，未替换部署副本。
+  用该旧副本的 `ENGINE_PATTERN` 覆盖运行后仍找到 PID `96540`，running args 与 config 的 54 项
+  一致，且进程启动晚于 config 写入；脚本把两个由 systemd 注入的额外 env 报为 `DIFFERENT`，
+  所以本次不把整份旧脚本写成 PASS。
+
+**边界**：只测了短 prompt 的 512-token 上限负载和 3,427-token 冷读，没有重跑一小时 mixed soak、
+240K 长读、图片质量、取消流程或多租户；这些旧结论不能自动迁移到 `c219fbca`。
+
+**原始证据**：
+
+- `/opt/ai/logs/strata-027-bench.json`
+  （sha256 `7fd8b4c133893b5f068f82aa82ccdb91426da3b34462db739d1c1827e1e99830`）
+- `/opt/ai/logs/strata-027-bench-followup.json`
+  （sha256 `735bc46764e7103e0f3ee992a67acd5eec4783948caa7da3f19d3fda662cd5ca`）
+- `/opt/ai/logs/strata-027-preflight.out`
+  （sha256 `12b20e1cf82244e31f4471933177cf737c3723c02483bae50d9aeb6936d2dbcb`）
+- `/opt/ai/tmp/cp027/pytest_final.log`
+  （sha256 `8d9ce5982a93c196dbac00e01793ca31ade6e26298d31104c745c610bb57db65`）
+- `/opt/ai/tmp/cp027/ctest.log`
+  （sha256 `4d60fb3d547fb38c14cd1a4d3b37f42e1df5ed2619478ef67bd1b2cc4a4e6ced`）
+- `/opt/ai/logs/T-probe-path-20261028.json`
+  （sha256 `050b3ccb5fb6f63b91ea62576c9b35aabab7de9875c6c7cd315df1673f0a0424`）

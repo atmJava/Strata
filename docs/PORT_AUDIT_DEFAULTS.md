@@ -4,6 +4,9 @@
 `40125aa4`+`2682c9b0`+`738c65d9`、`55c802a5`+`d71b7311`、`869c1224`+`483c53f5`+`5ac5e47b`（Python 工具部分）。
 只读审计，唯一新文件就是本页。没有 commit / checkout / reset / stash / clean。
 
+> **状态：历史审计记录（2026-10-25）。** 结论按当时 HEAD `738c65d9` 写，不代表当前 HEAD；
+> 现行判定看 [`VLLM_PORT_PLAN.md`](VLLM_PORT_PLAN.md) §5/§6.1 与 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)。
+
 ## 审计环境（先说清楚证据等级）
 
 - HEAD 确认：`git rev-parse HEAD` → `738c65d95678c527f35ce7c66d07cdd374821d88`。

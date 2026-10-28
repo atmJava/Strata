@@ -1,5 +1,8 @@
 # 移植文档关键数字：独立重测（只读审计）
 
+> **状态：历史测量记录（2026-10-25）。** 数字是当时那次重测的原始记录，已被后续台账条目接续；
+> 现行数字看 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 与 [`STATE.md`](STATE.md)。
+
 > 目的：把 `docs/VLLM_PORT_PLAN.md` §P3b / §P3c / §P4 与 verify 三件套的数字，在服务器上**重测一遍**，
 > 只记录、不改代码、不 commit。本文件是唯一新建的文件。
 >

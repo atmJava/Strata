@@ -1,17 +1,17 @@
-> **先读**：`docs/CODE_CONCLUSIONS.md` —— 一页写下这个夜里已经封掉的路、封它们的数字，以及唯一还开着的方向（并发）。
+> **先读**：`archive/CODE_CONCLUSIONS-2026-10-24.md` —— 一页写下这个夜里已经封掉的路、封它们的数字，以及唯一还开着的方向（并发）。
 
 > **归档（2026-10-25）**：这是历史交接与决策记录。当前入口是 `docs/STATE.md` 和 `docs/RULES.md`。
 
 # 交接 · Strata 服务器适配（持续更新的唯一入口）
 
 > 这份文件是接手入口：**先读它**，需要数字时按 `docs/EVIDENCE_LEDGER.md` 顶部的判决索引跳条目。
-> 文档地图：[`docs/README.md`](README.md)（哪些现行、哪些是历史存档）。工装手册：[`tools/server/README.md`](../tools/server/README.md)。
+> 文档地图：[`docs/README.md`](README.md)（哪些现行、哪些是历史存档）。工装手册：[`tools/server/README.md`](../../tools/server/README.md)。
 > 最后更新：2026-10-25 02:25 UTC（规则 v3、计数与索引对齐那一轮）。
 
 
 ## 0. 十分钟接手
 
-1. **先读章程 [`RULES.md`](RULES.md)**（怎么干活、决策权、写代码与证据规则），再读这一页：§3 的决策表
+1. **先读章程 [`RULES.md`](../RULES.md)**（怎么干活、决策权、写代码与证据规则），再读这一页：§3 的决策表
    （现在生产是什么、为什么、怎么回滚）、§6 的生产现状（PID、配置、最近重启）。
 2. **看下一轮做什么**：§13 顶部的"下一轮先做"。
 3. **扫一遍 §9 的坑**：每一条都真踩过并付过代价，重踩等于白烧重启。
@@ -32,7 +32,7 @@
 1. **兼容上游 `Niko1221/Strata`**：`main` 只 fast-forward；一分支一改动；默认路径字节一致、新行为 opt-in；
    动手前先查上游 issue/PR，撞车就跟、不重复做。
    **2026-10-24 用户加了硬规矩：上游只读——不回帖、不开 PR、不提交任何东西。** 此前发过的三条评论
-   **已按此令删除**（§11）；写好的英文正文只作为台账留档放在 `docs/UPSTREAM_DRAFTS.md`，不再发布。
+   **已按此令删除**（§11）；写好的英文正文只作为台账留档放在 `archive/UPSTREAM_DRAFTS-through-2026-10-25.md`，不再发布。
 2. **判据**：同 boot A-B-A 或交错、**每臂 ≥3 次**、中位+sd、**<3% 不算结论**；改数值要过逐位门或质量门；
    每个实验落一条能追到原始日志的台账。**读代码得到的结论必须标"静态阅读，未测"**。
 3. **不许提交自己没做过的测量**（CONTRIBUTING.md 明写）。外部网站只读不压测；GitHub API 节制。
@@ -91,7 +91,7 @@ NVLink NV2、驱动**钉死 595.71.05**、vBIOS 功耗上限 280 W、CUDA 13.0�
 它在 decode 里没有位置（跨卡只有 stage 交接 ~410 KB/窗口，改 P2P 也只省 0.18%），**在 prefill 里有**：
 `set_stage_helper` 让空闲的下一段 GPU 分担一部分专家的"流 + 算"，收益来自第二条 PCIe 链路、代价是跨卡交换——
 而 `split_help_frac` 的默认值（T>3.3k 不帮、且只在单 chunk）是在 **无 P2P 的 3090 对**上定的，我们的 4.5k
-提示词正好落在关掉的一侧。测量与代码项见 [`CODE_PLAN.md`](CODE_PLAN.md) §8 / P0d。
+提示词正好落在关掉的一侧。测量与代码项见 [`CODE_PLAN.md`](CODE_PLAN-2026-10-24.md) §8 / P0d。
 服务：`strata.service` → `/opt/ai/src/strata-0.2.2/run-022.sh` → **自建引擎 0.1.47**（上游现在 0.1.48）。
 引擎日志 `/opt/ai/src/strata-0.2.2/strata-022.log`（**logrotate 每天 00:00 转成 `.log.1`**）；
 服务日志 `/opt/ai/logs/strata-service.log`。GPU0 稳态负载下 ~70–78 ℃、空载 ~62 ℃（**负载驱动，正常**）。
@@ -290,7 +290,7 @@ MainPID **147049**（服务进程 06:20:13Z 起）、引擎子进程 **147064**�
 
 ## 10. 工装（源码在 `tools/server/`，部署在 `/opt/ai/bin`）
 
-**手册在 [`tools/server/README.md`](../tools/server/README.md)**：每个脚本干什么、属于哪一类（`ops-` 改机器 /
+**手册在 [`tools/server/README.md`](../../tools/server/README.md)**：每个脚本干什么、属于哪一类（`ops-` 改机器 /
 `exp-` 要重启 / `probe-` 只读）、写到哪里、对应哪条台账。改脚本的规矩也写在那份文件里。
 
 三条必须记住的：
@@ -311,7 +311,7 @@ MainPID **147049**（服务进程 06:20:13Z 起）、引擎子进程 **147064**�
 `server-dashboard-0.2.6`。13 个过时树（0.1.45、0.1.45-tp、0.2.0-beta、0.2.0-tp、上游 main 快照、
 llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的东西在
 `/opt/ai/backups/outdated-src-20261024/`（`MANIFEST.md` 说清删了什么、为什么、留了什么）。
-**本机唯一一处本机代码优化（TP 张量并行）已归档到 [`patches/local-strata/`](../patches/local-strata/README.md)，
+**本机唯一一处本机代码优化（TP 张量并行）已归档到 `patches/local-strata/`，
 判定不合并**（L-033：只作用单流窗口、+3% 在噪声线内、移植要跨两个上游版本）。
 
 ---
@@ -379,9 +379,9 @@ llama.cpp-v0.4.1、dashboard 旧版）已删，释放 4.8 GB；抢救出来的�
 
 ## 13. 未决 / 待观察
 
-**（2026-10-24 夜，多路融合立项）** 计划见 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN.md)（W1–W4），
-功能清单与验收见 [`FEATURE_PARITY.md`](FEATURE_PARITY.md)，口径见 [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)，
-执行规则与每轮复盘见 [`MULTIPATH_RULES.md`](MULTIPATH_RULES.md) / [`MULTIPATH_LOG.md`](MULTIPATH_LOG.md)。
+**（2026-10-24 夜，多路融合立项）** 计划见 [`MULTIPATH_PLAN.md`](MULTIPATH_PLAN-2026-10-24.md)（W1–W4），
+功能清单与验收见 [`FEATURE_PARITY.md`](FEATURE_PARITY-2026-10-24.md)，口径见 [`MULTIPATH_STANDARD.md`](../MULTIPATH_STANDARD.md)，
+执行规则与每轮复盘见 [`MULTIPATH_RULES.md`](../MULTIPATH_RULES.md) / [`MULTIPATH_LOG.md`](MULTIPATH_LOG-through-2026-10-25.md)。
 当前目标 `goal-49e1a86f-f67c-491d-b12b-21a5be8e2407`（2026-10-25 状态复位后；旧 `goal-402218d9-57d7-4af1-aea0-391a1494acd9` 作废）。
 **24/7 协议 v1.3（2026-10-25）**：`PORTING_RULES.md` §12 队列驱动、轮次 ≤45 min、独立复核、自更新边界、
 熔断（同项 3 轮/生产健康 2 次失败）、停机条件；重启次数只记录、不设上限；`WORK_QUEUE.md`（18 项）为唯一事实源，`STATE.md` 为断点；
@@ -422,7 +422,7 @@ env**，我自己的 `prefill_help=0` 把它关了 —— 两个条件同时满�
 > **代码侧现状**：单流延迟由架构固定开销主导（每 token 一次窗口、每层一次交接），
 > 今晚 6 条候选全部实测否决后，**没有一条 ≥5% 且可安全落地的代码改动** —— 这是结论，不是没做完。
 
-**代码计划见 [`CODE_PLAN.md`](CODE_PLAN.md)**（v2：P0 定位病因 → P1-A/B/C 三选一 → P2 head 分卡 → P3 结构级；含测量协议与不做清单）。
+**代码计划见 [`CODE_PLAN.md`](CODE_PLAN-2026-10-24.md)**（v2：P0 定位病因 → P1-A/B/C 三选一 → P2 head 分卡 → P3 结构级；含测量协议与不做清单）。
 
 **代码优化的现状（2026-10-24 第 4 轮结束时）**
 
@@ -470,7 +470,7 @@ env**，我自己的 `prefill_help=0` 把它关了 —— 两个条件同时满�
    真要花一次重启，值的是 `STRATA_PREFILL_MMQ=0` 对默认（证明 prompt 到底走不走 MMQ、多大），不是 backport。
    另记一条 build 坑：Strata 把这个调度器**镜像**在 `moe_mmq_tab.cuh:427`，CMake 对 `mmq.cuh:875..1571`
    做指纹，backport 会让 `STRATA_MMQ_TAB` 自动关掉（今天它 OFF，所以暂无影响）。
-   **Draft D 写好了，按"上游只读"的新规矩不再发**（`docs/UPSTREAM_DRAFTS.md`）。
+   **Draft D 写好了，按"上游只读"的新规矩不再发**（`archive/UPSTREAM_DRAFTS-through-2026-10-25.md`）。
 2. **`/opt/ai/bin` 剩余脚本继续搬进 git**：本轮搬了 `passive_windows.py`、`concurrent_reads.py`，外加 9 个
    判据脚本（`nvlink-crc-sample.sh`、`t2check.py`、`thinking-budget-ab.sh`、`soak-analyze.py`、`warm-measure.py`、
    `read-gap.py`、`metrics-peek.py`、`verify-running-config.sh`、`check-session-warnings.sh`）。

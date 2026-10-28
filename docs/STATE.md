@@ -3,33 +3,43 @@
 > 接手顺序：`RULES.md` → 本文件 → `ROADMAP.md` → `ITERATION_LOG.md` 最近两条。
 > 本文件只写当前断点，不重复历史、规则或完整证据。
 
-- 目标：持续优化用户可感知的推理性能、稳定性和资源效率；当前全局优化目标暂停。
-- 当前阶段：生产已从 `6×192K` 切换到 `6×256K` 并完成功能验证；256K 长时间 soak 尚未开始。
-- 当前项：CTX256（256K mixed soak）。
-- 当前迭代：无运行中实验。切换后的两次长上下文 needle、一次基础请求和一次 6 路短并发已完成；
-  这不等替一小时 mixed soak。
-- 下一动作：用户恢复全局目标后，先跑 256K mixed soak；P7 之后必须从全新的 A1 起完整重跑 A-B-A，
-  B 只增加 `STRATA_PF_WMMA=1`，并重新从 `/proc/<engine-pid>/environ` 证明运行态。
-- 当前候选：P7 仍是未验证候选；engine read 与 wall 均需改善 ≥3%，A2 需回到 A 的 3% 内。
+- 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
+- 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
+  功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
+- 当前项：先对 Nsight 暴露的低 issue/Tensor/warp 窗口做 NCU 根因归因，然后只改对应的内核或
+  调度代码，提升瓶颈管线占用。
+- 当前迭代：无运行中实验。工作区整理、上游合并部署和吞吐复测已完成；Nsight GPU Metrics 已完成，
+  NCU 尚未执行，P7 搁置。
+- 下一动作：性能工作按计划在独立受控 engine 上做 NCU 根因归因；固定同一模型、32K prompt 和
+  采集指标，结束时恢复当前生产。得到 stall 证据后只选择一个最能提高资源利用率的代码切片。
+  参数 A/B 只用于验证代码改动的部署收益，不再做独立参数探索。
+- 当前候选：UTIL-KERNEL。先根据 NCU 锁定一个瓶颈内核，再预先固定主计数器和端到端 wall 门限；
+  P7 只有在证据表明 Tensor 管线是直接瓶颈时才恢复，并仍需完整 A-B-A。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
-- 未完成采纳项：16。
+- 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
+  Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
+- 未完成采纳项：18。
 - 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
   该测量路线不阻塞主线。
 
 ## 生产
 
-- `strata.service` 在 `192.168.2.223:8080`，health 200、`loaded=true`（256K 切换后实测）。
-- **生产已部署合并引擎 `0.1.51` / `a09d78b1`**：server `de09cffd`、launcher `34271059`、
-  config `ea1e2959`；引擎自身一小时 mixed soak 与 T-probe 均通过。
+- `strata.service` 在 `192.168.2.223:8080`，`active/running`、`NRestarts=0`、health 200、
+  `loaded=true`（2026-10-28 实测）。
+- **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
+  干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
+  config md5 `023663ba`。服务实际启动的 engine 为
+  `/opt/ai/src/strata-027-picks/build75-027/strata`；修复后的 T-probe 从进程 argv 识别实际
+  engine/server/config，现网返回 `problems=[]`。
 - 生产配置：`parallel=6`、`max_context=262144`、`STRATA_HC_Q8=1`，W3 staged read 开启，阈值 2048；
   lead-in 1600 ms、等待 750 ms、只处理 ≥4096-token 的冷读，短请求首准入阈值 2048。
-- 256K 下 `batch_slots=6`、`kv_resident=32768`、`expert_slots=17248`、expert cache `28222 MiB`；
-  启动后两卡自报空闲 `1005/1073 MiB`。
+- 256K 下 `batch_slots=6`、`kv_resident=32768`、`expert_slots=17280`、`max_context=262144`；
+  服务进程参数包含 `--batch 6 --layer-split 24 --batch-groups 2`。
 - `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 config 的 `env` 只会传给引擎子进程。
-- 回滚快照：当前生产优先使用 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；P4 严格基线仍保留在
-  `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。更早的 400 ms P3 配置仍保留在
-  `/opt/ai/tmp/pre-P3-ABA-20261025T213040Z/strata-022.json`，仅用于历史回退。
+- 旧 `0.1.51` / `a09d78b1` 二进制仍保留在 `/opt/ai/src/strata-0.2.2/build/strata`，可用于
+  紧急回退；切换前的 `6×256K` 历史快照仍在 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`。
+  c219 合并前的完整 Git 状态保留在本地 `refs/codex-backup/pre-workspace-cleanup-*`。
 
 ## 已知结果
 
@@ -91,6 +101,29 @@
   `a09d78b1`，单路合并中位 `71.3` 对旧 `68.8`（+3.6%），4 路 `130.0` 对 `130.4`
   （−0.3%），cold prefill +0.4%。CTest 为 151 passed / 8 skipped / 1 failed，唯一失败是
   服务器缺少 Q2_0 PLE 外部资产，不能写成全测试绿。
+- `6×256K` 版本吞吐 A-B-A 已完成：新版单路 engine decode `80.45` 对旧版 `82.7 tok/s`
+  （−2.72%），4 路 `136.05` 对 `139.6`（−2.54%），冷读 `2267` 对 `2273`（−0.26%）；
+  均在 3% 门内。三臂 greedy 哈希一致，最终恢复新版后 T-probe `problems=[]`。
+- `CTX256` 一小时 soak 已通过：414 请求、133 waves、0 错误、0 意外 length、74/74 needle；
+  batch slots 始终 6、expert slots 始终 17248、version 始终 `0.1.51`，结束后 T-probe
+  `problems=[]`。14 次约 245.9K 长读全部成功，wall 中位 `101.077 s`。
+- 真实硬件计数首轮已验证：约 32K 冷 prefill 的 SMs Active 中位 `77%`、p90 `98%`，
+  SM Issue `13–14%`、Tensor `10%`、Warps `28%`、DRAM read `15%`；两次同窗 NVML
+  分别为 `95/98%` 与 `40/99%`，只表示采样活动，不能代表算术或 Tensor 利用率。
+- 上游合并构建吞吐复测（数字序列、512-token 上限）：单路 `102.46/105.64 tok/s`，6 路聚合
+  `163.70/165.66 tok/s`；自然语言单路 `67.24/70.21 tok/s`，6 路聚合
+  `148.94/150.71 tok/s`。3,427-token 冷读为 `923.7/931.4 tok/s`。
+- 并发凹点已复现：2 路数字序列聚合只有 `94.03/95.67 tok/s`，低于单路；
+  8 路聚合为 `137.85/139.66 tok/s`，低于 6 路且平均 TTFT 升至约 `5.7–5.8 s`。
+  当前 6 槽上限有效，但 2 路和 8 路都需要单独优化，不能只看峰值。
+- 服务器独立构建目录 `/opt/ai/src/strata-027-picks/build75-027` 构建成功；终端最终测试
+  `1224 passed / 56 skipped / 10894 subtests passed`。CTest 仍保留 6 个已知失败：
+  `mmvq_il_parity`、`iq_multi_parity`、`gdn_rec_parity`、`native_grouped_parity`、
+  `ple_parity`、`native_expert_parity_q8_0_q8_0`；其中 `ple_parity` 缺外部 Q2_0 PLE 文件，
+  `gdn_rec_parity` 在部分断言通过后 OOM，不能写成全测试绿。
+- 版本探针已改为从进程 argv 读取实际 engine/server/config 路径，不再依赖 `build/strata`；
+  现网输出 `problems=[]`，`mixed-soak.py` 也能读取当前 engine 的 PID 与 RSS。工具联合回归
+  `28 passed, 1 skipped`；本轮未重跑需要 root 的完整 Nsight GPU Metrics。
 - 配置漂移门禁已采纳：`--expect-env-file production-env-2080ti.json` 精确核对 12 个关键运行态 env；
   缺键或错值会失败。现网一次实测 0 problems。
 - 当前最大用户可感知短板仍是 96K 冷 prefill 本身约 37–42 s，以及满槽准入约 11.4–13.9 s；
@@ -105,6 +138,11 @@
 ## 当前风险
 
 - 4 路聚合跨 boot 噪声约 9%，同会话低于 3% 不下结论。
+- 上游合并构建在 2 路出现吞吐凹点，8 路没有相对 6 路的吞吐收益且 TTFT 明显变差；
+  任何批处理或 kernel 改动都必须同时检查单路、2/4/6/8 路和 TTFT，不允许只优化峰值。
+- CTest 的 6 个已知失败仍未清零；运行验收通过不能替代这些 parity/OOM 缺口。
+- `6×256K` 的 4 路版本差为 −2.54%，距 3% 门限只有约 0.46 个百分点；后续任何调度或内核改动
+  都必须重新做同配置 A-B-A，不能把本轮“无显著回退”扩大成“没有性能代价”。
 - 性能 A/B 前必须先证明实验开关真的进入目标路径；否则 on/off 两臂可能完全相同。
 - C1 的 6/8 槽受控边界已测；不同邻居长度和真实混合流量下的准入上限仍未覆盖。
 - 新引擎进入 GPU A/B 前必须用 T-probe 证明 running engine/server hash；版本戳已不再从旧目录猜路径。
@@ -120,14 +158,14 @@
 - 当前公平性测试只覆盖 14/41-token 输出和 96K 冷读；32K/64K、多长读、取消与真实外部流量未覆盖。
 - `STRATA_PA_V2T=1` 改变 prompt-attention 的求和/暂存顺序，即使性能提升也必须先通过 greedy parity
   与 needle；哈希变化不能自动判为正确或错误。
-- P7 已暂停且没有有效样本；恢复后必须新建完整 A-B-A，不能复用被中断的首请求或把“实验已启动”
-  当作部分结果。`STRATA_PF_WMMA=1` 走 FP16 tensor-core prompt experts，输出可能变化；
-  速度达标后仍必须有质量门。
-- 256K 只完成了两次单请求 needle 和一次 6 路短并发，尚未跑一小时 mixed soak；不能把当前结果
-  写成“256K 全负载稳定”。
-- `253,633` token 已覆盖上限的约 96.8%，但仍比 `262144` 少 `8,511` token；真实满窗口请求、
-  多长读同时到达、取消和长时间 pinned RAM 压力仍未覆盖。
-- 两次长读后可用 RAM 降到约 `5.8 GiB`；虽然 swap 为 0，后续 soak 必须监控最低可用内存、
-  conversation cache 淘汰和 KV host read，而不是只看两卡显存。
+- P7 已搁置且没有有效样本；只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复。恢复后必须新建完整
+  A-B-A，不能复用被中断的首请求或把“实验已启动”当作部分结果。`STRATA_PF_WMMA=1`
+  走 FP16 tensor-core prompt experts，输出可能变化；速度达标后仍必须有质量门。
+- `CTX256` 已通过，但并发最高为 4，不能写成“6 槽满载稳定”；最长 prompt 为
+  `245,856` token，仍比 `262144` 少 `16,288`，真实满窗口仍未覆盖。
+- soak 的最低 available RAM 为 `2430.4 MiB`；swap 未用，但后续多长读或提高并发必须继续监控
+  conversation cache 淘汰和 KV host read，不能只看末值或两卡显存。
+- Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
+  或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-26T16:05+08:00（生产切换为 `6×256K`；功能门通过，mixed soak 待做）
+- 最后更新：2026-10-28T13:35+08:00（上游 37 提交已部署；吞吐和并发凹点已复测，测试缺口保留）

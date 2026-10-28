@@ -152,7 +152,7 @@ interleaved, not as one run each.
    passive: the four-stream aggregate and any rise in empty or truncated answers in the service log, before
    spending another restart window on anything.
 2. Rebuild from `hw/server-adapt` and confirm it matches the binary that is serving now.
-3. Post the two upstream comment drafts in `docs/UPSTREAM_DRAFTS.md` (the #2275 one carries the 84K and 127K
+3. Post the two upstream comment drafts in `archive/UPSTREAM_DRAFTS-through-2026-10-25.md` (the #2275 one carries the 84K and 127K
    concurrent-read numbers and the instrumented answer to the recycled-buffer objection). They are written and
    unposted; posting is the owner's call.
 4. Only then touch placement, if the numbers ask for it: the split planner and the RAM tier on 22 GB cards.

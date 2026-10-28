@@ -6,6 +6,9 @@
 >
 > 标记约定：**†** = fork 自述的数字或收益，**未在本机复现**，只用于定位"它认为值钱的地方"，不当作 Strata 的收益预期。
 > 所有 status 判定都带行号；行号以本文件写作时的两侧树为准（fork 是 `git diff b23433088b HEAD` 的 `+` 侧，Strata 是工作区）。
+>
+> **状态：历史审计记录（2026-10-25）。** status 与行号按当时 HEAD `738c65d9` + 工作区写，不代表当前 HEAD；
+> 每项的现行判定看 [`VLLM_PORT_PLAN.md`](VLLM_PORT_PLAN.md) §5 状态表与 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)。
 
 ## 0. 方法与范围
 

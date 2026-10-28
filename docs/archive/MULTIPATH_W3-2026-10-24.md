@@ -4,7 +4,7 @@
 
 > 状态：设计稿（R3 起）。基线：生产 `strata-0.2.2` / engine `0.1.47`（服务器 `/opt/ai/src/strata-mp`，
 > 与生产同一份源码的副本）。所有行号都是 **0.1.47** 的，和仓库里的 0.1.48 差约 150 行。
-> 判据见 [`MULTIPATH_STANDARD.md`](MULTIPATH_STANDARD.md)：读者首 token ≤2 s、邻居停顿 ≤1 s、
+> 判据见 [`MULTIPATH_STANDARD.md`](../MULTIPATH_STANDARD.md)：读者首 token ≤2 s、邻居停顿 ≤1 s、
 > 聚合 ≥ 基线 −3%；基线 27.2 s / 0.68 s / 120.5 tok/s（L-046）。
 
 ## 1. 为什么必须动引擎
