@@ -34,7 +34,7 @@ print("config ok: %d args, parallel=%s" % (len(a), c.get("parallel")))
 PY
 [ $? -eq 0 ] || { echo "refusing to install a config that is not the shape the service expects"; exit 1; }
 
-oldpid=$(pgrep -f 'build/strata --serve' | head -1)
+oldpid=$(pgrep -f '[s]trata --serve' | head -1)
 cp -p "$RUN" "$BK/strata-022.json.$TS"
 cp -p "$CFG" "$RUN"
 echo "config in place: $CFG   backup: $BK/strata-022.json.$TS   old engine pid ${oldpid:-none}"
@@ -50,7 +50,7 @@ fi
 
 newpid=""
 for i in $(seq 1 40); do
-  newpid=$(pgrep -f 'build/strata --serve' | head -1)
+  newpid=$(pgrep -f '[s]trata --serve' | head -1)
   [ -n "$newpid" ] && [ "$newpid" != "$oldpid" ] && break
   sleep 3
 done

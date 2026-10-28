@@ -49,7 +49,7 @@ PY
 # Is the service already running exactly arm A?  If so the first restart is wasted and we skip it.
 # Both halves matter: the live config matching arm A says what would start, and the running engine's
 # environment says what did start - a config edited on disk but never restarted matches only the first.
-EPID=$(pgrep -f 'build/strata --serve' | head -1)
+EPID=$(pgrep -f '[s]trata --serve' | head -1)
 same=""
 if [ -n "${EPID:-}" ]; then
   same=$(python3 - "$A" <<'PY'

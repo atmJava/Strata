@@ -26,7 +26,7 @@ KEY=$(python3 -c "import json;print(json.load(open('$CFG')).get('api_key',''))")
   echo "--- config env ---"
   python3 -c "import json;c=json.load(open('$CFG'));print(json.dumps(c.get('env'),indent=1,sort_keys=True))"
   echo "--- engine env (actual process) ---"
-  E=$(pgrep -f 'build/strata --serve' | head -1)
+  E=$(pgrep -f '[s]trata --serve' | head -1)
   if [ -n "${E:-}" ]; then
     tr '\0' '\n' < "/proc/$E/environ" | grep -E '^STRATA_' | sort
     echo "engine pid $E"

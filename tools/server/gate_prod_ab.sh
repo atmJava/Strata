@@ -39,7 +39,7 @@ say() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$OUT"; }
 
 snapshot() {
   local pid gate
-  pid=$(pgrep -f "build/strata --serve" | head -1)
+  pid=$(pgrep -f "[s]trata --serve" | head -1)
   gate=$(tr '\0' '\n' < "/proc/${pid:-1}/environ" 2>/dev/null | grep '^STRATA_PIPED_CONCURRENT' || echo MISSING)
   say "engine pid=${pid:-none}  $gate  live config sha=$(sha256sum < "$CFG" | cut -c1-12)"
 }

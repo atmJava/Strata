@@ -5,7 +5,7 @@
 #
 # Two files in the production tree change: build/strata (the ported engine) and run-022.sh (which now runs
 # the port tree's server).  The config is NOT touched: its exe/cwd stay production's, so use-config.sh's
-# restart detection (pgrep 'build/strata --serve') and verify-running-config.sh keep working.  The port tree
+# restart detection (pgrep '[s]trata --serve') and verify-running-config.sh keep working.  The port tree
 # is self-contained (its serve/, strata_control/, strata_cli/ and tools/ are the repo's own, as the mock
 # start proved) - the first attempt failed because it mixed 0.2.3's serve/ with 0.2.2's strata_control,
 # which has no tls module.

@@ -28,6 +28,9 @@ import subprocess
 import sys
 import time
 
+ENGINE_PROCESS_PATTERN = "[s]trata --serve"
+SERVER_PROCESS_PATTERN = "serve/[s]erver.py --engine"
+
 REMOTE_PROGRAM = r'''
 import hashlib, json, os, subprocess, sys, time, urllib.request
 
@@ -68,22 +71,29 @@ out = {"collected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
        "files": {}, "running": {}, "markers": {}, "health": None, "engine": None, "errors": []}
 
 # the engine is a child of the python server; match the binary, not the systemd MainPID
-engine_pid = subprocess.run(["pgrep", "-f", "build/strata --serve"], capture_output=True, text=True).stdout.split()
-server_pid = subprocess.run(["pgrep", "-f", "serve/server.py --engine"], capture_output=True, text=True).stdout.split()
+engine_pid = subprocess.run(["pgrep", "-f", "__ENGINE_PROCESS_PATTERN__"],
+                            capture_output=True, text=True).stdout.split()
+server_pid = subprocess.run(["pgrep", "-f", "__SERVER_PROCESS_PATTERN__"],
+                            capture_output=True, text=True).stdout.split()
 agent_script = None
+agent_config = None
 if server_pid:
     pid = server_pid[0]
     try:
         argv = [part for part in open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0") if part]
-        for part in argv:
-            text = part.decode("utf-8", "replace")
+        text_argv = [part.decode("utf-8", "replace") for part in argv]
+        for index, text in enumerate(text_argv):
             if text.endswith("/serve/server.py") or text.endswith("serve/server.py"):
                 agent_script = text
-                break
+            elif text == "--config" and index + 1 < len(text_argv):
+                agent_config = text_argv[index + 1]
+            elif text.startswith("--config="):
+                agent_config = text.partition("=")[2]
         out["running"]["server"] = {
             "pid": int(pid),
             "cmdline": b" ".join(argv).decode("utf-8", "replace").strip(),
             "script": agent_script,
+            "config": agent_config,
             "started": subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True, text=True).stdout.strip(),
         }
     except OSError as exc:
@@ -113,6 +123,8 @@ if engine_binary:
     FILES["engine"] = engine_binary
 if agent_script:
     FILES["server"] = agent_script
+if agent_config:
+    FILES["config"] = agent_config
 out["default_paths"] = dict(DEFAULT_FILES)
 for name, path in FILES.items():
     try:
@@ -150,7 +162,9 @@ except Exception as exc:                                    # noqa: BLE001
     out["errors"].append("metrics: %s" % exc)
 
 print(json.dumps(out))
-'''
+'''.replace("__ENGINE_PROCESS_PATTERN__", ENGINE_PROCESS_PATTERN).replace(
+    "__SERVER_PROCESS_PATTERN__", SERVER_PROCESS_PATTERN
+)
 
 
 def run_remote(host: str, base_url: str, api_key: str) -> dict:
@@ -181,6 +195,15 @@ def check(stamp: dict) -> list[str]:
         problems.append("running server: cannot identify its serve/server.py")
     elif server_file and running_server.get("script") != server_file["path"]:
         problems.append(f"running server script {running_server.get('script')} is not the hashed {server_file['path']}")
+    config_file = stamp.get("files", {}).get("config")
+    if not running_server:
+        problems.append("running server: cannot identify its config")
+    elif not running_server.get("config"):
+        problems.append("running server: cannot identify its --config")
+    elif config_file and running_server.get("config") != config_file["path"]:
+        problems.append(
+            f"running server config {running_server.get('config')} is not the hashed {config_file['path']}"
+        )
     health = stamp.get("health")
     if not isinstance(health, dict):
         problems.append("health: no JSON")

@@ -7,14 +7,14 @@
 # twice and the script kept pointing at whichever tree was current when it was written (it was
 # reading /opt/ai/src/strata-0.1.40.1 while production had moved to strata-0.2.2).  Defaults now:
 #   CFG=/opt/ai/src/strata-0.2.2/strata-022.json   LOG=/opt/ai/src/strata-0.2.2/strata-022.log
-#   ENGINE_PATTERN='build/strata --serve'
+#   ENGINE_PATTERN='[s]trata --serve'
 # The engine is a CHILD of the python server: systemd's MainPID is the server, and its environ
 # holds no STRATA_* at all.  pgrep for the engine binary, not for MainPID.
 set -u
 S=${S:-/opt/ai/src/strata-0.2.2}
 CFG=${CFG:-$S/strata-022.json}
 L=${LOG:-$S/strata-022.log}
-ENGINE_PATTERN=${ENGINE_PATTERN:-build/strata --serve}
+ENGINE_PATTERN=${ENGINE_PATTERN:-[s]trata --serve}
 PID=$(pgrep -f "$ENGINE_PATTERN" | head -1)
 
 echo "engine pid    = ${PID:-NONE}"

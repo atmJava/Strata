@@ -23,7 +23,7 @@ def _stamp(engine: str, server: str) -> dict:
         },
         "running": {
             "engine": {"binary": engine},
-            "server": {"script": server},
+            "server": {"script": server, "config": "/config"},
         },
         "health": {"loaded": True},
     }
@@ -45,6 +45,26 @@ def test_check_rejects_an_unidentified_server_script():
     stamp["running"]["server"]["script"] = None
     problems = probe.check(stamp)
     assert any("cannot identify" in problem for problem in problems)
+
+
+def test_check_rejects_a_config_hash_from_another_file():
+    stamp = _stamp("/run/strata", "/run/serve/server.py")
+    stamp["files"]["config"]["path"] = "/run/old/strata-live.json"
+    problems = probe.check(stamp)
+    assert any("running server config" in problem for problem in problems)
+
+
+def test_check_rejects_an_unidentified_running_config():
+    stamp = _stamp("/run/strata", "/run/serve/server.py")
+    stamp["running"]["server"]["config"] = None
+    problems = probe.check(stamp)
+    assert any("cannot identify its --config" in problem for problem in problems)
+
+
+def test_probe_discovers_engine_independent_of_build_directory():
+    assert probe.ENGINE_PROCESS_PATTERN == "[s]trata --serve"
+    assert "build/strata --serve" not in probe.REMOTE_PROGRAM
+    assert "[s]trata --serve" in probe.REMOTE_PROGRAM
 
 
 def test_expected_env_accepts_exact_running_switches():

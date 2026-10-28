@@ -24,7 +24,7 @@ GO=0
 say() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 ssh_() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "$@"; }
 
-pid=$(ssh_ "pgrep -f 'build/strata --serve' | head -1")
+pid=$(ssh_ "pgrep -f '[s]trata --serve' | head -1")
 [ -n "$pid" ] || { echo "no engine process found" >&2; exit 1; }
 say "engine pid=$pid"
 if [ "$GO" -eq 0 ]; then
@@ -50,7 +50,7 @@ if [ -z "$seen" ]; then
   exit 1
 fi
 
-now=$(ssh_ "pgrep -f 'build/strata --serve' | head -1")
+now=$(ssh_ "pgrep -f '[s]trata --serve' | head -1")
 if [ -z "$now" ] || [ "$now" != "$pid" ]; then
   say "engine pid changed before the kill ($now vs $pid); aborting the kill"
   wait "$probe_pid" 2>/dev/null

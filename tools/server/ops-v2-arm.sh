@@ -66,7 +66,7 @@ PY
       exit 0
     fi
     "$USE_CONFIG" "$out" || { echo "RESTART FAILED - restore with ops-v2-window.sh restore --go" >&2; exit 1; }
-    pid=$(pgrep -f 'build/strata --serve' | head -1)
+    pid=$(pgrep -f '[s]trata --serve' | head -1)
     echo "== running engine pid ${pid:-none}; $NAME in its environment:"
     [ -n "$pid" ] && tr '\0' '\n' < "/proc/$pid/environ" | grep -E "^$NAME=" | sed 's/^/  /' || echo "  (not set)"
     ;;
