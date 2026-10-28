@@ -58,6 +58,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `turn-ttft.py`, `stage_repeat_probe.py` | the fixed cost of a small read: is it expert staging or per-run work | jsonl |
 | `parity_window.py` | bitwise gate for a kernel or layout change | exit code + hashes |
 | `probe_determinism.py` | is run-to-run spread sampling or the engine | `/opt/ai/runs/probe-determinism.json` |
+| `probe-gpu-utilization.py` | what the GPU hardware counters show during a controlled short decode and cold long prefill; separates SM activity, issue, Tensor, warps and DRAM | `/opt/ai/logs/gpu-util-*/probe.json`, `.nsys-rep` and `.sqlite`; `--check-only` validates the collection path without inference |
 | `agent_budget_ab.py` | agent-shaped A/B with a real tool loop, self-scoring tasks | `/opt/ai/runs/agent-budget-ab-*.json` |
 | `quality_eval.py`, `quality_eval_budget.py` | small self-scoring quality eval (the quality gate) | stdout |
 | `effort-cost.py`, `effort_lang_ab.py`, `replay_effort_ab.py` | what a thinking budget costs and changes | jsonl / stdout |
@@ -66,7 +67,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `soak-analyze.py` | soak log summary: errors, RSS and MemAvailable drift | stdout |
 | `run-arm.sh`, `t2-run.sh`, `t2check.py`, `prepare-t2.py` | same-boot arm bookkeeping and the T2 bitwise arm | `/opt/ai/logs/arm-*` |
 | `hitrate_before_after.py` | **legacy**, superseded by `passive_windows.py` | kept for the older ledger entries |
-| `probe-version-stamp.py` | what the box is *running*: md5/sha256/mtime of the four deployed files, the running engine/server, its `STRATA_*` env, feature markers, `/health`; `--expect-env-file production-env-2080ti.json` turns required switches into a deployment gate | stdout + the JSON named by `--out` |
+| `probe-version-stamp.py` | what the box is *running*: md5/sha256/mtime of the four deployed files, the running engine/server, its `STRATA_*` env, feature markers, `/health`; engine/server/config paths come from process argv rather than a fixed build directory, and `--expect-env-file production-env-2080ti.json` turns required switches into a deployment gate | stdout + the JSON named by `--out` |
 | `probe-instrument-cost.py` | what the S2 per-request timing probe itself costs (local micro-benchmark) | stdout |
 
 ### exp — costs restarts, always ends restored
@@ -114,10 +115,36 @@ See [`tests/README.md`](tests/README.md). The tests are real requests: do not ru
 `ops-check-tool-sync.sh` answers "are they the same" in one line per file; run it after every edit and before
 any experiment, and never edit a script on the box without bringing it back here.
 
+## 真实 GPU 利用率诊断
+
+`probe-gpu-utilization.py` 回答的是“硬件管线实际在做什么”，不是“NVML 看起来有多忙”。
+它使用 root 权限启动系统级 Nsight Systems GPU Metrics，同时用 1 Hz NVML 采样做交叉核对；
+默认对现役服务发送一次短解码和一次约 32K token 的冷 prefill，不重启、不改配置。
+
+```sh
+sudo /opt/ai/bin/probe-gpu-utilization.py --profile mixed --long-tokens 32768
+sudo /opt/ai/bin/probe-gpu-utilization.py --check-only
+```
+
+必须把 `SMs Active`、`SM Issue`、`Tensor Active`、`Compute Warps in Flight` 和
+`DRAM Read/Write Bandwidth` 分开解释。`nvidia-smi utilization.gpu` 只表示采样窗口内设备有活动，
+不能写成算术单元或 Tensor 管线利用率。SQLite 导出没有稳定的 Nsight channel 到 GPU UUID 映射，
+所以结果只标 `channel_0/channel_1`；NVML 侧仍保留物理 index。
+
+质量门包括 root、Nsight 版本、计数器与双通道、服务 `loaded/idle`、请求 HTTP 200、
+`finish_reason=stop`、needle、输出长度、prompt 尺寸、cache 重用、前后 PID/文件/config hash，
+以及结束后回到 idle。退出码为 `0=verified`、`1=rejected`、`2=preflight/collection failed`；
+失败 JSON 会保留，不能从失败样本推导性能结论。
+
+目前不能在现役 engine 上附加 Nsight Compute。要继续定位 stall reason，必须另起受控 engine
+实例并由 NCU 启动，不能用当前 system-wide GPU Metrics 结果替代 SM throughput、occupancy、
+Tensor pipe 和 warp stall 的逐内核归因。
+
 ## Usage signatures (the ones that take arguments)
 
 ```
 probe-version-stamp.py [--host H | --local] [--out FILE] [--expect-env-file FILE]   # measured hashes + required env
+probe-gpu-utilization.py [--profile short|long|mixed] [--long-tokens N] [--check-only]
 run-matrix.py --batch V1 [--src DIR] [--only ID] [--skip ID] # one batch, one matrix run
 check_assert_lock.py <source-tree> <build-dir>   # the 64/256 shape is locked by static_assert
 use-config.sh <config.json>                      # the only install/restore entry, ~156 s

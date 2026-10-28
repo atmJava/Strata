@@ -29,6 +29,8 @@ from collections import Counter, defaultdict
 
 
 MODEL = "qwen3.8-flash-next-iq3_xxs"
+ENGINE_PROCESS_PATTERN = "[s]trata --serve"
+SERVER_PROCESS_PATTERN = "serve/[s]erver.py --engine"
 TOOLS = [{
     "type": "function",
     "function": {
@@ -219,8 +221,8 @@ class Sampler(threading.Thread):
             row["metrics_error"] = f"{type(error).__name__}: {error}"
 
         row["memory"] = meminfo()
-        row["engine_pid"], row["engine_rss_mib"] = pid_rss_mib("build/strata --serve")
-        row["server_pid"], row["server_rss_mib"] = pid_rss_mib("serve/server.py --engine")
+        row["engine_pid"], row["engine_rss_mib"] = pid_rss_mib(ENGINE_PROCESS_PATTERN)
+        row["server_pid"], row["server_rss_mib"] = pid_rss_mib(SERVER_PROCESS_PATTERN)
         row["gpus"] = gpu_sample()
         self._read_log_increment()
         row["last_hit"] = self.last_hit
@@ -346,6 +348,7 @@ WAVE_SHAPES = [
     ("short_json", "medium_code"),
 ]
 FAIRNESS_SHAPE = ("short_json", "short_json", "medium_code", "long_96k")
+CTX256_SHAPES = WAVE_SHAPES + [("short_json", "medium_code", "agent_tool", "long_240k")]
 
 
 def make_task(kind: str, wave: int, lane: int) -> dict:
@@ -534,8 +537,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--duration", type=int, default=3600, help="seconds of load")
     parser.add_argument("--sample-every", type=float, default=10)
     parser.add_argument("--request-timeout", type=float, default=1800)
-    parser.add_argument("--profile", choices=("mixed", "fairness"), default="mixed",
-                        help="mixed: the 8-wave soak; fairness: repeat the 4-way 96K-neighbor wave")
+    parser.add_argument("--profile", choices=("mixed", "fairness", "ctx256"), default="mixed",
+                        help="mixed: the 8-wave soak; fairness: repeat the 4-way 96K-neighbor wave; "
+                             "ctx256: mixed plus a near-256K cold read each cycle")
     parser.add_argument("--waves", type=int, default=0, help="stop after N waves (0: use duration)")
     parser.add_argument("--engine-log", type=pathlib.Path,
                         default=pathlib.Path("/opt/ai/src/strata-0.2.2/strata-022.log"))
@@ -548,7 +552,11 @@ def main(argv: list[str]) -> int:
     out_path = options.out or pathlib.Path(f"/opt/ai/logs/P2-mixed-soak-{stamp}.jsonl")
     summary_path = options.summary or out_path.with_suffix(".summary.json")
     text_path = summary_path.with_suffix(".txt")
-    shapes = WAVE_SHAPES if options.profile == "mixed" else [FAIRNESS_SHAPE]
+    shapes = {
+        "mixed": WAVE_SHAPES,
+        "fairness": [FAIRNESS_SHAPE],
+        "ctx256": CTX256_SHAPES,
+    }[options.profile]
 
     if options.dry_run:
         for wave, shape in enumerate(shapes):
