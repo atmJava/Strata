@@ -251,6 +251,7 @@ class PickSlot(unittest.TestCase):
         e.slot_cv = threading.Condition()
         e.ctl = threading.Lock()
         e.waiting = 0
+        e.ctl_epoch = 0
         return e
 
     def test_the_slot_that_holds_the_conversation(self):
@@ -334,6 +335,22 @@ class PickSlot(unittest.TestCase):
                              "for a long read: it could then get neither the slot nor the solo continuation")
         finally:
             e.ctl.release()
+        self.assertEqual(e.ctl_epoch, 1, "the lines changed hands once here and no more; counting the attempt that "
+                                         "found them busy would hand the next turn to a request that only waited")
+
+    def test_a_lone_slot_that_is_not_alone_gives_the_lines_back(self):
+        """两个 slot 都忙时，取到控制通道的请求必须立刻交还，并把这次交接计入 ctl_epoch。"""
+        e = self.engine(2)
+        e.info = {"slot_cache": 1}
+        e.slot_busy[0] = True
+        e.slot_busy[1] = True
+        self.assertFalse(e._take_solo_lines(100, 0, None),
+                         "both slots are busy, so this request is not alone: it keeps decoding in its slot and hands "
+                         "the control lines straight back")
+        self.assertFalse(e.ctl.locked(), "the control lines were taken and never given back: every request that "
+                                         "comes after would wait on a lock nobody holds")
+        self.assertEqual(e.ctl_epoch, 1, "handing the lines back is still a handoff: a request that gave way only "
+                                         "takes its turn once this count moves")
 
     def test_slot_release_thread_failure_finishes_the_bounded_wait(self):
         e = self.engine(1)

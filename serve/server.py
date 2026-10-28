@@ -1808,9 +1808,12 @@ class StrataEngine:
     def _take_solo_lines(self, left: int, times: int, embeddings) -> bool:
         """为非嵌入请求原子地取得 solo 回切所需的控制通道。
 
-        返回 True 时调用方持有 ``ctl``，必须保持到 slot 结束并成功进入 solo
-        续算；否则不发送 ``BSTOP``，避免长读占着控制通道时请求既离开 batch
-        slot 又无法继续 solo。``STRATA_PARALLEL_SOLO=0`` 会完全关闭该回切。
+        返回 True 时调用方持有 ``ctl``，保持到完成 solo 交接（slot 的 BDONE 之后
+        回到 solo 路径）或交还控制通道去等 slot 为止；返回 False 时不发送
+        ``BSTOP``，避免长读占着控制通道时请求既离开 batch slot 又无法继续 solo。
+        只要取得过控制通道就记一次 ``ctl_epoch`` 并唤醒等待者，即使随后发现并不
+        独处又立刻交还：否则正在让路的请求等不到"控制通道换过手"的信号，可能在
+        通道其实空闲时仍然互相谦让。``STRATA_PARALLEL_SOLO=0`` 会完全关闭该回切。
         """
         if (embeddings or times >= self.SOLO_AGAIN_MAX or left < self.SOLO_AGAIN_MIN_LEFT or
                 not (self.info or {}).get("slot_cache") or os.environ.get("STRATA_PARALLEL_SOLO") == "0"):
@@ -1820,6 +1823,8 @@ class StrataEngine:
         alone = False
         try:
             with self.slot_cv:
+                self.ctl_epoch += 1         # 每次交接控制通道都算一次，等待者据此判断轮到自己
+                self.slot_cv.notify_all()
                 alone = sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
             return alone
         finally:
