@@ -6066,6 +6066,8 @@ def openai_collect(chunks) -> dict:
             {"reasoning_content": lps["reasoning_content"]} if lps.get("reasoning_content") else {})}
     if last.get("timings"):
         out["timings"] = last["timings"]
+    if last.get("strata_rejected_tool_calls"):
+        out["strata_rejected_tool_calls"] = last["strata_rejected_tool_calls"]
     if last.get("metrics"):
         out["metrics"] = last["metrics"]
     return out
@@ -6134,8 +6136,6 @@ def _with_reasoning(lps: dict, entries: list) -> dict:
     out = {"content": entries}
     if lps.get("reasoning_content"):
         out["reasoning_content"] = lps["reasoning_content"]
-    if last.get("strata_rejected_tool_calls"):
-        out["strata_rejected_tool_calls"] = last["strata_rejected_tool_calls"]
     return out
 
 
