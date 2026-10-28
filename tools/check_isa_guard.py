@@ -33,6 +33,7 @@ WIDE_PUBLIC = {
     "act_quant_q8_1", "q2_0_gguf_rows_multi", "s2_expert_vnni", "s2_expert_vnni_q", "s2_expert_gu_rows",
     "s2_expert_down_rows", "s2_expert_gu_rows_multi", "s2_expert_down_rows_multi", "s2_expert_vnni_multi",
     "s2_expert_scalar", "iq512_gu_rows", "iq512_rows", "iq256_gu_rows", "iq256_rows", "iq256_gu_rows_v",
+    "iq512_reference_gu_rows",               # the AVX-512 reference rows (native_expert.cpp: behind avx512 &&)
     "iq256_rows_v", "iq4nl256_down_rows", "iq4nl256_down_rows_v", "q2_0_gguf_rows_multi_avx2",
     "iq512x_rows",                           # the DS4 lane's exact AVX-512 rows (ds4_gg_cpu.cpp: after cpu_avx512_ok())
     "q2_0_gguf_rows_multi_avx2_v", "q2_0_gguf_rows_multi_avx2_legacy", "q2_0_gguf_rows_multi_avx2_bitplane",

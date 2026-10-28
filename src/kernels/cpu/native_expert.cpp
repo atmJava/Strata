@@ -62,7 +62,8 @@ bool iq4nl_reference_ok() {
     return ok;
 }
 
-// The same check for the AVX-512 accumulation of IQ3_XXS / IQ3_S / IQ2_S gate/up rows (types 18, 21, 22), SwiGLU included.
+// The same check for the AVX-512 accumulation of IQ3_XXS / IQ3_S gate/up rows (types 18, 21 - this tree's
+// iq_avx512.cpp carries no IQ2_S table), SwiGLU included.
 bool iq512_reference_ok(int type) {
     static std::mutex mu;
     static std::map<int, bool> memo;
@@ -398,7 +399,7 @@ void native_gu_rows_impl(const NativeFmt& f, const uint8_t* blob, const void* co
         if (singleton_iq) {
 #if defined(__x86_64__) || defined(_M_X64)
             if (avx512 && ggml_cpu_has_avx2() && ggml_cpu_has_fma() &&
-                (f.gu_type == 18 || f.gu_type == 21 || f.gu_type == 22) && iq512_reference_ok(f.gu_type)) {
+                (f.gu_type == 18 || f.gu_type == 21) && iq512_reference_ok(f.gu_type)) {
                 iq512_reference_gu_rows(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
                 return;
             }
