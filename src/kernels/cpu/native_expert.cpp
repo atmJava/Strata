@@ -474,7 +474,8 @@ void native_down_rows_impl(const NativeFmt& f, const uint8_t* blob, const void* 
 }
 
 // Keep one dispatch implementation: only width-sensitive IQ kernels need a different arithmetic path.
-// Already invariant kernels (including NVFP4) retain their shared decoding and scale handling.
+// Already invariant kernels retain their shared decoding and scale handling (port: NVFP4 is not a format of
+// this tree, the fork's whitelist is the IQ2/IQ3 family plus Q8_0/Q2_0/IQ4_NL).
 void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* act, int nt,
                     float* const* ff, int r0, int r1) {
     native_gu_rows_impl<NativeArithmetic::Default>(f, blob, act, nt, ff, r0, r1);

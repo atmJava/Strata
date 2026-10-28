@@ -34,7 +34,7 @@ bool check_format(int gu, int down, int ff) {
     std::vector<uint8_t> blob(fmt.bytes);
     for (auto &byte : blob)
         byte = static_cast<uint8_t>(rng());
-    // Use finite block scales and random packed values. NVFP4 has four UE4M3 sub-block scales.
+    // Use finite block scales and random packed values.
     const uint16_t scale = 0x2400; // 2^-6; exclude NaN/Inf scales from the random bytes.
     auto scales = [&](size_t first, size_t last, int type) {
         const size_t block = ggml_type_size(static_cast<ggml_type>(type));
