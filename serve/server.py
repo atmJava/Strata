@@ -1805,15 +1805,26 @@ class StrataEngine:
     SOLO_AGAIN_MAX = 2      # how often a request left alone in a slot goes back to the solo path
     SOLO_AGAIN_MIN_LEFT = 32  # ... only with at least this many tokens still allowed (max_tokens)
 
-    def _may_go_solo(self, left: int, times: int, embeddings) -> bool:
-        """A request decoding in a slot that is alone now (no other slot busy, nobody waiting) goes back to the solo
-        path with its MTP drafts: the engine continues it from the slot's sessions (its slot cache; INFO
-        slot_cache=1).  STRATA_PARALLEL_SOLO=0 keeps it in the slot."""
+    def _take_solo_lines(self, left: int, times: int, embeddings) -> bool:
+        """为非嵌入请求原子地取得 solo 回切所需的控制通道。
+
+        返回 True 时调用方持有 ``ctl``，必须保持到 slot 结束并成功进入 solo
+        续算；否则不发送 ``BSTOP``，避免长读占着控制通道时请求既离开 batch
+        slot 又无法继续 solo。``STRATA_PARALLEL_SOLO=0`` 会完全关闭该回切。
+        """
         if (embeddings or times >= self.SOLO_AGAIN_MAX or left < self.SOLO_AGAIN_MIN_LEFT or
                 not (self.info or {}).get("slot_cache") or os.environ.get("STRATA_PARALLEL_SOLO") == "0"):
             return False
-        with self.slot_cv:
-            return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
+        if not self.ctl.acquire(blocking=False):
+            return False
+        alone = False
+        try:
+            with self.slot_cv:
+                alone = sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
+            return alone
+        finally:
+            if not alone:
+                self.ctl.release()
 
     def _shorter_waiting(self, plen: int) -> bool:
         """#656: someone waits for the control lines with a prompt under half this one's: worth giving way to."""
@@ -2189,8 +2200,9 @@ class StrataEngine:
                                 stop_sent = True
                             continue
                         yield t
-                        if not going_solo and not stop_sent and self._may_go_solo(int(max_new) - len(out), solo_again,
-                                                                                  embeddings):
+                        if (not going_solo and not stop_sent
+                                and self._take_solo_lines(int(max_new) - len(out), solo_again, embeddings)):
+                            holding = True
                             self._send(f"BSTOP {slot}")         # alone now: on with the drafts (below)
                             going_solo = True
                     elif line.startswith("BDONE "):

@@ -144,6 +144,46 @@ class ParallelServiceYield(tp.FakeEngineCase):
         with self.svc.status_lock:
             self.assertEqual(len(self.svc.history), 2)
 
+    def test_a_lone_slot_keeps_decoding_while_control_lines_are_busy(self):
+        """剩余 slot 不能在其它请求占用控制通道时发送 BSTOP，否则既失去 batch decode 又无法续算 solo。"""
+        self.start(2, slot_cache=True)
+        result = {}
+        errors = []
+
+        def ask(name, text):
+            try:
+                result[name] = self.chat(text, max_tokens=200)
+            except Exception as error:          # noqa: BLE001 - the test reports the request failure
+                errors.append((name, repr(error)))
+
+        long = threading.Thread(target=ask, args=("long", "LONGREPLY please"))
+        long.start()
+        time.sleep(0.05)
+        short = threading.Thread(target=ask, args=("short", "short"))
+        short.start()
+
+        deadline = time.time() + 10
+        while sum(self.engine.slot_busy) < 2 and time.time() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(sum(self.engine.slot_busy), 2, "both requests did not reach batch slots")
+
+        self.engine.ctl.acquire()
+        try:
+            short.join(5)
+            self.assertFalse(short.is_alive(), "the short request did not finish")
+            long.join(5)
+            self.assertFalse(
+                long.is_alive(),
+                "the lone slot stopped decoding while another request held the control lines",
+            )
+        finally:
+            self.engine.ctl.release()
+        long.join(5)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(result["short"]["choices"][0]["message"]["content"], "ok, done.")
+        self.assertEqual(result["long"]["choices"][0]["message"]["content"], "ok, " + "la " * 15 + "done.")
+
     def test_next_turn_goes_back_to_its_slot(self):
         self.start(2)
         a = "conversation A, first turn"

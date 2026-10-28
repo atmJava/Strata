@@ -248,6 +248,9 @@ class PickSlot(unittest.TestCase):
         e.slot_live = [None] * n
         e.slot_group = [0] * n
         e._orphan_seen = {}
+        e.slot_cv = threading.Condition()
+        e.ctl = threading.Lock()
+        e.waiting = 0
         return e
 
     def test_the_slot_that_holds_the_conversation(self):
@@ -316,6 +319,21 @@ class PickSlot(unittest.TestCase):
         self.assertEqual(v[0]["state"], "decoding")
         self.assertEqual(v[0]["generated"], 4)
         self.assertEqual(v[1], {"slot": 1, "state": "idle", "held_tokens": 2})
+
+    def test_solo_handoff_waits_for_the_control_lines(self):
+        e = self.engine(2)
+        e.info = {"slot_cache": 1}
+        e.slot_busy[0] = True
+        self.assertTrue(e._take_solo_lines(100, 0, None))
+        self.assertTrue(e.ctl.locked())
+        e.ctl.release()
+        e.ctl.acquire()
+        try:
+            self.assertFalse(e._take_solo_lines(100, 0, None),
+                             "a slot must not stop for the solo path while another request holds the control lines "
+                             "for a long read: it could then get neither the slot nor the solo continuation")
+        finally:
+            e.ctl.release()
 
     def test_slot_release_thread_failure_finishes_the_bounded_wait(self):
         e = self.engine(1)
