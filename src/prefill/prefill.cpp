@@ -4844,10 +4844,9 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
         return 0;
     }
     if (embd_rows != nullptr) { why = "an image prompt"; return 0; }
-    // features of run_impl this walk does not carry: the DFlash2 drafter's prompt taps, and KVA's approximate late layers
-    // (a prompt that wants them takes the chunk-major path, which has both)
+    // features of run_impl this walk does not carry: the DFlash2 drafter's prompt taps
+    // (a prompt that wants them takes the chunk-major path, which has them)
     if (!tap_layers_.empty()) { why = "the DFlash2 drafter's prompt taps"; return 0; }
-    if (kva_config().on) { why = "STRATA_KVA is on"; return 0; }
     if (stop_at_chunk) { why = "a batch read that yields at chunk boundaries"; return 0; }
     if (force_chunk_ > 0) { why = "a --prefill-pipe plan sets the chunks of this read"; return 0; }   // (left set for run_impl)
 #if STRATA_EXPERT_NIBBLE_BUILT   // the 4-bit expert slots (STRATA_EXPERT_NIBBLE) are gathered for MMQ only by run_impl
@@ -4870,18 +4869,8 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
         for (int i = 0; i < DQ; ++i) dq_ok = dq_ok && m.dq_gu[i] && m.dq_d[i];
         if (!m.Xs || !m.Hh || !dq_ok) { why = "the FP16 expert path's buffers are missing"; return 0; }
     }
-    // 0.2.2's expert formats this path's MMQ pass does not carry (port, 2026-10-24): APR's Hadamard-folded layers,
-    // NVFP4's tails and w4a4 activations, and IQ1_M layers that only the WMMA tiles run
-    {
-        const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
-        for (int64_t l = 0; l < g.n_layers; ++l) {
-            if (l < (int64_t) mp.wmma_only.size() && mp.wmma_only[(size_t) l]) { why = "a layer needs the WMMA tiles"; return 0; }
-            if (!lay.native) continue;
-            const auto& f = lay.fmt[(size_t) l];
-            if (f.had_gu || f.had_d) { why = "an APR (Hadamard-folded) layer"; return 0; }
-            if (f.tail_off || mmq::fp4_activations(f.gu_type)) { why = "an NVFP4 layer"; return 0; }
-        }
-    }
+    // (port: upstream's APR-fold / NVFP4-tail / WMMA-only-IQ1_M declines are dropped here - this tree's FP16
+    // path runs IQ1_M layers, and its native layout carries no APR folds or NVFP4 tails)
     if (m.fused_bufs) { why = "the fused expert layout"; return 0; }
     if (!m.GU || !m.Dm || (n_mmq > 0 && !m.ids_identity)) { why = "the MoE buffers are missing"; return 0; }
     // (an explicit STRATA_PREFILL_LM_TOKENS may be one chunk: the A/B against the default path, experts aside)
@@ -5373,10 +5362,8 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
                     dq = (dq + 1) % DQ;
                     if (lay.native) {
                         const auto& f = lay.fmt[(size_t) l];
-                        strata::kernels::iq_dequant_gu_f16(f.gu_type, blob_dev, blob_dev + f.up_off, f.n_ff, f.n_embd,
-                                                           m.dq_gu[dq], cs, nullptr);
-                        strata::kernels::iq_dequant_f16(f.d_type, blob_dev + f.down_off, f.n_embd * f.n_ff, m.dq_d[dq], cs,
-                                                        nullptr);
+                        strata::kernels::iq_dequant_gu_f16(f.gu_type, blob_dev, blob_dev + f.up_off, f.n_ff, f.n_embd, m.dq_gu[dq], cs);
+                        strata::kernels::iq_dequant_f16(f.d_type, blob_dev + f.down_off, f.n_embd * f.n_ff, m.dq_d[dq], cs);
                     } else {
                         blob_dequant_f16(blob_dev, m.dq_gu[dq], m.dq_d[dq], cs);
                     }
