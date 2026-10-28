@@ -456,12 +456,11 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
     const double now = now_us();
     const bool rearm = m.keep_us > 0 && (m.last_issue_us <= 0 || now - m.last_issue_us > m.keep_window_us);
     m.last_issue_us = now;
-    TicketState& ts = m.tickets[id];
     // After a failed read the reader stays failed (`collect` reports `error` until the next `open`) and its worker has
     // parked (worker_loop). A ticket queued now would never be read and `collect` would wait for it for ever, so it
     // is not queued: it has no jobs, and `collect` returns the error at once.
     if (!m.error.empty()) {
-        ts.pending = 0;
+        m.tickets[id].pending = 0;
         return Ticket{id};
     }
     std::unordered_map<uint64_t, size_t> by_page;     // aligned offset -> index in `jobs`
@@ -512,7 +511,10 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
             m.queue.push_back(std::move(j));
             ++queued;
         }
-        m.tickets.emplace(id, TicketState{(uint32_t) jobs.size()});
+        // `tickets[id]` already created the entry above, so `emplace` would be a no-op here and leave
+        // `pending` at 0: threaded `collect` would return before any row was copied. Assign the count
+        // instead. (The entry cannot vanish: the worker only erases tickets from `collect`, which needs `mu`.)
+        m.tickets[id].pending = (uint32_t) jobs.size();
     } catch (...) {
         while (queued-- > 0) m.queue.pop_back();
         throw;
