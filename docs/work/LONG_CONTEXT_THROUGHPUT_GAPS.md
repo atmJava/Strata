@@ -1,6 +1,6 @@
 # Strata 长上下文吞吐优化遗漏审查（2026-10-30）
 
-**状态：分析记录及 2026-10-31 L0 执行记录；不是已实现的优化，也不是新的默认配置。**
+**状态：分析记录及 2026-10-31 L0/显式 layer-major 执行记录；不是已实现的优化，也不是新的默认配置。**
 
 本文审查 `freeze/server-adapt-0.2.7` 在真实服务器和长上下文负载下仍未被主线覆盖的吞吐
 优化方向。逐项实现和已经测得的局部收益见
@@ -168,12 +168,14 @@ layer-major off for this prompt: no VRAM for a super-chunk (888 MiB free)
 无法分配。因此 L0 的“只移除 pipe 就会启用 layer-major”被判为否决；这不是 layer-major
 计算性能的结论，B 没有完成任何性能样本。A2 已恢复 A 配置并通过 health。
 
-下一步不再重复删除 pipe：先验证显式 `STRATA_PREFILL_LAYER_MAJOR=1` 的 96 MiB 余量策略，
-目标 16K super-chunk、residual 留在 host。日志必须出现真实 super-chunk 执行，之后才做
-150K/210K 性能和质量门。用户已明确稳定、可归因的约 1% 改善也值得保留，但仍需重复或
-A-B-A 排除单次噪声。
+随后验证了显式 `STRATA_PREFILL_LAYER_MAJOR=1` 的 96 MiB 余量策略、16K super-chunk 和
+host residual。150K/210K 分别真实执行 10/13 个 super-chunk，但六个请求的 prompt 吞吐中位
+从 `2208.55` 降到 `1892.9 tok/s`（−14.29%）。150K warm 的墙钟从 `7.641` 降到
+`3.559 s`，同时 cached tokens 从 `142848` 增到 `147456`，是命中差异，不是 layer-major
+的独立收益。该策略因此被否决，不再扫描 16K 邻近 target。
 
-证据：`/opt/ai/logs/layer-major-l0-20261030T160244Z/`。
+证据：`/opt/ai/logs/layer-major-l0-20261030T160244Z/`、
+`/opt/ai/logs/lm-explicit-20261030T161831Z/`。
 
 ## 5. P0：QSA selection 的长上下文成本
 
@@ -562,18 +564,20 @@ stale 或 double-free。
 
 配置和日志中不得提交 API key、密码、私有地址或用户内容。
 
-### 16.2 layer-major A/B
+### 16.2 layer-major A/B（已完成，否决）
 
-这是下一轮唯一应优先做的重启实验：
+这项重启实验已经完成；保留原始设计以便复核：
 
 | 字段 | 基线 | 候选 |
 | --- | --- | --- |
 | 二进制 | 不变 | 不变 |
-| 环境变量 | 不变 | 不变 |
+| 环境变量 | 不变 | 增加 `STRATA_PREFILL_LAYER_MAJOR=1`、16K target、host residual |
 | 模型和量化 | 不变 | 不变 |
 | layer split | 24 | 24 |
 | `--prefill-pipe` | `1` | 移除 |
-| `STRATA_PREFILL_LAYER_MAJOR` | 默认开 | 默认开 |
+| `STRATA_PREFILL_LAYER_MAJOR` | 默认开 | `1` |
+| `STRATA_PREFILL_LM_TOKENS` | 默认 | `16384` |
+| `STRATA_PREFILL_LM_R` | 默认 | `host` |
 
 执行：
 
@@ -590,9 +594,9 @@ stale 或 double-free。
 - VRAM 余量低于安全阈值、OOM、host ram 触发 paging 或 snapshot 被驱逐增多，直接停下；
 - 若没有收益，检查 `why` 后结束这条路线，不连续试 16K/24K/28K 多个 super-chunk。
 
-### 16.3 QSA 诊断
+### 16.3 QSA 诊断（下一步）
 
-QSA 诊断可以在 layer-major 决策后做，使用真实 150K prompt，不先用 36K 得出结论。
+layer-major 决策已经结束；QSA 诊断使用真实 150K prompt，不先用 36K 得出结论。
 
 一次 run 同时记录：
 
@@ -686,8 +690,9 @@ STRATA_ROUTE_TAIL_SKIP=0
 
 ## 19. 结论
 
-当前代码不是没有优化热点，而是最关键的调度路线被旧的 pipe plan 关闭了。只继续做 kernel
-微调，会漏掉可能影响整条长 prompt 的 layer-major、QSA selection、双卡计算分工和会话快照
-结构。下一步应先做一次严格受控的 layer-major A/B，再根据真实 150K/210K 数据决定后续实现。
+layer-major 的调度收益假设没有通过端到端验证：容量策略成功打开路径，但当前 16K
+host-residual 配置整体慢 14.29%。短 prompt 的 kernel 微调仍可能有用，但长 prompt 的下一个
+高信息量热点是 QSA selection：先用真实 150K prompt 读取 overlap 与 FP16 一致性，再决定
+是否实现候选复用或半精度选择。
 
 本文没有修改引擎代码，没有重启候选服务，也没有改变生产配置。

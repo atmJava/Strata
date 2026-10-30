@@ -37,9 +37,11 @@
 12. **上游 37 提交已部署**：`c219fbca`、engine md5 `0e4a9596`、server `11fd33f0`、
     config `023663ba`，health loaded、`NRestarts=0`。数字序列 6 路约 `164.7 tok/s`，
     自然语言 6 路约 `149.8 tok/s`；2 路和 8 路存在独立凹点。
-13. **L0 layer-major 直改已否决**：只移除 `--prefill-pipe 1` 后，首个请求因最小
-    super-chunk 所需显存不足而回退；候选已恢复 A 配置。下一项只验证显式 layer-major 的
-    96 MiB 余量策略和 16K host-residual super-chunk。
+13. **layer-major 配置路线已否决**：只移除 `--prefill-pipe 1` 被容量门槛挡住；显式
+    96 MiB、16K host-residual 虽真实执行，六请求 prompt 吞吐中位仍慢 `14.29%`。候选已
+    恢复 A 配置。
+14. **按 1% 门兑现已有收益**：P6 的旧 A-B-A 已有约 2.3% 改善且 parity/needle 通过；用户
+    已明确约 1% 也保留，下一轮先复验 P6，再进入 QSA overlap/FP16 诊断。
 
 ## 候选
 
@@ -52,7 +54,8 @@
 | P3 | 长 prefill 下短 decode 公平性 | 96K 邻居下短请求 wall 降 ≥10%；96K wave 不退 >3%；零错误且 needle 全对 | 已完成 | L-078：A 40.21 s → E 3.40 s（−91.5%）；96K +2.2%；A-B-A 通过 | 400 ms lead-in + 750 ms 等待已部署 |
 | P4 | 长 prefill 下中请求 decode 公平性 | 96K 邻居下 41-token 代码请求 wall ≤10 s；96K 按 wave 与单请求中位均不退 >3%；零错误 | 已完成 | L-078–L-080、L-083–L-084：新引擎 A-B-A 代码 −87.681%，96K +2.761%/+2.202%，短 JSON 3.980 s | **采纳但余量小**；生产保持 1600 ms + 2048 优先 |
 | P5 | 96K 冷 prefill 相位归因 | 3 个唯一 96K prompt 可解析 21 相与 host 成本；3 个同形状 plain prompt 能量化工装开销；零执行错误，恢复后 T-probe 无 problems | 已完成 | L-085：GPU timeline 中位 32.653 s、phase 总墙钟 35.441 s、host staging 0.341 s；timing 开销 +0.72% | 结论是 GPU 计算主导，不直接改生产 |
-| P6 | Turing prompt-attention v2 A-B-A | 同 boot A-B-A；每臂 3 个唯一 96K prompt；B 的 engine read 与 wall 中位均改善 ≥3%；A2 回到 A 的 3% 内；零执行错误、needle 3/3；greedy parity 一致或过质量门 | 已完成 | L-086：B 相对 A1 −2.346%/−2.297%，A2 漂移 +0.57%，parity 一致 | 方向和正确性正常但低于 3%，生产不采纳 |
+| P6 | Turing prompt-attention v2 A-B-A | 同 boot A-B-A；每臂 3 个唯一 96K prompt；B 的 engine read 与 wall 中位均改善 ≥1%；A2 回到 A 的 3% 内；零执行错误、needle 3/3；greedy parity 一致或过质量门 | 已完成 | L-086：B 相对 A1 −2.346%/−2.297%，A2 漂移 +0.57%，parity 一致 | 按用户新 1% 门已满足旧数据，待候选部署复验 |
+| P6-1PCT | P6 新门槛复验与采纳 | 同 boot A-B-A 再确认 engine read/wall 均改善 ≥1%；A2 漂移 ≤3%；零错误、needle/parity 通过；候选配置可回滚 | 待做 | L-086 的旧 A-B-A；用户 2026-10-31 明确 1% 也算 | 先兑现已有低风险收益，再接 QSA |
 | P7 | Turing FP16 tensor-core prompt experts | 同 boot A-B-A；每臂 3 个唯一 96K prompt；B 的 engine read 与 wall 中位均改善 ≥3%；A2 回到 3% 内；零错误、needle 3/3；输出变化时必须过质量门 | 搁置 | L-087：A1 被中断，无有效 JSONL/summary | 只有 NCU 证明 Tensor 是直接瓶颈时才恢复；否则不作为后续方向 |
 | CTX256 | 256K 生产混合负载 soak | 至少 1 小时 mixed traffic；覆盖 32K/64K/96K、接近 256K 的长读与短请求并发；零意外错误、零 needle 失败、6 槽不降级；记录 TTFT/wall、KV host read、expert hit、RAM/swap 与最低显存余量 | 已完成 | L-090：414 请求、133 waves、0 错误、0 意外 length、74/74 needle；14 次约 245.9K 长读全通过；slots 始终 6 | 已冻结 `0.1.51` 基线；最高并发 4、最长 245,856 token，不能写成 6 路或满窗口 |
 | GPU-UTIL | 真实 GPU 利用率探测 | Nsight 双卡计数器完整、请求质量门通过；结果能区分 SM 活动、issue、Tensor、warp 与 DRAM；失败样本不得进入汇总 | 已完成 | L-091：两次 32K prefill 的 SMs Active 77%、SM Issue 13–14%、Tensor 10%、DRAM read 15%；NVML 95/98% 与 40/99% 均只表示有活动 | 最终脚本 `tools/server/probe-gpu-utilization.py` 完整 run `verified`，15 项本地测试通过 |
@@ -65,7 +68,7 @@
 | HEAD-ENGINE | 旧合并源码的 sm_75 可部署验证 | 从当次 HEAD 独立构建；测试、输出 parity、版本 marker、运行路径 hash 与一小时 soak 通过 | 已完成（历史基线） | L-082/L-083/L-089/L-090：当次 256K 变化在 3% 内，一小时 soak 通过 | 记录属于 `a09d78b1`，不能当作 c219 的测试结论 |
 | UPSTREAM-027 | v0.2.7 37 提交的服务器验收 | 独立构建；真实代理接口、工具/图片、并发 health 通过；记录吞吐曲线和测试缺口 | 已完成（测试缺口） | L-092：6 路数字 `164.68`、自然语言 `149.82 tok/s`；CTest 仍有 6 项失败 | 运行可用，不代表测试全绿；2/8 路另立 UTIL-MULTI |
 | LM-L0 | 只移除 pipe 启动 layer-major | 日志进入真实 super-chunk，随后测 150K/210K；质量与内存门通过 | 否决 | L-093：`no VRAM for a super-chunk (888 MiB free)`，未进入性能阶段 | 不重复同形实验 |
-| LM-EXPLICIT | 显式 layer-major 的容量策略 | 96 MiB 余量下 16K host-residual super-chunk 实际执行；150K/210K A-B-A 出现稳定且可归因的 ≥1% 改善，内存与质量不退化 | 待做 | L-093 只证明默认余量路径被容量阻断 | 先确认路径启动，再跑长请求 |
+| LM-EXPLICIT | 显式 layer-major 的容量策略 | 96 MiB 余量下 16K host-residual super-chunk 实际执行；150K/210K A-B-A 出现稳定且可归因的 ≥1% 改善，内存与质量不退化 | 否决 | L-094：路径真实执行，但六请求 prompt 中位 `1892.9` 对 `2208.55 tok/s`（−14.29%） | 不扫描邻近 target |
 | S0d | staged 取消不吞他人控制行 | 客户端断开时其它流不丢 token，有回归测试 | 待做 | V2-1 PASS，待固化 | 只差测试与复核 |
 | S8 | SSE 保活 | 空闲 ≥10 s 的流收到保活；有测试 | 待做 | `serve/server.py` 已有实现 | 已有功能，补测试 |
 | S1 | 准入上限 | 超限返回稳定 429/503 与错误体；有测试 | 待做 | `serve/server.py` 已有实现 | 已有功能，补测试 |
@@ -80,7 +83,7 @@
 | F1F2 | 多路准入判据 | 由 S0b/S2 的证据决定可接受上界；不允许首 token 后静默数十秒 | 待做 | R11 旧提案 | AI 根据测量裁决，不等待用户 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀；有测试 | 待做 | | |
 
-未完成采纳项：19
+未完成采纳项：20
 
 ## 搁置
 

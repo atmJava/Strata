@@ -3,6 +3,40 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-67 · 显式 layer-major 真实执行，但长上下文吞吐整体回退约 14%，否决
+
+- 目标 / 指标：验证显式 `STRATA_PREFILL_LAYER_MAJOR=1` 能否在默认 512 MiB 余量之外，以
+  16K target、host residual 安全执行；若真实进入 super-chunk，则用同一固定 seed 比较
+  150K/210K 冷读、续读和 25% 改写，保留稳定、可归因的 ≥1% 改善。
+- 假设与预期：把 layer-major 默认余量从 512 MiB 降到 96 MiB，小到 16K 的 super-chunk
+  应能在现役 batch/expert cache 形状内分配，并减少专家重复 staging 与短 launch。
+- 为什么选这条路线：L0 已证明只移除 `--prefill-pipe 1` 会在容量门槛直接回退，因此本轮先
+  验证一个明确容量策略；只有路径实际执行后，长请求数字才有归因价值。
+- 改动与实验：候选源码和二进制不变；从 A1 配置移除 `--prefill-pipe 1`，增加
+  `STRATA_PREFILL_LAYER_MAJOR=1`、16K target 和 `STRATA_PREFILL_LM_R=host`。C 配置各重启
+  一次，测试完成后又重启一次恢复 A，两次启动各约 2.5–3 分钟；运行路径始终是候选 8080。
+- 结果：路径真实执行。150K 请求记录 `149133 tokens in 10 super-chunk(s)`，210K 记录
+  `208934 tokens in 13 super-chunk(s)`，均打印 `R in pinned RAM`，两个层段都走 layer-major。
+  六个请求全部成功，没有 OOM，swap 保持未增长；未另做 needle/parity 专用质量集。
+- 性能：C 相对 A1 的 prompt 吞吐为 150K cold `1909.5` 对 `2104.1`（−9.25%）、rewrite25
+  `1884.0` 对 `2348.9`（−19.79%）；210K cold `2008.2` 对 `2373.1`（−15.38%）、warm
+  `807.0` 对 `1097.7`（−26.48%）、rewrite25 `1901.8` 对 `2313.0`（−17.78%）。六项中位
+  `1892.9` 对 `2208.55 tok/s`（−14.29%）。
+- 异常与归因：150K warm 的 wall 从 `7.641 s` 降到 `3.559 s`，但 cached tokens 同时从
+  `142848` 增到 `147456`，read tokens 从约 6297 降到 1689；这是本次缓存命中差异，不是
+  layer-major 计算的独立收益。其余五个吞吐样本均明显回退，不能用这一项抵消。
+- 判决：**否决显式 16K、host-residual layer-major 作为当前生产候选**。路径和容量假设成立，
+  但端到端性能不成立；不再重复相同或邻近 target 的参数扫描。
+- 生产状态与回滚：生产 systemd 未修改且保持 inactive。候选 8080 已恢复 A 配置，health 200、
+  `loaded=true`，server/engine PID `481955/481964`；恢复进程显存和 swap 状态正常。
+- 证据：`/opt/ai/logs/lm-explicit-20261030T161831Z/`；六请求 JSON、路径日志、engine 日志、
+  脱敏配置与 A/C 比较均保留。台账见 L-094。
+- 学到什么：容量开关能打开路径，不等于跨过性能门；比较 warm 必须同时核对 cached/read
+  tokens，不能把缓存差异写成算法收益。
+- 下一步与理由：用户已把采纳门改为稳定、可归因的约 1%；P6 Turing prompt-attention v2
+  已有 A-B-A、parity 和 needle 证据，engine read/wall 约改善 2.3%，应优先按新门槛复验并在
+  候选配置评估采纳。之后再做真实 150K prompt 的 QSA overlap/FP16 诊断。
+
 ## I-20261031-66 · 直接移除 `--prefill-pipe 1` 无法启动 layer-major：最小 super-chunk 也缺显存
 
 - 目标 / 指标：验证交接计划中的 L0：保持二进制、模型、环境和缓存配置不变，只移除

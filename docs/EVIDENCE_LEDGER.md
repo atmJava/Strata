@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（94 条：L-000…L-093，按编号）
+## 台账索引（95 条：L-000…L-094，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -108,6 +108,7 @@
 | L-091 | 10-27 08:5xZ | Nsight 双次硬件计数：32K 冷 prefill 的 SMs Active 77%、SM Issue 13–14%、Tensor 10%、DRAM read 15%；同窗 NVML 40/99% 与 95/98% 均不能代表真实计算利用率 | **结论** |
 | L-092 | 10-28 05:1xZ | v0.2.7 上游 37 提交部署到 `c219fbca`：6 路数字序列约 `164.7 tok/s`、自然语言约 `149.8 tok/s`；2 路低于单路，8 路无吞吐收益且 TTFT 变差；CTest 仍有 6 个已知失败 | **采纳·测试缺口** |
 | L-093 | 10-31 00:0x | 只移除 `--prefill-pipe 1` 未启用 layer-major：888 MiB 显存下最小 super-chunk 也无法分配；A1 150K/210K 六请求 cold 为 2104.1–2373.1 tok/s，中位 2208.55 | **否决 L0 直改假设** |
+| L-094 | 10-31 00:1xZ | 显式 16K host-residual layer-major 真执行 10/13 个 super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；150K warm wall 优势由缓存命中差异造成 | **否决** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3618,3 +3619,72 @@ strata prefill: layer-major off for this prompt: no VRAM for a super-chunk (888 
   （sha256 `f1cd16fe6cb5616e013f8753265d90d8f97781c4213daca9726d32318cf92c05`）
 - `/opt/ai/logs/layer-major-l0-20261030T160244Z/contract.md`
   （sha256 `2d2118b9932df0ce9c34f11ea2a5494721c91c36feeba81e4d1e597761733ae8`）
+
+## L-094 显式 layer-major 真正执行但整体慢 14.29%：16K host-residual 策略否决
+
+**判定**：**否决**。`STRATA_PREFILL_LAYER_MAJOR=1` 成功绕过默认 512 MiB 容量门槛，
+以 16K super-chunk 和 pinned-host residual 执行；但冷读、210K 续读和改写普遍回退，
+不足以作为当前生产候选。
+
+**实验边界**：候选 8080，同一 engine sha256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`、`c219fbca`
+源码树、2×RTX 2080 Ti、`layer_split=24`、batch 6、262144 上下文、int8 KV 和长期 expert
+cache 均不变。相对 A1 只移除 `--prefill-pipe 1`，增加
+`STRATA_PREFILL_LAYER_MAJOR=1`、`STRATA_PREFILL_LM_TOKENS=16384` 和
+`STRATA_PREFILL_LM_R=host`。A1 数据来自 L-093；C 和恢复后的 A 各重启一次，每轮约
+2.5–3 分钟。
+
+**路径证据**：
+
+```text
+strata prefill: layer-major (layers 0..24): 149133 tokens in 10 super-chunk(s) of up to 16384 (R in pinned RAM, 888 MiB VRAM free before)
+strata prefill: layer-major (layers 0..24): 208934 tokens in 13 super-chunk(s) of up to 16384 (R in pinned RAM, 884 MiB VRAM free before)
+```
+
+日志同时显示层段 `24..48` 的 super-chunk。默认路径在相近余量下曾因保留 512 MiB 而拒绝，
+所以本轮不仅进入函数，而是实际执行了缩小余量后的 layer-major 路径。
+
+**性能**：
+
+| 场景 | A1 prompt tok/s | C prompt tok/s | 变化 | A1 wall | C wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 150K cold | 2104.1 | 1909.5 | −9.25% | 71.064 s | 78.312 s |
+| 150K warm suffix | 843.8 | 499.4 | −40.82% | 7.641 s | 3.559 s |
+| 150K rewrite25 | 2348.9 | 1884.0 | −19.79% | 50.147 s | 61.939 s |
+| 210K cold | 2373.1 | 2008.2 | −15.38% | 88.293 s | 104.315 s |
+| 210K warm suffix | 1097.7 | 807.0 | −26.48% | 11.529 s | 15.528 s |
+| 210K rewrite25 | 2313.0 | 1901.8 | −17.78% | 76.400 s | 84.289 s |
+
+六请求 prompt tok/s 中位为 `2208.55 → 1892.9`（−14.29%）。150K warm 是唯一墙钟改善：
+C 命中 `147456` cached tokens、读 1689，A1 命中 `142848`、读约 6297；该差异足以解释
+wall 从 `7.641 s` 降到 `3.559 s`，不能归因给 layer-major。210K warm 两臂的 cached
+tokens 都是 `196608`，该项仍是墙钟和吞吐双回退。
+
+**安全与质量**：六个请求全部成功，没有 OOM，swap 未增长。未单独跑 needle/parity 质量集；
+因此不能把“请求成功”扩大成质量已全面验收。性能整体回退已达否决条件，无需追加同类质量或
+16K 邻近参数实验。
+
+**生产状态与回滚**：生产 systemd 未修改且保持 `inactive/dead`。候选 8080 已恢复 A1 配置，
+health 200、`loaded=true`，server/engine PID `481955/481964`；保留 C 配置、A 恢复配置、
+两轮启动输出和引擎路径日志。
+
+**下一步**：按用户新的约 1% 采纳门，先复验已有约 2.3% A-B-A 证据的 P6；随后用真实 150K
+prompt 运行 `STRATA_SEL_OVERLAP=1` 与 `STRATA_IDX_FP16_CHECK=1`，只有 overlap/FP16
+一致性支持时才进入 QSA 实现。
+
+**原始证据**：
+
+- `/opt/ai/logs/lm-explicit-20261030T161831Z/c-results.json`
+  （sha256 `2ac6f892eacbcf7c419a1470b14dfcf7d108e94d4ec8c945e4f2f6184f551aac`）
+- `/opt/ai/logs/lm-explicit-20261030T161831Z/c-path.txt`
+  （sha256 `74b5c98c2fd1892f2116fd3d60e26af70da1695652944e43f6efa4469086cfe1`）
+- `/opt/ai/logs/lm-explicit-20261030T161831Z/c-engine.log`
+  （sha256 `220d7d59d3a318d54d49f4a6fd4a3a462251b8a1ec75e436c177b0533592827e`）
+- `/opt/ai/logs/lm-explicit-20261030T161831Z/c-server.out`
+  （sha256 `466029240efd50825a5ad84797fe6a44fc3acc6e41b8ecc1bf42e75dc45039da`）
+- `/opt/ai/logs/lm-explicit-20261030T161831Z/c.json`
+  （sha256 `3c3b3b301c792357118eb80bb6d3a85f0e4d4cfabd8f30489aa23816048678c6`）
+- `/opt/ai/logs/lm-explicit-20261030T161831Z/comparison.txt`
+  （sha256 `d4e838aa4be7bf6946d8ba730a22fd4f3ccc42af901d5739ec9bb88f61395fde`）
+- `/opt/ai/logs/lm-explicit-20261030T161831Z/contract.md`
+  （sha256 `81cb555a5458caa3b71d804dc15897092b09dcc166bf1a43745495ab88186e69`）
