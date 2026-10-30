@@ -795,6 +795,22 @@ gate/up 都进入 expdec 路径，down 保持默认；真实路径接管并通�
 （sha256 `bc3ac9bfbbddc2f153118d984e62b296a77895e1a1ad0eb6c9cd2e35232c32b3`）。下一步转向
 8 路流水固定成本，优先检查最后不足窗口、重复 handoff 和每请求约 183 engine tokens 的来源。
 
+### 16.5.11 UTIL-SLOT-CKPT-MOVE（已完成，吞吐门否决）
+
+A 已启用 self-commit、direct slot copy、batch sync 与 checkpoint pool/threads。唯一新增候选
+`STRATA_SLOT_CKPT_MOVE=1` 把准入 turn checkpoint 移入槽位而非复制约 112 MiB。它正常以
+6 slots / 2 groups loaded，三组 greedy 探针两次均与 A 逐字相同，说明该路径保持观察到的
+token 选择。
+
+同周期 A3/B2/A4 的 2/4/6/8 路候选中位为 `81.5/110.9/123.1/107.8 tok/s`。相对 A3/A4
+合并中位，候选为 `+3.099%/+2.259%/+0.122%/-3.014%`，胜场 `4/6, 3/6, 3/6, 2/6`；
+没有一级同时达到 1% 与 5/6，8 路明确回退，2/4/6 的 A-A 漂移还达到
+`8.944%/6.166%/7.055%`。A 已恢复，不扫描 checkpoint/copy/cache 邻近设置。
+
+结果见 [`UTIL_CKPT_MOVE_RESULT-20261031.md`](UTIL_CKPT_MOVE_RESULT-20261031.md)。下一步把
+8 路尾部拆到 one-row GDN batch 与流水窗口状态，寻找减少 scalar/barrier/launch 序列但保持
+每行算术的新机制。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

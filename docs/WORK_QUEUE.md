@@ -71,6 +71,14 @@
     `STRATA_EXP_MODE=8`，gate/up 先由 fused/LDS 分支完成，down 也在 LDS 分支直接返回；
     `STRATA_EXPDEC=1` 不可达。没有重启、parity 或吞吐数据。下一步转 8 路流水波次与最后不足
     一整窗的只读审计，先找不改变模型算术的重复工作、padding 或 replay。
+24. **UTIL-MULTI 审计转向 checkpoint move**：A 已启用 `STRATA_BATCH_SELF_COMMIT=1`、
+    direct slot copy、batch sync 和 checkpoint pool/threads，不能重复当作候选。源码另有
+    默认关闭的 `STRATA_SLOT_CKPT_MOVE=1`，只把约 112 MiB 准入 checkpoint 移入槽位而非复制；
+    当前预注册为 `UTIL-SLOT-CKPT-MOVE`，先 parity，再测 2/4/6/8 路。
+25. **UTIL-SLOT-CKPT-MOVE 已否决**：三组 greedy 探针两次逐字等于 A，但同周期
+    2/4/6/8 路仅有 2/4 路名义增益、各胜 4/6 与 3/6，6 路 `+0.122%`，8 路 `-3.014%`；
+    2/4/6 路 A3/A4 漂移还分别达到 `-8.944%/-6.166%/-7.055%`。A 已恢复。下一步回到
+    one-row GDN batch 与流水窗口状态，不扫描 checkpoint/copy/cache 邻近设置。
 
 ## 候选
 
@@ -99,7 +107,8 @@
 | UTIL-PIPED-MTP-ORDER | 用现有 CPU-order expert 算术消除 cache 位置舍入 | 从 B 只加 `--expert-cache-cpu-order`；启动仍为 6/2/MTP；先要求全部固定 greedy 输出逐字重复且等于 A，再测 2/4/6 路；2 路 +1%/5-of-6，4/6 不退>1% | 否决 | L-106：6/2 正常 loaded，但自然语言探针两次不同且与 A 不同；未跑吞吐 | 开关接在 `ExpertDispatch`，未覆盖 layer-split `VerifyHits`；不扫其他顺序/cache 开关 |
 | UTIL-BATCH-GROUP-FIT | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | A 补 8 路；B 只把 groups 2→1；先过相同两次 greedy parity，再同测 2/4/6/8 路并恢复 A4；2 路 +≥1% 且 5/6 胜，4/6/8 不退>1%，零请求/资源错误 | 否决 | L-107：A3 `2/4/6/8=81.0/116.1/133.2/104.4 tok/s`；B 正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | parity 失败，未跑吞吐；只改 group 数也会改变数值路径，不扫其他固定组数 |
 | UTIL-EXPDEC-GU | 验证 mode-8 gate/up 的 EXPDEC opt-in 接管 | 启动前证明两张卡 gate/up 均可到 `expdec_gu_kernel` 且 down 保持默认；通过后 6/2、正确 hash、parity 逐字相等，再测 2/4/6/8 路且 1% 门与资源/请求 hard gate 全过 | 否决 | L-108：进程/config 为 mode 8，fused/LDS 先完成 gate/up，down 分支直接 return；EXPDEC 调用不可达 | 启动前否决；未重启、未跑 parity/吞吐 |
-| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107：A3 `2/4/6/8=81.0/116.1/133.2/104.4`；8 路 TTFT `1926 ms`，每请求约 183 engine tokens | 先只读审计 `PGroup`/`pump()`/`GS` 波次和尾部窗口，不先扫参数 |
+| UTIL-SLOT-CKPT-MOVE | 准入 checkpoint 从复制改为移动 | A 深拷贝且只加 `STRATA_SLOT_CKPT_MOVE=1`；6 slots / 2 groups、hash/health/资源正确；三组 greedy 两次逐字等于 A；A3-B-A4 的 2/4/6/8 路至少一级 ≥1% 且 5/6 胜，其他级不回退 >1%，零错误/外来请求 | 否决 | L-109：parity 全过；2/4 名义 `+3.099%/+2.259%`、胜 4/6 与 3/6，6 `+0.122%`，8 `-3.014%`、胜 2/6；A 漂移最大 8.944% | 不扫 checkpoint/cache/copy 邻近设置 |
+| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107/L-109：8 路仍低于 6 路；A-B-A 可见 2/4/6 路跨引擎漂移 `6.2–8.9%`，需要优先拆 one-row GDN/window 成本 | 先只读审计 one-row GDN batch 与流水窗口，不重跑已启用 self-commit 或 checkpoint move |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |

@@ -3,6 +3,36 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-82 · checkpoint move preserves text but fails multi-concurrency throughput
+
+- 目标 / 指标：只给 A 增加 `STRATA_SLOT_CKPT_MOVE=1`，验证移动准入 checkpoint 能否减少
+  2/4/6/8 路准入成本；三组 greedy 两次逐字等于 A 后，至少一级 ≥1% 且 5/6 胜，其他级不回退
+  >1%，A3/A4 漂移 ≤3%。
+- 假设与预期：移动与复制恢复同一 checkpoint 字节，模型算术不变；8 路六槽加排队换槽会反复
+  触发 112 MiB 复制，因此 move 有机会把任务完成时间缩短超过 1%。
+- 为什么选这条路线：A 已有 self-commit、direct slot copy、batch sync 和 checkpoint pool/
+  threads，move 是源码中独立且尚未启用的单位置路径，不需要重编译。
+- 改动与实验：深拷贝 A 后只增加该 env；移除该键可精确恢复 A。B 以 6 slots / 2 groups、
+  engine hash、health 和资源门启动。先用 A 验证夹具稳定性，原始自由文本因 A 自身不重复
+  被替换为第三组 exact-copy 探针；最终 A/B 各两组探针全部逐字相同。
+- 结果：候选同周期 2/4/6/8 路为 `81.5/110.9/123.1/107.8 tok/s`；A3/A4 合并中位为
+  `79.05/108.45/122.95/111.15`。2/4 路名义 `+3.099%/+2.259%`，但只胜 `4/6` 与
+  `3/6`；6 路 `+0.122%`；8 路 `-3.014%`、仅胜 `2/6`。
+- 判决：**UTIL-SLOT-CKPT-MOVE 否决。** 没有任何一级同时达到 ≥1% 与 5/6 胜；8 路明确
+  回退超过 1%。A3/A4 自身在 2/4/6 路漂移 `8.944%/6.166%/7.055%`，也不能支撑较小正差值。
+- 预期被推翻：减少约 112 MiB 复制没有转化为稳定的多流收益，也没有改善 8 路尾部；复制路径
+  不是当前瓶颈，或 move 的跨槽 ownership 成本抵消了节省。
+- 生产状态与回滚：A 已恢复，server/engine/vision PID `541714/541773/541717`，health
+  loaded，6 slots / 2 groups，engine/config hash 正确、engine env 无 move；systemd 仍
+  inactive/dead、`MainPID=0`、`NRestarts=23`。最终 RAM available `13.5 GiB`、swap
+  12 MiB、两卡 idle。
+- 证据：`docs/work/UTIL_CKPT_MOVE_RESULT-20261031.md`、台账 L-109、同周期 A3/B2/A4 logs。
+- 学到什么：先验证基线夹具可重复，再启动候选；自由文本探针不适合作为唯一质量门。吞吐判决
+  必须看配对胜率和 A-B-A 漂移，不能只看某一级的中位正差值。
+- 下一步与理由：回到 `UTIL-MULTI` 的 one-row GDN batch 与流水窗口状态审计。8 路仍是六槽
+  加两个排队请求；下一步寻找不同机制减少单行窗口的 scalar/barrier/launch 序列，必须保持每行
+  算术与 token 选择，不再扫描 checkpoint/cache/copy、self-commit、group 或 MTP 开关。
+
 ## I-20261031-81 · EXPDEC is unreachable behind the fixed mode-8 kernels
 
 - 目标 / 指标：在重启前确认 `STRATA_EXPDEC=1` 是否真的能接管当前两卡的 gate/up；只有两张卡

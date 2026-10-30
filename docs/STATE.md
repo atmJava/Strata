@@ -6,9 +6,13 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-MULTI 已进入 8 路流水波次与尾部窗口审计。当前 A 的 2/4/6/8 路中位为
-  `81.0/116.1/133.2/104.4 tok/s`，先只读检查每请求约 183 engine tokens、slot wait、
-  decode rate 和最后不足一整窗是否重复计算或 replay；候选必须保持模型算术并先过 parity。
+- 当前项：UTIL-MULTI 继续进行 one-row GDN batch 与流水窗口状态审计。A 的 self-commit、
+  direct slot copy、batch sync 和 checkpoint pool/threads 均已启用；新增的
+  `STRATA_SLOT_CKPT_MOVE=1` 已过 parity，但 8 路 `-3.014%`、仅胜 2/6，且 2/4/6 路
+  A3/A4 漂移超过 3%，因此否决。下一候选必须走不同机制。
+- 上一项：UTIL-SLOT-CKPT-MOVE 已完成并否决。三组 greedy 探针两次逐字等于 A；同周期
+  2/4/6/8 路为 `81.5/110.9/123.1/107.8 tok/s`，相对 A3/A4 仅 2/4 路名义
+  `+3.099%/+2.259%`、各胜 4/6 与 3/6，6 路 `+0.122%`，8 路 `-3.014%`。
 - 上一项：UTIL-EXPDEC-GU 已在启动前路径门否决。部署源码的 mode 8 先执行 fused/LDS gate/up，
   down 也在 LDS 分支直接返回，因此 `STRATA_EXPDEC=1` 无法到达目标内核；未重启、未跑 parity
   或吞吐。证据为 `util-expdec-gu-static-20261030T2008Z.txt`。
@@ -51,14 +55,15 @@
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
 - 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
-  调度和 EXPDEC 路径均已否决。attention v2 已是当前默认并完成 1% 门复验；不要再次用
+  调度、EXPDEC 和 checkpoint move 路径均已否决。attention v2 已是当前默认并完成 1% 门复验；
+  不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：只读审计 `src/program/generate.cpp` 的 8 路 `PGroup`/`pump()`/`GS` 流水与最后
-  不足窗口处理，定位可用固定分组负载隔离的重复工作或可安全消除的 padding/replay。只有新机制
-  明确不改变 token 选择和数值路径，才预注册冻结负载、parity 与端到端 1% 门。
-- 当前候选：无。EXPDEC 未启动；固定 groups=1 已因 parity 否决。P7 不恢复：实测 Tensor pipe
-  仅 `0.04%`。
+- 下一动作：只读审计 `record_window`/commit 中一槽窗口仍执行的 scalar、barrier 和 launch
+  顺序，优先寻找能把多行相同操作合并但保持每行算术与 token 选择不变的新路径。不得重跑
+  checkpoint move、self-commit 开关、固定 groups、piped MTP 或已关闭内核变体。
+- 当前候选：无。checkpoint move 已否决并恢复 A；EXPDEC 未启动；P7 不恢复：实测 Tensor
+  pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
@@ -71,9 +76,10 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；EXPDEC 只读判决时 server/engine/vision PID 仍为
-  `529088/529112/529097`，engine 为 `105a4171...`，6 slots / 2 groups，没有
-  `STRATA_PIPED_MTP`、`--expert-cache-cpu-order` 或实验 profiler/QSA/kernel env。
+  `loaded=true`；checkpoint-move 判决后恢复的 server/engine/vision PID 为
+  `541714/541773/541717`，engine 为 `105a4171...`，6 slots / 2 groups，没有
+  `STRATA_SLOT_CKPT_MOVE`、`STRATA_PIPED_MTP`、`--expert-cache-cpu-order` 或实验
+  profiler/QSA/kernel env。
   A3→候选停机 8 秒、启动至 loaded 206 秒；候选→A4 停机 9 秒、启动至 loaded 180 秒。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、

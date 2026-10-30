@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-108。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-109。
 
 ## 2. 当前断点
 
@@ -21,7 +21,8 @@
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的
   `UTIL-PIPED-MTP-ORDER` 又在 parity 门否决；`UTIL-BATCH-GROUP-FIT` 也已过启动门，
   但在自然语言 parity 门否决。`UTIL-EXPDEC-GU` 随后在启动前路径门否决：mode 8 的
-  fused/LDS 分支使目标 EXPDEC 内核不可达。当前断点是 8 路流水波次与尾部窗口的只读审计。
+  fused/LDS 分支使目标 EXPDEC 内核不可达。`UTIL-SLOT-CKPT-MOVE` 过了启动和 parity 门，
+  但 8 路回退 `3.014%` 且高并发胜率不足。当前断点是 one-row GDN batch 与流水窗口状态审计。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -48,7 +49,7 @@
   分别回退 `3.82%/9.79%`，且 greedy 文本不重复。直接指定 CUDA1 cache 的路线在双卡上不可启动；
   CPU-order expert 算术也没有改变输出；单组调度仍在自然语言上产生不同但可重复的文本。
   当前 A3 的 8 路中位 `104.4 tok/s` 比 6 路 `133.2` 低，但固定单组不能通过质量门；
-  EXPDEC 又因 mode 8 控制流短路而不值得启动。
+  EXPDEC 又因 mode 8 控制流短路而不值得启动；checkpoint move 也没有越过多并发硬门。
 
 ## 3. 当前生产
 
@@ -59,7 +60,7 @@
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
 | 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 候选 PID | server `529088`、engine `529112`；vision `529097` |
+| 候选 PID | server `541714`、engine `541773`；vision `541717` |
 | candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -314,10 +315,11 @@ query 的 score、top-k、softmax 或输出算术。
 4. UTIL-NCU 已使用快照和独立候选完成；不要把 full-section NCU replay 重新压到完整双卡
    请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
 5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
-6. `UTIL-EXPDEC-GU` 已在启动前路径门否决，不再启动。下一步只允许 8 路流水波次与尾部窗口的
-   只读审计；新候选必须用不同机制，先证明不会改变 token 选择和数值路径，再预注册冻结
-   greedy parity 与 2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、并发回退和资源 hard gate
-   不放宽。只有代码路径明确需要实测且预计收益高于约 3-7 分钟重启成本时才重启。
+6. `UTIL-EXPDEC-GU` 和 `UTIL-SLOT-CKPT-MOVE` 均已否决，不再启动。下一步只允许 one-row
+   GDN batch 与流水窗口状态的只读审计；新候选必须用不同机制，先证明不会改变 token 选择和
+   数值路径，再预注册冻结 greedy parity 与 2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、
+   并发回退和资源 hard gate 不放宽。只有代码路径明确需要实测且预计收益高于约 3-7 分钟
+   重启成本时才重启。
 
 不要把已否决项原样重跑：
 

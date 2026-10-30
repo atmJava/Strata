@@ -84,6 +84,7 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | UTIL-PIPED-MTP-ORDER | M14 | 用 CPU-order expert 算术隔离 GPU/CPU expert 位置造成的小数舍入 | 已证伪 | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **否决**：6/2 正常 loaded，但自然语言探针仍两次不同且与 A 不同；未跑候选吞吐 |
 | UTIL-BATCH-GROUP-FIT | M14 | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | 已证伪（当前配置） | 中；补 A3 八路，一次 candidate 启动和一次 A4 恢复 | **否决**：A3 8 路 `104.4 tok/s` 低于 6 路；单组候选正常 loaded 但自然语言 parity 不同，未跑吞吐 |
 | UTIL-EXPDEC-GU | M13/M14 | 用既有 opt-in EXPDEC 内核接管 mode-8 gate/up | 已证伪（启动前路径） | 低；只读源码与进程环境 | **否决**：fused/LDS 分支先完成 gate/up，down 直接 return；`STRATA_EXPDEC=1` 不可达，未重启 |
+| UTIL-SLOT-CKPT-MOVE | M14 | 准入时移动而不是复制约 112 MiB turn checkpoint | 已证伪 | 中；parity 与 2/4/6/8 A3-B-A4 | **否决**：parity 全过，但 8 路 `-3.014%`/胜 2/6；2/4 胜率不足，6 仅 `+0.122%` |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -176,6 +177,17 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
     8 路每请求约 183 engine tokens，slot wait 中位 `1468.5 ms`、decode rate `21.9 tok/s`。
     下一轮只读检查 `PGroup`、`pump()`、`GS` 和最后不足窗口是否重复 handoff、padding 或
     replay，并用固定分组负载隔离；任何候选都必须先保持 token 选择和数值 parity。
+33. **波次审计转向 checkpoint move**：A 的 self-commit、direct slot copy、batch sync 与
+    checkpoint pool/threads 均已启用。唯一新的单位置候选是 `STRATA_SLOT_CKPT_MOVE=1`：
+    将约 112 MiB 的准入 checkpoint 移入槽位而非复制，源码称恢复字节不变。先过三组冻结
+    parity，再测 2/4/6/8 路；至少一级 ≥1% 且其余不回退 >1% 才采纳。
+34. **UTIL-SLOT-CKPT-MOVE 已否决**：三组 parity 两次均与 A 逐字相同。同周期候选为
+    `81.5/110.9/123.1/107.8 tok/s`；只有 2/4 路名义增益，分别胜 4/6 与 3/6，6 路仅
+    `+0.122%`，8 路 `-3.014%` 且胜 2/6。A3/A4 在 2/4/6 路的漂移为
+    `-8.944%/-6.166%/-7.055%`，同样越过 3% 门。A 已恢复，不扫描 checkpoint 邻近设置。
+35. **下一项审计 one-row GDN batch 与流水窗口状态**：8 路仍是六槽加两排队请求，单行窗口
+    仍做 scalar/barrier/launch 序列。下一候选必须尝试不同机制，保持每行算术与 token 选择；
+    不重跑 self-commit 开关、checkpoint move、固定 groups 或 piped MTP。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

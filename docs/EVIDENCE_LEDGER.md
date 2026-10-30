@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（109 条：L-000…L-108，按编号）
+## 台账索引（110 条：L-000…L-109，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -123,6 +123,7 @@
 | L-106 | 10-31 19:4xZ | CPU-order piped MTP 保持 6 slots / 2 groups，但自然语言 greedy 探针仍两次不同且与 A 不同；未跑候选吞吐 | **UTIL-PIPED-MTP-ORDER parity 门否决；转 1-vs-2 batch-group fit** |
 | L-107 | 10-31 20:0xZ | A3 8 路中位 `104.4 tok/s`，低于 6 路 `133.2`；单组候选正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | **UTIL-BATCH-GROUP-FIT parity 门否决；未跑候选吞吐** |
 | L-108 | 10-31 20:0xZ | A 的进程/config 均为 mode 8；fused/LDS gate/up 先完成，down 的 LDS 分支直接 return，`STRATA_EXPDEC=1` 无法到达 EXPDEC 内核 | **UTIL-EXPDEC-GU 启动前路径门否决** |
+| L-109 | 10-31 21:0xZ | checkpoint move parity 全过；同周期 2/4/6/8 路 `81.5/110.9/123.1/107.8 tok/s`，2/4 胜率仅 4/6、3/6，6 `+0.122%`，8 `-3.014%` | **UTIL-SLOT-CKPT-MOVE 吞吐门否决；A 已恢复** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3839,6 +3840,32 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-109 UTIL-SLOT-CKPT-MOVE：checkpoint 移动保持文本但没有多流收益
+
+**判定**：**UTIL-SLOT-CKPT-MOVE 在吞吐门否决。** 候选只把准入 turn checkpoint 的复制改为
+移动，6 slots / 2 groups、engine/config hash、health 和资源均正确；三组冻结 greedy 探针两次
+都与 A 逐字相同且 finish 相同，parity 通过。
+
+**同周期吞吐**：A3/B2/A4 的 2/4/6/8 路中位为
+`80.5/81.5/73.3`、`111.9/110.9/105.0`、`130.4/123.1/121.2`、`112.3/107.8/110.0 tok/s`。
+相对 A3/A4 合并中位，候选变化为 `+3.099%/+2.259%/+0.122%/-3.014%`，胜场
+`4/6, 3/6, 3/6, 2/6`。没有一级同时达到 ≥1% 和 5/6，8 路还回退超过 1%；2/4/6 的 A-A
+漂移 `-8.944%/-6.166%/-7.055%` 也超过 3% 门。
+
+**恢复**：A 已恢复，server/engine/vision PID `541714/541773/541717`，engine
+`105a4171...`、config `88de996a...`、health loaded、engine env 无 move；systemd 仍
+inactive/dead、`MainPID=0`、`NRestarts=23`。最终 RAM available `13.5 GiB`、swap 12 MiB、
+两卡 idle。
+
+**没测什么**：没有在吞吐门失败后跑混合流量、长上下文或 session checkpoint-save soak。
+这些后续门不会改变当前否决。
+
+**证据**：`docs/work/UTIL_CKPT_MOVE_RESULT-20261031.md`；同周期 A3/B2/A4 logs 与 summary
+`/opt/ai/logs/util-slot-ckpt-move-sameboot-summary-20261030T2105Z.json`。
+
+**下一步**：回到 one-row GDN batch 与流水窗口状态，寻找减少 scalar/barrier/launch 序列的
+不同机制；不重跑 checkpoint move、self-commit、固定 groups 或 piped MTP。
 
 ## L-108 UTIL-EXPDEC-GU：mode-8 分支让 opt-in 内核在启动前不可达
 
