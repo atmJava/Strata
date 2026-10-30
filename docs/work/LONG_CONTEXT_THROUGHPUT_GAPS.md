@@ -811,6 +811,23 @@ token 选择。
 8 路尾部拆到 one-row GDN batch 与流水窗口状态，寻找减少 scalar/barrier/launch 序列但保持
 每行算术的新机制。
 
+### 16.5.12 UTIL-GDN-GROUPS（吞吐/漂移门否决）
+
+`STRATA_BATCH_ATTN_ROWS=1` 在 `kv_mode=1` 的 streaming 实例不可达，因此没有作为候选。
+可达的 `STRATA_BATCH_GDN_GROUPS=1` 还缺少与 A 已启用 self-commit 的状态写回配合；补上
+keep pointer 和最终 state 写回后，1/4/8 组输出、每槽 state 与三组冻结 greedy 探针全部
+bitwise 等于 A。
+
+同 boot A3/B/A4 的 2/4/6/8 路候选为 `77.8/102.2/121.6/106.7 tok/s`。相对 A3/A4 合并
+中位为 `+0.777%/-8.011%/+0.913%/-1.386%`，胜场 `2/6/2/6/3/6/2/6`；没有一级同时达到
+1% 与 5/6，4 路回退超过 1%，所有级别的 A3/A4 漂移都超过 3%。A 已恢复，不继续扫
+GDN group 数或同类 launch 聚合。
+
+结果见
+[`UTIL_GDN_GROUPS_RESULT-20261031.md`](UTIL_GDN_GROUPS_RESULT-20261031.md)。下一步先做
+`UTIL-WINDOW-PROFILE`：用现有 stage stamps 和 batch telemetry 拆分 active rows、stage
+hand-off、streamed KV resolve、slot turnover 与每请求 ITL/TTFT，再选择新的源码机制。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

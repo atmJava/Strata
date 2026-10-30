@@ -3,6 +3,39 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-83 · GDN grouped recurrence is exact but slower at four streams
+
+- 目标 / 指标：在 A 的 `STRATA_BATCH_SELF_COMMIT=1` 下，把每个 GDN layer 的各槽
+  recurrence 合并为一个 launch；先证明每行输出和每槽状态 bitwise 不变，再以 2/4/6/8 路
+  A3-B-A4 验证至少一级 ≥1%、5/6 胜、其他级不回退 >1%。
+- 假设与预期：六行窗口可把最多六次 recurrence launch 降为一次，节省每层固定成本，且不改变
+  每槽 arithmetic。预计至少 6 路可能越过 1%，其余级保持稳定。
+- 为什么选这条路线：A 已启用 self-commit，默认关闭的 grouped recurrence 恰好覆盖 one-row
+  window；`STRATA_BATCH_ATTN_ROWS` 因真实 `kv_mode=1` 不可达，因此 GDN 是唯一直接可达且
+  不需要扫相邻参数的候选。
+- 改动与实验：静态审计发现 grouped window 在 self-commit 下丢掉 keep pointer，候选先补状态
+  写回，并新增 1/4/8 组输出+state `memcmp` harness。独立构建后再加唯一 env
+  `STRATA_BATCH_GDN_GROUPS=1`，保持 6 slots / 2 groups、KV streaming 和其他参数不变。
+- 结果：完整 GPU harness `batch_rows_parity: ok`；3 个固定 greedy 探针两轮都等于 A。
+  2/4/6/8 路候选为 `77.8/102.2/121.6/106.7 tok/s`，相对 A3/A4 合并中位
+  `+0.777%/-8.011%/+0.913%/-1.386%`，胜场 `2/6/2/6/3/6/2/6`。
+- 判决：**UTIL-GDN-GROUPS 否决。** 没有一级同时满足 ≥1% 与 5/6 胜；4 路越过 1% 回退门。
+  A3/A4 在 2/4/6/8 路漂移为 `-4.822%/-7.278%/-3.018%/+3.412%`，全部超过 3%。
+- 预期被推翻：减少约 180 个 recurrence graph node 没有转化为端到端收益，4 路反而明显回退；
+  当前瓶颈不是可被同类 launch 合并消除的固定开销，或 grouped kernel 的 occupancy/调度成本
+  抵消了节省。
+- 生产状态与回滚：候选源码已反向，A 原二进制恢复；server/engine/vision PID
+  `548696/548707/548699`，engine/config hash 正确、health loaded、6 slots / 2 groups，
+  systemd inactive/dead、`MainPID=0`、`NRestarts=23`。两次停服各约 9 秒，加载各 150 秒。
+- 证据：`docs/work/UTIL_GDN_GROUPS_CONTRACT-20261031.md`、
+  `docs/work/UTIL_GDN_GROUPS_RESULT-20261031.md`、台账 L-110、GPU harness/parity/A3/B/A4。
+- 学到什么：parity 补丁正确不代表性能机制有效；即使能精确消除固定 launch，也必须先证明
+  当前 stage/window 成本主要由该序列构成。完整 A-B-A 漂移继续要求保留因果边界，不能用单级
+  名义正差值抵消。
+- 下一步与理由：开设 `UTIL-WINDOW-PROFILE`，用现有 stage stamps 与 batch telemetry 同 boot
+  采 2/4/6/8 路，先分离 active rows、stage hand-off、streamed-KV resolve 和 slot turnover。
+  不再重跑 GDN/checkpoint/固定 group 或其它同类 launch 聚合。
+
 ## I-20261031-82 · checkpoint move preserves text but fails multi-concurrency throughput
 
 - 目标 / 指标：只给 A 增加 `STRATA_SLOT_CKPT_MOVE=1`，验证移动准入 checkpoint 能否减少

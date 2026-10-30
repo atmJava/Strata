@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（110 条：L-000…L-109，按编号）
+## 台账索引（111 条：L-000…L-110，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -124,6 +124,7 @@
 | L-107 | 10-31 20:0xZ | A3 8 路中位 `104.4 tok/s`，低于 6 路 `133.2`；单组候选正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | **UTIL-BATCH-GROUP-FIT parity 门否决；未跑候选吞吐** |
 | L-108 | 10-31 20:0xZ | A 的进程/config 均为 mode 8；fused/LDS gate/up 先完成，down 的 LDS 分支直接 return，`STRATA_EXPDEC=1` 无法到达 EXPDEC 内核 | **UTIL-EXPDEC-GU 启动前路径门否决** |
 | L-109 | 10-31 21:0xZ | checkpoint move parity 全过；同周期 2/4/6/8 路 `81.5/110.9/123.1/107.8 tok/s`，2/4 胜率仅 4/6、3/6，6 `+0.122%`，8 `-3.014%` | **UTIL-SLOT-CKPT-MOVE 吞吐门否决；A 已恢复** |
+| L-110 | 10-31 22:0xZ | GDN grouped self-commit 输出/state bitwise 全过；2/4/6/8 路 `+0.777%/-8.011%/+0.913%/-1.386%`，胜场均不足，漂移全超 3% | **UTIL-GDN-GROUPS 吞吐/漂移门否决；A 已恢复** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3840,6 +3841,73 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-110 UTIL-GDN-GROUPS：grouped self-commit 状态精确但没有多流收益
+
+**判定**：**UTIL-GDN-GROUPS 在吞吐与 A-B-A 漂移门否决。** 修正 grouped recurrence 的
+self-commit 状态写回后，合成 GPU harness 的 1/4/8 组输出和每槽最终 GDN state 全部
+`memcmp` 相等；三组冻结 greedy 探针各两轮也与 A 逐字相同、finish 都是 `stop`。正确性门通过，
+但完整 2/4/6/8 路吞吐没有越过 1% 门。
+
+**路径与源码审计**：真实引擎日志为 `KV streaming: 32768 of 262144 cells`，即 `kv_mode=1`。
+因此现有 `STRATA_BATCH_ATTN_ROWS=1` 路径在任一 slot streaming 时仍逐行调用，在本实例不可达，
+启动前即排除。A 已启用 `STRATA_BATCH_SELF_COMMIT=1`，默认关闭的
+`STRATA_BATCH_GDN_GROUPS=1` 可达，但 grouped window 固定传 `commit=false` 且没有携带 self-commit
+的 keep pointer，会只算输出而漏写 recurrent state。候选只补两处功能：把 one-row keep 放入
+grouped window 条目，并在 kernel 产生全部输出后写回最终 state。默认和非 self-commit 路径不变。
+
+**同周期吞吐**：A3/B/A4 每级各 3 reps。A3、B、A4 的中位 tok/s 如下：
+
+| 路数 | A3 | B | A4 | A3/A4 合并中位 | B 相对合并 | B 胜场 | A3→A4 漂移 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 78.8 | 77.8 | 75.0 | 77.2 | `+0.777%` | 2/6 | `-4.822%` |
+| 4 | 111.3 | 102.2 | 103.2 | 111.1 | `-8.011%` | 2/6 | `-7.278%` |
+| 6 | 122.6 | 121.6 | 118.9 | 120.5 | `+0.913%` | 3/6 | `-3.018%` |
+| 8 | 105.5 | 106.7 | 109.1 | 108.2 | `-1.386%` | 2/6 | `+3.412%` |
+
+没有一级同时达到 ≥1% 与 5/6 胜；4 路回退超过 1%，所有级别的 A3/A4 漂移都超过 3%。
+所有 benchmark 窗口外来请求为 0，无 HTTP/执行错误；draft acceptance 为
+`79.78%/79.35%/79.77%/79.16%`。8 路仍低于 6 路。
+
+**启动与资源**：候选正常以 6 slots / 2 groups loaded，`expert_slots=17274`、
+`expert_cache_mib=28267`、`vram_free_mib=1006`。生产 systemd 始终 inactive/dead。A 到候选与
+候选回 A 的停服各约 9 秒，加载各 150 秒，共重启两次。
+
+**恢复**：候选源码已反向，A 原二进制恢复；server/engine/vision PID
+`548696/548707/548699`，health loaded、6 slots / 2 groups，engine/config SHA-256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
+`88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`。最终 RAM available
+`13 GiB`、swap used `12 MiB`、两卡 idle；`strata.service` inactive/dead、`MainPID=0`、
+`NRestarts=23`。
+
+**没测什么**：吞吐门失败后没有跑长上下文、混合流量或 conversation checkpoint-save soak；
+本轮不能说明 GDN conv、QSA resolve 或其它窗口调度机制是否有效。
+
+**证据**：
+
+- `docs/work/UTIL_GDN_GROUPS_CONTRACT-20261031.md`
+- `docs/work/UTIL_GDN_GROUPS_RESULT-20261031.md`
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/f-gdn-groups.json`
+  （sha256 `c033d81ffe07fc8819532499b7a170ad530c5f24ee76f99214bb4e80a5bbb5cb`）
+- `/opt/ai/logs/util-gdn-groups-parity-kernel-freegpu-20261031T0025Z.log`
+  （sha256 `0aab4ceb06430e55f0c6a25d36fdcf4335a16a3cecd431a7563ec945a1f78fbe`）
+- `/opt/ai/logs/util-gdn-groups-parity-A-20261031T0010Z.json`
+  （sha256 `32253bf35a25255c9ad3322086a76027184638fd2036760e8c2a3fa150b0cb93`）
+- `/opt/ai/logs/util-gdn-groups-parity-B-20261031T0035Z.json`
+  （sha256 `8c79eed8456f35e6d6ab09b1f10f9a9ccbe1e10fccf222418a611beb943af81b`）
+- `/opt/ai/logs/util-gdn-groups-sameboot-A3-20261031T0015Z.log`
+  （sha256 `a8aadf42ad9567721f4de293794c7c87e0ceb893fb26569f77286fd639ec252a`）
+- `/opt/ai/logs/util-gdn-groups-sameboot-B-perf-20261031T0040Z.log`
+  （sha256 `08c13be6da7885f5d24fa1f1c72dba0e464c1804a747214b3470a17a2c65fe03`）
+- `/opt/ai/logs/util-gdn-groups-sameboot-A4-perf-20261031T0055Z.log`
+  （sha256 `207763faeb443510dfb68dca281e187e49de47be94393df4fcdae643ec92fff8`）
+- `/opt/ai/logs/util-gdn-groups-sameboot-summary-20261031T0105Z.json`
+  （sha256 `974a855847544175faf9a847dd0148da60e3124d1e32d35f4ef9923aee975017`）
+
+**下一步**：`UTIL-WINDOW-PROFILE`。用现有 `STRATA_VERIFY_PROFILE`、stage stamps 和 opt-in
+batch telemetry 同 boot 采 2/4/6/8 路，先分离 active rows / 有效窗口占用、stage hand-off、
+streamed KV resolve、slot turnover 与 ITL/TTFT。至少两项指标必须能区分 6 路峰值和 8 路尾部，
+再预注册一个不同机制的候选；不再猜单行 launch 聚合。
 
 ## L-109 UTIL-SLOT-CKPT-MOVE：checkpoint 移动保持文本但没有多流收益
 
