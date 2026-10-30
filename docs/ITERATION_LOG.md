@@ -3,6 +3,41 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-77 · piped MTP wins two streams by 19.92% but fails six streams and repeatable parity
+
+- 目标 / 指标：保留 6 slots / 2 groups，启用 `--batch-mtp` + `STRATA_PIPED_MTP=1`；
+  A1-B-A2 固定测 2/4/6 路。2 路须相对 A 合并中位改善 ≥1%、至少 5/6 胜；4/6 路不得
+  回退 >1%；固定 greedy 输出、health、RAM/VRAM 和生产 systemd 必须通过。
+- 假设与预期：B 启动标记和六槽 drafters 在同 cache 条件下应恢复低并发吞吐，并保持目标模型
+  验证后的输出；2 路应接近上游 A6000 的两位数收益。
+- 为什么选这条路线：这是前五次 fused gate/up 微调均低于 1% 后，已有实现中最大且直接面向
+  用户可感知并发凹点的机制；只需配置切换，不需要改源码。
+- 改动与实验：从 A 复制独立 config，只加 `--batch-mtp`、`STRATA_PIPED_MTP=1` 并把
+  `STRATA_BATCH_SELF_COMMIT=0`。启动日志确认 2 组 × 3 slots 和 6 个 drafters；按
+  `tools/server/bench-strata.py` 跑 A1-B-A2，每档 3 reps、400 output tokens，并做三组固定
+  greedy 探针各两次。
+- 结果：A1/A2 合并中位 `78.3/108.55/125.7 tok/s`，B 为 `93.9/104.4/113.4`。2 路
+  `+19.92%` 且 5/6 胜；4/6 路分别 `-3.82%/-9.79%`。135 个基准请求全部完成且无外来请求。
+  精确文本和算术探针一致；自然语言探针 A 两次相同，B 两次生成不同文本。
+- 判决：**UTIL-PIPED-MTP 否决。** 当前六槽两组配置不能采纳；不扫描草稿深度、槽数或组数。
+- 预期被推翻：低并发收益真实且很大，但不能推广到 4/6 路；同时“目标验证”没有让磁盘上的
+  文本输出在 cache 变化后保持可重复。B 的 CUDA1 cache 为 `7040` slots，A 为 `7209`；
+  总 cache 为 `17104` 对 `17274`，与上游要求的同 cache 条件不符。
+- 生产状态与回滚：A 已恢复，server/engine/vision PID `520066/520075/520070`，health loaded，
+  engine `105a4171...`，config `88de996a...`，6/2 slots/groups，vram free `1006 MiB`。
+  A→B 停机 8 秒、总中断约 `3:01`；B→A 停机 9 秒、总中断约 `4:01`。production systemd
+  仍 inactive/dead、`MainPID=0`、`NRestarts=23`。
+- 预期被推翻的边界：没有证据把所有 piped MTP 判为错误。上游文档明确说相同 expert cache
+  下文本可一致，因此下一项只隔离 cache；若恢复 cache 后 parity 仍失败，再关闭该分支。
+- 证据：`docs/work/UTIL_PIPED_MTP_RESULT-20261031.md`、台账 L-104、
+  `/opt/ai/logs/util-piped-mtp-summary-20261031T1923Z.json`。
+- 学到什么：并发优化必须同时过低并发峰值、高并发回退和逐字质量门；A 的恢复冷态会让 A2
+  2 路明显偏低，因此契约要求的 A1/A2 合并中位和原始 reps 都必须保留。
+- 下一步与理由：`UTIL-PIPED-MTP-CACHE`。只把 `--expert-cache auto` 替换为 A 的
+  `10065`，并加 `--expert-cache-device1 7209`，然后先跑相同 parity；失败不消耗性能 A-B-A，
+  通过后再确认 4/6 路是否由 cache 挤压造成。契约见
+  `docs/work/UTIL_PIPED_MTP_CACHE_CONTRACT-20261031.md`。
+
 ## I-20261031-76 · read-only loads changed SASS but stopped at 0.339%; turn to pipelined MTP
 
 - 目标 / 指标：只把 fused IQ3 gate/up 的 weight `qs`、aux/sign word 和 scale 改走显式只读

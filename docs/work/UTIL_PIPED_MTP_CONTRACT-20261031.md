@@ -1,6 +1,7 @@
 # UTIL-PIPED-MTP contract
 
-Status: pre-registered before implementation.
+Status: rejected by the quality and high-concurrency gates; see
+[`UTIL_PIPED_MTP_RESULT-20261031.md`](UTIL_PIPED_MTP_RESULT-20261031.md).
 
 ## Evidence and selected problem
 

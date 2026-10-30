@@ -60,6 +60,10 @@
 20. **UTIL-WEIGHT-RO 已否决**：SASS 真实生成 `LDG.E.U16.CONSTANT.SYS`，但 gate/up
     中位只从 `472.6` 到 `471.0 us`（+0.339%），6/7 胜。下一项转用户可感知的并发凹点：
     验证已有但默认关闭的 pipelined MTP，目标是先把 2 路聚合拉过单路。
+21. **UTIL-PIPED-MTP 已否决**：六槽两组和 piped MTP 启动标记真实，2 路聚合
+    `78.3 → 93.9 tok/s`（+19.92%，5/6 胜），但 4/6 路为 `-3.82%/-9.79%`，且固定 greedy
+    文本在 B 内不可重复。下一项只隔离 B 少掉的 CUDA1 expert-cache：恢复 A 的
+    `10065 + 7209 = 17274` slots 后先验逐字 parity；失败就停止 Piped MTP 分支。
 
 ## 候选
 
@@ -83,7 +87,8 @@
 | UTIL-WEIGHT | 跨 NTC token 复用 weight-side IQ3_XXS decode | 每个 k 只解码一次 grid/aux/scale，再对 chunk 内 token apply；7 组 process 中位 ≥1%、5/7 胜、p75 优于 baseline 中位；MIO≤28.75%、wavefronts 下降、寄存器≤85、hash/parity 不变 | 否决 | L-101：`473.2` 对 `475.8 us`（+0.546%）、6/7 胜；load 指令完全相同，寄存器 73→80 | 不接受未达 1% 的方向性结果 |
 | UTIL-GRID-PAD | 修正四副本 codebook bank 布局 | 固定副本 4、stride 257，使每个 replica 覆盖 32 banks；7 组 process 中位 ≥1%、5/7 胜、p75 优于 baseline 中位；MIO≤28.75%、wavefronts 下降、寄存器≤85、hash/parity 不变 | 否决 | L-102：`489.3` 对 `475.7 us`（−2.86%），3/7 胜；剔除首组后仍慢约 1.2% | 不扫描副本数或 stride |
 | UTIL-WEIGHT-RO | IQ3 weight 走显式只读缓存 | SASS 证明 principal weight 16-bit loads 从 `LD.E.U16.SYS` 变为 `LDG...CONSTANT`；7 组 process 中位 ≥1%、5/7 胜、p75 优于 baseline 中位；long scoreboard≤16.5%、global loads≤296,960、寄存器≤85、active warps≥69%、hash/parity 不变 | 否决 | L-103：48 条 `LDG.E.U16.CONSTANT.SYS`、80 registers、无 stack；中位 `471.0` 对 `472.6 us`（+0.339%），6/7 胜 | 机器码生效但未达 1%；不扫描 cache operator 或几何 |
-| UTIL-PIPED-MTP | 保留两组流水并启用每槽 MTP | 6 slots / 2 groups / `STRATA_PIPED_MTP=1` 启动标记真实；A1-B-A2 固定 2/4/6 路；2 路聚合改善≥1%且 5/6 胜，4/6 路不退>1%；输出、health、RAM/VRAM 不变 | 待做 | v0.2.7 双卡文档：2 路 `+16.0%`、4 路 `+10.2%`；当前 2 路低于单路 | 只测 `=1`；不扫描槽数、组数或草稿深度 |
+| UTIL-PIPED-MTP | 保留两组流水并启用每槽 MTP | 6 slots / 2 groups / `STRATA_PIPED_MTP=1` 启动标记真实；A1-B-A2 固定 2/4/6 路；2 路聚合改善≥1%且 5/6 胜，4/6 路不退>1%；输出、health、RAM/VRAM 不变 | 否决 | L-104：2 路 `78.3 → 93.9 tok/s`（+19.92%，5/6 胜），但 4/6 路 `-3.82%/-9.79%`，greedy 文本不重复 | 不扫描草稿深度、槽数或组数 |
+| UTIL-PIPED-MTP-CACHE | 隔离 slot drafters 的 expert-cache 挤压 | 从 B 只恢复 A 的 `10065` primary + `7209` CUDA1 slots；启动仍为 6/2/MTP；先要求所有固定 greedy 输出逐字重复且等于 A，再测 2/4/6 路；2 路 +1%/5-of-6，4/6 不退>1% | 待做 | L-104：B CUDA1 `7040` 对 A `7209`，总 `17104` 对 `17274`；上游文档要求同 cache 才比较文本 | 一次只测这组计数；失败不扫邻近 cache、草稿深度或组数 |
 | UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 待做 | L-092：2 路数字 `94.85 tok/s` 低于单路 `104.05`；8 路 `138.76` 低于 6 路 `164.68`，TTFT 约 `5.8 s` | 先查调度/批窗口固定成本，不先做参数扫描 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |

@@ -710,6 +710,24 @@ load-policy 微调仍是正向但不足；不扫描 cache operator、row-pair、
 并守住输出、health 和 RAM/VRAM 门。契约见
 [`UTIL_PIPED_MTP_CONTRACT-20261031.md`](UTIL_PIPED_MTP_CONTRACT-20261031.md)。
 
+### 16.5.6 UTIL-PIPED-MTP（已完成，否决）
+
+六槽、两组的 B 配置真实启用了 `--batch-mtp` 和 `STRATA_PIPED_MTP=1`，启动日志与 metrics
+都证明 drafters 和流水路径生效。A1/A2 合并的 2/4/6 路中位为
+`78.3/108.55/125.7 tok/s`，B 为 `93.9/104.4/113.4`：2 路改善 `19.92%`、5/6 胜，
+但 4/6 路回退 `3.82%/9.79%`。固定 greedy 的自然语言探针还在 B 内生成两次不同文本，
+因此候选同时失败高并发和输出门。
+
+B 的 CUDA1 expert cache 为 `7040` slots，A 为 `7209`，总数为 `17104` 对 `17274`。
+上游文档说明只有同 expert cache 时才能做文本等价比，且 CPU/GPU 不同舍入会改变末位 token。
+因此下一项不扫描草稿深度、槽数或组数，而是只恢复 A 的 primary/CUDA1 计数，先验证 parity。
+若 parity 仍失败即结束该分支；若通过，再确认 4/6 路回退是否来自 cache 挤压。
+
+两次切换分别停机 8/9 秒，启动到 loaded 约 181/232 秒。A 已恢复，engine hash
+`105a4171...`、health loaded、6 slots / 2 groups、production systemd 不变。结果见
+[`UTIL_PIPED_MTP_RESULT-20261031.md`](UTIL_PIPED_MTP_RESULT-20261031.md)，契约见
+[`UTIL_PIPED_MTP_CACHE_CONTRACT-20261031.md`](UTIL_PIPED_MTP_CACHE_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

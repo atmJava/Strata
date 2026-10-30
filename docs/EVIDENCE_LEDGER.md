@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（104 条：L-000…L-103，按编号）
+## 台账索引（105 条：L-000…L-104，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -118,6 +118,7 @@
 | L-101 | 10-31 20:1xZ | weight decode 复用 `473.2` 对 `475.8 us`（+0.546%）、6/7 胜，但 shared/global load 指令完全相同；寄存器 73→80，未达 1% | **UTIL-WEIGHT 否决；转 UTIL-GRID-PAD** |
 | L-102 | 10-31 21:0x | padded four-copy IQ3 codebook 使用 stride 257，hash 不变但 `489.3` 对 `475.7 us`（−2.86%）、仅 3/7 胜；剔除首组后仍慢约 1.2% | **UTIL-GRID-PAD 否决；转 UTIL-WEIGHT-RO** |
 | L-103 | 10-31 21:4x | read-only IQ3 weight loads 真实生成 48 条 `LDG.E.U16.CONSTANT.SYS`，hash 不变但只从 `472.6` 到 `471.0 us`（+0.339%）、6/7 胜 | **UTIL-WEIGHT-RO 否决；转 UTIL-PIPED-MTP** |
+| L-104 | 10-31 19:2xZ | piped MTP 六槽/两组真实启用，2 路 `78.3 → 93.9 tok/s`（+19.92%，5/6 胜），但 4/6 路 `-3.82%/-9.79%`，固定 greedy 文本在 B 内不重复 | **UTIL-PIPED-MTP 否决；转 cache-neutral 隔离** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3834,6 +3835,61 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-104 UTIL-PIPED-MTP：2 路 +19.92%，6 路 −9.79% 且 greedy 文本不重复
+
+**判定**：**UTIL-PIPED-MTP 否决。** 六 slots / 两组和 piped MTP 启动标记全部真实，
+2 路有显著收益，但高并发回退与输出不可重复同时越过硬门。
+
+**启动与 workload**：独立 B config 只在 A 上增加 `--batch-mtp`、`STRATA_PIPED_MTP=1`，
+并把 `STRATA_BATCH_SELF_COMMIT` 改为 `0`。日志打印 2 个 pipelined groups、每组 3 slots、
+每槽 1 个 proposal，共 6 个 slot drafters；metrics 为 `batch_slots=6`、`batch_groups=2`。
+A1-B-A2 各自在 2/4/6 路跑 3 reps，固定 prompt 与 `MAX_TOKENS=400`，共 135 个请求，
+零 HTTP/执行错误、零外来请求。
+
+| streams | A1 | A2 | A 合并中位 | B | B vs A | B 配对胜场 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 89.5 | 75.4 | 78.3 | 93.9 | +19.92% | 5/6 |
+| 4 | 104.6 | 108.8 | 108.55 | 104.4 | -3.82% | 1/6 |
+| 6 | 125.3 | 128.5 | 125.7 | 113.4 | -9.79% | 0/6 |
+
+**质量门**：三组 greedy 探针各跑两次。精确文本与算术题两臂、两 trial 均一致；自然语言题
+A 两次相同，B 两次给出不同句子（两段语义都正确，但 finish 与文本不同）。因此按预注册门
+判失败。B 的缓存为 `10064 + 7040 = 17104` slots，A 为 `10065 + 7209 = 17274`；
+drafters 在 CUDA1 少掉 169 个 cache slots。上游文档明确要求相同 expert cache 才做文本比较，
+这给出一个尚未证明的因果假设，而不是借口。
+
+**恢复**：A 已恢复，server/engine/vision PID `520066/520075/520070`，engine
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`，config
+`88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`，health loaded，
+6 slots / 2 groups，vram free `1006 MiB`。A→B 停机 8 秒、总中断约 `3:01`；B→A 停机
+9 秒、总中断约 `4:01`。生产 systemd 仍 inactive/dead、`MainPID=0`、`NRestarts=23`。
+
+**下一步**：`UTIL-PIPED-MTP-CACHE`。从 B 只把 `--expert-cache auto` 替换为 `10065`，
+并加 `--expert-cache-device1 7209`；先跑同一组逐字 parity。失败即停止 Piped MTP 分支；
+通过后才测 2/4/6 路。contract 见
+`docs/work/UTIL_PIPED_MTP_CACHE_CONTRACT-20261031.md`。
+
+**证据**：
+
+- `docs/work/UTIL_PIPED_MTP_RESULT-20261031.md`
+- `/opt/ai/logs/util-piped-mtp-summary-20261031T1923Z.json`
+  （sha256 `bf0c1cbcc2f671d41e4567130546d5ffcfbd8480965d6d5b2913b0acd8b297f2`）
+- `/opt/ai/logs/util-piped-mtp-a1-20261031T1905Z.log`
+  （sha256 `fab6a00cab9e2e22097024f6ce5c24c99debc93fa1729bb7bde2b4dc4aeedf2a`）
+- `/opt/ai/logs/util-piped-mtp-B-diag-20261031T1914Z.log`
+  （sha256 `0511c233767909433e1a5666f8eacaf66d5802a854892be37775a19fd949bfbb`）
+- `/opt/ai/logs/util-piped-mtp-a2-20261031T1920Z.log`
+  （sha256 `e3846bb52946717a1bd70abe783e2956158c605c9030733b62052e4fb7f709c0`）
+- `/opt/ai/logs/util-piped-mtp-parity-A-20261031T1908Z.json`
+  （sha256 `2ab2dcfc6dfed18e287b308ca5c560f34194164468aa58776fc4c54c30d94003`）
+- `/opt/ai/logs/util-piped-mtp-parity-B-20261031T1912Z.json`
+  （sha256 `145f697b105d28b75e519d27b68b15a5be4db41f0fe05c425cc32e5a48695fb6`）
+- `/opt/ai/logs/util-piped-mtp-A2-final-metrics-20261031T1923Z.json`
+  （sha256 `f5ae2401ef4ce3ec885636f68cc365eef5c1b01f3e1d0d353c7acb6b5d53196c`）
+
+**没测什么**：没有证明“同 cache 后一定逐字一致”，也没有长 soak、采样、取消、1/8 路、
+其它模型或 AMD。当前结论只否决六槽两组加自动 cache 的这条候选。
 
 ## L-103 UTIL-WEIGHT-RO：机器码变化真实，但只改善 0.339%
 
