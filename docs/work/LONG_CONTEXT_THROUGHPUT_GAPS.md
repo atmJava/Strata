@@ -856,6 +856,28 @@ group verdict 时序不变。第一道门是独立 GPU harness：半区 logits�
 draw counter 必须和 full head `memcmp` 相等，accepted path 实测投影端到端至少 1% 后才接
 server。契约见 [`UTIL_HEAD_SPLIT_CONTRACT-20261031.md`](UTIL_HEAD_SPLIT_CONTRACT-20261031.md)。
 
+### 16.5.15 UTIL-HEAD-SPLIT harness：全尺寸逐字通过，临界路径超过 1%
+
+独立 Q5_K `2560→248320` harness 在七个交替进程中覆盖 `T=1..8`。每档的半区 logits、
+合并 logits、greedy、固定种子 sampled ids、draw counter 17/10017、NaN 检查和改变输入
+后的两个独立 graph replay 全部通过。完整/并发中位与保守端到端投影如下：
+
+| T | full us | concurrent us | projected |
+| ---: | ---: | ---: | ---: |
+| 1 | 1094.779 | 763.241 | 1.813% |
+| 2 | 1932.903 | 1071.851 | 4.611% |
+| 3 | 2364.746 | 1243.243 | 6.052% |
+| 4 | 2517.119 | 1347.023 | 6.439% |
+| 5 | 2806.073 | 1494.654 | 7.213% |
+| 6 | 3083.637 | 1643.123 | 7.935% |
+| 7 | 3479.548 | 1833.882 | 9.031% |
+| 8 | 3881.892 | 2066.048 | 9.936% |
+
+最差单次投影也全部高于 1%。两半权重之和严格等于完整 `437,043,200 B`；split 两卡峰值
+`453,189,152 B`，低于 `461,577,760 B` 上界。结论只授权 opt-in server integration：
+生产主 graph 不能直接捕获 peer kernel，必须把 peer head 作为独立 graph 启动，并让主图
+只等待本次 head 的两个半区。服务端编排开销、batch window 覆盖和启动回退仍未测。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

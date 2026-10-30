@@ -127,6 +127,7 @@
 | L-110 | 10-31 22:0xZ | GDN grouped self-commit 输出/state bitwise 全过；2/4/6/8 路 `+0.777%/-8.011%/+0.913%/-1.386%`，胜场均不足，漂移全超 3% | **UTIL-GDN-GROUPS 吞吐/漂移门否决；A 已恢复** |
 | L-111 | 10-31 21:5xZ | A-P-A2 每级 3 波；P 的 6/8 路 `113.352/103.373 tok/s`；8 路 occupancy `5.010`、tail `1.1349`、max slot wait `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`；head 每窗口约 `1.04 ms` | **UTIL-WINDOW-PROFILE 完成；下一项 UTIL-BATCH-HEAD** |
 | L-112 | 10-31 22:1xZ | 两个 pipeline group 在末级严格串行；每级只有一个 verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 每次只绑定一个 group，`batch_poll` 返回时才释放末级 | **UTIL-BATCH-HEAD 源码门否决；未构建、未重启；转 UTIL-HEAD-SPLIT** |
+| L-113 | 10-31 22:2xZ | HEAD-SPLIT GPU harness 七进程全过：`T=1..8` 半区/合并 logits、greedy、固定种子、counter、graph 改变输入全 bitwise；并发投影中位 `1.813–9.936%`，split peak `453,189,152 B` < 上界 `461,577,760 B` | **GPU harness 通过；进入 opt-in server integration；未重启** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3843,6 +3844,47 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-113 UTIL-HEAD-SPLIT：双卡半 vocabulary 输出头逐字一致，并跨过 1% 临界路径门
+
+**判定**：**独立 GPU harness 通过，允许进入 opt-in server integration。** 这还不是服务端
+性能采纳，也没有消耗重启。
+
+**正确性**：production native head 形状/格式为 Q5_K `2560→248320`，两个 vocabulary
+半区各 124,160 行。`T=1..8` 的 first-half、second-half 和 merged logits 都逐字节等于完整
+单卡 call；greedy、固定 seed 的 sampled ids、draw counter 17/10017、NaN/finite 检查和
+改变输入后的 graph replay 全过。七个交替进程均 `failures=0 result=PASS`。
+
+**临界路径**：全量中位按 `T=1..8` 为
+`1094.779/1932.903/2364.746/2517.119/2806.073/3083.637/3479.548/3881.892 us`；
+双卡并发为 `763.241/1071.851/1243.243/1347.023/1494.654/1643.123/1833.882/2066.048 us`。
+按最快 stage-2 window `18.27 ms` 保守投影，收益中位为
+`1.813/4.611/6.052/6.439/7.213/7.935/9.031/9.936%`；最差单次分别为
+`1.727/2.610/4.556/5.287/6.456/7.745/8.771/9.825%`，全部高于 1%。
+
+**显存**：完整 head 权重 `437,043,200 B`；完整路径峰值 `445,116,192 B`；split 两卡峰值
+合计 `453,189,152 B`；允许上界 `461,577,760 B`。两个半区权重之和严格等于完整 head；
+额外约 7.7 MiB 是激活副本、Q8_1、半区 logits 与 merge scratch。
+
+**边界**：收益是 head 临界路径投影，不含 server peer graph 编排和所有 window 路径覆盖。
+主卡外层 CUDA graph 不能直接捕获另一设备的 kernel，下一步必须先实现独立 peer graph、事件
+同步和默认关闭的 `STRATA_HEAD_SPLIT=1`，再用三组 greedy 两轮逐字 parity 与路径命中证明
+生产集成没有改变语义。
+
+**恢复与成本**：测试在 `/opt/ai/src/strata-head-split-harness-20261031T0625CST` 独立构建，
+未修改远端用户 dirty 源码树，A2 未停、未重启。生产仍为 server/engine/vision
+`557432/557442/557436`，health loaded、6 slots / 2 groups；systemd inactive/dead。
+
+**证据**：
+
+- `/opt/ai/logs/util-head-split-20261031T0625CST/seven-processes.log`
+  （sha256 `e7d136c5835e718f120a913d9f73d70349d0e03de01405603f9205af5d50fc4c`）
+- `/opt/ai/logs/util-head-split-20261031T0625CST/process-0.log` … `process-6.log`
+- `src/kernels/head_split_parity.cu`
+- [`UTIL_HEAD_SPLIT_RESULT-20261031.md`](work/UTIL_HEAD_SPLIT_RESULT-20261031.md)
+
+**没测什么**：没有服务端 graph 集成、真实模型质量、A1-B-A2、资源安全、batch 调度开销或
+启动失败回退。harness 的合成权重只证明 native kernel 的分区与选择语义，不能替代端到端门。
 
 ## L-112 UTIL-BATCH-HEAD：端到端合并会制造大于 head 的流水线空窗
 

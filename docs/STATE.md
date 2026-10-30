@@ -6,10 +6,16 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-HEAD-SPLIT
-- 当前工作：先只写独立 GPU harness，把 native head 的 vocabulary rows 分成两个互斥区间，
-  在两块 RTX 2080 Ti 上分别计算并与完整 head 做 logits、greedy、固定种子与 draw counter
-  的 bitwise 对照；再测串行、并发与 peer 合并的临界路径。harness 不过不接 server、不重启。
+- 当前项：UTIL-HEAD-SPLIT（server integration）
+- 当前工作：独立 GPU harness 已通过。`T=1..8` 的半区与合并 logits 全部 `memcmp` 相等，
+  graph 改变输入、greedy、固定种子和两个 draw counter 全过；七个交替进程的并发临界路径
+  投影收益为 `1.813–9.936%`，最差单次也全部高于 1%。下一步把 `output.weight` 从 GGUF 直接
+  加载成两个不相交 vocabulary 区间，并以私有 peer graph/事件接入单请求和 batch window；
+  主图只等待本次 head 的两个半区，不等待另一个 pipeline group。默认关闭。
+- 上一项：UTIL-BATCH-HEAD 已在源码门否决。两个 group 在末级并非同时 ready；每级只有一个
+  verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 一次只绑定一个 group。
+  等齐后再合并会把 A 的 verdict 延迟一个 16.9–19.2 ms 的末级窗口，远大于约 1.04 ms 的
+  合并收益。未构建、未重启。
 - 上一项：UTIL-BATCH-HEAD 已在源码门否决。两个 group 在末级并非同时 ready；每级只有一个
   verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 一次只绑定一个 group。
   等齐后再合并会把 A 的 verdict 延迟一个 16.9–19.2 ms 的末级窗口，远大于约 1.04 ms 的
@@ -73,10 +79,12 @@
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：实现 `UTIL-HEAD-SPLIT` 的独立 harness。总 head 权重显存不增加；半区 logits
-  必须逐字节拼接为完整结果，greedy/sampler/counter 不变，并发临界路径按实测至少投影
-  端到端 1% 才允许接 server。不得重跑 window profile、batch-head、GDN groups、checkpoint
-  move、固定 groups、QSA slots 或 piped MTP。
+- 下一动作：实现 `UTIL-HEAD-SPLIT` 的 opt-in server 路径。按 vocabulary row 直接加载两个
+  半区，总 head 权重不增加；用私有 peer stream/event 和一份 Q8_1 激活，把 peer graph
+  接到所有末级 window 启动点；半区 logits 按 vocabulary offset 合并后再进入原
+  argmax/NaN/sampler。先做候选源码内三组 greedy 两次逐字等于 A 与路径命中门，再执行
+  同 boot A1-B-A2；不得重跑 window profile、batch-head、GDN groups、checkpoint move、
+  固定 groups、QSA slots 或 piped MTP。
 - 当前候选：无运行中 server 候选。A2 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
   仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为

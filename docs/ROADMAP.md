@@ -94,7 +94,7 @@ head 已在源码门否决：末级每级只有一个 verifier 和一套 head �
 | UTIL-GDN-GROUPS | M14 | 把窗口内各 slot 的 GDN recurrence 合并为每层一次 launch，并保留 self-commit 状态 | 已证伪 | 中；源码 parity、一次候选启动与 A3-B-A4 | **否决**：输出/状态 bitwise 全过，但 4 路 `-8.011%`，最佳 6 路仅 `+0.913%` 且 3/6 胜；漂移全超 3% |
 | UTIL-WINDOW-PROFILE | M14 | 用现有 stage/BSTAT 拆分 2/4/6/8 路 | 已完成 | 低；A1-P-A2，每级 3 波 | 8 路 occupancy/tail/wait 与 active rows/window 均退化；padding、KV resolve 否决 |
 | UTIL-BATCH-HEAD | M14 | 合并两个 pipeline group 的 final-stage head rows，一次读 output projection | 已证伪（源码控制流） | 高；源码重构、GPU harness、A1-B-A2 | **否决**：两个 group 在末级严格串行；延迟 A 的 verdict 会制造一个 16.9–19.2 ms 空窗，远大于约 1.04 ms head 收益 |
-| UTIL-HEAD-SPLIT | M14 | vocabulary rows 分到两张卡并并发各算一半 head | 进行中 | 高；harness、双卡事件、最终 A1-B-A2 | 总权重显存不增；先过半区 logits bitwise 与并发临界路径 ≥1% |
+| UTIL-HEAD-SPLIT | M14 | vocabulary rows 分到两张卡并并发各算一半 head | harness 已通过；接 server | 高；双卡事件、单/batch window、最终 A1-B-A2 | T=1..8 全 bitwise；七进程投影中位 `1.813–9.936%`，最差单次全部 >1%；总权重显存不增 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |

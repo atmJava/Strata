@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-86 · Head split is byte exact and clears the critical-path gate
+
+- 目标 / 指标：证明按 vocabulary rows 双卡并发计算 output projection 不改变 logits、
+  argmax、采样和 graph 语义，并证明临界路径按快速 stage-2 窗口投影至少端到端 1%。
+- 假设与预期：vocabulary rows 互相独立；两个半区应逐字节等于完整 call，并消除约一半
+  Q5_K head 时间，给低占用窗口带来超过 1% 的端到端空间。
+- 为什么选这条路线：window profile 找到 final-stage head 的固定成本；跨 group 延迟合并
+  因 pipeline bubble 在源码门否决，而 vocabulary partition 不延迟任何 group verdict。
+- 改动与实验：新增 `src/kernels/head_split_parity.cu` 与 CTest 目标，在独立远端源码目录
+  构建；对 Q5_K `2560→248320` 跑全量参考、两个 124,160-row 半区、串行/并发/peer 合并、
+  两个独立 graph、改变输入重放、greedy、固定种子和 draw counter 17/10017。
+- 结果：七个交替进程全部 `failures=0`，每个进程 `T=1..8` 全过。全量中位
+  `1094.779/1932.903/2364.746/2517.119/2806.073/3083.637/3479.548/3881.892 us`，
+  并发中位 `763.241/1071.851/1243.243/1347.023/1494.654/1643.123/1833.882/2066.048 us`；
+  投影中位 `1.813–9.936%`，最差单次也都超过 1%。split 峰值 `453,189,152 B`，低于
+  `461,577,760 B` 上界，两半权重之和严格等于 `437,043,200 B` 全量。
+- 判决：**UTIL-HEAD-SPLIT harness 通过，允许进入 server integration。** 这还不是端到端
+  采纳；必须证明 production graph 编排成本没有吃掉收益，并通过 A1-B-A2。
+- 预期部分确认：GPU head 层收益足够大；但生产主图不能直接捕获 peer kernel，server 路径
+  仍需独立 peer graph、事件同步和所有 window 启动点覆盖。
+- 生产状态与回滚：没有构建或启动 Strata 候选，没有重启。A2 仍为
+  server/engine/vision `557432/557442/557436`，health loaded、6 slots / 2 groups；
+  systemd inactive/dead，无需回滚。
+- 证据：台账 L-113、`UTIL_HEAD_SPLIT_RESULT-20261031.md`、远端
+  `/opt/ai/logs/util-head-split-20261031T0625CST/`。
+- 学到什么：在 2080 Ti 上让另一张卡承担半个 head，收益跨过用户 1% 门所需的条件已经
+  具备；下一步风险从数值正确性转到 graph/事件集成和每窗口 host/driver 成本。
+- 下一步与理由：实现默认关闭的 `STRATA_HEAD_SPLIT=1` server 路径，直接加载两个 vocabulary
+  权重区间，单请求与 batch window 都在私有 peer stream 上发 peer graph，主图只等待本次
+  head 的两个半区。通过逐字 parity 后才消耗一次 A-B-A 的约五分钟加载成本。
+
 ## I-20261031-85 · Cross-group head batching loses to its own pipeline bubble
 
 - 目标 / 指标：验证 profile 暴露的 final-stage head 固定成本能否通过合并两个 pipeline

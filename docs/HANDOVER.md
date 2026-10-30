@@ -28,7 +28,10 @@
   `12,596 ms`，BSTAT active rows/window `2.6837`（6 路 `2.9515`）；padding 更低，KV resolve
   为 `0.000 ms`。由此提出的跨 group head 合并在源码门否决：末级每级只有一个 verifier 和
   一套 head 缓冲，延迟前一组 verdict 会在二组流水制造大于 `1.04 ms` 收益的 10–19 ms 空窗。
-  当前断点改为 vocab-row head split 的独立 GPU harness。
+  vocab-row head split 的独立 GPU harness 随后通过：`T=1..8` 的半区/合并 logits 全部
+  `memcmp` 相等，greedy、固定种子、draw counter 和 graph 改变输入全过；七个交替进程的
+  并发临界路径投影收益中位为 `1.813–9.936%`，最差单次也全部超过 1%。当前断点改为
+  opt-in server integration，而不是再次测 harness。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；

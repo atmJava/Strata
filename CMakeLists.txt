@@ -612,6 +612,13 @@ if(STRATA_ENABLE_CUDA)
     target_include_directories(mmvq_il_parity PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(mmvq_il_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
     add_test(NAME mmvq_il_parity COMMAND mmvq_il_parity)
+    # UTIL-HEAD-SPLIT: vocabulary-row partition, exact sampling/graph parity, and the two-card critical path.
+    # The test skips with 77 where the two-device peer setup the server candidate needs is unavailable.
+    add_executable(head_split_parity src/kernels/head_split_parity.cu)
+    target_include_directories(head_split_parity PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(head_split_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    add_test(NAME head_split_parity COMMAND head_split_parity --selftest --reps 20)
+    set_tests_properties(head_split_parity PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     # the wide dequant kernels (a thread per 8 values; sm_61's default), bitwise vs the per-group ones (GPU, synthetic,
     # no model; --bench adds old/new timings)
     add_executable(dequant_wide_parity src/kernels/dequant_wide_parity.cpp)
