@@ -781,6 +781,20 @@ loaded、engine/config hash 正确；A→B 和 B→A 分别停机 8/9 秒，启�
 gate/up 都进入 expdec 路径，down 保持默认；真实路径接管并通过冻结 parity 后，才允许做
 2/4/6/8 路 A-B-A 和端到端 1% 门。
 
+### 16.5.10 UTIL-EXPDEC-GU（启动前路径否决）
+
+当前 A 的进程环境和 config 都固定 `STRATA_EXP_MODE=8`，进程里没有 `STRATA_EXPDEC`。部署
+源码在 mode 8 下先由 `native_gu_fused_kernel<18>` 或 mode-8 LDS gate/up 完成 gate/up，
+`expdec_gu()` 位于这些分支之后；down 走 `native_down_lds_kernel` 后直接 return，
+`expdec_down()` 也不可达。因此只增加 `STRATA_EXPDEC=1` 不可能让两卡的目标 EXPDEC 内核开始
+执行。
+
+本轮没有构造候选、重启、运行 parity 或吞吐；结论属于源码控制流的静态路径门，不是 EXPDEC
+性能负结果。原始证据为
+`/opt/ai/logs/util-expdec-gu-static-20261030T2008Z.txt`
+（sha256 `bc3ac9bfbbddc2f153118d984e62b296a77895e1a1ad0eb6c9cd2e35232c32b3`）。下一步转向
+8 路流水固定成本，优先检查最后不足窗口、重复 handoff 和每请求约 183 engine tokens 的来源。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

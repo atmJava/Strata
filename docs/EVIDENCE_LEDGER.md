@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（108 条：L-000…L-107，按编号）
+## 台账索引（109 条：L-000…L-108，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -122,6 +122,7 @@
 | L-105 | 10-31 19:2xZ | cache-neutral 候选只恢复 `10065 + 7209` cache，但 device1 是额外 helper cache；双卡 layer split 在读取权重前 exit 2 | **UTIL-PIPED-MTP-CACHE 启动门否决；转 CPU-order parity** |
 | L-106 | 10-31 19:4xZ | CPU-order piped MTP 保持 6 slots / 2 groups，但自然语言 greedy 探针仍两次不同且与 A 不同；未跑候选吞吐 | **UTIL-PIPED-MTP-ORDER parity 门否决；转 1-vs-2 batch-group fit** |
 | L-107 | 10-31 20:0xZ | A3 8 路中位 `104.4 tok/s`，低于 6 路 `133.2`；单组候选正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | **UTIL-BATCH-GROUP-FIT parity 门否决；未跑候选吞吐** |
+| L-108 | 10-31 20:0xZ | A 的进程/config 均为 mode 8；fused/LDS gate/up 先完成，down 的 LDS 分支直接 return，`STRATA_EXPDEC=1` 无法到达 EXPDEC 内核 | **UTIL-EXPDEC-GU 启动前路径门否决** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3838,6 +3839,28 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-108 UTIL-EXPDEC-GU：mode-8 分支让 opt-in 内核在启动前不可达
+
+**判定**：**UTIL-EXPDEC-GU 在启动前路径门否决。** 当前 A 的进程配置与 JSON 配置都固定
+`STRATA_EXP_MODE=8`，进程环境没有 `STRATA_EXPDEC`。部署源码的 mode-8 gate/up 在
+`gu_type=18` 时先进入 `native_gu_fused_kernel<18>`，否则进入 mode-8 LDS gate/up，两条分支
+都在 `expdec_gu()` 前完成；down 进入 `native_down_lds_kernel` 后直接 return，
+`expdec_down()` 同样不可达。仅增加 `STRATA_EXPDEC=1` 不能改变实际执行内核。
+
+**运行证据**：source `c219fbca...`、engine `105a4171...`、config `88de996a...`；
+server/engine/vision PID `529088/529112/529097`，health loaded。证据文件记录
+`proc_exp_mode=STRATA_EXP_MODE=8`、`config_exp_mode=8` 和 `proc_expdec=absent`。
+
+**没测什么**：没有创建候选、重启、检查 loaded 候选、运行 parity 或吞吐。这不是 EXPDEC
+端到端性能负结果，而是当前生产控制流下的可达性否决；不会消耗一次 3-7 分钟重启预算。
+
+**证据**：`/opt/ai/logs/util-expdec-gu-static-20261030T2008Z.txt`
+（sha256 `bc3ac9bfbbddc2f153118d984e62b296a77895e1a1ad0eb6c9cd2e35232c32b3`）。
+
+**下一步**：`UTIL-MULTI` 的 8 路流水波次审计。A3 8 路 `104.4 tok/s` 低于 6 路 `133.2`，
+每请求约 183 engine tokens；先查最后不足一整窗的 padding/replay、重复 handoff 和草稿分配，
+必须找到不改变 token 选择与数值路径的不同机制。
 
 ## L-107 UTIL-BATCH-GROUP-FIT：单组调度改变自然语言数值路径
 

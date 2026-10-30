@@ -3,6 +3,34 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-81 · EXPDEC is unreachable behind the fixed mode-8 kernels
+
+- 目标 / 指标：在重启前确认 `STRATA_EXPDEC=1` 是否真的能接管当前两卡的 gate/up；只有两张卡
+  的目标内核可达，才允许创建候选并进入冻结 parity 与 2/4/6/8 路 1% 门。
+- 假设与预期：既有 opt-in 文档表明 EXPDEC 覆盖 IQ3_XXS gate/up，若当前 `gu_type` 和几何满足，
+  增加单一 env 就应在启动日志出现 `expdec_gu_kernel`。
+- 为什么选这条路线：它只需只读源码和进程环境，若可达则有现成内核可做低风险端到端验证；若
+  不可达，应在支付一次 3-7 分钟加载成本前停止。
+- 改动与实验：没有启动候选或改配置。核对运行 engine/config hash、进程环境和部署源码，追踪
+  `native_expert_grouped` 的 gate/up 与 down 控制流，并保存只读证据文件与 sha256。
+- 结果：进程和 config 都是 `STRATA_EXP_MODE=8`，`STRATA_EXPDEC` 不存在。mode 8 +
+  `gu_type=18` 先进入 `native_gu_fused_kernel<18>`，否则进入 mode-8 LDS gate/up；两者都在
+  `expdec_gu()` 之前完成。down 进入 `native_down_lds_kernel` 后直接 return，
+  `expdec_down()` 同样不可达。
+- 判决：**UTIL-EXPDEC-GU 在启动前路径门否决。** 未创建候选、未重启，也未运行 parity 或
+  候选吞吐；A 的 server/engine/vision PID 仍为 `529088/529112/529097`。
+- 预期被推翻：已有 EXPDEC 内核“可用”不等于当前部署分支“可达”；只在源码里找到 kernel 和
+  opt-in 开关不足以证明生产 mode 会调用它。
+- 生产状态与回滚：无状态变化。engine `105a4171...`、config `88de996a...`、health loaded，
+  production systemd 仍 inactive/dead、`MainPID=0`、`NRestarts=23`。
+- 证据：`docs/work/UTIL_EXPDEC_GU_RESULT-20261031.md`、台账 L-108、
+  `/opt/ai/logs/util-expdec-gu-static-20261030T2008Z.txt`。
+- 学到什么：调度/内核候选必须先做“当前分支是否可达”的短路门；一个静态不可达候选即使文档
+  声称与模型几何兼容，也不值得占用重启和 parity 窗口。
+- 下一步与理由：转 `UTIL-MULTI` 的 8 路流水波次审计。A3 8 路 `104.4 tok/s` 明显低于 6 路
+  `133.2`，且每请求只实际生成约 183 engine tokens；先查最后不足窗口的 padding/replay、
+  重复 handoff 和草稿分配，必须找到不改变模型算术的新机制后才允许候选启动。
+
 ## I-20261031-80 · 单组调度既未修复 8 路平台，也未保持 greedy parity
 
 - 目标 / 指标：先补当前 A 的 8 路基线，再把 groups 2→1 作为唯一候选变化；B 必须逐字等于

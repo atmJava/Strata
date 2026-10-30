@@ -67,6 +67,10 @@
     的 cache，不是 layer-split 第二级槽位上限；双卡均跑 stage 时引擎在读取权重前以 exit 2
     退出。下一步只测现有 `--expert-cache-cpu-order`，让 GPU expert 算术匹配 CPU 顺序；
     仍然先过逐字 parity，再允许性能测量。
+23. **UTIL-EXPDEC-GU 已在启动前路径门否决**：当前进程和 config 均为
+    `STRATA_EXP_MODE=8`，gate/up 先由 fused/LDS 分支完成，down 也在 LDS 分支直接返回；
+    `STRATA_EXPDEC=1` 不可达。没有重启、parity 或吞吐数据。下一步转 8 路流水波次与最后不足
+    一整窗的只读审计，先找不改变模型算术的重复工作、padding 或 replay。
 
 ## 候选
 
@@ -94,7 +98,8 @@
 | UTIL-PIPED-MTP-CACHE | 隔离 slot drafters 的 expert-cache 挤压 | 从 B 只恢复 A 的 `10065` primary + `7209` CUDA1 slots；启动仍为 6/2/MTP；先要求所有固定 greedy 输出逐字重复且等于 A，再测 2/4/6 路；2 路 +1%/5-of-6，4/6 不退>1% | 否决 | L-105：`--expert-cache-device1` 要求不跑 stage 的 helper GPU；双卡候选 exit 2，未 loaded | 不扫邻近 cache、草稿深度或组数 |
 | UTIL-PIPED-MTP-ORDER | 用现有 CPU-order expert 算术消除 cache 位置舍入 | 从 B 只加 `--expert-cache-cpu-order`；启动仍为 6/2/MTP；先要求全部固定 greedy 输出逐字重复且等于 A，再测 2/4/6 路；2 路 +1%/5-of-6，4/6 不退>1% | 否决 | L-106：6/2 正常 loaded，但自然语言探针两次不同且与 A 不同；未跑吞吐 | 开关接在 `ExpertDispatch`，未覆盖 layer-split `VerifyHits`；不扫其他顺序/cache 开关 |
 | UTIL-BATCH-GROUP-FIT | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | A 补 8 路；B 只把 groups 2→1；先过相同两次 greedy parity，再同测 2/4/6/8 路并恢复 A4；2 路 +≥1% 且 5/6 胜，4/6/8 不退>1%，零请求/资源错误 | 否决 | L-107：A3 `2/4/6/8=81.0/116.1/133.2/104.4 tok/s`；B 正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | parity 失败，未跑吞吐；只改 group 数也会改变数值路径，不扫其他固定组数 |
-| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 待做 | L-092：2 路数字 `94.85 tok/s` 低于单路 `104.05`；8 路 `138.76` 低于 6 路 `164.68`，TTFT 约 `5.8 s` | 先查调度/批窗口固定成本，不先做参数扫描 |
+| UTIL-EXPDEC-GU | 验证 mode-8 gate/up 的 EXPDEC opt-in 接管 | 启动前证明两张卡 gate/up 均可到 `expdec_gu_kernel` 且 down 保持默认；通过后 6/2、正确 hash、parity 逐字相等，再测 2/4/6/8 路且 1% 门与资源/请求 hard gate 全过 | 否决 | L-108：进程/config 为 mode 8，fused/LDS 先完成 gate/up，down 分支直接 return；EXPDEC 调用不可达 | 启动前否决；未重启、未跑 parity/吞吐 |
+| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107：A3 `2/4/6/8=81.0/116.1/133.2/104.4`；8 路 TTFT `1926 ms`，每请求约 183 engine tokens | 先只读审计 `PGroup`/`pump()`/`GS` 波次和尾部窗口，不先扫参数 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |

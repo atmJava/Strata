@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-107。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-108。
 
 ## 2. 当前断点
 
@@ -20,7 +20,8 @@
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的
   `UTIL-PIPED-MTP-ORDER` 又在 parity 门否决；`UTIL-BATCH-GROUP-FIT` 也已过启动门，
-  但在自然语言 parity 门否决。当前断点是短路验证 `UTIL-EXPDEC-GU`。
+  但在自然语言 parity 门否决。`UTIL-EXPDEC-GU` 随后在启动前路径门否决：mode 8 的
+  fused/LDS 分支使目标 EXPDEC 内核不可达。当前断点是 8 路流水波次与尾部窗口的只读审计。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -46,7 +47,8 @@
   `LDG.E.U16.CONSTANT.SYS` 但仍只有 `0.339%`。Pipelined MTP 的 2 路确有 `+19.92%`，但 4/6 路
   分别回退 `3.82%/9.79%`，且 greedy 文本不重复。直接指定 CUDA1 cache 的路线在双卡上不可启动；
   CPU-order expert 算术也没有改变输出；单组调度仍在自然语言上产生不同但可重复的文本。
-  当前 A3 的 8 路中位 `104.4 tok/s` 比 6 路 `133.2` 低，但固定单组不能通过质量门。
+  当前 A3 的 8 路中位 `104.4 tok/s` 比 6 路 `133.2` 低，但固定单组不能通过质量门；
+  EXPDEC 又因 mode 8 控制流短路而不值得启动。
 
 ## 3. 当前生产
 
@@ -312,10 +314,10 @@ query 的 score、top-k、softmax 或输出算术。
 4. UTIL-NCU 已使用快照和独立候选完成；不要把 full-section NCU replay 重新压到完整双卡
    请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
 5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
-6. 当前只允许 `UTIL-EXPDEC-GU` 的短路验证：从 A config 复制独立候选，只给 env 增加
-   `STRATA_EXPDEC=1`。启动日志必须证明两张卡的 gate/up 都进入 `expdec_gu_kernel`，down
-   保持默认。路径未真实接管即否决；接管后先过三组冻结 greedy parity，通过才预注册并测
-   2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、并发回退和资源 hard gate 不放宽。
+6. `UTIL-EXPDEC-GU` 已在启动前路径门否决，不再启动。下一步只允许 8 路流水波次与尾部窗口的
+   只读审计；新候选必须用不同机制，先证明不会改变 token 选择和数值路径，再预注册冻结
+   greedy parity 与 2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、并发回退和资源 hard gate
+   不放宽。只有代码路径明确需要实测且预计收益高于约 3-7 分钟重启成本时才重启。
 
 不要把已否决项原样重跑：
 
@@ -341,8 +343,8 @@ query 的 score、top-k、softmax 或输出算术。
 ## 9. 仓库与工作区
 
 - 当前本地收敛工作区：`/home/kali/IdeaProjects/strata`。
-- 当前分支：`refactor/sm75-cli-server`。
+- 当前分支：`freeze/server-adapt-0.2.7`。
 - 本地收敛工作按可验证阶段提交并推送；接手时以 `git status` 和 `git log` 核对最新阶段与未完成改动。
-- 服务器实验源码：`/opt/ai/src/strata-merged-a66698c6`。
+- 服务器实验源码：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z`。
 - 工作区存在未提交源码、文档、实验说明和未跟踪文件；不得清理、回滚或覆盖用户改动。
 - 只修改与当前任务有关的最小文件，并在交付前运行离线预检、diff check 和 UTF-8 BOM 检查。
