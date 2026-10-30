@@ -6,10 +6,14 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-WINDOW-PROFILE
-- 当前工作：先用现有 `STRATA_VERIFY_PROFILE` 和 batch telemetry 拆解
-  2/4/6/8 路 decode window 的 active rows、stage hand-off、streamed-KV resolve 与 slot
-  turnover；在读数能区分 8 路尾部原因前不再扫单行 launch 聚合。
+- 当前项：UTIL-BATCH-HEAD
+- 当前工作：先只读审计 piped `PGroup` 的 final-stage residual/mixed/logit 所有权，证明两个
+  ready group 可以按 group/slot 顺序拼成一次 `T<=8` 的 native head，再实现 opt-in
+  `STRATA_BATCH_HEAD_MERGE=1` 和 separate-vs-merged bitwise harness。源码门不过就不重启。
+- 上一项：UTIL-WINDOW-PROFILE 已完成。A1/P/A2 各 12 波；P 的 6/8 路为
+  `113.352/103.373 tok/s`，8 路 occupancy `5.010`、tail `1.1349`、max slot wait
+  `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`。按活跃行计的
+  stage 2 成本上升 `4.54%`；KV resolve 为 0.000 ms，padding 不是原因。
 - 上一项：UTIL-GDN-GROUPS 已完成并否决。修正 grouped self-commit 状态写回后，GPU parity
   输出和状态全部 `memcmp` 通过；2/4/6/8 路相对 A3/A4 合并中位为
   `+0.777%/-8.011%/+0.913%/-1.386%`，胜场 `2/6/2/6/3/6/2/6`，4 路回退超过 1%，
@@ -59,15 +63,17 @@
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
 - 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
-  调度、EXPDEC 和 checkpoint move 路径均已否决。attention v2 已是当前默认并完成 1% 门复验；
+  调度、EXPDEC、checkpoint move 和 GDN recurrence 合并均已否决；window profile 已完成。
+  attention v2 已是当前默认并完成 1% 门复验；
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：建立同 boot 的 2/4/6/8 路 profile 基线，使用现有 stage stamps 与 BSTAT 记录
-  窗口行数、阶段驻留和 KV resolve 计数；先确认能区分瓶颈，再预注册一个不同机制的源码候选。
-  不得重跑 checkpoint move、self-commit、GDN groups、QSA slots、固定 groups 或 piped MTP。
-- 当前候选：无。GDN groups 与 checkpoint move 已否决并恢复 A；EXPDEC 未启动；P7 不恢复：
-  实测 Tensor pipe 仅 `0.04%`。
+- 下一动作：先做 `UTIL-BATCH-HEAD` 源码门。检查两个 `PGroup` 在 final stage 的 residual、
+  mixed、logits 和 sampling 生命周期；任何覆盖活 group、改变 slot 顺序或引入超过一次额外
+  sync 的设计都在构建前否决。不得重跑 window profile、GDN groups、checkpoint move、固定
+  groups、QSA slots 或 piped MTP。
+- 当前候选：无运行中 server 候选。A2 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
+  仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
@@ -80,11 +86,11 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；GDN-groups 判决后恢复的 server/engine/vision PID 为
-  `548696/548707/548699`，engine 为 `105a4171...`，6 slots / 2 groups，没有
-  `STRATA_BATCH_GDN_GROUPS`、`STRATA_SLOT_CKPT_MOVE`、`STRATA_PIPED_MTP`、
-  `--expert-cache-cpu-order` 或实验 profiler/QSA/kernel env。
-  A3→候选停机 9 秒、启动至 loaded 150 秒；候选→A4 停机 9 秒、启动至 loaded 150 秒。
+  `loaded=true`；window-profile 判决后恢复的 server/engine/vision PID 为
+  `557432/557442/557436`，engine 为 `105a4171...`，6 slots / 2 groups，没有
+  `STRATA_VERIFY_PROFILE`、`STRATA_BATCH_TELEMETRY`、`STRATA_BATCH_GDN_GROUPS`、
+  `STRATA_SLOT_CKPT_MOVE`、`STRATA_PIPED_MTP`、`--expert-cache-cpu-order` 或其它实验
+  profiler/QSA/kernel env。A→P 停机约 9 秒、加载 130 秒；P→A2 停机约 9 秒、加载 148 秒。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为

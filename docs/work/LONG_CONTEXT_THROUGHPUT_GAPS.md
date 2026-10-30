@@ -828,6 +828,21 @@ GDN group 数或同类 launch 聚合。
 `UTIL-WINDOW-PROFILE`：用现有 stage stamps 和 batch telemetry 拆分 active rows、stage
 hand-off、streamed KV resolve、slot turnover 与每请求 ITL/TTFT，再选择新的源码机制。
 
+### 16.5.13 UTIL-WINDOW-PROFILE（完成，定位 8 路 underfilled tail）
+
+A1/P/A2 各跑 2/4/6/8 路、每级 3 波。P 只增加 `STRATA_VERIFY_PROFILE=1` 与
+`STRATA_BATCH_TELEMETRY=1`。P 的绝对吞吐比 A 低 3.6–7.6%，所以只用其中同 run 的分布。
+
+P 的 6/8 路为 `113.352/103.373 tok/s`。8 路平均占用 `5.010`，6 路为 `5.333`；
+slowest/median tail 从 `1.0026` 升到 `1.1349`，最大 slot wait 从 `1,859 ms` 升到
+`12,596 ms`。BSTAT active rows/window 从 `2.9515` 降到 `2.6837`，padding 反而更低；
+按活跃行计 stage 1/2 成本升 `4.70%/4.54%`。KV resolve 为 `0.000 ms`。
+
+结论是六槽队列结束后的 underfilled pipeline，而不是 padding replay 或流式 KV resolve。
+下一步候选为 `UTIL-BATCH-HEAD`：两个 pipeline group 在 final stage 各自跑一次 head，
+把 ready rows 合并后可一次读 output projection，理论上有 1%+ 空间。
+契约见 [`UTIL_BATCH_HEAD_CONTRACT-20261031.md`](UTIL_BATCH_HEAD_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

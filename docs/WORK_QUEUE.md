@@ -84,6 +84,11 @@
     修正后 1/4/8 组输出与状态全部 bitwise 相等，固定 greedy 两轮也等于 A，但 4 路
     `-8.011%`，2/6/8 路分别只 `+0.777%/+0.913%/-1.386%`，胜场均不足 5/6。下一步停止
     猜单行 launch 成本，先用 stage/BSTAT 拆 2/4/6/8 路窗口再选新机制。
+27. **UTIL-WINDOW-PROFILE 已完成**：A1/P/A2 各 12 波。P 的 6/8 路为
+    `113.352/103.373 tok/s`；8 路 occupancy `5.010`、tail `1.1349`、最大 slot wait
+    `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`。padding 没有上升，
+    KV resolve 为 `0.000 ms`，但按活跃行计的 stage 2 成本上升 `4.54%`。下一项只做 final-stage
+    head rows 跨两个 pipeline group 合并的源码门。
 
 ## 候选
 
@@ -113,8 +118,9 @@
 | UTIL-BATCH-GROUP-FIT | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | A 补 8 路；B 只把 groups 2→1；先过相同两次 greedy parity，再同测 2/4/6/8 路并恢复 A4；2 路 +≥1% 且 5/6 胜，4/6/8 不退>1%，零请求/资源错误 | 否决 | L-107：A3 `2/4/6/8=81.0/116.1/133.2/104.4 tok/s`；B 正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | parity 失败，未跑吞吐；只改 group 数也会改变数值路径，不扫其他固定组数 |
 | UTIL-EXPDEC-GU | 验证 mode-8 gate/up 的 EXPDEC opt-in 接管 | 启动前证明两张卡 gate/up 均可到 `expdec_gu_kernel` 且 down 保持默认；通过后 6/2、正确 hash、parity 逐字相等，再测 2/4/6/8 路且 1% 门与资源/请求 hard gate 全过 | 否决 | L-108：进程/config 为 mode 8，fused/LDS 先完成 gate/up，down 分支直接 return；EXPDEC 调用不可达 | 启动前否决；未重启、未跑 parity/吞吐 |
 | UTIL-SLOT-CKPT-MOVE | 准入 checkpoint 从复制改为移动 | A 深拷贝且只加 `STRATA_SLOT_CKPT_MOVE=1`；6 slots / 2 groups、hash/health/资源正确；三组 greedy 两次逐字等于 A；A3-B-A4 的 2/4/6/8 路至少一级 ≥1% 且 5/6 胜，其他级不回退 >1%，零错误/外来请求 | 否决 | L-109：parity 全过；2/4 名义 `+3.099%/+2.259%`、胜 4/6 与 3/6，6 `+0.122%`，8 `-3.014%`、胜 2/6；A 漂移最大 8.944% | 不扫 checkpoint/cache/copy 邻近设置 |
-| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107/L-109/L-110：8 路仍低于 6 路；GDN/checkpoint 合并没有改善；A-B-A 漂移仍大 | 不再扫 launch 聚合；先做 2/4/6/8 路 stage/BSTAT 归因 |
-| UTIL-WINDOW-PROFILE | 拆当前 2/4/6/8 路窗口 | 同 boot 记录 active rows、stage hand-off、KV resolve、slot turnover 与 ITL；至少两项指标能区分 6 路峰值和 8 路尾部，并据此预注册一个不同机制候选 | 进行中 | 待 L-111 | 只开现有 profiler/telemetry；不改生产 config 或源码 |
+| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107/L-109/L-110/L-111：8 路尾部来自六槽轮换后的 underfilled groups；GDN/checkpoint 合并没有改善 | 不再扫 launch 聚合；转 final-stage head rows 合并 |
+| UTIL-WINDOW-PROFILE | 拆当前 2/4/6/8 路窗口 | 同 boot 记录 active rows、stage hand-off、KV resolve、slot turnover 与 ITL；至少两项指标能区分 6 路峰值和 8 路尾部，并据此预注册一个不同机制候选 | 已完成 | L-111：occupancy `5.010`、tail `1.1349`、max wait `12,596 ms`；active rows/window `2.6837` 对 `2.9515`；padding/KV resolve 否决 | 只开现有 profiler/telemetry；PSTAT 未交付 |
+| UTIL-BATCH-HEAD | 合并两个 ready pipeline group 的 final-stage head rows | 源码门先证明 row ownership/order/一次额外 sync；GPU harness 的 logits、greedy、fixed-seed、state 全部 bitwise；A1-B-A2 的 2/4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不退 >1%，漂移 ≤3%、零错误/外来请求 | 进行中 | 待 L-112 | opt-in `STRATA_BATCH_HEAD_MERGE=1`；默认路径不变 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |

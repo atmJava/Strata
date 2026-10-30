@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-84 · The eight-stream tail is an underfilled six-slot turnover
+
+- 目标 / 指标：在同 boot 的 A1/P/A2 中用现有 stage stamps 与 batch telemetry 跑 2/4/6/8 路，
+  每级 3 波；至少两个独立指标必须区分 6 路峰值和 8 路尾部，再据此预注册一个不同机制候选。
+- 假设与预期：如果 8 路仍下降，active rows/window、slot occupancy、最大 slot wait 或 per-request
+  tail 中至少两项会显示六槽轮换留下的 underfilled pipeline；padding 与 KV resolve 应能被排除。
+- 为什么选这条路线：此前 GDN、checkpoint、固定分组、MTP 与 QSA slot 合并都已失败；继续猜
+  同类 launch 成本没有证据。
+- 改动与实验：P 深拷贝 A，只加 `STRATA_VERIFY_PROFILE=1` 与
+  `STRATA_BATCH_TELEMETRY=1`。每波用 barrier 同时释放固定 400-token prompts，并采样
+  `/v1/telemetry`；A1/P/A2 之间停服约 9 秒、加载 130/148 秒。
+- 结果：P 的 6/8 路为 `113.352/103.373 tok/s`；8 路占用 `5.010`（6 路 `5.333`）、
+  slowest/median tail `1.1349`（`1.0026`）、最大 slot wait `12,596 ms`（`1,859 ms`）。
+  BSTAT active rows/window 从 `2.9515` 降到 `2.6837`，padding 反而更低；按活跃行计
+  stage 1/2 成本分别升 `4.70%/4.54%`。KV resolve 为 `0.000 ms`。
+- 判决：**UTIL-WINDOW-PROFILE 完成。** 8 路尾部由六槽轮换后的 underfilled group 与固定
+  每窗口成本解释；两个 pipeline group 各自支付 final-stage head，是该轮证据支持的新靶子。
+- 预期部分推翻：没有发现 padding replay 或 streamed-KV resolve 热点；昂贵项是低占用时仍
+  按 group 执行的 stage/head 固定工作。
+- 生产状态与回滚：A2 server/engine/vision `557432/557442/557436` 已恢复，engine/config hash
+  正确，6 slots / 2 groups，两个 profiler env 均不存在；systemd inactive/dead、
+  `MainPID=0`、`NRestarts=23`。
+- 证据：`docs/work/UTIL_WINDOW_PROFILE_RESULT-20261031.md`、台账 L-111、A1/P/A2 JSON 与
+  stage/BSTAT 原始日志。
+- 学到什么：6 路峰值是容量峰值，不存在“保持 8 路都活跃”的简单调度修复；低占用尾部会用
+  更少的 active rows 为同样的 head/窗口固定工作付费。profiler 会改变融合路径并带来
+  3.6–7.6% 成本，只能用于阶段归因。
+- 下一步与理由：预注册 `UTIL-BATCH-HEAD`，合并两个 ready pipeline group 的 final-stage
+  head rows，使最多 6 行只读一次 output projection。先做源码所有权/顺序门与
+  separate-vs-merged GPU bitwise，再允许重启。
+
 ## I-20261031-83 · GDN grouped recurrence is exact but slower at four streams
 
 - 目标 / 指标：在 A 的 `STRATA_BATCH_SELF_COMMIT=1` 下，把每个 GDN layer 的各槽

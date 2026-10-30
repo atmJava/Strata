@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T05:36+08:00。
+> 整理时间：2026-10-31T06:08+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -24,8 +24,9 @@
   fused/LDS 分支使目标 EXPDEC 内核不可达。`UTIL-SLOT-CKPT-MOVE` 过了启动和 parity 门，
   但 8 路回退 `3.014%` 且高并发胜率不足。`UTIL-GDN-GROUPS` 修正 grouped self-commit
   状态写回后通过输出/状态 bitwise parity，但 4 路回退 `8.011%`，2/4/6/8 路胜场均不足。
-  当前断点转到 2/4/6/8 路 window profile，先拆 active rows、stage hand-off、KV resolve
-  与 slot turnover。
+  `UTIL-WINDOW-PROFILE` 随后完成：8 路平均占用 `5.010`、tail `1.1349`、最大 slot wait
+  `12,596 ms`，BSTAT active rows/window `2.6837`（6 路 `2.9515`）；padding 更低，KV resolve
+  为 `0.000 ms`。当前断点转到 final-stage 跨 group head 合并的源码审计。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -51,10 +52,10 @@
   `LDG.E.U16.CONSTANT.SYS` 但仍只有 `0.339%`。Pipelined MTP 的 2 路确有 `+19.92%`，但 4/6 路
   分别回退 `3.82%/9.79%`，且 greedy 文本不重复。直接指定 CUDA1 cache 的路线在双卡上不可启动；
   CPU-order expert 算术也没有改变输出；单组调度仍在自然语言上产生不同但可重复的文本。
-  最新 A3 的 8 路中位 `105.5 tok/s` 仍比 6 路 `122.6` 低；固定单组不能通过质量门；
+  最新 A1/A2 合并中位 8 路 `107.214 tok/s` 仍比 6 路 `122.703` 低；固定单组不能通过质量门；
   EXPDEC 因 mode 8 控制流短路而不可达；checkpoint move 与 GDN recurrence 合并都没有越过
-  多并发硬门。下一轮必须从同 boot profile 区分 8 路尾部到底来自窗口内计算、跨 stage
-  hand-off，还是六槽轮换，而不是继续合并同类 kernel launch。
+  多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；下一步只审计 final-stage
+  head rows 跨两个 pipeline group 的合并，不再合并同类 kernel launch。
 
 ## 3. 当前生产
 
@@ -65,7 +66,7 @@
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
 | 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 候选 PID | server `548696`、engine `548707`；vision `548699` |
+| 候选 PID | server `557432`、engine `557442`；vision `557436` |
 | candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 

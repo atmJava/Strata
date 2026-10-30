@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（111 条：L-000…L-110，按编号）
+## 台账索引（112 条：L-000…L-111，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -125,6 +125,7 @@
 | L-108 | 10-31 20:0xZ | A 的进程/config 均为 mode 8；fused/LDS gate/up 先完成，down 的 LDS 分支直接 return，`STRATA_EXPDEC=1` 无法到达 EXPDEC 内核 | **UTIL-EXPDEC-GU 启动前路径门否决** |
 | L-109 | 10-31 21:0xZ | checkpoint move parity 全过；同周期 2/4/6/8 路 `81.5/110.9/123.1/107.8 tok/s`，2/4 胜率仅 4/6、3/6，6 `+0.122%`，8 `-3.014%` | **UTIL-SLOT-CKPT-MOVE 吞吐门否决；A 已恢复** |
 | L-110 | 10-31 22:0xZ | GDN grouped self-commit 输出/state bitwise 全过；2/4/6/8 路 `+0.777%/-8.011%/+0.913%/-1.386%`，胜场均不足，漂移全超 3% | **UTIL-GDN-GROUPS 吞吐/漂移门否决；A 已恢复** |
+| L-111 | 10-31 22:5xZ | A-P-A2 每级 3 波；P 的 6/8 路 `113.352/103.373 tok/s`；8 路 occupancy `5.010`、tail `1.1349`、max slot wait `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`；head 每窗口约 `1.04 ms` | **UTIL-WINDOW-PROFILE 完成；下一项 UTIL-BATCH-HEAD** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3841,6 +3842,66 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-111 UTIL-WINDOW-PROFILE：8 路尾部是六槽轮换后的 underfilled group
+
+**判定**：**UTIL-WINDOW-PROFILE 完成。** 同一 boot 的 A1/P/A2 各跑 2/4/6/8 路、每级 3 波。
+P 只比 A 多 `STRATA_VERIFY_PROFILE=1` 与 `STRATA_BATCH_TELEMETRY=1`。P 的 profiled 吞吐低于 A
+`3.583–7.621%`，所以只用它的同 run 分布和阶段，不把绝对 tok/s 当生产性能。
+
+**吞吐**：A1/P/A2 的 6 路中位为 `120.547/113.352/123.866 tok/s`，8 路为
+`107.216/103.373/107.213`。A1→A2 漂移为 `-2.280%/+5.804%/+2.753%/-0.003%`；相对 A1/A2
+合并中位，P 的 2/4/6/8 路为 `-4.696%/-5.329%/-7.621%/-3.583%`，即仪器成本。
+
+**8 路尾部**：三个独立指标同向。
+
+| 指标 | 6 路 | 8 路 | 变化 |
+| --- | ---: | ---: | ---: |
+| 平均占用 slot | 5.333 | 5.010 | `-6.06%` |
+| 最慢/同波中位 wall | 1.0026 | 1.1349 | `+13.2%` |
+| 最大 slot wait 中位 | 1,859 ms | 12,596 ms | `+577.6%` |
+| BSTAT active rows/window | 2.9515 | 2.6837 | `-9.07%` |
+| BSTAT padding rows/window | 0.0315 | 0.0228 | 更低 |
+| stage 1 / active row | 5.7225 ms | 5.9917 ms | `+4.70%` |
+| stage 2 / active row | 6.5119 ms | 6.8078 ms | `+4.54%` |
+
+因此瓶颈不是 padding：六槽队列结束后只剩少量活跃行，两个 pipeline group 仍各自支付固定的
+每窗口工作。P 的 stage 2 GDN `head` 在 6/8 路分别为 `1.06/1.04 ms/window`，按活跃行摊薄后
+8 路贵 `7.9%`。KV resolve 在同几何报告为 `0.000 ms`，本轮没有支持继续优化的证据。
+
+**完整性/限制**：P 的 12 波都各有两条 stage report 和 BSTAT，零 HTTP/执行错误、零外来请求；
+但启用 `PSTAT` 后 `/v1/telemetry` 的 stage sample 仍为空，因此不把 PSTAT 当作已测。A1/A2 真值
+finish 为 `length=12, stop=6`，P 为 `length=12, stop=5`；profiler 会关闭部分 fused/side 路径，
+所以该差异使 P 只能作诊断，不能作为生产候选或数值等价证明。
+
+**重启与恢复**：A1 server/engine/vision `548696/548707/548699`；A→P 停服约 9 秒、加载
+130 秒，P server/engine `553834/553841`；P→A2 停服约 9 秒、加载 148 秒。最终
+server/engine/vision `557432/557442/557436`，health loaded、6 slots / 2 groups，engine/config
+SHA-256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
+`88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`，两个 profiler env
+均不存在。`strata.service` 仍 inactive/dead、`MainPID=0`、`NRestarts=23`；RAM available
+`13 GiB`、swap used `12 MiB`、两卡 idle。
+
+**没测什么**：没有长 prompt、混合 prefill/decode 或 soak；PSTAT 未交付。还没有证明跨 group
+合并 head 的实际临界路径收益。
+
+**证据**：
+
+- `docs/work/UTIL_WINDOW_PROFILE_CONTRACT-20261031.md`
+- `docs/work/UTIL_WINDOW_PROFILE_RESULT-20261031.md`
+- `/opt/ai/logs/util-window-profile-20261031T0545CST/UTIL-WINDOW-PROFILE-summary.json`
+  （sha256 `8a35e4abcab25fa34d8ebf9db921d2f50368f994e1a1e8821097790404b7e221`）
+- `A1-WINDOW.json` `d13a5f9b...`、`P-WINDOW.json` `2119df02...`、`A2-WINDOW.json`
+  `458de9be...`，均在上述目录。
+- `/opt/ai/bin/window-profile-sweep.py`
+  （sha256 `02db9bfa014f8f436a0a4280d83db28dcae628c7076d7728876fa1160f214ddb`）
+- `/home/atm/verify-20261027/strata-verify/strata-verify.log`
+  （sha256 `e22ccfa9b1ac40e37e7610be60ae2711acde60ecf71e7bd6f060c4f7dcf28701`）
+
+**下一步**：`UTIL-BATCH-HEAD`。先在
+[`UTIL_BATCH_HEAD_CONTRACT-20261031.md`](work/UTIL_BATCH_HEAD_CONTRACT-20261031.md)
+的源码门前证明两个 ready group 的 final rows 可无损拼成一次 native head，再测
+separate-vs-merged logits bitwise、greedy/fixed-seed parity 与 A1-B-A2 2/4/6/8 路。
 
 ## L-110 UTIL-GDN-GROUPS：grouped self-commit 状态精确但没有多流收益
 
