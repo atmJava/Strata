@@ -664,6 +664,18 @@ wavefronts 也相同，因此编译器本来就已复用同一 activation load�
 详见 [`UTIL_ACT_RESULT-20261031.md`](UTIL_ACT_RESULT-20261031.md) 和
 [`UTIL_WEIGHT_REUSE_CONTRACT-20261031.md`](UTIL_WEIGHT_REUSE_CONTRACT-20261031.md)。
 
+### 16.5.3 UTIL-WEIGHT（已完成，否决）
+
+显式复用每个 k 的 weight-side decode 得到 `473.2` 对 `475.8 us`（改善 `0.546%`），
+6/7 组胜出，但未过预注册 1%。NCU 显示两臂 shared/global load instructions 分别为完全相同的
+`10,583,040/296,960`，wavefronts 与 bank conflicts 也基本不变；寄存器从 73 升到 80。
+因此这是源代码层面的重复，NVCC 已经完成 CSE，不能作为稳定机器级收益采纳。
+
+同时找到首版四副本 bank rotation 的具体缺陷：`4*index+replica` 每个 replica 只能覆盖八个
+bank。下一候选固定四副本并使用 stride 257，让 `index+replica (mod 32)` 覆盖全部 32 banks。
+详见 [`UTIL_WEIGHT_RESULT-20261031.md`](UTIL_WEIGHT_RESULT-20261031.md) 和
+[`UTIL_GRID_PAD_CONTRACT-20261031.md`](UTIL_GRID_PAD_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

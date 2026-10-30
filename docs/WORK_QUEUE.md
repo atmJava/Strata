@@ -51,6 +51,9 @@
 17. **UTIL-ACT 已否决**：显式 activation reload 与 baseline 都执行 `10,583,040` 条
     shared-load（−0.021%，3/7 胜），编译器已复用；下一项 UTIL-WEIGHT 改为跨 NTC token
     复用 weight-side decode。
+18. **UTIL-WEIGHT 已否决**：方向性改善 `0.546%`、6/7 胜，但 shared/global load 指令完全
+    不变且寄存器 73→80；未达 1%。下一项 UTIL-GRID-PAD 修正四副本地址布局，使每个副本覆盖
+    全部 32 个 bank。
 
 ## 候选
 
@@ -71,7 +74,8 @@
 | UTIL-NCU | 独立实例 stall 归因 | 停服前保存并校验快照；用受控 engine 实例采集 SM throughput、occupancy、Tensor pipe、DRAM 和 stall reason；目标 prompt 与热态固定；结束后恢复生产并 T-probe 无问题 | 已完成 | L-098：MIO `29.75%`、active warps `71.59%`、Tensor `0.04%`；全请求 replay 超时后用真实权重微内核完成 | 不恢复 Tensor/P7 |
 | UTIL-KERNEL | 按根因提高资源利用率 | 预先固定目标计数器和 wall 门限；只改一个瓶颈内核或调度路径；同负载下目标硬件计数与端到端 wall 同向改善；输出和稳定性门通过 | 否决 | L-099：四副本 rotated codebook hash 不变，但 `474.5` 对 `474.1 us`，2/7 胜；bank conflicts 反升 | 不扫描 2/8/16 副本 |
 | UTIL-ACT | 消除 gate/up 的重复 activation shared load | 每个 k 只显式读取一次 q8_1 words/scale 并复用于两 row dot；7 组 process 中位 ≥1%、5/7 胜、p75 优于 baseline 中位；MIO≤28.75%、wavefronts 下降、active warps≥69%、hash/parity 不变 | 否决 | L-100：`475.2` 对 `475.1 us`，3/7 胜；两臂 shared loads 都 `10,583,040`，编译器已复用 | 不重试同形 activation hoisting |
-| UTIL-WEIGHT | 跨 NTC token 复用 weight-side IQ3_XXS decode | 每个 k 只解码一次 grid/aux/scale，再对 chunk 内 token apply；7 组 process 中位 ≥1%、5/7 胜、p75 优于 baseline 中位；MIO≤28.75%、wavefronts 下降、寄存器≤85、hash/parity 不变 | 待做 | contract 已预注册；6-entry 形状 codebook lookup 预期约降 2.5 倍 | 通过后仅做一次 engine A/B；失败后换机制 |
+| UTIL-WEIGHT | 跨 NTC token 复用 weight-side IQ3_XXS decode | 每个 k 只解码一次 grid/aux/scale，再对 chunk 内 token apply；7 组 process 中位 ≥1%、5/7 胜、p75 优于 baseline 中位；MIO≤28.75%、wavefronts 下降、寄存器≤85、hash/parity 不变 | 否决 | L-101：`473.2` 对 `475.8 us`（+0.546%）、6/7 胜；load 指令完全相同，寄存器 73→80 | 不接受未达 1% 的方向性结果 |
+| UTIL-GRID-PAD | 修正四副本 codebook bank 布局 | 固定副本 4、stride 257，使每个 replica 覆盖 32 banks；7 组 process 中位 ≥1%、5/7 胜、p75 优于 baseline 中位；MIO≤28.75%、wavefronts 下降、寄存器≤85、hash/parity 不变 | 待做 | 首版 `4*index+replica` 只覆盖 8 banks；新地址 bank=`index+replica mod 32` | 通过后仅做一次 engine A/B；不扫描副本数或 stride |
 | UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 待做 | L-092：2 路数字 `94.85 tok/s` 低于单路 `104.05`；8 路 `138.76` 低于 6 路 `164.68`，TTFT 约 `5.8 s` | 先查调度/批窗口固定成本，不先做参数扫描 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |

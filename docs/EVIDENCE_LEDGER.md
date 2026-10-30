@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（101 条：L-000…L-100，按编号）
+## 台账索引（102 条：L-000…L-101，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -115,6 +115,7 @@
 | L-098 | 10-31 02:1xZ | 完整请求 NCU 触发 stall watchdog；同权重 mode-8 fused gate/up 测得 MIO `29.75%`、long scoreboard `17.50%`、Tensor `0.04%`，选 MIO 根因 | **诊断完成；UTIL-KERNEL 待验证** |
 | L-099 | 10-31 19:2xZ | 四路 rotated codebook 副本 hash 相同，但 gate/up `474.5` 对 `474.1 us`（−0.084%）、仅 2/7 胜；bank conflicts 反升 2.5%，寄存器 73→80 | **UTIL-KERNEL 否决；转 UTIL-ACT** |
 | L-100 | 10-31 19:5xZ | 显式 activation reload hash 相同但 `475.2` 对 `475.1 us`（−0.021%）、3/7 胜；shared-load 指令与寄存器完全不变，编译器已复用 | **UTIL-ACT 否决；转 UTIL-WEIGHT** |
+| L-101 | 10-31 20:1xZ | weight decode 复用 `473.2` 对 `475.8 us`（+0.546%）、6/7 胜，但 shared/global load 指令完全相同；寄存器 73→80，未达 1% | **UTIL-WEIGHT 否决；转 UTIL-GRID-PAD** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3831,6 +3832,51 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-101 UTIL-WEIGHT：源码级 weight decode 复用未减少机器指令，0.546% 未达 1%
+
+**判定**：**UTIL-WEIGHT 否决。** 单行 weight-decode 工作集保持 hash
+`9a055a5a94e15c87`，七组 gate/up 中位 `473.2` 对 baseline `475.8 us`（改善 `0.546%`），
+6/7 胜、p75 `473.85 us` 低于 baseline 中位；方向稳定但未达到预注册 1%，不进入 engine A/B。
+
+**七组交替进程**：baseline
+`663.6/473.1/474.5/476.5/475.0/475.8/476.6 us`；candidate
+`470.6/474.0/473.2/473.7/473.2/472.8/475.3 us`。
+
+**counter**：baseline/candidate shared-load instructions 都是 `10,583,040`，global-load
+instructions 都是 `296,960`；wavefronts `17,698,290/17,698,304`，bank conflicts
+`7,115,250/7,115,264`；寄存器 73→80；MIO ratio `3.872857→4.069270`，active warps
+`71.618825%→71.551537%`。编译器已消除源码可见的 activation/weight 重复 load。
+
+**恢复**：源码恢复为
+`47009da533393ff4bcb62e6831427204237da3a1f9679ad4a691d4ddc897971b`；parity 与 grouped
+parity 均 0 failure；restored bench hash `9a055a5a94e15c87`；engine 仍为
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。微基准停候选一次，
+恢复冷启动实测 `2:50`；最终 server/engine PID `510062/510127`，health loaded，无实验 env；
+生产 systemd 不变。
+
+**新发现**：首版四副本地址 `4*index+replica` 的 bank 是
+`4*(index mod 8)+replica`，每个 replica 只覆盖 8 个 bank，解释了 bank conflicts 为何反升。
+下一候选固定四副本，但使用 stride 257：`replica*257+index`，bank 为
+`index+replica (mod 32)`，每个 replica 都能覆盖全部 32 个 bank。
+
+**下一步**：contract `docs/work/UTIL_GRID_PAD_CONTRACT-20261031.md`。目标仍是输出不变、
+中位至少快 1%、5/7 胜、wavefronts/MIO 下降、寄存器≤85；不扫描副本数或邻近 stride。
+
+**证据**：
+
+- `/opt/ai/logs/util-weight-ab-20261031T2010Z.log`
+  （sha256 `a946e50ea9a9ee5a02bb1b0a871c5dc691ee42864317e904c98021b799935918`）
+- `/opt/ai/logs/util-weight-baseline-counters-20261031T2013Z.ncu-rep`
+  （sha256 `d85080d26151dd077c823fa245e4f65dbfcd5093c3606fa014ce81bcb87ab959`）
+- `/opt/ai/logs/util-weight-candidate-counters-20261031T2013Z.ncu-rep`
+  （sha256 `56cef7a0d6ffc66dd7cf832893c4c71f409e2b7d43edae5859f06228c2876e84`）
+- `/opt/ai/logs/util-weight-restore-build-20261031T2018Z.log`
+  （sha256 `669bde5b249538e46e4281cabc3e53ea1abff10bcb7606fdce73b9b34150601f`）
+- `/opt/ai/tmp/pre-util-weight-20261031T2007Z/`
+
+**没测什么**：只覆盖一个真实层和 mode-8 几何，没有 engine A/B。0.546% 只保留为负结果；
+padded bank layout 必须独立复测，不能沿用这次方向性收益。
 
 ## L-100 UTIL-ACT：显式 activation reload 与编译器行为等价，否决
 

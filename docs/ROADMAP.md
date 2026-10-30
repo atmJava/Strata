@@ -76,7 +76,8 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **完成**：MIO `29.75%` 为唯一主因；Tensor `0.04%` |
 | UTIL-KERNEL | M13 | 按 NCU 证据只改一个瓶颈内核或调度路径，提高 issue/Tensor/warp 占用并缩短 wall | 高 | 中；需要代码级验证 | **否决**：四副本 codebook `−0.084%`，仅 2/7 胜，bank conflicts 反升 |
 | UTIL-ACT | M13 | 每个 k 只加载一次 q8_1 activation words/scale，供 gate/up 两个 row dot 复用 | 中高 | 中；隔离 GPU、7 组进程与 NCU | **否决**：编译器已复用，shared-load 指令完全不变 |
-| UTIL-WEIGHT | M13 | 每个 k 只解码一次 weight-side codebook/aux/scale，复用于 NTC chunk 的多个 token | 高 | 中；隔离 GPU、7 组进程与 NCU | **下一代码项**：contract、1% 与 counter 门已预注册 |
+| UTIL-WEIGHT | M13 | 每个 k 只解码一次 weight-side codebook/aux/scale，复用于 NTC chunk 的多个 token | 高 | 中；隔离 GPU、7 组进程与 NCU | **否决**：`+0.546%`、6/7 胜，但 load 指令完全相同且寄存器升高 |
+| UTIL-GRID-PAD | M13 | 四副本 codebook 使用 stride 257，使每个 replica 覆盖全部 32 banks | 中高 | 中；隔离 GPU、7 组进程与 NCU | **下一代码项**：修正首版每副本仅八 bank 的地址布局 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -136,10 +137,10 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 23. **QSA-UNION-ATTN 已否决**：三 query 同 CTA 保持 parity、168 registers/thread 和无 spill，
     但普通选择慢 `20.05%`，`QA_SAME=4` 最强共享上界仍慢 `20.75%`。按预注册内核门停止，
     不消耗 150K A-B-A，也不重复同形 cache co-residency。
-24. **下一项 UTIL-WEIGHT**：UTIL-NCU 已把 MIO 定为唯一主因；四副本 codebook 和显式
-    activation reload 都因无时间收益关闭。现在对每个 k 只解码一次 weight-side
-    codebook/aux/scale，复用于 NTC chunk 的多个 token；先过 7 组 kernel 与 NCU，再决定
-    是否做一次 engine A/B。
+24. **下一项 UTIL-GRID-PAD**：UTIL-NCU 已把 MIO 定为唯一主因；四副本首版、activation
+    reload 和 weight working set 都因无 1% 收益关闭。首版四副本的 `4*index+replica`
+    每个 replica 只覆盖八个 bank；现在固定四副本并改用 stride 257，使每个 replica 覆盖
+    全部 32 个 bank；先过 7 组 kernel 与 NCU，再决定是否做一次 engine A/B。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

@@ -3,6 +3,36 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-74 · weight decode 复用只有 0.546%，编译器已消除源码重复，按 1% 门否决
+
+- 目标 / 指标：每个 k 只解码一次 IQ3_XXS weight grid/aux/scale，供 NTC chunk 内多个 token
+  应用；要求 7 组 kernel 中位至少快 1%、5/7 胜、MIO≤28.75%、wavefronts 下降后再接 engine A/B。
+- 假设与预期：6-entry chunk 先执行 4-token 再执行 2-token，若 weight decode 按源码重复，
+  显式复用可使 codebook lookup 总数约降 2.5 倍，应产生明显 MIO 与时间收益。
+- 为什么选这条路线：UTIL-ACT 已确认 activation 被编译器复用；weight side 是该 counter 下
+  剩余最具体、可形成独立开关且不改 arithmetic 的结构性假设。
+- 改动与实验：opt-in `STRATA_IQ3_WEIGHT_REUSE=1` 单行工作集先 load gate k 并对 chunk 内
+  tokens apply，再处理 up k；控制寄存器增长。真实权重层 36、`G=64, T=6` 做 7 组交替进程。
+- 结果：baseline/candidate gate/up 中位 `475.8/473.2 us`，改善 `0.546%`；candidate
+  6/7 胜，p75 `473.85 us` 低于 baseline 中位，所有 hash 都是 `9a055a5a94e15c87`。
+  方向稳定，但未达到预注册 1%，不能采纳。
+- counter：两臂 shared/global load 指令都精确为 `10,583,040/296,960`；wavefronts
+  `17,698,290/17,698,304`，bank conflicts 基本相同；寄存器 73→80，MIO ratio
+  `3.872857→4.069270`。编译器已把 weight-side 重复也消除，源码 working set 只改变调度。
+- 判决：**UTIL-WEIGHT 否决。** 不接受无法跨过 1% 且增加寄存器的改动，不进入 engine A/B；
+  不扫描邻近 NTC/chunk 或 row-pair 形状。
+- 预期被推翻：当前源码中的重复 load 是表面现象，NVCC 已对成对 row/token 做 CSE。源码级
+  工作集不能减少机器指令；需要改变 shared 地址算法本身。
+- 恢复与成本：源码 hash 回到 `47009da533...`，parity/grouped parity 0 failure，engine
+  `105a4171...`。为微基准停候选一次，恢复冷启动实测 `2:50`；生产 systemd 未改。
+- 证据：`/opt/ai/logs/util-weight-ab-20261031T2010Z.log`；baseline/candidate counter
+  `util-weight-*-counters-20261031T2013Z.ncu-rep`；结果见
+  `docs/work/UTIL_WEIGHT_RESULT-20261031.md`，台账 L-101。
+- 学到什么：连续三次给出相同/无收益的源码重排说明不能继续与编译器抢调度。四副本首版失败
+  也找到了具体地址布局错误：`4*index+replica` 每个 replica 只覆盖 8 个 bank。
+- 下一步与理由：执行预注册 `UTIL-GRID-PAD`，固定四副本、stride 257，使每个 replica 覆盖
+  全部 32 个 bank；这是针对已证实的首版布局缺陷，而不是扫描副本数。
+
 ## I-20261031-73 · 显式 activation reload 与编译器生成代码等价，UTIL-ACT 否决
 
 - 目标 / 指标：消除 gate/up 两个 row dot 对同一 q8_1 activation 的重复 shared load；

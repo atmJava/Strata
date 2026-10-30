@@ -1,6 +1,6 @@
 # UTIL-WEIGHT contract
 
-Status: pre-registered before implementation.
+Status: rejected; see [`UTIL_WEIGHT_RESULT-20261031.md`](UTIL_WEIGHT_RESULT-20261031.md).
 
 ## Evidence and selected problem
 
