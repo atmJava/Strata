@@ -27,6 +27,7 @@ talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes ev
 from __future__ import annotations
 
 import argparse
+import builtins
 import contextlib
 import collections
 import base64
@@ -84,6 +85,16 @@ from serve.structured import StructuredOutputError, prepare_format, validated_js
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
+
+def _safe_print(*args, **kwargs):
+    """Keep diagnostics from taking a request down when their output sink has closed."""
+    try:
+        builtins.print(*args, **kwargs)
+    except (OSError, ValueError):
+        pass
+
+
+print = _safe_print
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"

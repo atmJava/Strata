@@ -306,11 +306,12 @@ class Server(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
 
-    def post(self, body, path="/v1/responses", headers=None):
+    def post(self, body, path="/v1/responses", headers=None, capture_stdout=True):
         """(status, parsed body: a dict, or the list of SSE events of a stream)."""
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
+            output = contextlib.redirect_stdout(io.StringIO()) if capture_stdout else contextlib.nullcontext()
+            with output:
                 c.request("POST", path, body=json.dumps(body).encode(),
                           headers={"Content-Type": "application/json", **(headers or {})})
                 r = c.getresponse()
@@ -333,6 +334,26 @@ class Server(unittest.TestCase):
 
 
 class OverHttp(Server):
+    def test_a_closed_log_pipe_does_not_cut_the_stream(self):
+        class BrokenStdout:
+            encoding = "utf-8"
+
+            def write(self, value):
+                raise BrokenPipeError("the log reader closed")
+
+            def flush(self):
+                raise BrokenPipeError("the log reader closed")
+
+        stdout = sys.stdout
+        try:
+            sys.stdout = BrokenStdout()
+            code, events = self.post({"model": "m", "input": "hi", "stream": True,
+                                      "reasoning": {"effort": "none"}}, capture_stdout=False)
+        finally:
+            sys.stdout = stdout
+        self.assertEqual(code, 200)
+        self.assertEqual(events[-1]["type"], "response.completed")
+
     def test_non_streaming_text_with_reasoning(self):
         code, r = self.post({"model": "m", "input": "hi", "store": False})
         self.assertEqual(code, 200)
