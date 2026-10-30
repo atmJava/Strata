@@ -1,6 +1,8 @@
 # UTIL-PIPED-MTP-CACHE contract
 
-Status: pre-registered before implementation.
+Status: rejected at startup. `--expert-cache-device1` is a helper-cache option and cannot cap the
+second stage of a two-GPU layer split; see
+[`UTIL_PIPED_MTP_CACHE_RESULT-20261031.md`](UTIL_PIPED_MTP_CACHE_RESULT-20261031.md).
 
 ## Evidence and selected problem
 

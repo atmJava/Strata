@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T03:30+08:00。
+> 整理时间：2026-10-31T03:36+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,13 +12,14 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-104。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-105。
 
 ## 2. 当前断点
 
 - 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，UTIL-KERNEL、
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
-  当前断点是 cache-neutral 的 `UTIL-PIPED-MTP-CACHE`。
+  cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决；当前断点是
+  `UTIL-PIPED-MTP-ORDER`。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -42,7 +43,8 @@
 - 恢复 P7 时必须从全新的 A1 起跑完整同 boot A-B-A，不能复用中断前的首请求。
 - 当前目标链路是：融合 gate/up 的五次局部重排都未过 1%，read-only load 已真实生成
   `LDG.E.U16.CONSTANT.SYS` 但仍只有 `0.339%`。Pipelined MTP 的 2 路确有 `+19.92%`，但 4/6 路
-  分别回退 `3.82%/9.79%`，且 greedy 文本不重复；下一步只隔离它造成的 expert-cache 差异。
+  分别回退 `3.82%/9.79%`，且 greedy 文本不重复。直接指定 CUDA1 cache 的路线在双卡上不可启动；
+  下一步只加现有 CPU-order expert 算术开关，先验证逐字 parity。
 
 ## 3. 当前生产
 
@@ -53,7 +55,7 @@
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
 | 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 候选 PID | server `520066`、engine `520075`；vision `520070` |
+| 候选 PID | server `522908`、engine `522922`；vision `522917` |
 | candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -237,6 +239,19 @@ server/engine/vision PID 为 `520066/520075/520070`，production systemd 仍
 `inactive/dead`、`MainPID=0`、`NRestarts=23`。完整结果见
 [`work/UTIL_PIPED_MTP_RESULT-20261031.md`](work/UTIL_PIPED_MTP_RESULT-20261031.md)。
 
+### UTIL-PIPED-MTP-CACHE 在启动门否决：device1 不是 layer-split 槽位上限
+
+从已否决的 B 配置复制候选，只把 `--expert-cache auto` 换成 `10065`，再追加
+`--expert-cache-device1 7209`。引擎把后者解释为额外 helper GPU 的 cache；双卡 layer split
+已经让两块可见 GPU 各跑一个 stage，因此启动报
+`--expert-cache-remote with a layer split needs a GPU that runs no stage` 并以 exit 2 退出。
+
+候选没有读取完权重、没有 health-loaded，也没有跑 parity 或性能。A 随后立即恢复；
+server/engine/vision PID 为 `522908/522922/522917`，6 slots / 2 groups、`expert_slots=17274`、
+health loaded、engine 与 config hash 均正确。A→失败候选停机 8 秒，至 A 恢复 loaded 总中断
+`3:47`。证据见
+[`work/UTIL_PIPED_MTP_CACHE_RESULT-20261031.md`](work/UTIL_PIPED_MTP_CACHE_RESULT-20261031.md)。
+
 ### QSA-UNION-ATTN 否决
 
 实现了一次真正的 kernel 原型：把三个相邻 query 的现有 128-thread 计算放进一个
@@ -295,10 +310,10 @@ query 的 score、top-k、softmax 或输出算术。
 4. UTIL-NCU 已使用快照和独立候选完成；不要把 full-section NCU replay 重新压到完整双卡
    请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
 5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
-6. 当前只允许 `UTIL-PIPED-MTP-CACHE`：从已否决的 B config 复制独立文件，只把
-   `--expert-cache auto` 替换为 A 的 `10065` slots，并用 `--expert-cache-device1 7209`
-   恢复 A 的 CUDA1 计数。先要求所有固定 greedy 输出逐字重复且等于 A；parity 失败时不跑性能。
-   通过后再测 2/4/6 路，2 路改善 ≥1%、4/6 路不退 >1%、health 和资源门通过。
+6. 当前只允许 `UTIL-PIPED-MTP-ORDER`：从原 B config 复制独立文件，只追加
+   `--expert-cache-cpu-order`，不改 cache、槽数、组数或草稿深度。先要求所有固定 greedy
+   输出逐字重复且等于 A；parity 失败时不跑性能。通过后再测 2/4/6 路，2 路改善 ≥1%、
+   4/6 路不退 >1%、health 和资源门通过。
 
 不要把已否决项原样重跑：
 

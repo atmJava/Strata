@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（105 条：L-000…L-104，按编号）
+## 台账索引（106 条：L-000…L-105，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -119,6 +119,7 @@
 | L-102 | 10-31 21:0x | padded four-copy IQ3 codebook 使用 stride 257，hash 不变但 `489.3` 对 `475.7 us`（−2.86%）、仅 3/7 胜；剔除首组后仍慢约 1.2% | **UTIL-GRID-PAD 否决；转 UTIL-WEIGHT-RO** |
 | L-103 | 10-31 21:4x | read-only IQ3 weight loads 真实生成 48 条 `LDG.E.U16.CONSTANT.SYS`，hash 不变但只从 `472.6` 到 `471.0 us`（+0.339%）、6/7 胜 | **UTIL-WEIGHT-RO 否决；转 UTIL-PIPED-MTP** |
 | L-104 | 10-31 19:2xZ | piped MTP 六槽/两组真实启用，2 路 `78.3 → 93.9 tok/s`（+19.92%，5/6 胜），但 4/6 路 `-3.82%/-9.79%`，固定 greedy 文本在 B 内不重复 | **UTIL-PIPED-MTP 否决；转 cache-neutral 隔离** |
+| L-105 | 10-31 19:2xZ | cache-neutral 候选只恢复 `10065 + 7209` cache，但 device1 是额外 helper cache；双卡 layer split 在读取权重前 exit 2 | **UTIL-PIPED-MTP-CACHE 启动门否决；转 CPU-order parity** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3835,6 +3836,46 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-105 UTIL-PIPED-MTP-CACHE：双卡 layer split 无法用 device1 指定第二级槽数
+
+**判定**：**UTIL-PIPED-MTP-CACHE 在启动门否决。** 候选没有 loaded，没有执行 parity 或性能
+请求；这是参数语义/形状不兼容，不是 piped MTP 的第二次性能判决。
+
+**候选**：从 B config 复制，只把 `--expert-cache auto` 替换成 `10065`，追加
+`--expert-cache-device1 7209`。其余参数、环境、6 slots / 2 groups 完全不变。候选 config
+sha256 为 `877514d023ebb1fed4f5689242e980adc2c40f10ab43a4086bb4a6c8c3452525`。
+
+**失败**：引擎在读取权重前报
+`strata generate: --expert-cache-remote with a layer split needs a GPU that runs no stage
+(2 visible, 2 used by the split)` 并 exit 2。源码中 `--expert-cache-device1..3` 写入
+`expert_cache_remote`，属于额外 helper cache；它不会给 layer-split 的第二 stage 设置槽位上限。
+
+**恢复与成本**：A→失败候选停机 8 秒，候选在 24 秒内退出，A 从开始恢复到 health-loaded
+3 分 15 秒；总中断 3 分 47 秒。恢复后 server/engine/vision PID
+`522908/522922/522917`，health loaded，`batch_slots=6`、`batch_groups=2`、
+`expert_slots=17274`、engine `105a4171...`、config `88de996a...`；production systemd
+仍 inactive/dead、`MainPID=0`、`NRestarts=23`。
+
+**下一步**：`UTIL-PIPED-MTP-ORDER`。只给原 B 追加现有 `--expert-cache-cpu-order`，先验证 GPU
+expert reduction 匹配 CPU 顺序后能否让三组 greedy 输出逐字重复且等于 A。parity 失败即停止，
+不扫描 cache 或其他顺序开关。contract 见
+`docs/work/UTIL_PIPED_MTP_ORDER_CONTRACT-20261031.md`。
+
+**证据**：
+
+- `docs/work/UTIL_PIPED_MTP_CACHE_RESULT-20261031.md`
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/c-piped-mtp-cache-neutral.json`
+  （sha256 `877514d023ebb1fed4f5689242e980adc2c40f10ab43a4086bb4a6c8c3452525`）
+- `/opt/ai/logs/util-piped-mtp-cache-server-20261030T192747Z.out`
+  （sha256 `4979ba0d9de2d7be4b5f1ba6658cb71f040ad533e2124a3adbb3bc60cc949645`）
+- `/opt/ai/logs/util-piped-mtp-cache-restore-A-20261030T192819Z.out`
+  （sha256 `b0e1957fd80ff01b042db0ed72be45ae82c855916032d947ca5e577281907eef`）
+- `/opt/ai/logs/util-piped-mtp-cache-switch-A-to-C-20261030T192747Z.txt`
+  （sha256 `3f17f519cc5c6cdf5bad04b8d97e761538fd6fd7b79c2f3665d75554bdd299bf`）
+
+**没测什么**：没有测试显式为 layer-split 每个 stage 增加 cache-cap 的实现，也没有测试
+CPU-order expert arithmetic；两者分别是后续不同的问题。
 
 ## L-104 UTIL-PIPED-MTP：2 路 +19.92%，6 路 −9.79% 且 greedy 文本不重复
 

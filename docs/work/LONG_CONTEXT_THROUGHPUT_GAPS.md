@@ -728,6 +728,22 @@ B 的 CUDA1 expert cache 为 `7040` slots，A 为 `7209`，总数为 `17104` 对
 [`UTIL_PIPED_MTP_RESULT-20261031.md`](UTIL_PIPED_MTP_RESULT-20261031.md)，契约见
 [`UTIL_PIPED_MTP_CACHE_CONTRACT-20261031.md`](UTIL_PIPED_MTP_CACHE_CONTRACT-20261031.md)。
 
+### 16.5.7 UTIL-PIPED-MTP-CACHE（已完成，启动门否决）
+
+候选只把 B 的 `--expert-cache auto` 替换为 `10065`，并追加
+`--expert-cache-device1 7209`。源码与引擎实际行为表明 device1 是额外 helper GPU 的 cache，
+不是 layer-split 第二 stage 的槽位上限。双卡都已经承担 stage，没有第三块 helper GPU，因此
+引擎在读取权重前报 “needs a GPU that runs no stage” 并以 exit 2 退出。
+
+候选从未 loaded，所以没有 parity、吞吐或显存驻留比较。A 已恢复，6 slots / 2 groups、
+`expert_slots=17274`、health loaded；停机 8 秒，至 A 恢复 loaded 的总中断为 `3:47`。
+
+下一步 `UTIL-PIPED-MTP-ORDER` 不强行改 cache，只给原 B 加现有
+`--expert-cache-cpu-order`。它测试 GPU expert 按 CPU 累加顺序计算后，expert 驻留位置是否
+不再改变 greedy 输出。仍然先过逐字 parity，再允许性能测量。结果见
+[`UTIL_PIPED_MTP_CACHE_RESULT-20261031.md`](UTIL_PIPED_MTP_CACHE_RESULT-20261031.md)，契约见
+[`UTIL_PIPED_MTP_ORDER_CONTRACT-20261031.md`](UTIL_PIPED_MTP_ORDER_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

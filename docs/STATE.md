@@ -6,10 +6,13 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-PIPED-MTP 已完成并否决。六槽两组 drafters 真实启动，2 路
+- 当前项：UTIL-PIPED-MTP-CACHE 已完成并在启动门否决。`--expert-cache-device1 7209`
+  被引擎解释为 helper cache，而双卡 layer split 已占用两块 GPU，候选在读取权重前以 exit 2
+  退出；没有跑 parity 或性能。下一步是 `UTIL-PIPED-MTP-ORDER`，只给原 B 增加
+  `--expert-cache-cpu-order`，先验证能否消除 GPU/CPU expert 位置造成的舍入漂移。
+- 上一项：UTIL-PIPED-MTP 已完成并否决。六槽两组 drafters 真实启动，2 路
   `78.3 → 93.9 tok/s`（+19.92%，5/6 胜），但 4/6 路回退 `3.82%/9.79%`，且固定 greedy
-  文本在 B 内不可重复。下一步是 `UTIL-PIPED-MTP-CACHE`：只恢复 A 的 primary/CUDA1
-  expert-cache 计数后先验 parity，失败即停止这条分支。
+  文本在 B 内不可重复。
 - 上一项：UTIL-WEIGHT-RO 已完成并否决。显式只读加载生成 48 条
   `LDG.E.U16.CONSTANT.SYS`，hash 不变，但 gate/up 中位 `471.0` 对 `472.6 us`
   （+0.339%），6/7 胜；未达 1%。
@@ -35,13 +38,13 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前迭代：UTIL-PIPED-MTP 已否决，cache-neutral 复验 contract 已预注册。attention v2 已是当前默认并完成 1% 门复验；不要再次用
+- 当前迭代：UTIL-PIPED-MTP 与 cache-neutral 启动路线均已否决，CPU-order parity contract 已预注册。attention v2 已是当前默认并完成 1% 门复验；不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：从已否决的 B config 复制独立候选，只把 `--expert-cache auto` 替换为 `10065`，
-  加 `--expert-cache-device1 7209`，保持 piped MTP、6 slots / 2 groups 和其他参数不变。
-  启动先核对 `17274` 总 slots，再跑两次固定 greedy parity；不一致就不消耗性能 A-B-A。
-- 当前候选：UTIL-PIPED-MTP-CACHE。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
+- 下一动作：从原 B config 复制独立候选，只追加 `--expert-cache-cpu-order`，保持 cache
+  auto、piped MTP、6 slots / 2 groups 和其他参数不变。先跑两次固定 greedy parity；不一致就
+  不消耗性能 A-B-A。
+- 当前候选：UTIL-PIPED-MTP-ORDER。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
@@ -54,10 +57,10 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；UTIL-PIPED-MTP 恢复后的 server/engine/vision PID 为
-  `520066/520075/520070`，engine 为 `105a4171...`，没有 `STRATA_PIPED_MTP` 或实验
-  profiler/QSA/kernel env。A→B 停机 8 秒、总中断约 `3:01`；B→A 停机 9 秒、总中断约
-  `4:01`。
+  `loaded=true`；cache-neutral 失败后恢复的 server/engine/vision PID 为
+  `522908/522922/522917`，engine 为 `105a4171...`，没有 `STRATA_PIPED_MTP`、
+  `--expert-cache-cpu-order` 或实验 profiler/QSA/kernel env。A→失败候选停机 8 秒，
+  total interruption 至 A 恢复 loaded 为 `3:47`。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
@@ -88,6 +91,9 @@
 - UTIL-PIPED-MTP 已否决：A1/A2 合并中位 `78.3/108.55/125.7 tok/s`，B 为
   `93.9/104.4/113.4`；2 路 `+19.92%`、5/6 胜，但 4/6 路 `-3.82%/-9.79%`。固定 greedy
   文本 B 两次不同；B 的 CUDA1 cache 比 A 少 169 slots，下一项先做 cache-neutral 隔离。
+- UTIL-PIPED-MTP-CACHE 已在启动门否决：候选只把 B 的 `--expert-cache auto` 换成
+  `10065` 并加 `--expert-cache-device1 7209`，后者被读成 helper cache，而双卡 layer split
+  没有不跑 stage 的 GPU；engine 在读取权重前 exit 2，没有 parity/性能结果。
 - V3-1 容量预设已收口：4 路中位 `6×192K` 聚合 120.6、`8×128K` 133.9、`8×192K` 122.8；
   默认保持 `6×192K`。8×128K 的 +11% 以 192K→128K 上下文为代价。
 - 256K 生产切换已完成：config 仅把 `max_context` 从 `192000` 改为 `262144`，同时保留
@@ -221,4 +227,4 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-31T03:30+08:00（UTIL-PIPED-MTP 否决；cache-neutral 复验已预注册）
+- 最后更新：2026-10-31T03:36+08:00（cache-neutral 启动门否决；CPU-order parity 已预注册）

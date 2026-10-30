@@ -80,7 +80,8 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | UTIL-GRID-PAD | M13 | 四副本 codebook 使用 stride 257，使每个 replica 覆盖全部 32 banks | 已证伪 | 中；隔离 GPU、7 组进程 | **否决**：`489.3` 对 `475.7 us`（−2.86%），3/7 胜；不再扫副本或 stride |
 | UTIL-WEIGHT-RO | M13 | IQ3 weight `qs`/aux 使用显式只读加载，降低 long-scoreboard stall | 已证伪 | 低中；SASS 检查、7 组进程 | **否决**：机器码已变为 `LDG.E.U16.CONSTANT.SYS`，但只改善 `0.339%` |
 | UTIL-PIPED-MTP | M14 | 保留两组流水，用每槽 MTP 草稿修复低并发吞吐凹点 | 已证伪（当前形状） | 中；两次候选切换、2/4/6 路 A-B-A、显存检查 | **否决**：2 路 `+19.92%`/5-of-6，但 4/6 路 `-3.82%/-9.79%`，greedy 输出不重复 |
-| UTIL-PIPED-MTP-CACHE | M14 | 只消除 slot drafters 对 expert-cache 的挤压，隔离 parity 混淆 | 高信息量 | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **下一项**：恢复 A 的 `10065 + 7209` slots；parity 不逐字相等就停止 |
+| UTIL-PIPED-MTP-CACHE | M14 | 只消除 slot drafters 对 expert-cache 的挤压，隔离 parity 混淆 | 已证伪（参数语义） | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **否决**：`--expert-cache-device1` 是额外 helper cache；双卡 layer split 在读取权重前 exit 2 |
+| UTIL-PIPED-MTP-ORDER | M14 | 用 CPU-order expert 算术隔离 GPU/CPU expert 位置造成的小数舍入 | 高信息量 | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **下一项**：只给原 B 加 `--expert-cache-cpu-order`；parity 不逐字相等就停止 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -149,10 +150,13 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 26. **UTIL-PIPED-MTP 已否决**：六 slots / 两组 drafters 真实启动；A 合并中位
     `78.3/108.55/125.7 tok/s`，B 为 `93.9/104.4/113.4`。2 路 `+19.92%` 且 5/6 胜，但
     4/6 路 `-3.82%/-9.79%`，固定 greedy 文本在 B 内也不可重复。不能只看低并发峰值。
-27. **下一项 UTIL-PIPED-MTP-CACHE**：B 的 CUDA1 expert cache 少了 169 slots
-    （`7040` 对 `7209`），总 cache 为 `17104` 对 `17274`。只恢复 A 的 primary 和 CUDA1
-    slot 计数，启动仍必须是 6 slots / 2 groups；先跑两次逐字 greedy parity，失败就不能用
-    性能数字继续辩护。不扫描邻近 cache、草稿深度、槽数或组数。
+27. **UTIL-PIPED-MTP-CACHE 在启动门否决**：B 的 CUDA1 expert cache 少 169 slots
+    （`7040` 对 `7209`），但 `--expert-cache-device1` 被定义为额外 helper GPU 的 cache；
+    双卡都跑 layer-split stage 时没有可用 helper，候选在读取权重前 exit 2，未 loaded。
+28. **下一项 UTIL-PIPED-MTP-ORDER**：原 B 配置只追加现有
+    `--expert-cache-cpu-order`，让 GPU expert reduction 匹配 CPU 浮点顺序，直接测试 parity
+    漂移是否由 expert 位置舍入造成。仍先过两次逐字 greedy parity；失败就停止，不扫描
+    cache、顺序、草稿深度、槽数或组数。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

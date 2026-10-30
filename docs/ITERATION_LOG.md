@@ -3,6 +3,31 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-78 · cache-neutral piped MTP cannot start on two layer-split GPUs
+
+- 目标 / 指标：从已否决的 B 配置只恢复 A 的 primary/CUDA1 expert-cache 槽数，保持 6 slots /
+  2 groups 和 piped MTP；先过逐字 parity，再测 2/4/6 路并守住 1% 门。
+- 假设与预期：显式 `10065 + 7209` 会消除 cache 差异；若 parity 仍失败则停止该分支。
+- 为什么选这条路线：上一轮 B 的 CUDA1 cache 少 169 slots，且上游文档要求同 cache 才能做文本等价比。
+- 改动与实验：从 B 复制独立 config，只把 `--expert-cache auto` 换成 `10065` 并追加
+  `--expert-cache-device1 7209`；结构化 diff 证明没有其他参数变化。
+- 结果：引擎把 device1 解释为额外 helper GPU 的 cache，报
+  `--expert-cache-remote with a layer split needs a GPU that runs no stage` 并以 exit 2
+  退出。候选在读取权重前失败，没有 loaded、parity 或性能结果。
+- 判决：**UTIL-PIPED-MTP-CACHE 在启动门否决。** 原契约描述的 CUDA1 槽位恢复方法在当前
+  双卡 layer-split 形状不可实施；不扫描其他 cache 数值。
+- 预期被推翻：`--expert-cache-device1` 的 CLI 简称容易被读成“第二块 stage 的 cache”，实际
+  代码路径是 CUDA1..3 helper cache，要求另有一块不跑 stage 的 GPU。
+- 生产状态与回滚：A 已恢复，server/engine/vision PID `522908/522922/522917`，health loaded，
+  6/2 slots/groups，`expert_slots=17274`，engine/config hash 正确；production systemd 仍
+  inactive/dead、`MainPID=0`、`NRestarts=23`。A→失败候选停机 8 秒，至 A loaded 总中断 `3:47`。
+- 学到什么：预注册不能绕过真实参数语义；启动门应先解析同一二进制源码或用一秒钟 help 检查，
+  不应把错误参数带进 3–4 分钟的加载窗口。
+- 下一步与理由：`UTIL-PIPED-MTP-ORDER`。现有 `--expert-cache-cpu-order` 直接针对 GPU/CPU
+  expert 浮点顺序差异，不需要强制 CUDA1 槽数；只加这一个开关，先跑相同逐字 parity，通过后
+  才允许 2/4/6 路性能 A-B-A。契约见
+  `docs/work/UTIL_PIPED_MTP_ORDER_CONTRACT-20261031.md`。
+
 ## I-20261031-77 · piped MTP wins two streams by 19.92% but fails six streams and repeatable parity
 
 - 目标 / 指标：保留 6 slots / 2 groups，启用 `--batch-mtp` + `STRATA_PIPED_MTP=1`；
