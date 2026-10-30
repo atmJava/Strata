@@ -31,12 +31,12 @@
    下一步是 NCU stall 归因，不是直接根据该计数改内核。
 10. **用户裁定资源利用率优先**：停止独立参数探索。NCU 只用于找根因，随后改一个内核或调度路径；
     参数 A/B 只在代码候选实现后作为部署门，不能反过来代替优化。
-11. **执行边界固定**：按[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)
-    先做自愈演练与基线复核，再以配置候选验证并发 MTP 与预填让路；内核 NCU 降为结构性修复
-    仍不达标时的条件项。
-12. **上游 37 提交已部署**：`c219fbca`、engine md5 `0e4a9596`、server `11fd33f0`、
-    config `023663ba`，health loaded、`NRestarts=0`。数字序列 6 路约 `164.7 tok/s`，
-    自然语言 6 路约 `149.8 tok/s`；2 路和 8 路存在独立凹点。
+11. **v5 执行边界**：按[单路解码 200、预填 5000 与可随时重启的架构计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)
+    先做 M0 自愈演练与基线复核，再推进统一解码策略、单路 200、预填复用、多路冷读和快启动。
+    内核 NCU 降为结构性修复仍不达标时的条件项。
+12. **生产当前仍是手动进程**：`strata.service` inactive/enabled，实际 server/engine 由手动启动；
+    监督器接管前不能执行生产候选。当前短负载 6 路约 `164.7 tok/s`、单路中位 `64.8 tok/s`；
+    2 路和 8 路存在独立凹点。
 
 ## 候选
 

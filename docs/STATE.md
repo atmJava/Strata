@@ -3,40 +3,44 @@
 > 接手顺序：`RULES.md` → 本文件 → `ROADMAP.md` → `ITERATION_LOG.md` 最近两条。
 > 本文件只写当前断点，不重复历史、规则或完整证据。
 
-- 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
-- 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
-  功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：先修并发解码与预填的结构性问题——两路并发 `draft_n=0`、`PIPED_CONCURRENT` 被
-  staged 专家源关闭、长上下文无法停车；内核 NCU 降为条件项。
+- 目标：完全释放双 RTX 2080 Ti 的性能；单路 decode 稳定 200 tok/s、32K 冷预填
+  ≥5000 tok/s、多路会话不塌陷、冷会话快读，并做到随时可安全重启和失败自动回滚。
+- 当前阶段：v5 架构计划已取代 v4 及更早版本。单路 200 是硬目标，不再用 6 路聚合
+  200 代替；旧参数兼容可以为统一架构让路。
+- 当前项：先把生产从手动 server/engine 进程迁移到可观测、可回滚的监督器，再采集正式
+  解码、预填和启动账本；在 M0 通过前不做停服压测或生产候选。
 - 当前迭代：无运行中实验。工作区整理、上游合并部署和吞吐复测已完成；Nsight GPU Metrics 已完成，
   NCU 尚未执行，P7 搁置。
-- 下一动作：按 v4 计划先做 M0 自愈演练与性能账本（解码窗口、预填、启动），再依次推进
-  W1 并发草稿、W2 窗口效率、W3 预填复用、W4 多路与冷读、W5 快启动。
-  参数只在机制假设下做 A/B/A，不做独立参数探索。
-- 当前候选：UTIL-CONCURRENCY（v4 W1/W3）；UTIL-KERNEL 只有在结构性修复后仍不达标时启动。
+- 下一动作：按 v5 计划完成 M0 自愈演练与性能账本（窗口/草稿深度、预填、启动），再依次
+  推进 W1 统一解码策略、W2 单路 200、W3 预填复用、W4 多路与冷读、W5 快启动。
+  参数只在机制实现后做 A/B/A，不做独立参数探索。
+- 当前候选：DECODE-UNIFIED（v5 W1/W2）、PREFILL-LAYER-MAJOR（v5 W3）；
+  UTIL-KERNEL 只有在结构性修复后仍不达标时启动。
   P7 只有在证据表明 Tensor 管线是直接瓶颈时才恢复，并仍需完整 A-B-A。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
-- 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
-  M0 建账本，W1–W5 分工作流逼近解码 200 / 预填 5000 / 快启动；内核 NCU 为条件项。
+- 执行计划：[单路解码 200、预填 5000 与可随时重启的架构计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
+  M0 建自愈与账本，W1–W5 分工作流推进；内核 NCU 为条件项。
 - 未完成采纳项：18。
 - 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
   该测量路线不阻塞主线。
 
 ## 生产
 
-- `strata.service` 在 `192.168.9.103:8080`，`active/running`、`NRestarts=0`、health 200、
-  `loaded=true`（2026-10-28 实测）。
-- **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
-  干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
-  config md5 `023663ba`。服务实际启动的 engine 为
-  `/opt/ai/src/strata-027-picks/build75-027/strata`；修复后的 T-probe 从进程 argv 识别实际
-  engine/server/config，现网返回 `problems=[]`。
+- `strata.service` 当前为 `inactive` 但 `enabled`，只作兜底；真正服务 `192.168.9.103:8080`
+  的是手动启动的 server/engine 进程对。监督器接管前，不能把 systemd 状态当作生产已受管。
+- 交接时生产 server 为 `serve/server.py --engine strata --config
+  /tmp/strata-freeze-candidate-long.json --port 8080`；engine 树为
+  `/opt/ai/src/strata-freeze-throughput-20261029T0812Z`，可执行文件为 `build75/strata`。
+  engine md5 `8539fef58b8364b1451722fadf997a4b`、server md5
+  `e23cd4b2d52617f9ac01f19eb79faa51`、config md5 `ebe04efaeacd880e54898d2ce4ae6175`；
+  生产日志为 `/home/atm/verify-20261027/strata-verify/strata-verify.log`。
 - 生产配置：`parallel=6`、`max_context=262144`、`STRATA_HC_Q8=1`，W3 staged read 开启，阈值 2048；
   lead-in 1600 ms、等待 750 ms、只处理 ≥4096-token 的冷读，短请求首准入阈值 2048。
 - 256K 下 `batch_slots=6`、`kv_resident=32768`、`expert_slots=17280`、`max_context=262144`；
-  服务进程参数包含 `--batch 6 --layer-split 24 --batch-groups 2`。
-- `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 config 的 `env` 只会传给引擎子进程。
+  服务进程参数包含 `--batch 6 --layer-split 24 --batch-groups 2 --prefill-pipe 1 --spec 8`。
+- `STRATA_ADMIT_SHORT_FIRST` 必须由未来监督器的 server 进程环境提供；写进 config 的 `env`
+  只会传给引擎子进程，不能替代 server 环境。
 - 旧 `0.1.51` / `a09d78b1` 二进制仍保留在 `/opt/ai/src/strata-0.2.2/build/strata`，可用于
   紧急回退；切换前的 `6×256K` 历史快照仍在 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`。
   c219 合并前的完整 Git 状态保留在本地 `refs/codex-backup/pre-workspace-cleanup-*`。
@@ -168,4 +172,4 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-28T13:35+08:00（上游 37 提交已部署；吞吐和并发凹点已复测，测试缺口保留）
+- 最后更新：2026-10-30（v5 架构计划已落盘；单路 200 升为硬目标，等待 M0 自愈与账本）
