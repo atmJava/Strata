@@ -128,6 +128,7 @@
 | L-111 | 10-31 21:5xZ | A-P-A2 每级 3 波；P 的 6/8 路 `113.352/103.373 tok/s`；8 路 occupancy `5.010`、tail `1.1349`、max slot wait `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`；head 每窗口约 `1.04 ms` | **UTIL-WINDOW-PROFILE 完成；下一项 UTIL-BATCH-HEAD** |
 | L-112 | 10-31 22:1xZ | 两个 pipeline group 在末级严格串行；每级只有一个 verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 每次只绑定一个 group，`batch_poll` 返回时才释放末级 | **UTIL-BATCH-HEAD 源码门否决；未构建、未重启；转 UTIL-HEAD-SPLIT** |
 | L-113 | 10-31 22:2xZ | HEAD-SPLIT GPU harness 七进程全过：`T=1..8` 半区/合并 logits、greedy、固定种子、counter、graph 改变输入全 bitwise；并发投影中位 `1.813–9.936%`，split peak `453,189,152 B` < 上界 `461,577,760 B` | **GPU harness 通过；进入 opt-in server integration；未重启** |
+| L-114 | 10-31 23:4xZ | HEAD-SPLIT server 正确性全过：`1..8` 行 peer graph 全命中、三组 greedy 两轮等于期望、6/2 与资源正常；A1-B-A2 2/4/6/8 路 `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 回退超 1% | **UTIL-HEAD-SPLIT 吞吐门否决；A2 已恢复；转 UTIL-HEAD-Q8-FUSE 源码/GPU 门** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3844,6 +3845,60 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-114 UTIL-HEAD-SPLIT：服务端正确性通过，4/6 路端到端回退导致否决
+
+**判定**：**服务端集成正确性通过，吞吐门否决。** 独立 harness 的临界路径收益没有在
+4/6 路真实窗口中稳定兑现；4/6 分别回退 `1.305%/8.659%`，违反“其他级不回退 >1%”的硬门。
+候选默认关闭，A2 已恢复。
+
+**启动与路径**：候选以 6 slots / 2 groups 正常 loaded。日志捕获了 `1/2/3/4/5/6/7/8` 行
+peer head graph，输出 vocabulary 区间为 `124160+124160`；health 200、`loaded=true`，
+两卡剩余显存约 `1002/1069 MiB`。生产运行进程没有 `STRATA_HEAD_SPLIT`。
+
+**正确性**：三组固定 greedy 探针在 B 内各两轮逐字重复且等于期望值，`finish=stop`；A2 同样
+通过。独立 server 路径还通过 peer graph 捕获和 Q8_1 主卡激活读取测试，七交替进程全部
+`failures=0 result=PASS`。正确性不能替代吞吐门。
+
+**A1-B-A2**：
+
+| N | A1 | B | A2 | A combined | B vs A | A drift |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 77.0 | 80.8 | 77.8 | 77.70 | **+3.99%** | +1.039% |
+| 4 | 115.7 | 113.4 | 114.1 | 114.90 | **-1.305%** | -1.383% |
+| 6 | 124.0 | 113.4 | 124.3 | 124.15 | **-8.659%** | +0.242% |
+| 8 | 106.6 | 106.2 | 106.0 | 106.30 | -0.094% | -0.563% |
+
+所有吞吐请求的 `foreign_requests=0`。A1/A2 各 3 个固定 400-token 波次，A 合并中位用于
+判决。4/6 回退超过门限，且 4/6 的 B 胜率不足，所以不能采纳 2 路收益。
+`ab-summary.json` 的 finish 汇总包含脚本样本的 `stop`/`length` 组合，不把它写成零意外
+finish；硬否决来自可复现的吞吐回退。
+
+**集成修复**：第一，MTP gather 允许默认 CUDA stream，修复旧校验拒绝 `stream=nullptr`；
+第二，双卡 split 不能用 `stages.size()==2`，因为 vector 只含后置 GPU，第一张卡是
+`primary_device`；第三，peer graph 不能捕获 `cudaMemcpyPeerAsync`，首请求会挂起，最终改为
+peer 直接读取主卡 Q8_1 激活。`peer-read-direct` 单进程和七交替进程均通过。
+
+**恢复**：A2 的 server/engine/vision 为 `573407/573418/573413`；engine sha256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`，config sha256
+`88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`；6 slots / 2 groups、
+health loaded、systemd inactive/dead。
+
+**证据**：
+
+- `/opt/ai/logs/util-head-split-server-20261031T0800CST/peer-read-direct-seven-processes.log`
+  sha256 `2b32c31d7db7a39cb99fa7103d9936f0b3ab973867f54a3c29707c68c1a89ed4`
+- `ab-summary.json` sha256
+  `8319e5c72b4342eb7c2f0151470f24d62b334dca1b66c1de2c3ccf7e0c18d28b`
+- `a2-restored-metrics.json` sha256
+  `cd539246dd2678255d9e4bbc36489a4b46b32323ff8d523221060e3c2dba143b`
+- 证据目录 `all-sha256.txt` sha256
+  `a7aed4cd7d12d5e333819bbca30d5a1ad56b792f9794bd63aa82ae00923975cd`
+
+**下一步**：`UTIL-HEAD-Q8-FUSE`。现有 `STRATA_HC_Q8=1` 的末层 write 与最终 mixer 在源码中
+是两次独立操作；Q8 multi-read 内核已支持 `apply=true`。先用独立 harness 证明
+`gr_write_multi + apply=false` 与单次 `apply=true` 的激活/logits bitwise 相等并测临界路径，
+达到 1% 依据后才允许服务器重启。
 
 ## L-113 UTIL-HEAD-SPLIT：双卡半 vocabulary 输出头逐字一致，并跨过 1% 临界路径门
 

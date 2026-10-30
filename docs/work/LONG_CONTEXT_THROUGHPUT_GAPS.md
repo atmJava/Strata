@@ -878,6 +878,18 @@ server。契约见 [`UTIL_HEAD_SPLIT_CONTRACT-20261031.md`](UTIL_HEAD_SPLIT_CONT
 生产主 graph 不能直接捕获 peer kernel，必须把 peer head 作为独立 graph 启动，并让主图
 只等待本次 head 的两个半区。服务端编排开销、batch window 覆盖和启动回退仍未测。
 
+### 16.5.16 UTIL-HEAD-SPLIT server 结果：正确性通过，端到端否决
+
+服务端候选以 6 slots / 2 groups 正常 loaded，日志捕获 `1..8` 行 peer graph；三组固定 greedy
+各两轮逐字等于期望值，A2 同样通过。A1-B-A2 的 2/4/6/8 路 A 合并中位为
+`77.70/114.90/124.15/106.30 tok/s`，B 为 `80.80/113.40/113.40/106.20`，相对变化
+`+3.99%/-1.31%/-8.66%/-0.09%`。4/6 路回退超过 1%，所以 head split 否决，默认关闭。
+
+集成修复包括 MTP 默认 stream、双卡启动判定和 peer graph 不可捕获 `cudaMemcpyPeerAsync`；
+最终由 peer 直接读取主卡 Q8_1 激活。下一步 `UTIL-HEAD-Q8-FUSE` 只在现有 Q8 mixer 内做
+末层 pending write + final mixer 的融合，先用独立 GPU harness 验证触发、bitwise 与临界路径；
+没有 1% 依据就不重启服务器。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

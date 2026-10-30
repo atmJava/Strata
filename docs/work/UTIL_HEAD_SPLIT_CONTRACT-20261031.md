@@ -1,6 +1,7 @@
 # UTIL-HEAD-SPLIT contract
 
-Status: proposed on 2026-10-31. GPU harness precedes server integration.
+Status: completed on 2026-10-31. GPU harness and server correctness passed; the
+server throughput gate rejected the candidate and the default full-head path remains.
 
 ## Evidence and selected problem
 
@@ -100,3 +101,19 @@ modify production config or runtime files. If any parity, startup, throughput, d
 memory, or request gate fails, remove the switch, restore the exact A binary/config,
 and verify hashes, health, six slots, two groups, memory, and GPU state. Never write an
 API key or token to the repository or logs.
+
+## Final server decision
+
+The candidate met startup, path-hit, greedy parity, health, slot count and resource
+checks. It did not meet the throughput contract:
+
+| N | A combined tok/s | B tok/s | change |
+|---:|---:|---:|---:|
+| 2 | 77.70 | 80.80 | +3.99% |
+| 4 | 114.90 | 113.40 | -1.305% |
+| 6 | 124.15 | 113.40 | -8.659% |
+| 8 | 106.30 | 106.20 | -0.094% |
+
+4 and 6 streams regress by more than 1%, so **UTIL-HEAD-SPLIT is rejected**. A2 was
+restored with the full head and no split environment variable. The server evidence
+is in `/opt/ai/logs/util-head-split-server-20261031T0800CST/`.

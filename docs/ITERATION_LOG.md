@@ -3,6 +3,39 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-87 · Head split is exact and fast in isolation, but loses at server concurrency
+
+- 目标 / 指标：在独立 GPU harness 通过后，把 vocabulary-row head split 接入单请求与 batch
+  window，并验证 A1-B-A2 的 2/4/6/8 路端到端门。
+- 假设与预期：双卡并发 head 的理论临界路径收益足够大，独立 peer graph 和事件同步不会吃掉
+  收益；至少一级达到 1%、5/6 胜，其他级不回退 >1%。
+- 为什么选这条路线：window profile 证明 final-stage head 是真实固定成本；vocabulary 分区
+  不延迟任何 pipeline group 的 verdict，避开了 `UTIL-BATCH-HEAD` 的流水气泡。
+- 改动与实验：实现 opt-in `STRATA_HEAD_SPLIT=1`，直接加载两个不相交 vocabulary 区间；
+  增加私有 peer graph、共享 Q8_1 激活、half logits 合并与所有 row-count graph。过程中
+  修复 MTP 默认 stream、双卡 `stages.size()==2` 启动误判和 peer graph capture
+  `cudaMemcpyPeerAsync` 三处缺陷，最终由 peer 直接读取主卡激活。
+- 结果：候选实际命中 `1..8` 行 peer graph；6 slots / 2 groups、health loaded、资源安全。
+  三组固定 greedy 各两轮逐字等于期望值，B 内部重复，A2 同样通过。A1-B-A2 的
+  2/4/6/8 路相对 A 合并中位为 `+3.99%/-1.31%/-8.66%/-0.09%`，A1→A2 漂移均在 3% 内；
+  吞吐汇总无外来请求，请求层面的执行错误计数为零。
+- 判决：**UTIL-HEAD-SPLIT 服务端集成正确性通过，吞吐门否决。** 4/6 路回退超过 1%，
+  不能因为 2 路 `+3.99%` 就采纳；A 二进制与配置已恢复，split 默认关闭。
+- 预期部分推翻：GPU 微基准的临界路径收益真实，但 peer graph、事件和每窗口编排没有在
+  4/6 路转成稳定端到端收益，反而放大了低占用窗口成本。
+- 生产状态与回滚：A2 为 server/engine/vision `573407/573418/573413`，engine sha256
+  `105a4171...`、config `88de996a...`、health loaded、6 slots / 2 groups；systemd
+  inactive/dead。运行环境无 `STRATA_HEAD_SPLIT` 或 `STRATA_FUSE_HEAD_GR`。
+- 证据：台账 L-114、`UTIL_HEAD_SPLIT_RESULT-20261031.md`、远端
+  `/opt/ai/logs/util-head-split-server-20261031T0800CST/`；七进程日志 sha256
+  `2b32c31d7db7a39cb99fa7103d9936f0b3ab973867f54a3c29707c68c1a89ed4`，
+  `ab-summary.json` sha256 `8319e5c72b4342eb7c2f0151470f24d62b334dca1b66c1de2c3ccf7e0c18d28b`。
+- 学到什么：正确性门和微基准临界路径门都不能替代端到端并发门；约 1% 的空间很容易被
+  peer graph 编排与不同 window 活跃行数吃掉。
+- 下一步与理由：预注册 `UTIL-HEAD-Q8-FUSE`。现有 Q8 mixer 内核在代码中已经支持
+  `apply=true`，可以先在独立 GPU harness 中把末层 `gr_write_multi + apply=false` 与单次
+  `apply=true` 做 bitwise 和计时；若省去的写回不足以达到 1% 临界路径，就不构建服务器候选。
+
 ## I-20261031-86 · Head split is byte exact and clears the critical-path gate
 
 - 目标 / 指标：证明按 vocabulary rows 双卡并发计算 output projection 不改变 logits、

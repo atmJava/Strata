@@ -6,16 +6,17 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-HEAD-SPLIT（server integration）
-- 当前工作：独立 GPU harness 已通过。`T=1..8` 的半区与合并 logits 全部 `memcmp` 相等，
-  graph 改变输入、greedy、固定种子和两个 draw counter 全过；七个交替进程的并发临界路径
-  投影收益为 `1.813–9.936%`，最差单次也全部高于 1%。下一步把 `output.weight` 从 GGUF 直接
-  加载成两个不相交 vocabulary 区间，并以私有 peer graph/事件接入单请求和 batch window；
-  主图只等待本次 head 的两个半区，不等待另一个 pipeline group。默认关闭。
-- 上一项：UTIL-BATCH-HEAD 已在源码门否决。两个 group 在末级并非同时 ready；每级只有一个
-  verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 一次只绑定一个 group。
-  等齐后再合并会把 A 的 verdict 延迟一个 16.9–19.2 ms 的末级窗口，远大于约 1.04 ms 的
-  合并收益。未构建、未重启。
+- 当前项：UTIL-HEAD-Q8-FUSE（源码与独立 GPU 门）
+- 当前工作：现有 `STRATA_HC_Q8=1` 路径在末层仍先执行一次 `gr_write_multi`，随后以
+  `apply=false` 读取最终 mixer；Q8 multi-read 内核本身已有把 pending write 折入 `apply=true`
+  的算术。先核实真实触发率、重复读写位置、数值/bitwise 影响和可测的 ≥1% 依据，再预注册
+  独立 harness。源码或 GPU 门不足时不构建服务器候选、不重启。
+- 上一项：UTIL-HEAD-SPLIT 服务端集成通过启动、路径命中、输出与资源门，但吞吐门否决。
+  `1/2/3/4/5/6/7/8` 行 peer graph 全部捕获；6 slots / 2 groups、health loaded，三组固定
+  greedy 各两轮逐字等于期望值，A2 同样通过。A1-B-A2 的 2/4/6/8 路为 A
+  `77.70/114.90/124.15/106.30`、B `80.80/113.40/113.40/106.20 tok/s`，相对变化
+  `+3.99%/-1.31%/-8.66%/-0.09%`；4/6 路回退超过 1%，因此不采纳。A2 已恢复，
+  `STRATA_HEAD_SPLIT` 不在运行进程中。
 - 上一项：UTIL-BATCH-HEAD 已在源码门否决。两个 group 在末级并非同时 ready；每级只有一个
   verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 一次只绑定一个 group。
   等齐后再合并会把 A 的 verdict 延迟一个 16.9–19.2 ms 的末级窗口，远大于约 1.04 ms 的
@@ -73,17 +74,17 @@
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
 - 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
-  调度、EXPDEC、checkpoint move、GDN recurrence 合并和跨 group head 延迟合并均已否决；
-  window profile 已完成。
+  调度、EXPDEC、checkpoint move、GDN recurrence 合并、跨 group head 延迟合并和
+  vocabulary-row head split 均已否决；window profile 已完成。
   attention v2 已是当前默认并完成 1% 门复验；
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：实现 `UTIL-HEAD-SPLIT` 的 opt-in server 路径。按 vocabulary row 直接加载两个
-  半区，总 head 权重不增加；用私有 peer stream/event 和一份 Q8_1 激活，把 peer graph
-  接到所有末级 window 启动点；半区 logits 按 vocabulary offset 合并后再进入原
-  argmax/NaN/sampler。先做候选源码内三组 greedy 两次逐字等于 A 与路径命中门，再执行
-  同 boot A1-B-A2；不得重跑 window profile、batch-head、GDN groups、checkpoint move、
+- 下一动作：为 `UTIL-HEAD-Q8-FUSE` 写源码门结论和契约。检查
+  `Verifier::record_window` 末层写回、最终 mixer、`gr_write_multi` 与 Q8 multi-read 的
+  `apply` 路径；用独立 GPU harness 对 pending-write Q8/BF16 mixer 与
+  `gr_write_multi + apply=false mixer` 做 logits/激活逐字节比较并计时。通过后才允许一次
+  A1-B-A2；不得重跑 head split、window profile、batch-head、GDN groups、checkpoint move、
   固定 groups、QSA slots 或 piped MTP。
 - 当前候选：无运行中 server 候选。A2 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
   仅 `0.04%`。
@@ -99,11 +100,12 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；window-profile 判决后恢复的 server/engine/vision PID 为
-  `557432/557442/557436`，engine 为 `105a4171...`，6 slots / 2 groups，没有
+  `loaded=true`；head-split 判决后恢复的 server/engine/vision PID 为
+  `573407/573418/573413`，engine 为 `105a4171...`，6 slots / 2 groups，没有
   `STRATA_VERIFY_PROFILE`、`STRATA_BATCH_TELEMETRY`、`STRATA_BATCH_GDN_GROUPS`、
-  `STRATA_SLOT_CKPT_MOVE`、`STRATA_PIPED_MTP`、`--expert-cache-cpu-order` 或其它实验
-  profiler/QSA/kernel env。A→P 停机约 9 秒、加载 130 秒；P→A2 停机约 9 秒、加载 148 秒。
+  `STRATA_SLOT_CKPT_MOVE`、`STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、
+  `STRATA_FUSE_HEAD_GR`、`--expert-cache-cpu-order` 或其它实验 profiler/QSA/kernel env。
+  A→P 停机约 9 秒、加载 130 秒；P→A2 停机约 9 秒、加载 148 秒。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
@@ -131,6 +133,9 @@
 - UTIL-WEIGHT-RO 已否决：默认 SASS 有 56 条 `LD.E.U16.SYS`；候选产生 48 条
   `LDG.E.U16.CONSTANT.SYS`、80 registers、无 stack。七组中位 `471.0` 对 `472.6 us`
   （+0.339%），6/7 胜；机器码变化真实，但未达 1%。
+- UTIL-HEAD-SPLIT 已否决：独立 harness 的 T=1..8 logits/采样全 bitwise，并发 head 临界
+  路径投影中位 `1.813–9.936%`；server 集成也命中 `1..8` 行 peer graph 且 greedy 全过。
+  但端到端 4/6 路为 `-1.305%/-8.659%`，违反其他级不回退 >1% 的门，默认关闭。
 - UTIL-PIPED-MTP 已否决：A1/A2 合并中位 `78.3/108.55/125.7 tok/s`，B 为
   `93.9/104.4/113.4`；2 路 `+19.92%`、5/6 胜，但 4/6 路 `-3.82%/-9.79%`。固定 greedy
   文本 B 两次不同；B 的 CUDA1 cache 比 A 少 169 slots，下一项先做 cache-neutral 隔离。

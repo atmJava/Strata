@@ -2,14 +2,16 @@
 
 ## Decision
 
-**The independent GPU gate passed on 2026-10-31.** The vocabulary-row partition is
-byte exact, graph replay uses changed activations, and the two-card critical path
-projects above the user's 1% end-to-end threshold at every measured window size.
+**The independent GPU gate passed on 2026-10-31, but the server throughput gate
+rejected the candidate.** The vocabulary-row partition is byte exact, graph replay
+uses changed activations, and the two-card critical path projected above 1% at
+every measured window size. The production A1-B-A2 run did not reproduce that gain:
+4 and 6 streams regressed by `1.305%` and `8.659%`, above the 1% non-regression
+limit.
 
-This authorizes the opt-in server integration. It does not claim an engine or
-end-to-end improvement yet: the production window graph, batch group scheduler,
-memory accounting, startup path and A1-B-A2 gates still have to be implemented and
-measured.
+The opt-in server integration was implemented and passed startup, path-hit, greedy
+parity and resource checks. It was not adopted. The full-head A path remains the
+default and `STRATA_HEAD_SPLIT` is absent from the production process.
 
 No Strata restart was used for this result. The current A2 process and production
 files were not changed.
@@ -118,6 +120,55 @@ process-6.log 661a1445a385e7d319a86a48b2ecf17f560f01ba06cc1fd721caffe12d67c1cb
 
 The synthetic weights are chosen only to exercise Q5_K block decoding. The harness
 does not claim model-quality parity beyond the exact native-kernel output it compares.
+
+## Server integration result
+
+The server candidate loaded with 6 slots / 2 groups and two free-VRAM readings of
+`1002/1069 MiB`. Logs show peer graphs captured for every row count `1..8`. Three
+frozen greedy probes repeated exactly in B and matched the expected text with
+`finish=stop`; A2 also passed.
+
+A1-B-A2 throughput in tokens/s:
+
+| N | A1 | B | A2 | A combined | B vs A |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 77.0 | 80.8 | 77.8 | 77.70 | **+3.99%** |
+| 4 | 115.7 | 113.4 | 114.1 | 114.90 | **-1.305%** |
+| 6 | 124.0 | 113.4 | 124.3 | 124.15 | **-8.659%** |
+| 8 | 106.6 | 106.2 | 106.0 | 106.30 | -0.094% |
+
+A1-to-A2 drift was within 3% at every level and no foreign requests were seen. The
+throughput script recorded both `length` and `stop` outcomes in its arm summary; the
+hard rejection is the reproducible 4/6 regression, not an unexpected-finish claim.
+
+Integration exposed and fixed three defects: MTP needed to accept the default CUDA
+stream, two-device startup could not use `stages.size()==2`, and a peer graph could
+not capture `cudaMemcpyPeerAsync`. The final peer path reads the primary device's
+Q8_1 activation directly. Both the single-process and seven-alternating-process
+parity logs passed with `failures=0`.
+
+Evidence:
+
+```text
+/opt/ai/logs/util-head-split-server-20261031T0800CST/
+
+peer-read-direct-seven-processes.log
+2b32c31d7db7a39cb99fa7103d9936f0b3ab973867f54a3c29707c68c1a89ed4
+
+ab-summary.json
+8319e5c72b4342eb7c2f0151470f24d62b334dca1b66c1de2c3ccf7e0c18d28b
+
+a2-restored-metrics.json
+cd539246dd2678255d9e4bbc36489a4b46b32323ff8d523221060e3c2dba143b
+
+all-sha256.txt
+a7aed4cd7d12d5e333819bbca30d5a1ad56b792f9794bd63aa82ae00923975cd
+```
+
+Restored A2: server/engine/vision `573407/573418/573413`; engine sha256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`;
+config sha256
+`88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`.
 
 ## Server integration contract
 

@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T06:14+08:00。
+> 整理时间：2026-10-31T07:33+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-109。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-114。
 
 ## 2. 当前断点
 
@@ -30,8 +30,11 @@
   一套 head 缓冲，延迟前一组 verdict 会在二组流水制造大于 `1.04 ms` 收益的 10–19 ms 空窗。
   vocab-row head split 的独立 GPU harness 随后通过：`T=1..8` 的半区/合并 logits 全部
   `memcmp` 相等，greedy、固定种子、draw counter 和 graph 改变输入全过；七个交替进程的
-  并发临界路径投影收益中位为 `1.813–9.936%`，最差单次也全部超过 1%。当前断点改为
-  opt-in server integration，而不是再次测 harness。
+  并发临界路径投影收益中位为 `1.813–9.936%`，最差单次也全部超过 1%。服务器集成也通过：
+  `1..8` 行 peer graph 全命中，三组固定 greedy 各两轮逐字一致，6 slots / 2 groups、
+  health loaded，A2 同样通过。但 A1-B-A2 的 2/4/6/8 路相对变化为
+  `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 路回退超过 1%，因此 head split 最终否决，默认关闭。
+  当前断点转为 `UTIL-HEAD-Q8-FUSE` 的源码与独立 GPU 门。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -71,7 +74,7 @@
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
 | 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 候选 PID | server `557432`、engine `557442`；vision `557436` |
+| 候选 PID | server `573407`、engine `573418`；vision `573413` |
 | candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -95,11 +98,30 @@ STRATA_SM75_PERF=1
 `STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING`、`STRATA_PA_GROUP3`、
 `STRATA_IQ3_GRID_REPL`、`STRATA_IQ3_ACT_RELOAD`、`STRATA_IQ3_WEIGHT_REUSE`、
 `STRATA_IQ3_GRID_PAD`、`STRATA_IQ3_WEIGHT_RO`、`STRATA_BATCH_MTP`、
-`STRATA_PIPED_MTP`、`STRATA_PROFILE_*` 或 `STRATA_NCU_*`。
+`STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、`STRATA_FUSE_HEAD_GR`、`STRATA_PROFILE_*` 或
+`STRATA_NCU_*`。
 `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
 引擎子进程，不能替代 service drop-in。
 
 当前生产是“已通过稳定性、正确性和同 boot 归因的最佳基线”，不是数学意义上的全局最优。
+
+### UTIL-HEAD-SPLIT 服务端判决（否决）
+
+独立 harness 已证明 half-row logits、greedy、固定种子和 graph replay 全 bitwise；server 候选
+也捕获了 `1/2/3/4/5/6/7/8` 行 peer head graph，三组固定 greedy 各两轮均等于期望值。A1-B-A2
+同 boot 的 2/4/6/8 路如下：
+
+| N | A1 | B | A2 | A 合并中位 | B 相对 A |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 77.0 | 80.8 | 77.8 | 77.70 | **+3.99%** |
+| 4 | 115.7 | 113.4 | 114.1 | 114.90 | **-1.31%** |
+| 6 | 124.0 | 113.4 | 124.3 | 124.15 | **-8.66%** |
+| 8 | 106.6 | 106.2 | 106.0 | 106.30 | -0.09% |
+
+A1→A2 漂移为 `+1.04%/-1.38%/+0.24%/-0.56%`，均门内；但其他级不得回退 >1%，4/6 路违反，
+所以不采纳。集成期间修复了三个真实缺陷：MTP gather 的默认 stream、双卡启动误判
+`stages.size()==2`、peer graph 无法捕获 `cudaMemcpyPeerAsync`。最终改为 peer 直接读取主卡
+Q8_1 激活；七进程与 server 均通过。
 
 ## 4. 最近证据
 

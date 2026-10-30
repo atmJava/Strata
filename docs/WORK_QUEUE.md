@@ -94,6 +94,11 @@
     完成并由 `batch_poll()` 返回后才释放。等齐两组会延迟前一 verdict 一个 16.9–19.2 ms
     窗口，而节省约 1.04 ms 的 head，因此未构建、未重启。下一项改为 `UTIL-HEAD-SPLIT`：
     两张卡各算 vocabulary 的一半，不延迟 group，先用独立 GPU harness 过 bitwise 与临界路径门。
+29. **UTIL-HEAD-SPLIT 已否决**：独立 harness 与 server 路径的正确性都通过；`1..8` 行 peer
+    graph 全命中，固定 greedy 两轮逐字一致，A2 也通过。A1-B-A2 的 2/4/6/8 路相对变化为
+    `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 路回退超过 1%，所以服务端编排成本没有得到稳定收益。
+    下一项 `UTIL-HEAD-Q8-FUSE` 只检查现有 Q8 路径能否把末层 write 折入最终 mixer；
+    先做源码控制和独立 GPU parity/计时门。
 
 ## 候选
 
@@ -126,7 +131,8 @@
 | UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107/L-109/L-110/L-111：8 路尾部来自六槽轮换后的 underfilled groups；GDN/checkpoint 合并没有改善 | 不再扫 launch 聚合；转 vocab-row head split |
 | UTIL-WINDOW-PROFILE | 拆当前 2/4/6/8 路窗口 | 同 boot 记录 active rows、stage hand-off、KV resolve、slot turnover 与 ITL；至少两项指标能区分 6 路峰值和 8 路尾部，并据此预注册一个不同机制候选 | 已完成 | L-111：occupancy `5.010`、tail `1.1349`、max wait `12,596 ms`；active rows/window `2.6837` 对 `2.9515`；padding/KV resolve 否决 | 只开现有 profiler/telemetry；PSTAT 未交付 |
 | UTIL-BATCH-HEAD | 合并两个 ready pipeline group 的 final-stage head rows | 源码门先证明 row ownership/order/一次额外 sync；GPU harness 的 logits、greedy、fixed-seed、state 全部 bitwise；A1-B-A2 的 2/4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不退 >1%，漂移 ≤3%、零错误/外来请求 | 否决 | L-112：末级 group 严格串行；等齐两组会阻塞同组下一窗口 16.9–19.2 ms，远大于 head 1.04 ms | 未构建、未重启；不重试延迟 verdict 的同形设计 |
-| UTIL-HEAD-SPLIT | 两张卡并发计算 output projection 的两个 vocabulary 区间 | 无损拆分；半区 logits 与 full call `memcmp` 相等，greedy/fixed-seed/counter 不变；并发临界路径投影端到端 ≥1%；接 server 后 A1-B-A2 过 2/4/6/8 门 | 进行中（server） | L-113：七个交替进程全部通过，T=1..8 投影中位 `1.813–9.936%`，最差单次全部 >1%；split peak `453,189,152 B`，上界 `461,577,760 B` | harness 已完成；opt-in `STRATA_HEAD_SPLIT=1`；总 head 权重不增加，不延迟 group verdict |
+| UTIL-HEAD-SPLIT | 两张卡并发计算 output projection 的两个 vocabulary 区间 | 无损拆分；半区 logits 与 full call `memcmp` 相等，greedy/fixed-seed/counter 不变；并发临界路径投影端到端 ≥1%；接 server 后 A1-B-A2 过 2/4/6/8 门 | 否决 | L-113/L-114：harness 与 server 正确性全过；A1-B-A2 的 2/4/6/8 路 `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 回退超门 | 默认保持完整 head；不重试同一 peer graph 编排 |
+| UTIL-HEAD-Q8-FUSE | 把 `STRATA_HC_Q8=1` 末层 pending write 折入最终 mixer | 源码门先证明真实触发与重复工作；独立 GPU harness 对末层激活/logits bitwise 等于 `gr_write_multi + apply=false`；目标内核端到端或窗口临界路径有 ≥1% 依据；之后 A1-B-A2 至少一级 ≥1% 且 5/6 胜、其他级不退 >1%、漂移 ≤3%、零错误/外来请求 | 进行中（源码/GPU 门） | 先审计 `Verifier::record_window` 末层、`fused_gr_read_multi` Q8 `apply` 与 `gr_write_multi` | 不改 model 算术；Q8 权威读已是当前生产路径；默认关闭现有 `STRATA_FUSE_HEAD_GR` |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |
