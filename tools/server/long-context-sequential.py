@@ -61,6 +61,9 @@ def process_env(pid: int | None) -> dict[str, object]:
     names = (
         "STRATA_PA_V2T",
         "STRATA_PROMPT_ATTN_V1",
+        "STRATA_SEL_OVERLAP",
+        "STRATA_IDX_FP16_CHECK",
+        "STRATA_PREFILL_TIMING",
         "STRATA_SM75_PERF",
         "STRATA_SELECT_SIMT",
     )
@@ -148,7 +151,8 @@ def main(argv: list[str]) -> int:
     rows: list[dict] = []
     started = time.monotonic()
     with options.out.open("w", encoding="utf-8") as handle:
-        engine_pid, _ = mixed.pid_rss_mib(mixed.ENGINE_PROCESS_PATTERN)
+        engine_pattern = getattr(mixed, "ENGINE_PROCESS_PATTERN", "[s]trata --serve")
+        engine_pid, _ = mixed.pid_rss_mib(engine_pattern)
         meta = {
             "type": "meta",
             "arm": options.label,

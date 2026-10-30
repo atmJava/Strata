@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（96 条：L-000…L-095，按编号）
+## 台账索引（97 条：L-000…L-096，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -110,6 +110,7 @@
 | L-093 | 10-31 00:0x | 只移除 `--prefill-pipe 1` 未启用 layer-major：888 MiB 显存下最小 super-chunk 也无法分配；A1 150K/210K 六请求 cold 为 2104.1–2373.1 tok/s，中位 2208.55 | **否决 L0 直改假设** |
 | L-094 | 10-31 00:1xZ | 显式 16K host-residual layer-major 真执行 10/13 个 super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；150K warm wall 优势由缓存命中差异造成 | **否决** |
 | L-095 | 10-31 00:4xZ | 当前默认 attention v2 对 v1 的固定 96K A-B-A：engine read `+1.814%`、wall `+1.905%`；A2 漂移约 1.26%，parity/needle 全过，按用户 1% 门复验通过 | **采纳（当前默认）** |
+| L-096 | 10-31 00:5xZ | 150K QSA：16-query overlap 中位 `28.0%`；FP16 全选择仅 `70.9207%` 相同，否决；候选共享预注册上界 `1.996%`，进入最小实现 | **诊断完成；FP16 否决；候选共享待实现** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3764,3 +3765,65 @@ engine `0.1.51`、6 slots、17274 expert slots、INT8 KV、1006 MiB VRAM free。
   （sha256 `622bf210c7a717648c8689ea9a50e64545eb9ad6c97689a2990057b5876efeb4`）
 - `/opt/ai/logs/P6-current-20261030T162623Z/comparison.md`
   （sha256 `dd591964c4eba559bb08e211a23e20888824faf1c79d566c5821d641c4df7d26`）
+
+## L-096 150K QSA 诊断：候选共享留有 1.996% 上界，FP16 因选择漂移否决
+
+**判定**：**QSA-DIAG 完成；QSA-FP16 否决；QSA-CANDIDATES 通过诊断门。** overlap 只支持
+attention-side 的选中 K/V 读取共享，不能作为跳过或近似 indexer score/top-k 的证据。
+
+**实验边界**：候选 8080、双 RTX 2080 Ti、`layer_split=24`、262144 context、INT8 KV、6 slots。
+基线 engine sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`；
+诊断 engine 只增加日志/计时边界与按 GPU 分离的 FP16 缓冲，sha256
+`b7daf62a76592f3a15e042cf47c2d61f1a8cd01f100aa42a346e650ae4545fd5`。诊断 config 只在
+A config 上增加 `STRATA_SEL_OVERLAP=1`、`STRATA_IDX_FP16_CHECK=1`、
+`STRATA_PREFILL_TIMING=1`，并隔离 engine log。
+
+**预注册**：contract sha256 `4945d3c327e1cc6273f707d93bd899c7a64bfe5df590e5e7b81ad3cbd2ede104`。
+候选复用要求 overlap ≤75% 且 `S*F*(1-r) ≥1.25%`；FP16 要求全选择一致 ≥99.9%、稀疏 cells
+一致 ≥99.99% 且 `S*F*0.5 ≥1.0%`。
+
+**方法**：同几何先运行 `qsa_select_bench 150000 256 10 262144`，然后唯一冷请求目标 150K。
+计时边界在正常 score/top-k 之后、诊断复算之前，因此 `qsa select` 是干净 phase；诊断成本
+归入 `qsa attn`，后者不用于结论。
+
+**结果**：请求 `150,069` prompt tokens、0 cached、0 HTTP/执行错误、needle 正确。19 chunk overlap
+中位 `28.0%`、均值 `26.84%`；最后 chunk `T=7,214`、active blocks `37,516`、width `2,051`。
+FP16 全选择相同 `1,203,932/1,697,576`（`70.9207%`）；稀疏 selected cells 相同
+`3,429,943,099/3,431,249,164`（`99.9619%`），差异 `1,306,065`。
+
+**判据计算**：clean `qsa select=3,929 ms` / diagnostic GPU timeline `98,075 ms`，`S=4.0061%`；
+同几何 production scorer/top-k 为 `2.020/0.899 ms`，`F=69.2018%`。候选共享乐观上界
+`S*F*(1-0.28)=1.996%`，高于 `1.25%`。FP16 理论 headroom 为 `1.386%`，但一致率未过门。
+
+**资源与失败样本**：正式诊断 warm wall `105.864 s`，仅作诊断执行证据。最低 MemAvailable
+`12,853.2 MiB`，SwapFree 维持 `4,088.4 MiB`，GPU 峰值约 `21,228/21,126 MiB`。首次请求暴露
+既有 FP16 hook 的跨 GPU 静态指针缺陷，修复为每 device 缓冲后重跑；失败 JSON/summary/日志
+保留但不计入结果。
+
+**恢复**：基线二进制已 byte-for-byte 恢复；候选 8080 的 server/engine PID `491072/491135`，
+health loaded、诊断 env 不存在。生产 systemd/config 未改，仍为 inactive/dead、
+`MainPID=0`、`NRestarts=23`。
+
+**没测什么**：一个合成 150K prompt、单流、sm_75 双卡；没有自然语言分布、并发、其他长度或
+其他 backend。overlap 上界不是实测提速，下一步必须做 exact implementation 的同负载 A-B-A。
+
+**下一步**：QSA-UNION-ATTN。只改 attention-side K/V 读取共享，保持 indexer selection 和每
+query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 parity/needle/资源门，
+否则回滚。
+
+**原始证据**：
+
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/contract.md`
+  （sha256 `4945d3c327e1cc6273f707d93bd899c7a64bfe5df590e5e7b81ad3cbd2ede104`）
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/diag.json`
+  （sha256 `86112d421fc39393259b0776145e7d99e04bf164fa85c3ba27c054da8b73dfaa`）
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/request-pass2.jsonl`
+  （sha256 `f35f1660276668999d995a68ca770e381e6acabd8b457e45b7cf1543152e0dc2`）
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/summary-pass2.json`
+  （sha256 `e8008ed4cbff60686362fcc2030d2ae09612359b1e70e090bd6e9db7a6543770`）
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/engine.log`
+  （sha256 `ecc078ac7d5a6f439e05740d0cbc4c86dd9e540a1141922fc92f6d9b56e0b10b`）
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/diagnostics-extract.txt`
+  （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
+  （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）

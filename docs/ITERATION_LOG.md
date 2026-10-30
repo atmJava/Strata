@@ -3,6 +3,45 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-69 · 150K QSA 诊断：overlap 中位 28%，FP16 一致率 70.92%，只保留候选共享方向
+
+- 目标 / 指标：用一个真实约 150K 冷 prompt，读取 16-query selected-cell union、FP16/FP32
+  选择一致率、差异 cells、clean `qsa select` 成本和尾部 active blocks；按预注册门决定是否做
+  一个最小实现。
+- 审计发现：两个既有 hook 都由 env 是否存在触发；overlap hook 只在每个 chunk 的第一个 QSA
+  layer 运行。既有 FP16 hook 的缓冲区是进程级单例，在双卡 layer split 上会跨设备传指针。
+- 改动与实验：诊断 config 只增加 `STRATA_SEL_OVERLAP=1`、`STRATA_IDX_FP16_CHECK=1` 和
+  `STRATA_PREFILL_TIMING=1`；在诊断 copy 前补计时边界，使 `qsa select` 不包含复算/同步，
+  overlap 行补尾部 active blocks/width，FP16 行补差异 cells。同几何先跑
+  `qsa_select_bench 150000 256 10 262144`。
+- 失败样本：第一次 150K 请求在首个 chunk 后 illegal memory access；根因是 FP16 检查缓冲在
+  第二张卡仍使用第一张卡的指针。改为每 GPU 独立缓冲、增量重建后重跑；失败 JSON/summary/日志
+  保留，不计入性能或诊断判决。
+- 结果：正式请求 `150,069` prompt tokens、0 reused、0 错误、needle 正确。19 个 chunk 的
+  overlap 中位 `28.0%`、均值 `26.84%`；最后 chunk T `7,214`、active blocks `37,516`、
+  width `2,051`。FP16 全选择相同 `1,203,932/1,697,576`（`70.9207%`），稀疏 cells 相同
+  `99.9619%`，差异 cells `1,306,065`。
+- 成本与判据：诊断 `qsa select` 为 `3,929 ms`，占 diagnostic GPU timeline `98,075 ms` 的
+  `4.0%`；同几何生产 scorer/top-k 为 `2.020/0.899 ms`，scorer 占 `69.20%`。以 overlap
+  `0.28` 计算候选共享乐观上界 `4.0061% × 69.20% × 72% = 1.996%`，过预注册 `1.25%` 门；
+  FP16 的全选择一致率远低于 `99.9%`，路线否决。
+- 正确性与资源：正式诊断 warm wall `105.864 s`（诊断同步成本高，不作性能结论）；最低
+  MemAvailable `12,853.2 MiB`，swap 未增长，两卡峰值约 `21,228/21,126 MiB`。
+- 判决：**QSA-DIAG 完成；QSA-FP16 否决；QSA-CANDIDATES 通过诊断门，允许一次 exact
+  attention-side K/V 共享读取实现**。低 overlap 不能用于跳过或近似 indexer scorer/top-k。
+- 生产状态与回滚：候选执行了诊断重启、失败后 engine 重载和恢复重启；基线二进制已逐字节恢复，
+  server/engine PID `491072/491135`，engine `105a4171...`、health loaded、诊断 env 不存在。
+  生产 systemd/config 未改，仍为 inactive/dead、`MainPID=0`、`NRestarts=23`。
+- 证据：`/opt/ai/logs/qsa-diag-20261031T1653Z/`；contract sha256
+  `4945d3c327e1cc6273f707d93bd899c7a64bfe5df590e5e7b81ad3cbd2ede104`。台账见 L-096，
+  报告见 `docs/work/QSA_DIAGNOSTIC_RESULT-20261031.md`。
+- 学到什么：低 selected-cell union 是 attention K/V 读取共享的机会，不是“知道了 final top-k
+  就能跳过 score”的理由；双卡调试 hook 的状态必须按 device 分配。诊断必须把自身同步和干净
+  phase timing 分开，否则会把 98 s 诊断成本误当成选择成本。
+- 下一步与理由：进入 QSA-UNION-ATTN，实现一个 opt-in exact 路径并做同负载 A-B-A。它必须同时
+  改善 wall 与 `qsa attn` 至少 1% 且保持 parity；若 union 管理或 shared-memory 开销吃掉收益，
+  回滚并转向 UTIL-NCU。
+
 ## I-20261031-68 · 当前默认 attention v2 在 1% 门下复验通过：read +1.814%，wall +1.905%
 
 - 目标 / 指标：按用户新的约 1% 采纳门复验 P6。当前源码已把 prompt-attention v2 设为默认，

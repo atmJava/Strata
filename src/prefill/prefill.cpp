@@ -3243,6 +3243,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         strata::kernels::qsa_block_topk(m.sel_scores, steps0, nb, m.max_blocks, m.cap, s,
                                                         m.sel_ids + t0 * m.cap, m.cs, active);
                     }
+                    // The diagnostics below synchronize and may score the same queries again. Close the select phase
+                    // first so STRATA_PREFILL_TIMING still reports the production selection cost; their own cost is
+                    // charged to qsa attn, whose timing is intentionally not used when diagnostics are enabled.
+                    if (std::getenv("STRATA_SEL_OVERLAP") != nullptr ||
+                        std::getenv("STRATA_IDX_FP16_CHECK") != nullptr)
+                        pt.mark(kPfQsaAttn, cs);
                     // STRATA_SEL_OVERLAP (debug, D-1's question): how much do neighbouring queries' selections share?
                     // Per tile of 16 queries: the union of their selected cells against the sum of their widths.
                     if (static const bool ovl = std::getenv("STRATA_SEL_OVERLAP") != nullptr; ovl && qsa_index == 0) {
@@ -3260,39 +3266,48 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             std::sort(u.begin(), u.end());
                             sum_u += (double) (std::unique(u.begin(), u.end()) - u.begin());
                         }
+                        const int64_t tail_step = (T - 1) * strata::kernels::kStepCount;
                         std::fprintf(stderr, "strata prefill: selection overlap at %lld: 16-query tiles read %.1f%% of the "
-                                             "cells one query at a time does\n", (long long) p0, sum_w > 0 ? 100.0 * sum_u / sum_w : 0.0);
+                                             "cells one query at a time does; T %lld, tail active blocks %d, width %d\n",
+                                     (long long) p0, sum_w > 0 ? 100.0 * sum_u / sum_w : 0.0, (long long) T,
+                                     m.steps_host[(size_t) (tail_step + strata::kernels::kStepNBid)] + 1,
+                                     m.steps_host[(size_t) (tail_step + strata::kernels::kStepWidth)]);
                     }
                     // STRATA_IDX_FP16_CHECK: would FP16 pooled indexer keys select the same cells? (the KV-streaming
                     // design's last question). Every query is selected again from the pooled keys and `dead` rounded
                     // to fp16 (exactly what an fp16 store reads back); the agreement with the fp32 selection is
                     // printed cumulatively after each chunk's last QSA layer. Debug: syncs per layer.
                     if (static const bool f16chk = std::getenv("STRATA_IDX_FP16_CHECK") != nullptr; f16chk) {
-                        static float *pooled16 = nullptr, *dead16 = nullptr;
-                        static int32_t* ids16 = nullptr;
+                        static float *pooled16[64] = {}, *dead16[64] = {};
+                        static int32_t* ids16[64] = {};
                         static double shared = 0, cells = 0;
                         static long long queries = 0, same = 0, sel_queries = 0;
                         const int64_t rows = st.idx_pooled_rows;
-                        if (pooled16 == nullptr &&
-                            (cudaMalloc((void**) &pooled16, (size_t) rows * s.idx_dim * 4) != cudaSuccess ||
-                             cudaMalloc((void**) &dead16, (size_t) s.idx_dim * 4) != cudaSuccess ||
-                             cudaMalloc((void**) &ids16, (size_t) (m.T * m.cap) * 4) != cudaSuccess)) {
+                        int dev = -1;
+                        if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) {
+                            err = "STRATA_IDX_FP16_CHECK: cannot identify its GPU";
+                            return false;
+                        }
+                        if (pooled16[dev] == nullptr &&
+                            (cudaMalloc((void**) &pooled16[dev], (size_t) rows * s.idx_dim * 4) != cudaSuccess ||
+                             cudaMalloc((void**) &dead16[dev], (size_t) s.idx_dim * 4) != cudaSuccess ||
+                             cudaMalloc((void**) &ids16[dev], (size_t) (m.T * m.cap) * 4) != cudaSuccess)) {
                             err = "STRATA_IDX_FP16_CHECK: no room for its buffers";
                             return false;
                         }
-                        round_f16(st.idx_pooled, pooled16, rows * s.idx_dim, m.cs);
-                        round_f16(st.idx_dead, dead16, s.idx_dim, m.cs);
+                        round_f16(st.idx_pooled, pooled16[dev], rows * s.idx_dim, m.cs);
+                        round_f16(st.idx_dead, dead16[dev], s.idx_dim, m.cs);
                         for (int64_t t0 = 0; t0 < T; t0 += m.sel_batch) {
                             const int64_t nb = std::min(m.sel_batch, T - t0);
                             const int32_t* steps0 = m.steps_dev + t0 * strata::kernels::kStepCount;
-                            strata::kernels::qsa_block_scores(pooled16, dead16, m.q_idx + t0 * 512, steps0, nb,
+                            strata::kernels::qsa_block_scores(pooled16[dev], dead16[dev], m.q_idx + t0 * 512, steps0, nb,
                                                               m.max_blocks, s, m.sel_scores, m.cs);
                             strata::kernels::qsa_block_topk(m.sel_scores, steps0, nb, m.max_blocks, m.cap, s,
-                                                            ids16 + t0 * m.cap, m.cs);
+                                                            ids16[dev] + t0 * m.cap, m.cs);
                         }
                         std::vector<int32_t> a((size_t) (T * m.cap)), b((size_t) (T * m.cap));
                         cudaMemcpyAsync(a.data(), m.sel_ids, a.size() * 4, cudaMemcpyDeviceToHost, m.cs);
-                        cudaMemcpyAsync(b.data(), ids16, b.size() * 4, cudaMemcpyDeviceToHost, m.cs);
+                        cudaMemcpyAsync(b.data(), ids16[dev], b.size() * 4, cudaMemcpyDeviceToHost, m.cs);
                         cudaStreamSynchronize(m.cs);
                         for (int64_t t = 0; t < T; ++t) {
                             const int64_t w = m.steps_host[(size_t) (t * strata::kernels::kStepCount + strata::kernels::kStepWidth)];
@@ -3307,8 +3322,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         }
                         if (qsa_index + 1 == g.n_qsa_layers())
                             std::fprintf(stderr, "strata prefill: FP16 indexer keys: %lld of %lld selections identical; "
-                                                 "where the selection is sparse, %.4f%% of cells shared (%lld queries)\n",
-                                         same, queries, cells > 0 ? 100.0 * shared / cells : 100.0, sel_queries);
+                                                 "where the selection is sparse, %.4f%% of cells shared (%lld of %lld; "
+                                                 "%lld differ; %lld queries)\n",
+                                         same, queries, cells > 0 ? 100.0 * shared / cells : 100.0,
+                                         (long long) shared, (long long) cells, (long long) (cells - shared), sel_queries);
                     }
                     // STRATA_QSA_DUMP=<file>: append every QSA layer's selected cells for the prompt's last
                     // STRATA_QSA_DUMP_LAST (4096) positions - records of int32 {qsa layer, pos0, T, cap} + T*cap cells,

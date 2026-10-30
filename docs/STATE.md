@@ -6,19 +6,20 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：QSA-DIAG（用真实 150K prompt 同时读取 selected-cell overlap 与 FP16 选择
-  一致性诊断；不先改 kernel）。
+- 当前项：QSA-DIAG 已完成。真实 `150,069` token 冷读中，19 个 chunk 的 16-query selected-cell
+  union 中位为 `28.0%`；FP16 全选择一致率只有 `70.9207%`，否决半精度路线。候选复用通过
+  `1.996%` 的预注册乐观上界，进入下一项 QSA-UNION-ATTN 最小实现。
 - 上一项：P6-1PCT 已完成并通过。当前默认 v2 对 v1 的固定 96K A-B-A 中，engine read
   改善 `1.814%`、wall 改善 `1.905%`，A2 漂移约 1.26%，parity/needle 全过。
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
 - 当前迭代：无运行中实验。attention v2 已是当前默认并完成 1% 门复验；不要再次用
-  `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。
-- 下一动作：先审计已有 `STRATA_SEL_OVERLAP` / `STRATA_IDX_FP16_CHECK` 触发条件与旧诊断；
-  用真实 150K prompt 得到 overlap、选择差异 cells 和 `qsa select` 占比，再判断是否实现。
-- 当前候选：QSA-DIAG，其次是 UTIL-NCU / UTIL-KERNEL。P7 只有证据表明 Tensor 管线是直接
-  瓶颈时才恢复，并仍需完整 A-B-A。
+  `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 路线也已否决。
+- 下一动作：实现一个 opt-in、输出精确的 QSA-UNION-ATTN 路径，让相邻 query 共享选中 K/V
+  的读取，不改变 indexer 的 score/top-k 结果；然后做同负载 A-B-A。
+- 当前候选：QSA-UNION-ATTN，其次是 UTIL-NCU / UTIL-KERNEL。P7 只有证据表明 Tensor 管线是
+  直接瓶颈时才恢复，并仍需完整 A-B-A。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
@@ -31,7 +32,8 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`。
+  `loaded=true`；恢复后的 server/engine PID 为 `491072/491135`，engine 恢复为
+  `105a4171...`，诊断 env 不存在。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为

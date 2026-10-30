@@ -50,9 +50,10 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 没有有效样本。`CTX256` 一小时 soak 已通过并冻结 `0.1.51`，Nsight 双次显示 32K 冷 prefill
 不是 DRAM 饱和，而是多数 SM 参与但 issue、Tensor 与 warp residency 不高。后续重点转为提高
 真实资源利用率：NCU 只用于定位 stall，随后必须落到内核或调度代码改动。显式 layer-major
-虽然真实执行，但六请求中位慢 14.29%，已否决。P6 已按 1% 门复验通过。当前无运行中实验；
-下一项做真实 150K prompt 的 QSA overlap/FP16 诊断。P7 只有 NCU 证明 Tensor 管线是直接瓶颈时
-才恢复，恢复后必须从全新 A1 重跑。
+虽然真实执行，但六请求中位慢 14.29%，已否决。P6 已按 1% 门复验通过。真实 150K QSA 诊断
+已完成：16-query overlap 中位 28.0%，FP16 全选择一致率仅 70.92% 因而否决；按预注册上界，
+候选 attention 读取共享值得做一次最小实现。当前无运行中实验。P7 只有 NCU 证明 Tensor 管线
+是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
 
 ## 候选路线
 
@@ -68,7 +69,8 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | P4 中请求公平性 | M11 | 让 41-token 代码请求也尽早完成，同时守住长档 | 高 | 中高，涉及两个重叠调度开关 | **采纳**：新引擎 A-B-A 代码 −87.681%，96K +2.761%/+2.202%；余量小 |
 | P5 96K 相位归因 | M12 | 区分 GPU、host 与固定开销，给下一项实验定目标 | 高 | 低 | **完成**：GPU 主导，host staging 0.341 s |
 | P6 Turing prompt-attention v2 | M12 | 直接替换 `qsa attn` 的 v1 路径，尝试减少 96K 冷读 | 中 | 低，env-only 且可回滚 | **采纳（当前默认）**：L-095 read/wall `+1.814%/+1.905%`，parity 与 needle 均过 |
-| QSA-DIAG | 150K selection 诊断 | 读取 16-query overlap、FP16 一致率、差异 cells 和 select 成本 | 高信息量 | 低；优先只读诊断 | **下一项**：诊断不足则不实现候选复用或 FP16 |
+| QSA-DIAG | 150K selection 诊断 | 读取 16-query overlap、FP16 一致率、差异 cells 和 select 成本 | 高信息量 | 低；优先只读诊断 | **完成**：overlap 中位 28.0%；FP16 一致率 70.92%，否决；候选复用上界 1.996%，进入最小实现 |
+| QSA-UNION-ATTN | 相邻 query 共享选中 K/V | opt-in 且保持每 query 的 selection/attention 输出；长读 A-B-A 的 wall 与 `qsa attn` 同向改善 ≥1%，质量与资源门通过 | 中 | 中；需要新 kernel 路径和双卡验证 | **下一项**：先用真实 16-query overlap 设计 exact union/cache loader，不改变 top-k |
 | P7 Turing FP16 tensor-core prompt experts | M12/M13 | 用 tensor-core prompt experts 攻击最大 `gemm gate/up` 5.807 s | 中 | 低中，输出可能变化 | **搁置**：A1 中断；只有 NCU 证明 Tensor 是直接瓶颈时才恢复 |
 | GPU-UTIL | M13 | 用硬件计数器替代单看 NVML；先验证采集口径，再做内核调优 | 高 | 低；只读、不重启服务 | **完成**：两次 Nsight 双卡 GPU Metrics + NVML 交叉核对可复现 |
 | UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **待做**：先快照再停服，不能附加现役进程 |
@@ -126,9 +128,12 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 21. **layer-major 配置路线已否决**：只移除 `--prefill-pipe 1` 被 512 MiB 容量余量挡住；
     显式 96 MiB、16K host-residual 虽真实执行 10/13 个 super-chunk，六请求 prompt 吞吐中位
     仍慢 `14.29%`。不再重复同路径或扫描邻近 target。
-22. **P6 收益已兑现，转向 QSA-DIAG**：当前默认 v2 的 read/wall 均超过 1%，且输出 parity
-    不变。接下来用真实 150K prompt 读取 overlap、FP16 一致率和 select 成本；只有诊断支持时
-    才实现选择复用或半精度路径。
+22. **QSA-DIAG 已完成**：真实 150K 冷读的 overlap 中位 28.0%，尾部 37,516 active blocks；
+    FP16 全选择一致率 70.92%，半精度 scorer 路线否决。clean `qsa select` 占诊断 GPU timeline
+    4.0%，与同几何 scorer/top-k `2.020/0.899 ms` 组合得到候选共享 1.996% 的乐观上界。
+23. **下一项 QSA-UNION-ATTN**：只实现一个 opt-in 的 exact attention-side K/V 共享读取路径，
+    不拿 final-selection union 跳过或近似 indexer score/top-k。必须做同负载 A-B-A，wall 与
+    `qsa attn` 同向、稳定改善 ≥1%；否则回滚并转向 UTIL-NCU。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

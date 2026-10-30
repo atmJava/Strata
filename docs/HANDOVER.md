@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-26T15:04+08:00。
+> 整理时间：2026-10-31T01:10+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,29 +12,31 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-083–L-087。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-096。
 
 ## 2. 当前断点
 
-- 全局优化目标当前暂停，等待用户明确恢复；不要自行启动 24 小时循环。
+- 用户已恢复“除非叫停否则持续执行”的全局优化循环；当前断点是 QSA-UNION-ATTN。
+- QSA-DIAG 已完成：overlap 中位 `28.0%`，FP16 全选择一致率 `70.9207%`；半精度路线否决，
+  candidate-sharing 路线按预注册上界进入一次最小 exact 实现。
 - P7 状态是 **暂停/待做**，不是进行中。
 - P7 的 A1 在首个请求期间被用户中断；没有有效 A1 JSONL/summary，没有 B/A2、parity、
   needle 或性能结论。
 - 中断后只读核对到服务 active、health 200、生产配置已恢复，未发现残余 soak 或 P7 输出。
 - 恢复 P7 时必须从全新的 A1 起跑完整同 boot A-B-A，不能复用中断前的首请求。
-- 当前没有 active Codex goal；恢复“24 小时不间断执行”需要用户重新明确授权。
+- 当前目标链路是：完成 QSA 候选共享实现或否决后，立即更新证据并创建下一目标；不等待用户批准。
 
 ## 3. 当前生产
 
-`strata.service` 位于 `192.168.2.223:8080`。
+生产 `strata.service` 当前按用户要求保持 inactive；候选手动实例监听 `127.0.0.1:8080`。
 
 | 项 | 当前值 |
 |---|---|
-| health | 200，`loaded=true` |
-| engine | `a09d78b13c39378d1532a024b983d286` / `0.1.51` |
-| server | `de09cffdac39ff150a689bd3a44cc242` |
-| launcher | `342710595d34936f40e40233f5b62837` |
-| config md5 | `ea1e29598ba7e671280cafd7604cfd0b` |
+| service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
+| 候选 health | 200，`loaded=true` |
+| 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
+| 候选 PID | server `491072`、engine `491135` |
+| candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
 关键生产开关：
@@ -53,7 +55,8 @@ STRATA_SHARED_SLOT_ROPE=1
 STRATA_SM75_PERF=1
 ```
 
-生产进程中当前没有 `STRATA_PF_WMMA`、`STRATA_PA_V2T` 或 `STRATA_PREFILL_TIMING`。
+候选进程中当前没有 `STRATA_PF_WMMA`、`STRATA_PA_V2T`、`STRATA_SEL_OVERLAP`、
+`STRATA_IDX_FP16_CHECK` 或 `STRATA_PREFILL_TIMING`。
 `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
 引擎子进程，不能替代 service drop-in。
 
@@ -110,6 +113,18 @@ engine read 中位 `40063.1/41022.6/40564.9 ms`，wall 中位
 `1.814%/1.905%`，A2 漂移约 `1.26%`，parity 与 needle 全过。当前默认 v2 保留；
 不要再设 `STRATA_PA_V2T=1` 做同形 A/B。
 
+### QSA-DIAG 完成，FP16 否决
+
+真实 `150,069` token 冷请求中，19 个 chunk 的 16-query selected-cell union 中位 `28.0%`；
+最后 chunk 有 `37,516` active blocks、width `2,051`。FP16-rounded indexer keys 只保持
+`1,203,932/1,697,576` 个完整选择（`70.9207%`），稀疏 selected cells 一致率 `99.9619%`，
+因此不实现半精度 scorer。
+
+clean `qsa select` 为 `3,929 ms`，占诊断 GPU timeline `4.0%`；同几何 scorer/top-k 为
+`2.020/0.899 ms`。候选共享的预注册乐观上界为 `1.996%`，值得一次 exact A-B-A，但尚不等于
+采纳。报告在 [`work/QSA_DIAGNOSTIC_RESULT-20261031.md`](work/QSA_DIAGNOSTIC_RESULT-20261031.md)，
+原始证据在 `/opt/ai/logs/qsa-diag-20261031T1653Z/`。
+
 ### P7 无有效结果
 
 - 预注册判据：
@@ -120,13 +135,11 @@ engine read 中位 `40063.1/41022.6/40564.9 ms`，wall 中位
 
 ## 5. 构建与测试状态
 
-- 合并后 `0.1.51` 已部署并完成运行路径验证。
-- 256K 切换已完成功能门，但 mixed soak 仍待做。
-- CTest：`151 passed / 8 skipped / 1 failed`。
-- 唯一失败是服务器缺少 Q2_0 PLE 外部资产；不能写成“全测试绿”。
+- QSA-DIAG 的诊断源码增量构建通过；`qsa_topk_active_parity`、`qsa_slots_parity`、
+  `qsa_scores_parity`、`qsa_select_rows_parity_test`、`qsa_topk_parity` 为 `5/5` 通过。
+- 本轮没有重跑完整 CTest；上游 v0.2.7 已知 6 个失败项仍按 TEST-027 处理，不能写成“全测试绿”。
 - temperature 0 parity 通过；high-effort reasoning hash 在旧引擎 A/A2 间也会变化，
   当前生产形状下不能作为稳定 parity。
-- 8 个 skip 是平台或资产覆盖例外，详见 L-082。
 
 ## 6. 当前主要风险
 
@@ -140,6 +153,8 @@ engine read 中位 `40063.1/41022.6/40564.9 ms`，wall 中位
    显式启用后应安全回落 MTP，相关性能路线暂不能验收。
 6. **跨 boot 噪声**。4 路聚合跨 boot 曾漂移约 9%；同会话通常以 3% 为噪声地板。
 7. **P7 未验证**。`STRATA_PF_WMMA=1` 可能改变输出，恢复后必须同时过速度与质量门。
+8. **QSA overlap 尚不是实测收益**。1.996% 是乐观上界；union 管理、排序、shared-memory
+   容量和双卡调度都可能吃掉它。没有 A-B-A 不得写成采纳。
 
 ## 7. 用户恢复目标后的入口
 

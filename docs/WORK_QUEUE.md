@@ -42,8 +42,9 @@
     恢复 A 配置。
 14. **P6 已兑现**：当前源码默认 v2，复验不再设 `STRATA_PA_V2T=1`；只以 `=0` 回退 v1
     作对照。L-095 已证明 read/wall 均超过 1%，保留当前默认。
-15. **下一项 QSA-DIAG**：真实 150K prompt 同时读取 selected-cell overlap、FP16 一致率和
-    `qsa select` 占比；诊断不足时不做候选复用或半精度 kernel。
+15. **QSA-DIAG 已完成**：真实 150K prompt 的 16-query selected-cell union 中位 `28.0%`；
+    FP16 全选择一致率 `70.9207%`，半精度路线否决；候选共享按预注册公式仍有 `1.996%`
+    乐观上界，因此下一项只做一次 exact attention-side K/V 共享读取实现。
 
 ## 候选
 
@@ -66,7 +67,8 @@
 | UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 待做 | L-092：2 路数字 `94.85 tok/s` 低于单路 `104.05`；8 路 `138.76` 低于 6 路 `164.68`，TTFT 约 `5.8 s` | 先查调度/批窗口固定成本，不先做参数扫描 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
-| QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 待做 | 旧 153K profile 中 `qsa select` 约 7.0%/3874 ms；尚无 overlap/FP16 数据 | 先诊断，不先改 kernel；用现有 env 和日志 |
+| QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |
+| QSA-UNION-ATTN | 相邻 query 共享选中 K/V | opt-in exact 路径；同真实长读 A-B-A 的 wall 与 `qsa attn` 稳定同向改善 ≥1%；selection/attention parity、needle 与资源门通过 | 待做 | L-096 仅给出 overlap 上界，尚未实现 | 不改变 indexer score/top-k，不用近似候选跳过 |
 | QSA-SLOTS | 合并 batch window 的 QSA launch | 4/6 路交错 A-B 均稳定改善聚合吞吐 | 否决 | L-081：4 路无收益，6 路首次 +3.5% 不复现，最终相邻 −0.49% | 同配置不再重试 |
 | HEAD-ENGINE | 旧合并源码的 sm_75 可部署验证 | 从当次 HEAD 独立构建；测试、输出 parity、版本 marker、运行路径 hash 与一小时 soak 通过 | 已完成（历史基线） | L-082/L-083/L-089/L-090：当次 256K 变化在 3% 内，一小时 soak 通过 | 记录属于 `a09d78b1`，不能当作 c219 的测试结论 |
 | UPSTREAM-027 | v0.2.7 37 提交的服务器验收 | 独立构建；真实代理接口、工具/图片、并发 health 通过；记录吞吐曲线和测试缺口 | 已完成（测试缺口） | L-092：6 路数字 `164.68`、自然语言 `149.82 tok/s`；CTest 仍有 6 项失败 | 运行可用，不代表测试全绿；2/8 路另立 UTIL-MULTI |

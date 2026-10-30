@@ -594,7 +594,7 @@ stale 或 double-free。
 - VRAM 余量低于安全阈值、OOM、host ram 触发 paging 或 snapshot 被驱逐增多，直接停下；
 - 若没有收益，检查 `why` 后结束这条路线，不连续试 16K/24K/28K 多个 super-chunk。
 
-### 16.3 QSA 诊断（下一步）
+### 16.3 QSA 诊断（已完成）
 
 layer-major 决策已经结束；QSA 诊断使用真实 150K prompt，不先用 36K 得出结论。
 
@@ -608,7 +608,19 @@ layer-major 决策已经结束；QSA 诊断使用真实 150K prompt，不先用 
 如果 overlap 高且 FP16 一致，再实现对应 kernel；如果二者都否，转向融合 score/top-k 或
 kernel tiling，而不是继续重复相同检查。
 
-### 16.4 并发和会话快照
+结果见 [`QSA_DIAGNOSTIC_RESULT-20261031.md`](QSA_DIAGNOSTIC_RESULT-20261031.md)。真实 150K
+prompt 的 overlap 中位为 `28.0%`，但 FP16 全选择一致率只有 `70.9207%`，因此半精度 scorer
+否决；候选共享按预注册公式有 `1.996%` 乐观上界，进入一次 exact attention-side K/V 共享读取
+实现。final-selection union 只能说明 attention 读取有共享机会，不能用于跳过或近似 indexer
+score/top-k。
+
+### 16.4 QSA-UNION-ATTN（下一步）
+
+最小候选只合并相邻 query 对已选 K/V cell 的读取，保持每个 query 自己的 selection、softmax
+和输出算术。必须同负载 A-B-A，wall 与 `qsa attn` 稳定同向改善 ≥1%，selection/attention parity、
+needle 和资源门通过；否则回滚并转向 UTIL-NCU。
+
+### 16.5 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：
 
