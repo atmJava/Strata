@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from strata_cli.cli import main
-from strata_control import journal, management, owner_transport, procs, profiles, runtime
+from strata_control import artifacts, journal, management, owner_transport, procs, profiles, runtime
 
 
 @unittest.skipUnless(os.name == "posix", "the managed runtime is Linux/POSIX")
@@ -45,6 +45,9 @@ class RuntimeTests(unittest.TestCase):
                           "        slot = int(line.split()[1]) if line.startswith('BGEN ') else None\n"
                           "        if Path('fail-generation').exists():\n"
                           "            print('ERR generation-failed', flush=True)\n"
+                          "            continue\n"
+                          "        if slot is not None and Path('fail-batch-generation').exists():\n"
+                          "            print('ERR batch-probe-failed', flush=True)\n"
                           "            continue\n"
                           "        if Path('empty-generation').exists():\n"
                           "            print('DONE 0 1 1.0 0.0 stop 0 0 0', flush=True)\n"
@@ -629,7 +632,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(path.parent, self.root / "runtime")
         self.assertEqual(path.stat().st_mode & 0o077, 0)
         manifest = runtime._read_lkg("local")
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["profile"], "local")
         self.assertEqual(manifest["verified_instance_id"], started["instance_id"])
         self.assertEqual(manifest["profile_revision"], started["profile_revision"])
@@ -637,7 +640,99 @@ class RuntimeTests(unittest.TestCase):
                          hashlib.sha256(self.config.read_bytes()).hexdigest())
         self.assertEqual(manifest["source_size"], len(self.config.read_bytes()))
         self.assertIn("--config", manifest["server_argv"])
+        artifact = manifest["artifact"]
+        engine = self.root / "engine.py"
+        self.assertEqual(artifact["engine_path"], str(engine.resolve()))
+        self.assertEqual(artifact["engine_sha256"],
+                         hashlib.sha256(engine.read_bytes()).hexdigest())
+        self.assertEqual(artifact["engine_size"], len(engine.read_bytes()))
+        self.assertEqual(len(artifact["runtime_code_sha256"]), 64)
+        self.assertGreater(artifact["runtime_code_files"], 0)
+        self.assertEqual(started["artifact_id"], artifact["artifact_id"])
+        self.assertEqual(journal.compact_direct_result("runtime.start", started)["artifact_id"],
+                         artifact["artifact_id"])
         self.assertNotIn("source_bytes_b64", json.dumps(runtime.status("local")))
+
+    def test_artifact_identity_ignores_non_runtime_python_files(self):
+        root = self.root / "artifact-tree"
+        (root / "serve" / "fixtures").mkdir(parents=True)
+        (root / "strata_control").mkdir()
+        (root / "strata_cli").mkdir()
+        (root / "tools").mkdir()
+        engine = root / "engine.py"
+        engine.write_text("#!engine\n", encoding="utf-8")
+        runtime_file = root / "serve" / "runtime.py"
+        host_file = root / "strata_control" / "runtime.py"
+        runtime_file.write_text("RUNTIME = 1\n", encoding="utf-8")
+        host_file.write_text("HOST = 1\n", encoding="utf-8")
+        ignored = [
+            root / "serve" / "test_runtime.py",
+            root / "serve" / "fixtures" / "fake.py",
+            root / "strata_control" / "test_runtime.py",
+            root / "strata_cli" / "cli.py",
+            root / "tools" / "probe.py",
+            root / "strata.py",
+        ]
+        for path in ignored:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("VALUE = 1\n", encoding="utf-8")
+        source = json.dumps({"exe": str(engine), "cwd": str(root)}).encode("utf-8")
+
+        before = artifacts.capture(source, root=root)
+        for path in ignored:
+            path.write_text(path.read_text(encoding="utf-8") + "VALUE = 2\n", encoding="utf-8")
+        self.assertEqual(artifacts.capture(source, root=root), before)
+
+        runtime_file.write_text(runtime_file.read_text(encoding="utf-8") + "RUNTIME = 2\n",
+                                encoding="utf-8")
+        self.assertNotEqual(artifacts.capture(source, root=root)["artifact_id"], before["artifact_id"])
+
+    def test_restart_plan_reports_changed_engine_artifact_without_stopping(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
+        engine = self.root / "engine.py"
+        engine.write_text(engine.read_text() + "\n# changed build\n", encoding="utf-8")
+
+        plan = runtime.plan_restart("local")
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertTrue(plan["artifact_changed"])
+        self.assertEqual(plan["current_artifact_id"], original["artifact"]["artifact_id"])
+        self.assertNotEqual(plan["candidate_artifact_id"], plan["current_artifact_id"])
+        self.assertEqual(runtime.status("local")["instance_id"], first["instance_id"])
+
+    def test_restart_refuses_changed_engine_artifact_before_drain(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        engine = self.root / "engine.py"
+        engine.write_text(engine.read_text() + "\n# changed build\n", encoding="utf-8")
+
+        result = runtime.restart("local", timeout=10, startup_wait=10)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "lkg_artifact_mismatch")
+        current = runtime.status("local")
+        self.assertEqual(current["state"], "ready")
+        self.assertEqual(current["instance_id"], first["instance_id"])
+
+    def test_owner_start_refuses_unverifiable_lkg_artifact(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        self.assertTrue(runtime.stop("local", timeout=12)["ok"])
+        engine = self.root / "engine.py"
+        engine.write_text(engine.read_text() + "\n# changed build\n", encoding="utf-8")
+
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            profiles.set_values("local", [f"port={occupied.getsockname()[1]}"])
+            result = runtime.start("local", wait=20, shutdown_timeout=2)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["error"], "lkg_artifact_mismatch")
+        self.assertFalse(result.get("rolled_back", False))
 
     def test_successful_restart_replaces_lkg_after_generation_probe(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
@@ -1161,13 +1256,7 @@ class RuntimeTests(unittest.TestCase):
     def test_failed_generation_after_profile_edit_rolls_back_prior_launch(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(first["generation_ready"])
-        engine = self.root / "engine.py"
-        engine.write_text(engine.read_text().replace(
-            "        print('T 97', flush=True)",
-            "        if slot is not None:\n"
-            "            print('ERR batch-probe-failed', flush=True)\n"
-            "            continue\n"
-            "        print('T 97', flush=True)"))
+        (self.root / "fail-batch-generation").write_text("fail")
         profiles.set_values("local", ["parallel=2"])
         result = runtime.restart("local", timeout=30, startup_wait=10)
         self.assertFalse(result["ok"])

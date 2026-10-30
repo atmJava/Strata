@@ -28,7 +28,7 @@ import time
 import uuid
 from pathlib import Path
 
-from strata_control import atomic, owner_transport, paths, posix_owner, procs, profiles, readiness
+from strata_control import artifacts, atomic, owner_transport, paths, posix_owner, procs, profiles, readiness
 from strata_control.private_files import private_mkdir
 from serve import launch_identity
 from strata_control.profiles import ProfileError
@@ -163,10 +163,10 @@ def _read_lkg(name: str) -> dict | None:
     expected = {
         "schema_version", "profile", "verified_instance_id", "profile_revision",
         "readiness_state", "source_config", "source_sha256", "source_size",
-        "source_bytes_b64", "server_argv",
+        "source_bytes_b64", "server_argv", "artifact",
     }
     if not isinstance(record, dict) or set(record) != expected or \
-            record.get("schema_version") != 1 or record.get("profile") != name:
+            record.get("schema_version") != 2 or record.get("profile") != name:
         raise ProfileError("lkg_invalid", 5)
     if not isinstance(record.get("verified_instance_id"), str) or \
             not re.fullmatch(r"[0-9a-f]{32}", record["verified_instance_id"]):
@@ -200,6 +200,10 @@ def _read_lkg(name: str) -> dict | None:
         if config_index + 1 >= len(server_argv) or server_argv[config_index + 1] != source_config:
             raise ValueError
     except ValueError:
+        raise ProfileError("lkg_invalid", 5) from None
+    try:
+        artifacts.validate(record.get("artifact"))
+    except artifacts.ArtifactError:
         raise ProfileError("lkg_invalid", 5) from None
     return record
 
@@ -711,6 +715,7 @@ class Host:
         self.args: list[str] | None = None
         self.source: Path | None = None
         self.source_bytes: bytes | None = None
+        self.artifact: dict | None = None
         self.expected_attestation: str | None = None
         self.revision: str | None = None
         self.last_error: str | None = None
@@ -794,8 +799,14 @@ class Host:
             raise ProfileError("lkg_instance_invalid", 6)
         if len(self.source_bytes) > MAX_LKG_SOURCE:
             raise ProfileError("lkg_source_too_large", 6)
+        try:
+            current_artifact = artifacts.capture(self.source_bytes, root=ROOT)
+        except (OSError, artifacts.ArtifactError):
+            raise ProfileError("lkg_artifact_unavailable", 6) from None
+        if self.artifact is None or current_artifact != self.artifact:
+            raise ProfileError("lkg_artifact_changed", 6)
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "profile": self.name,
             "verified_instance_id": instance_id,
             "profile_revision": self.revision,
@@ -805,6 +816,7 @@ class Host:
             "source_size": len(self.source_bytes),
             "source_bytes_b64": base64.b64encode(self.source_bytes).decode("ascii"),
             "server_argv": list(self.args),
+            "artifact": current_artifact,
         }
         data = (
             json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
@@ -836,7 +848,13 @@ class Host:
         return result
 
     def _launch(self, args: list[str], source: Path, source_bytes: bytes,
-                revision: str | None) -> None:
+                revision: str | None, expected_artifact: dict | None = None) -> None:
+        try:
+            artifact = artifacts.capture(source_bytes, root=ROOT)
+        except (OSError, artifacts.ArtifactError):
+            raise ProfileError("artifact_unavailable", 5) from None
+        if expected_artifact is not None and artifact != expected_artifact:
+            raise ProfileError("lkg_artifact_mismatch", 6)
         ready = self.state_path.parent / f"{self.name}-{uuid.uuid4().hex}.ready.json"
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
         if hasattr(os, "O_NOFOLLOW"):
@@ -897,6 +915,7 @@ class Host:
             if self.launch_generation != launch_generation:
                 raise ProfileError("concurrent launch changed the owned instance", 6)
             self.args, self.source, self.source_bytes, self.revision = list(args), source, source_bytes, revision
+            self.artifact = artifact
             self.expected_attestation = expected_attestation
             self.last_error = None
             self.probe_deadline = time.monotonic() + self.probe_timeout
@@ -918,8 +937,9 @@ class Host:
                 self.startup_rollback_succeeded = recovering_startup
         except readiness.ReadinessError as exc:
             result = {"error": str(exc)}
-        except ProfileError:
-            result = {"error": "lkg_persist_failed"}
+        except ProfileError as exc:
+            result = {"error": str(exc) if str(exc) in (
+                "lkg_artifact_changed", "lkg_artifact_unavailable") else "lkg_persist_failed"}
         except Exception:
             result = {"error": "probe_internal_error"}
         with self.probe_lock:
@@ -946,7 +966,7 @@ class Host:
             rollback_args = self._config_args(lkg["server_argv"], rollback_source)
             self.startup_rollback_lkg = lkg
             self._launch(rollback_args, rollback_source, rollback_bytes,
-                         lkg["profile_revision"])
+                         lkg["profile_revision"], expected_artifact=lkg["artifact"])
             return True
         except (OSError, ProfileError) as exc:
             if rollback_source is not None:
@@ -985,6 +1005,8 @@ class Host:
                 "owner_id": self.owner_id,
                 "child_pid": child.pid if child else None, "profile_revision": self.revision,
                 "shutdown_timeout": self.shutdown_timeout}
+        if self.artifact is not None:
+            base["artifact_id"] = self.artifact["artifact_id"]
         rollback = {}
         if self.startup_rollback_succeeded and self.startup_rollback_lkg is not None:
             rollback = {"rolled_back": True,
@@ -1184,6 +1206,12 @@ class Host:
         if lkg["source_sha256"] != hashlib.sha256(self.source_bytes).hexdigest() or \
                 lkg["profile_revision"] != self.revision or lkg["server_argv"] != self.args:
             return {"ok": False, "state": "ready", "error": "lkg_running_instance_mismatch", "exit_code": 6}
+        try:
+            current_artifact = artifacts.capture(self.source_bytes, root=ROOT)
+        except (OSError, artifacts.ArtifactError):
+            return {"ok": False, "state": "ready", "error": "lkg_artifact_mismatch", "exit_code": 6}
+        if self.artifact is None or current_artifact != self.artifact or current_artifact != lkg["artifact"]:
+            return {"ok": False, "state": "ready", "error": "lkg_artifact_mismatch", "exit_code": 6}
         old_args, old_source, old_bytes, old_revision = self.args, self.source, self.source_bytes, self.revision
         rollback_source: Path | None = None
         try:
@@ -1223,7 +1251,8 @@ class Host:
             old_source_unchanged = False
         if old_source_unchanged:
             try:
-                self._launch(rollback_args, rollback_source, old_bytes, old_revision)
+                self._launch(rollback_args, rollback_source, old_bytes, old_revision,
+                             expected_artifact=lkg["artifact"])
                 rollback = self._wait_ready(startup_wait)
             except (OSError, ProfileError):
                 rollback = {"state": "failed"}
@@ -1250,6 +1279,11 @@ class Host:
             plan, candidate_args, source, source_bytes = self._plan()
         except (ProfileError, OSError):
             return {"ok": False, "state": "ready", "error": "new_profile_preflight_failed", "exit_code": 5}
+        try:
+            candidate_artifact = artifacts.capture(source_bytes, root=ROOT)
+            current_artifact = artifacts.validate(self.artifact)
+        except (OSError, artifacts.ArtifactError):
+            return {"ok": False, "state": "ready", "error": "artifact_unavailable", "exit_code": 5}
         switched, migrated, source_error = self._source_change_check(
             source, source_bytes, allow_source_switch, allow_source_migration)
         if source_error:
@@ -1266,12 +1300,16 @@ class Host:
                 "current_source_config": str(self.source), "candidate_source_config": str(source),
                 "current_source_sha256": hashlib.sha256(self.source_bytes).hexdigest(),
                 "candidate_source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "current_artifact_id": current_artifact["artifact_id"],
+                "candidate_artifact_id": candidate_artifact["artifact_id"],
+                "artifact_changed": candidate_artifact["artifact_id"] != current_artifact["artifact_id"],
                 "source_switch": switched, "source_migration": migrated,
                 "rollback_snapshot_required": migrated,
                 "current_server_argv": _redact_argv(self.args),
                 "candidate_server_argv": _redact_argv(candidate_args),
                 "changed": switched or migrated or self.args != candidate_args or
-                           self.revision != plan["profile_revision"],
+                           self.revision != plan["profile_revision"] or
+                           candidate_artifact["artifact_id"] != current_artifact["artifact_id"],
                 "shutdown_timeout": self.shutdown_timeout,
                 "would_drain": False, "would_start": False}
 

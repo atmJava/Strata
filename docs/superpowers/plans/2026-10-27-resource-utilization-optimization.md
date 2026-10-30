@@ -854,18 +854,25 @@ collection errors，因此不能写成“全仓 pytest 通过”。
 - [x] readiness 在 telemetry 身份和 attestation 通过后显式请求 `/health`，校验
   `status=ok`、`service=strata`、模型身份和 loaded 状态；结果以 `health_verified`
   写入 runtime 和 operation journal。
-- [ ] LKG 目前只保存配置、revision、argv 和验证实例，不保存 engine binary、Python
-  server、模型包及动态库的制品身份。若候选二进制覆盖旧路径，按旧 argv 重启仍可能
-  加载新制品；进入代码级自动回滚前必须补不可变制品 manifest 和原子 current 指针。
+- [x] LKG 记录 engine 可执行文件路径、大小和 SHA-256，以及 `serve/`、`strata_control/`
+  服务代码集合摘要；测试、fixtures、CLI 和 tools 不进入摘要，避免无关变更制造假故障。
+  restart plan 同时报告运行中与磁盘候选的 `artifact_id`，restart/startup fallback 在
+  drain 或启动前拒绝无法与 LKG 精确匹配的制品。
+- [ ] 当前能力是制品身份门禁，不是完整制品回滚。LKG 仍不保存旧 engine、Python 服务
+  代码、模型包和动态库，也没有原子 `current` 指针；其中任一路径被覆盖后，系统只能
+  明确拒绝回滚，不能自行恢复旧制品。进入代码级自动回滚前必须补不可变 release。
 - [ ] 真实模型启动、真实 GPU drain、真实 owner/systemd 重启恢复仍未演练。
 - [ ] engine smoke、stream smoke、tool smoke 和 session restore 尚未组合成 G0B 的
   完整验收门。
 
 **隔离结果（2026-10-30）：** fake-runtime 新增覆盖新 owner 候选失败后的持久 LKG 恢复、
 无 LKG 时保留原始失败、损坏 LKG 明确拒绝、`wait=0` 后台恢复、CLI journal 记录、
-回滚成功后的正常 restart 清除旧标记，以及旧 generation probe 不得替换 LKG。完整
-`tests/terminal` 为 `214 passed, 45 skipped, 93 subtests passed`；serve lifecycle、
-lifeline 和 ready-timeout 为 `20 passed, 6 subtests passed`。运行过程中还定位并修复了
+回滚成功后的正常 restart 清除旧标记、旧 generation probe 不得替换 LKG，以及 engine
+或 Python 服务代码变化时在 drain 前拒绝假回滚。新增制品用例为
+`4 passed, 64 deselected`，完整 `tests/terminal/test_runtime.py` 为
+`68 passed, 11 subtests passed`，完整 `tests/terminal` 为
+`219 passed, 45 skipped, 97 subtests passed`。此前的 serve lifecycle、lifeline 和
+ready-timeout 隔离结果为 `20 passed, 6 subtests passed`。运行过程中还定位并修复了
 mock server 的既有 SIGTERM 启动窗口竞态：ready 发布与 serving wait 现在处于同一个
 clean-stop 作用域，ready 后立即发送 SIGTERM 不再以 `-2` 退出。
 
@@ -874,7 +881,8 @@ clean-stop 作用域，ready 后立即发送 SIGTERM 不再以 `-2` 退出。
 **Gate:** 隔离持久 LKG 与 startup fallback：PASS。生产自动回滚：CLOSED。当前实现证明
 候选 activation 失败后，新 owner 可以在 fake runtime 中从磁盘 LKG 恢复；这不等价于
 零中断切换，也没有证明真实模型、生产 systemd 重启或会话恢复。`/health` 隔离门禁为
-PASS，但 LKG 尚未覆盖代码和二进制制品，因此生产自动回滚继续 CLOSED。
+PASS，engine 与 Python 服务代码身份门禁也为 PASS，但 LKG 尚不能保存和恢复旧制品，
+因此生产自动回滚继续 CLOSED。
 
 ### G0B：受控基线与恢复演练
 

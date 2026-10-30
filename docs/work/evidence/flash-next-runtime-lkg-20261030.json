@@ -2,8 +2,8 @@
   "schema_version": 1,
   "captured_at": "2026-10-30",
   "branch": "hw/server-adapt-0.2.3",
-  "base_commit": "9b1919a3a432158298f4d7458d56f37afd3994e2",
-  "scope": "Isolated POSIX owner runtime with a fake engine; no production restart or synthetic production generation",
+  "base_commit": "a9b679a031511a977e7c28adf8076297a80afb42",
+  "scope": "Isolated POSIX owner runtime with a fake engine and artifact identity gate; no production restart or synthetic production generation",
   "implementation": {
     "manifest": "owner-private <runtime>/<profile>.lkg.json",
     "commit_point": "after model state, /health, and generation readiness verification",
@@ -13,7 +13,10 @@
       "profile revision",
       "server argv",
       "verified instance ID",
-      "readiness state"
+      "readiness state",
+      "engine executable path, size, and SHA-256",
+      "SHA-256 over serve/ and strata_control/ Python runtime files",
+      "derived artifact ID"
     ],
     "restart_policy": [
       "validate LKG before drain",
@@ -26,14 +29,29 @@
       "complete the same fallback in the owner background when runtime start uses wait=0",
       "do not use the startup-only fallback after a candidate reaches ready",
       "prevent an older generation probe from replacing a newer LKG",
-      "record the rollback LKG source digest in the operation journal"
+      "record the rollback LKG source digest in the operation journal",
+      "report running and candidate artifact IDs in restart plans",
+      "refuse drain when the running artifact, disk candidate, and LKG artifact differ",
+      "refuse startup fallback when the LKG artifact cannot be reproduced exactly",
+      "exclude tests, fixtures, CLI files, and tools from the service-code digest"
     ]
   },
   "verification": {
     "runtime_suite": {
       "result": "PASS",
-      "summary": "64 passed, 11 subtests passed",
+      "summary": "68 passed, 11 subtests passed",
       "command_environment": "Linux, Python 3.12.3, MP_BASE_URL=http://127.0.0.1:9"
+    },
+    "artifact_identity_gate": {
+      "result": "PASS",
+      "summary": "4 passed, 64 deselected",
+      "covered": [
+        "verified launch records engine and Python runtime identity",
+        "restart plan reports the running and disk candidate artifacts without stopping",
+        "changed engine identity is rejected before drain",
+        "a fresh owner cannot roll back to an unverifiable artifact",
+        "test, fixture, CLI, and tools changes do not alter the service artifact"
+      ]
     },
     "lkg_slice": {
       "result": "PASS",
@@ -73,7 +91,7 @@
     },
     "terminal_suite": {
       "result": "PASS",
-      "summary": "215 passed, 45 skipped, 97 subtests passed",
+      "summary": "219 passed, 45 skipped, 97 subtests passed",
       "regression_found_and_fixed": "Immediate SIGTERM after ready publication previously exited -2 for delays 0, 0, 0.01, and 0.05 seconds; ready publication and the serving wait now share the same clean-stop scope, and ten immediate-signal repetitions exited 0"
     },
     "serve_lifecycle": {
@@ -89,6 +107,7 @@
   "gates": {
     "isolated_persistent_lkg": "PASS",
     "isolated_health_gate": "PASS",
+    "isolated_artifact_identity_gate": "PASS",
     "production_automatic_rollback": "CLOSED",
     "g0b": "NOT_STARTED"
   },
@@ -97,7 +116,9 @@
     "No production configuration was changed",
     "No production generation load was sent",
     "The LKG is not a signed append-only record; it relies on the owner-only runtime directory",
-    "The LKG does not pin engine binary, Python server, model pack, or shared-library digests",
+    "The LKG pins the engine executable and service Python files, but does not retain old artifacts",
+    "The LKG does not pin the Python interpreter, installed site-packages, model pack, or shared-library digests",
+    "A changed or overwritten artifact is rejected; it is not restored automatically",
     "Rollback does not preserve an in-flight HTTP or SSE request",
     "Startup fallback covers a fresh owner candidate that never reaches ready; a candidate that reaches ready and later fails stays outside this path",
     "A real systemd-level restart and real-model startup recovery have not been exercised",

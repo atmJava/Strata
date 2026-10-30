@@ -31,7 +31,8 @@ RESULT_KEYS = frozenset({"ok", "state", "instance_id", "previous_instance_id", "
                          "rollback_lkg_source_sha256", "rollback_snapshot_cleanup_pending",
                          "rolled_back", "error",
                          "exit_code", "error_type", "launch_attested", "health_verified", "generation_ready",
-                         "api_identity_verified", "readiness_state", "verified_now"})
+                         "api_identity_verified", "readiness_state", "verified_now", "artifact_id",
+                         "artifact_changed"})
 RECORD_KEYS = frozenset({"schema_version", "operation_id", "profile", "kind",
                          "profile_revision", "owner_pid", "intent", "origin", "state",
                          "started_at", "finished_at", "cancellation_policy", "events",
@@ -327,11 +328,11 @@ def compact_direct_result(kind: str, result: dict) -> dict:
         return {key: result.get(key) for key in ("ok", "state", "instance_id", "error", "exit_code",
                                                   "api_identity_verified", "launch_attested", "health_verified",
                                                   "generation_ready",
-                                                  "readiness_state", "verified_now")}
+                                                  "readiness_state", "verified_now", "artifact_id")}
     return {key: result.get(key) for key in ("ok", "state", "instance_id", "previous_instance_id",
                                               "restarted", "rolled_back", "source_switched",
                                               "source_migrated", "rollback_source_config",
                                               "rollback_lkg_source_sha256",
                                               "rollback_snapshot_cleanup_pending", "launch_attested",
                                               "health_verified",
-                                              "error", "exit_code")}
+                                              "artifact_id", "artifact_changed", "error", "exit_code")}
