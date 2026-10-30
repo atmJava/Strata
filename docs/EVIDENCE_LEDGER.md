@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（100 条：L-000…L-099，按编号）
+## 台账索引（101 条：L-000…L-100，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -114,6 +114,7 @@
 | L-097 | 10-31 01:0xZ | 三 query 同 CTA 保持 parity 和 12 warps/SM，但普通选择慢 `20.05%`、最强共享上界慢 `20.75%` | **否决** |
 | L-098 | 10-31 02:1xZ | 完整请求 NCU 触发 stall watchdog；同权重 mode-8 fused gate/up 测得 MIO `29.75%`、long scoreboard `17.50%`、Tensor `0.04%`，选 MIO 根因 | **诊断完成；UTIL-KERNEL 待验证** |
 | L-099 | 10-31 19:2xZ | 四路 rotated codebook 副本 hash 相同，但 gate/up `474.5` 对 `474.1 us`（−0.084%）、仅 2/7 胜；bank conflicts 反升 2.5%，寄存器 73→80 | **UTIL-KERNEL 否决；转 UTIL-ACT** |
+| L-100 | 10-31 19:5xZ | 显式 activation reload hash 相同但 `475.2` 对 `475.1 us`（−0.021%）、3/7 胜；shared-load 指令与寄存器完全不变，编译器已复用 | **UTIL-ACT 否决；转 UTIL-WEIGHT** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3830,6 +3831,48 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-100 UTIL-ACT：显式 activation reload 与编译器行为等价，否决
+
+**判定**：**UTIL-ACT 否决。** 每个 k 显式加载一次 q8_1 activation words/scale 后供 gate/up
+两行复用，保持 hash `9a055a5a94e15c87`，但 gate/up 中位 `475.2` 对 baseline `475.1 us`
+（−0.021%），仅 `3/7` 胜，p75 `475.3 us` 高于 baseline 中位。不进入 engine A/B。
+
+**七组交替进程**：baseline
+`663.6/476.1/475.1/471.7/476.6/473.8/475.1 us`；candidate
+`495.1/473.1/475.4/472.8/474.8/475.2/475.2 us`。首组 baseline 冷时钟离群不改变中位裁决。
+
+**counter**：baseline/candidate shared-load instructions 都是 `10,583,040`，寄存器都是 73；
+wavefronts `17,698,354/17,698,418`，bank conflicts `7,115,314/7,115,378`。MIO ratio
+`3.866710/3.837811`、active warps `71.598257%/71.607481%` 的小差异没有对应指令减少或时间收益，
+判定为 profiler noise。编译器已经在两个 inline row dot 之间复用 activation load。
+
+**恢复**：源码 hash 回到
+`47009da533393ff4bcb62e6831427204237da3a1f9679ad4a691d4ddc897971b`；`native_expert_parity`
+与 `iq_multi_parity` 均 0 failure；restored bench hash `9a055a5a94e15c87`；engine 仍为
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。
+候选为微基准停一次、恢复冷启动一次，本次实测 `3:50`；最终 server/engine PID
+`508675/508741`，health loaded，无实验 env；生产 systemd 不变。
+
+**下一步**：contract `docs/work/UTIL_WEIGHT_REUSE_CONTRACT-20261031.md`。对每个 k 只解码一次
+weight-side codebook words、aux 和 scale，再应用到 NTC chunk 中的每个 token；6-entry 形状下
+预计 codebook lookup 总数约降 2.5 倍。目标仍是 ≥1% 中位、5/7 胜、wavefronts 下降、
+MIO≤28.75%、寄存器≤85 且输出不变。
+
+**证据**：
+
+- `/opt/ai/logs/util-act-ab-20261031T1945Z.log`
+  （sha256 `6aa33b75d67cbb2363f8b5a28b4b0ccb988d52ea4292bb0cd90dc68fa2cbdf46`）
+- `/opt/ai/logs/util-act-baseline-counters-20261031T1948Z.ncu-rep`
+  （sha256 `2e64c4bfea047adcabfa150b1df41aaf319389f6d1dc27f3325920a27c38a87d`）
+- `/opt/ai/logs/util-act-candidate-counters-20261031T1948Z.ncu-rep`
+  （sha256 `f8791940d1fb4aba2b90fe3f96a214310964cf0c4038f68e6d5d65afd46a71d6`）
+- `/opt/ai/logs/util-act-restore-build-20261031T1952Z.log`
+  （sha256 `f49af4efc7e428fd27aa5b3d3272f41d7b81b3f80b066da42c8806396b3d9ff1`）
+- `/opt/ai/tmp/pre-util-act-20261031T1942Z/`
+
+**没测什么**：一个真实层和 mode-8 几何；没有 engine A/B。结果只说明 activation 在成对 row
+dot 间已由编译器复用，不说明 weight decode 也已复用。
 
 ## L-099 UTIL-KERNEL：四路 codebook 复制反升 bank conflict，时间门否决
 

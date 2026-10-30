@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-73 · 显式 activation reload 与编译器生成代码等价，UTIL-ACT 否决
+
+- 目标 / 指标：消除 gate/up 两个 row dot 对同一 q8_1 activation 的重复 shared load；
+  要求 7 组过程 kernel 中位至少快 1%、5/7 胜、wavefronts 下降、MIO≤28.75%，再接 engine A/B。
+- 假设与预期：counter 显示 shared-load 指令比 global-load 多约 35 倍，显式把 8 个 activation
+  words 和 scale 装一次再传给两行，应减少一倍的 activation 读取和 MIO 压力。
+- 为什么选这条路线：它不改 arithmetic、不增加 shared memory、作用域仅 mode-8 fused
+  gate/up；比立即改 CTA/row 几何更便宜，也能直接验证编译器是否已做公共子表达式消除。
+- 改动与实验：opt-in `STRATA_IQ3_ACT_RELOAD=1` 增加一个寄存器 activation record，供两个
+  row dot 复用；默认路径保留。真实权重层 36、`G=64, T=6` 做 7 组交替进程，再跑同 kernel
+  NCU counter。
+- 结果：baseline/candidate gate/up 中位 `475.1/475.2 us`（−0.021%），candidate 3/7 胜，
+  p75 `475.3 us` 高于 baseline 中位；所有 14 个 hash 均为 `9a055a5a94e15c87`。
+- counter：两臂 shared-load instructions 都精确为 `10,583,040`，寄存器都为 73；wavefronts
+  `17,698,354/17,698,418`，bank conflicts `7,115,314/7,115,378`。MIO ratio 的
+  `<1%` 差异不伴随实际指令减少，不能宣称收益。
+- 判决：**UTIL-ACT 否决。** 源码改动等价于编译器已有调度，不进入 engine A/B；不改变
+  7 个激活 token 或行几何来重试同一假设。
+- 预期被推翻：activation 在成对 row dot 间已经被编译器复用。剩余可消除的 shared work 是
+  weight-side decode 在每个 NTC token 上重复执行。
+- 恢复与成本：源码 hash 回到 `47009da533...`，parity/grouped parity 0 failure，engine
+  `105a4171...`。为独占微基准停候选一次，事后恢复冷启动一次；本次实测 `3:50`，
+  生产 systemd 未改。
+- 证据：`/opt/ai/logs/util-act-ab-20261031T1945Z.log`；baseline/candidate counter 报告
+  `util-act-*-counters-20261031T1948Z.ncu-rep`；结果见
+  `docs/work/UTIL_ACT_RESULT-20261031.md`，台账 L-100。
+- 学到什么：源码变量是否跨调用复用不等于 PTX/SASS 是否重复 load；counter 必须比较指令总数，
+  不能只凭源码生命周期判断。下一步直接复用 weight decode，而不是继续搬 activation。
+- 下一步与理由：执行预注册 `UTIL-WEIGHT`：每个 k 只解码一次 grid/aux/scale，对该 chunk
+  最多四个 token 反复 apply；目标代码书读取约降 2.5 倍，仍以同一 1% 和 counter 门裁决。
+
 ## I-20261031-72 · 四路 codebook 复制不降 bank conflict，UTIL-KERNEL 按时间门否决
 
 - 目标 / 指标：只改 `native_gu_fused_kernel<18>` 的 IQ3_XXS codebook 访问，保持输出算术；

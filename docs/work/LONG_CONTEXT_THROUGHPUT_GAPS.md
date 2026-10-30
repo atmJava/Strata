@@ -652,6 +652,18 @@ q8_1 activation，并让 gate/up 两个 row dot 复用。详见
 [`UTIL_KERNEL_RESULT-20261031.md`](UTIL_KERNEL_RESULT-20261031.md) 和
 [`UTIL_ACT_RELOAD_CONTRACT-20261031.md`](UTIL_ACT_RELOAD_CONTRACT-20261031.md)。
 
+### 16.5.2 UTIL-ACT（已完成，否决）
+
+显式把同一 q8_1 activation 装入寄存器一次、供 gate/up 两行复用，保持 hash
+`9a055a5a94e15c87`；但七组 gate/up 中位为 `475.2` 对 baseline `475.1 us`（−0.021%），
+仅 3/7 胜。NCU 证明两臂都执行 `10,583,040` 条 shared-load 且都用 73 registers，
+wavefronts 也相同，因此编译器本来就已复用同一 activation load。
+
+下一机制不再搬 activation，而是复用 weight-side decode：同一 k 的 codebook words、
+`aux32` 和 scale 目前会在 NTC chunk 的每个 token 上重复解码；候选在每个 k 只解码一次。
+详见 [`UTIL_ACT_RESULT-20261031.md`](UTIL_ACT_RESULT-20261031.md) 和
+[`UTIL_WEIGHT_REUSE_CONTRACT-20261031.md`](UTIL_WEIGHT_REUSE_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

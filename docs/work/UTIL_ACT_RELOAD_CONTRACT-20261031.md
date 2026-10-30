@@ -1,6 +1,6 @@
 # UTIL-ACT contract
 
-Status: pre-registered before implementation.
+Status: rejected; see [`UTIL_ACT_RESULT-20261031.md`](UTIL_ACT_RESULT-20261031.md).
 
 ## Evidence and selected problem
 
