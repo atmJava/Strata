@@ -28,7 +28,8 @@ ID = re.compile(r"[0-9a-f]{32}\Z")
 TERMINAL = frozenset({"succeeded", "failed", "completion_unknown"})
 RESULT_KEYS = frozenset({"ok", "state", "instance_id", "previous_instance_id", "restarted",
                          "source_switched", "source_migrated", "rollback_source_config",
-                         "rollback_snapshot_cleanup_pending", "rolled_back", "error",
+                         "rollback_lkg_source_sha256", "rollback_snapshot_cleanup_pending",
+                         "rolled_back", "error",
                          "exit_code", "error_type", "launch_attested", "generation_ready",
                          "api_identity_verified", "readiness_state", "verified_now"})
 RECORD_KEYS = frozenset({"schema_version", "operation_id", "profile", "kind",
@@ -329,5 +330,6 @@ def compact_direct_result(kind: str, result: dict) -> dict:
     return {key: result.get(key) for key in ("ok", "state", "instance_id", "previous_instance_id",
                                               "restarted", "rolled_back", "source_switched",
                                               "source_migrated", "rollback_source_config",
+                                              "rollback_lkg_source_sha256",
                                               "rollback_snapshot_cleanup_pending", "launch_attested",
                                               "error", "exit_code")}

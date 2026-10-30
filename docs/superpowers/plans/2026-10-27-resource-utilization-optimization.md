@@ -823,11 +823,46 @@ collection errors，因此不能写成“全仓 pytest 通过”。
 
 - G0A 实现 Gate：PASS（仅限隔离构建和 fake/unit/HTTP 测试）。
 - 生产观测 Gate：CLOSED（生产实例仍运行旧代码，不能把设计能力当作现网实测）。
-- G0B：不启动。当前没有替代访问、已验证 LKG、自动回滚和生产 owner runtime。
+- G0B：不启动。持久 LKG 已在隔离 fake-runtime 中实现并通过测试，但还没有真实模型、
+  生产 owner runtime 或会话恢复证据，也没有替代访问。
 
 下一安全检查点是“隔离原生协议演练”：只有在不挤占当前生产显存、不重启生产且能记录完整
 `X-Request-ID -> DONE/BDONE -> BTRACE` 链时执行。若硬件条件不成立，就保持 Gate 关闭，
 先完成 owner runtime、LKG 和回滚演练，不重复重启生产来换一次不可复核的观测。
+
+### G0A.1 owner runtime 持久 LKG
+
+**目的:** 把“候选失败后重新启动旧 argv”的内存态补救，升级为 owner 进程退出后仍可读取、
+校验和审计的 last-known-good。
+
+- [x] 只有 `/v1/telemetry` 身份、launch attestation 和模型 state 检查通过后，才原子写入
+  owner-private `<runtime>/<profile>.lkg.json`；配置 bytes、SHA-256、profile revision、
+  server argv 和验证 instance 一并记录。
+- [x] 成功的候选 restart 在 generation probe 通过后替换 LKG；失败的候选不覆盖旧记录。
+- [x] restart 在 drain 前校验 LKG；缺失、损坏、符号链接、摘要不匹配或当前运行实例不一致时
+  拒绝停机。
+- [x] 候选失败后从持久 LKG 恢复。原 config 仍为同一普通文件时直接复用；被原地修改或
+  不可用时从 LKG bytes 创建 mode-0600 私有快照，不覆盖操作者文件。
+- [x] 回滚结果在 operation journal 中记录 `rollback_lkg_source_sha256`；不回写配置 secret
+  或完整 manifest。
+- [x] 停止 owner、换一个全新 Python 进程后仍能读取同一 LKG；manifest 的 JSON、大小、
+  路径、私有权限、配置摘要和 `--config` 参数都经过零信任校验。
+- [ ] 真实模型启动、真实 GPU drain、真实 owner/systemd 重启恢复仍未演练。
+- [ ] `/health`、engine smoke、stream smoke、tool smoke 和 session restore 尚未组合成
+  G0B 的完整验收门。
+
+**隔离结果（2026-10-30）：** fake-runtime `tests/terminal/test_runtime.py` 为
+`58 passed, 11 subtests passed`。新增覆盖首次写入、成功替换、失败回滚、损坏拒绝、
+符号链接拒绝、fresh-process 持久读取，以及普通端口失败后不误报 source switch。
+完整 `tests/terminal` 运行到 `207 passed, 45 skipped, 93 subtests passed`，另有 1 个
+与本切片无关的既有 SIGTERM 启动窗口竞态：mock server 发布 ready 后 0–10 ms 内发送
+SIGTERM 会以 `-2` 退出，等待 50 ms 后为 0；该问题另立切片处理。
+
+证据见 `docs/work/evidence/flash-next-runtime-lkg-20261030.json`。
+
+**Gate:** 隔离持久 LKG：PASS。生产自动回滚：CLOSED。当前实现证明的是候选 activation
+事务可以在 fake runtime 中从磁盘恢复，不等于零中断切换，也没有证明 owner/systemd
+重启后会自动回到 LKG。
 
 ### G0B：受控基线与恢复演练
 

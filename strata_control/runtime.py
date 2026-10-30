@@ -9,6 +9,8 @@ before it can be treated as the server this host started.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import errno
 import fcntl
 import hashlib
@@ -33,6 +35,8 @@ from strata_control.profiles import ProfileError
 
 
 MAX_MESSAGE = 64 * 1024
+MAX_LKG_SOURCE = 1024 * 1024
+MAX_LKG_MANIFEST = 2 * 1024 * 1024
 ROOT = Path(__file__).resolve().parents[1]
 _STARTED_HOSTS: dict[str, subprocess.Popen] = {}
 
@@ -127,6 +131,77 @@ def _paths(name: str) -> tuple[Path, Path, Path]:
     digest = hashlib.sha256((str(directory) + "\0" + name).encode("utf-8")).hexdigest()[:16]
     address = owner_transport.address_for(directory, name)
     return directory / f"{name}.json", address, directory / f"{name}.host.log"
+
+
+def _lkg_path(name: str) -> Path:
+    """Return the owner-private manifest for one profile's last verified launch."""
+    return runtime_dir() / f"{_name(name)}.lkg.json"
+
+
+def _lkg_source_bytes(record: dict) -> bytes:
+    """Decode a validated manifest's exact launch-config bytes."""
+    try:
+        return base64.b64decode(record["source_bytes_b64"].encode("ascii"), validate=True)
+    except (UnicodeError, binascii.Error, KeyError):
+        raise ProfileError("lkg_invalid", 5) from None
+
+
+def _read_lkg(name: str) -> dict | None:
+    """Read and validate the last-known-good launch without trusting its file shape."""
+    path = _lkg_path(name)
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(details.st_mode) or not _is_private(details, path) or \
+            details.st_size > MAX_LKG_MANIFEST:
+        raise ProfileError("lkg_invalid", 5)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        raise ProfileError("lkg_invalid", 5) from None
+    expected = {
+        "schema_version", "profile", "verified_instance_id", "profile_revision",
+        "readiness_state", "source_config", "source_sha256", "source_size",
+        "source_bytes_b64", "server_argv",
+    }
+    if not isinstance(record, dict) or set(record) != expected or \
+            record.get("schema_version") != 1 or record.get("profile") != name:
+        raise ProfileError("lkg_invalid", 5)
+    if not isinstance(record.get("verified_instance_id"), str) or \
+            not re.fullmatch(r"[0-9a-f]{32}", record["verified_instance_id"]):
+        raise ProfileError("lkg_invalid", 5)
+    if not isinstance(record.get("profile_revision"), str) or \
+            not re.fullmatch(r"[0-9a-f]{16}", record["profile_revision"]):
+        raise ProfileError("lkg_invalid", 5)
+    if record.get("readiness_state") not in ("generation_ready", "unloaded"):
+        raise ProfileError("lkg_invalid", 5)
+    source_config = record.get("source_config")
+    if not isinstance(source_config, str) or "\0" in source_config or \
+            not Path(source_config).is_absolute():
+        raise ProfileError("lkg_invalid", 5)
+    source_size = record.get("source_size")
+    if type(source_size) is not int or not 0 <= source_size <= MAX_LKG_SOURCE:
+        raise ProfileError("lkg_invalid", 5)
+    source_digest = record.get("source_sha256")
+    if not isinstance(source_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", source_digest):
+        raise ProfileError("lkg_invalid", 5)
+    source_bytes = _lkg_source_bytes(record)
+    if len(source_bytes) != source_size or not secrets.compare_digest(
+            hashlib.sha256(source_bytes).hexdigest(), source_digest):
+        raise ProfileError("lkg_invalid", 5)
+    server_argv = record.get("server_argv")
+    if not isinstance(server_argv, list) or not server_argv or \
+            not all(isinstance(item, str) and "\0" not in item for item in server_argv) or \
+            server_argv.count("--config") != 1:
+        raise ProfileError("lkg_invalid", 5)
+    try:
+        config_index = server_argv.index("--config")
+        if config_index + 1 >= len(server_argv) or server_argv[config_index + 1] != source_config:
+            raise ValueError
+    except ValueError:
+        raise ProfileError("lkg_invalid", 5) from None
+    return record
 
 
 def _read_state(name: str) -> dict | None:
@@ -680,13 +755,57 @@ class Host:
             return True, False, "rollback_source_unavailable"
         return True, migrated, ("rollback_source_changed" if migrated and not allow_source_migration else None)
 
-    def _snapshot_running_config(self) -> Path:
-        """Save launch bytes before drain; never overwrite the operator's edited file."""
+    def _materialize_lkg(self, record: dict) -> tuple[Path, bytes]:
+        """Create the exact private config file used to relaunch a persisted LKG."""
+        source_bytes = _lkg_source_bytes(record)
         path = self.state_path.parent / f"{self.name}-{self.token}-{uuid.uuid4().hex}.rollback.json"
-        descriptor = _write_new(path, self.source_bytes)
+        descriptor = _write_new(path, source_bytes)
         os.close(descriptor)
         self.rollback_snapshots.add(path)
-        return path
+        return path, source_bytes
+
+    def _rollback_source(self, record: dict) -> tuple[Path, bytes]:
+        """Reuse the unchanged source file, or materialize private LKG bytes if it moved."""
+        source_bytes = _lkg_source_bytes(record)
+        if self.source is not None:
+            try:
+                if stat.S_ISREG(self.source.lstat().st_mode) and \
+                        self.source.read_bytes() == source_bytes:
+                    return self.source, source_bytes
+            except OSError:
+                pass
+        return self._materialize_lkg(record)
+
+    def _persist_lkg(self, instance_id: str, readiness_state: str) -> dict:
+        """Atomically commit this exact, generation-verified launch as the LKG."""
+        if self.args is None or self.source is None or self.source_bytes is None or \
+                not isinstance(self.revision, str) or not re.fullmatch(r"[0-9a-f]{16}", self.revision):
+            raise ProfileError("lkg_source_unavailable", 6)
+        if not re.fullmatch(r"[0-9a-f]{32}", instance_id):
+            raise ProfileError("lkg_instance_invalid", 6)
+        if len(self.source_bytes) > MAX_LKG_SOURCE:
+            raise ProfileError("lkg_source_too_large", 6)
+        record = {
+            "schema_version": 1,
+            "profile": self.name,
+            "verified_instance_id": instance_id,
+            "profile_revision": self.revision,
+            "readiness_state": readiness_state,
+            "source_config": str(self.source),
+            "source_sha256": hashlib.sha256(self.source_bytes).hexdigest(),
+            "source_size": len(self.source_bytes),
+            "source_bytes_b64": base64.b64encode(self.source_bytes).decode("ascii"),
+            "server_argv": list(self.args),
+        }
+        data = (
+            json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        if len(data) > MAX_LKG_MANIFEST:
+            raise ProfileError("lkg_manifest_too_large", 6)
+        atomic.write_bytes(_lkg_path(self.name), data)
+        if _read_lkg(self.name) != record:
+            raise ProfileError("lkg_readback_mismatch", 6)
+        return record
 
     def _retire_snapshot(self, path: Path) -> bool:
         if path in self.rollback_snapshots:
@@ -773,8 +892,11 @@ class Host:
             result = readiness.verify(ready, source_bytes, expected_host=host,
                                       expected_instance=key[1],
                                       expected_attestation=expected_attestation, timeout=timeout)
+            self._persist_lkg(key[1], result["readiness_state"])
         except readiness.ReadinessError as exc:
             result = {"error": str(exc)}
+        except ProfileError:
+            result = {"error": "lkg_persist_failed"}
         except Exception:
             result = {"error": "probe_internal_error"}
         if self.probe_key == key:
@@ -967,17 +1089,24 @@ class Host:
             return {"ok": False, "error": "instance_changed_after_restart_plan", "exit_code": 6}
         if current["state"] != "ready":
             return {"ok": False, "state": current["state"], "error": "runtime_not_ready", "exit_code": 6}
+        try:
+            lkg = _read_lkg(self.name)
+        except ProfileError:
+            return {"ok": False, "state": "ready", "error": "lkg_invalid", "exit_code": 6}
+        if lkg is None:
+            return {"ok": False, "state": "ready", "error": "lkg_unavailable", "exit_code": 6}
+        if lkg["source_sha256"] != hashlib.sha256(self.source_bytes).hexdigest() or \
+                lkg["profile_revision"] != self.revision or lkg["server_argv"] != self.args:
+            return {"ok": False, "state": "ready", "error": "lkg_running_instance_mismatch", "exit_code": 6}
         old_args, old_source, old_bytes, old_revision = self.args, self.source, self.source_bytes, self.revision
-        rollback_source = old_source
-        rollback_args = old_args
-        if migrated:
-            try:
-                rollback_source = self._snapshot_running_config()
-                rollback_args = self._config_args(old_args, rollback_source)
-            except (OSError, ProfileError):
-                if rollback_source != old_source:
-                    self._retire_snapshot(rollback_source)
-                return {"ok": False, "state": "ready", "error": "rollback_snapshot_failed", "exit_code": 6}
+        rollback_source: Path | None = None
+        try:
+            rollback_source, rollback_bytes = self._rollback_source(lkg)
+            rollback_args = self._config_args(old_args, rollback_source)
+        except (OSError, ProfileError):
+            if rollback_source is not None:
+                self._retire_snapshot(rollback_source)
+            return {"ok": False, "state": "ready", "error": "rollback_snapshot_failed", "exit_code": 6}
         self.probe_timeout = startup_wait
         stopped = self._stop_child()
         if not stopped["ok"]:
@@ -1001,9 +1130,9 @@ class Host:
         except (ProfileError, OSError):
             result = {"state": "failed", "error": "new_instance_launch_failed", "exit_code": 6}
         # The old launch needs its original bytes, even if the operator edited
-        # the same file. A private snapshot is used only for explicit migration.
+        # the same file. The private snapshot comes from the durable LKG record.
         try:
-            old_source_unchanged = rollback_source.read_bytes() == old_bytes
+            old_source_unchanged = rollback_source.read_bytes() == rollback_bytes == old_bytes
         except OSError:
             old_source_unchanged = False
         if old_source_unchanged:
@@ -1020,6 +1149,7 @@ class Host:
                         "exit_code": 6, "rolled_back": True,
                         "rollback_snapshot_cleanup_pending": not cleanup_ok,
                         "rollback_source_config": str(rollback_source),
+                        "rollback_lkg_source_sha256": lkg["source_sha256"],
                         "instance_id": rollback.get("instance_id"),
                         "previous_instance_id": old.get("instance_id")}
         return {"ok": False, "state": "failed", "error": result.get("error", "restart_failed"),

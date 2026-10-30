@@ -601,6 +601,113 @@ class RuntimeTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertIsNone(runtime._read_state("local"))
 
+    def test_verified_start_persists_private_lkg_manifest(self):
+        started = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(started["ok"])
+
+        path = runtime._lkg_path("local")
+        self.assertEqual(path.parent, self.root / "runtime")
+        self.assertEqual(path.stat().st_mode & 0o077, 0)
+        manifest = runtime._read_lkg("local")
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["profile"], "local")
+        self.assertEqual(manifest["verified_instance_id"], started["instance_id"])
+        self.assertEqual(manifest["profile_revision"], started["profile_revision"])
+        self.assertEqual(manifest["source_sha256"],
+                         hashlib.sha256(self.config.read_bytes()).hexdigest())
+        self.assertEqual(manifest["source_size"], len(self.config.read_bytes()))
+        self.assertIn("--config", manifest["server_argv"])
+        self.assertNotIn("source_bytes_b64", json.dumps(runtime.status("local")))
+
+    def test_successful_restart_replaces_lkg_after_generation_probe(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
+
+        profiles.set_values("local", ["parallel=2"])
+        restarted = runtime.restart("local", timeout=20, startup_wait=10)
+        self.assertTrue(restarted["ok"])
+        current = runtime._read_lkg("local")
+        self.assertEqual(current["verified_instance_id"], restarted["instance_id"])
+        self.assertNotEqual(current["verified_instance_id"],
+                            original["verified_instance_id"])
+        self.assertNotEqual(current["profile_revision"], original["profile_revision"])
+        self.assertEqual(list((self.root / "runtime").glob(".local.lkg-*.tmp")), [])
+
+    def test_failed_restart_rolls_back_from_persisted_lkg(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
+
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            profiles.set_values("local", [f"port={occupied.getsockname()[1]}"])
+            result = runtime.restart("local", timeout=30, startup_wait=10)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rolled_back"])
+        self.assertEqual(result["rollback_lkg_source_sha256"],
+                         original["source_sha256"])
+        restored = runtime._read_lkg("local")
+        self.assertEqual(restored["source_sha256"], original["source_sha256"])
+        self.assertEqual(restored["profile_revision"], original["profile_revision"])
+        self.assertEqual(restored["verified_instance_id"], result["instance_id"])
+        self.assertEqual(runtime.status("local")["instance_id"], result["instance_id"])
+
+    def test_restart_refuses_corrupt_lkg_before_drain(self):
+        started = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(started["ok"])
+        runtime._lkg_path("local").write_text("{", encoding="utf-8")
+        profiles.set_values("local", ["parallel=2"])
+
+        result = runtime.restart("local", timeout=10, startup_wait=10)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "lkg_invalid")
+        self.assertEqual(runtime.status("local")["instance_id"], started["instance_id"])
+
+    def test_restart_refuses_symlinked_lkg_before_drain(self):
+        started = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(started["ok"])
+        path = runtime._lkg_path("local")
+        path.unlink()
+        path.symlink_to(self.config)
+        profiles.set_values("local", ["parallel=2"])
+
+        result = runtime.restart("local", timeout=10, startup_wait=10)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "lkg_invalid")
+        self.assertEqual(runtime.status("local")["instance_id"], started["instance_id"])
+
+    def test_lkg_survives_a_fresh_owner_runtime_process(self):
+        started = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(started["ok"])
+        original = runtime._read_lkg("local")
+        stopped = runtime.stop("local", timeout=12)
+        self.assertTrue(stopped["ok"])
+
+        root = Path(__file__).resolve().parents[2]
+        script = (
+            "import json\n"
+            "from strata_control import runtime\n"
+            "print(json.dumps(runtime._read_lkg('local'), sort_keys=True))\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=root,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        recovered = json.loads(completed.stdout)
+        self.assertEqual(recovered["source_sha256"], original["source_sha256"])
+        self.assertEqual(recovered["verified_instance_id"],
+                         original["verified_instance_id"])
+
     def test_cli_stop_plan_pins_the_reviewed_owner_and_instance(self):
         started = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(started["ok"])
@@ -632,6 +739,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(result["rolled_back"])
         self.assertNotEqual(result["instance_id"], first["instance_id"])
         self.assertEqual(runtime.status("local")["instance_id"], result["instance_id"])
+        plan = runtime.plan_restart("local")
+        self.assertTrue(plan["ok"], plan)
+        self.assertFalse(plan["source_switch"])
 
     def test_changed_source_is_rejected_before_stopping_old_instance(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
@@ -689,6 +799,7 @@ class RuntimeTests(unittest.TestCase):
         self.config.write_text(json.dumps(original), encoding="utf-8")
         first = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(first["ok"])
+        original_lkg = runtime._read_lkg("local")
         with socket.socket() as occupied:
             occupied.bind(("127.0.0.1", 0))
             occupied.listen(1)
@@ -713,6 +824,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(result))
         record_result = journal.load("local", result["operation_id"])["result"]
         self.assertEqual(record_result["rollback_source_config"], str(snapshot))
+        self.assertEqual(record_result["rollback_lkg_source_sha256"],
+                         original_lkg["source_sha256"])
         self.assertNotIn(secret, json.dumps(record_result))
         self.assertTrue(runtime.status("local")["generation_ready"])
         # The edited file can be retried as a distinct source after freeing its port.

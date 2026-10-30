@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-30",
+  "branch": "hw/server-adapt-0.2.3",
+  "base_commit": "87d73dcd2efa3962f2bd914db373028e8b27fcbf",
+  "scope": "Isolated POSIX owner runtime with a fake engine; no production restart or synthetic production generation",
+  "implementation": {
+    "manifest": "owner-private <runtime>/<profile>.lkg.json",
+    "commit_point": "after model state and generation readiness verification",
+    "durable_fields": [
+      "exact source config bytes",
+      "source SHA-256 and size",
+      "profile revision",
+      "server argv",
+      "verified instance ID",
+      "readiness state"
+    ],
+    "restart_policy": [
+      "validate LKG before drain",
+      "reject missing, corrupt, symlinked, digest-mismatched, or running-instance-mismatched LKG",
+      "reuse an unchanged regular source file",
+      "materialize an owner-private snapshot when the source changed or disappeared",
+      "restore the persisted LKG after candidate failure",
+      "record the rollback LKG source digest in the operation journal"
+    ]
+  },
+  "verification": {
+    "runtime_suite": {
+      "result": "PASS",
+      "summary": "58 passed, 11 subtests passed",
+      "command_environment": "Linux, Python 3.12.3, MP_BASE_URL=http://127.0.0.1:9"
+    },
+    "lkg_slice": {
+      "result": "PASS",
+      "summary": "6 passed",
+      "covered": [
+        "first verified launch persists a private LKG",
+        "successful restart replaces the LKG",
+        "candidate failure rolls back from the persisted LKG",
+        "corrupt LKG is rejected before drain",
+        "symlinked LKG is rejected before drain",
+        "a fresh owner runtime process reads the same LKG"
+      ]
+    },
+    "terminal_suite": {
+      "result": "NOT_ALL_GREEN",
+      "summary": "207 passed, 45 skipped, 93 subtests passed, 1 failed",
+      "failure": "ReadyFileTests.test_mock_server_publishes_bound_port_and_cleans_on_sigterm",
+      "classification": "Independent existing serve.server startup-window race",
+      "reproduction": "Immediate SIGTERM after ready publication exited -2 for delays 0, 0, 0.01, and 0.05 seconds; delays 0.1 and 1.0 seconds exited 0"
+    }
+  },
+  "gates": {
+    "isolated_persistent_lkg": "PASS",
+    "production_automatic_rollback": "CLOSED",
+    "g0b": "NOT_STARTED"
+  },
+  "limits": [
+    "No real model or GPU was restarted",
+    "No production configuration was changed",
+    "No production generation load was sent",
+    "The LKG is not a signed append-only record; it relies on the owner-only runtime directory",
+    "Rollback does not preserve an in-flight HTTP or SSE request",
+    "Owner or systemd restart does not yet automatically start the persisted LKG",
+    "Health, engine smoke, stream smoke, tool smoke, and session restore are not yet one G0B gate"
+  ]
+}
