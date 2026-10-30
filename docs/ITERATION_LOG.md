@@ -3,6 +3,41 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-66 · 直接移除 `--prefill-pipe 1` 无法启动 layer-major：最小 super-chunk 也缺显存
+
+- 目标 / 指标：验证交接计划中的 L0：保持二进制、模型、环境和缓存配置不变，只移除
+  `--prefill-pipe 1`，让长 prompt 进入已有的 layer-major prefill；比较 150K/210K 冷读、
+  续读和 25% 改写的 prompt 吞吐、wall、错误与内存边界。
+- 假设与预期：pipe plan 是当前拒绝 layer-major 的直接原因；移除后应进入 16K/32K
+  super-chunk，减少专家重复 staging 和短 MMQ launch。用户已明确稳定、可归因的约 1% 改善
+  也值得保留，因此采纳线不再机械限定 3%。
+- 为什么选这条路线：这是交接计划中预期收益最大、改动最小且最容易回滚的 L0 配置实验；
+  先在候选 8080 上判断路径能否启动，比直接修改调度代码或继续调 kernel 更有信息价值。
+- 改动与实验：候选源码未改；新建 A1（保留 pipe）和 B（只移除 pipe 一项）配置。重启后确认
+  health、实际 engine hash、GPU/内存和路径日志。A1 使用固定 seed 跑完 150K/210K 六请求；
+  B 在首个请求日志确认回退后立即停止，未生成性能结论。每轮启动耗时约 2.5–3 分钟。
+- 结果：A1 六项全部成功。prompt 吞吐为 150K cold `2104.1`、warm `843.8`、rewrite25
+  `2348.9` tok/s；210K cold `2373.1`、warm `1097.7`、rewrite25 `2313.0` tok/s，中位
+  `2208.55 tok/s`。B 的路径日志为
+  `layer-major off for this prompt: no VRAM for a super-chunk (888 MiB free)`；默认
+  by-default 模式保留 512 MiB 安全余量，现役 batch/expert cache 配置下最小 super-chunk
+  也无法分配。
+- 判决：**否决 L0 的“仅移除 pipe 即获益”假设**。这不是 layer-major 的计算性能结论，
+  而是路径未执行的配置/容量结论；继续跑 B 不产生可归因数据。
+- 预期被推翻：pipe plan 不是唯一门槛；显存余量先一步阻止了 layer-major。B 还未来到
+  super-chunk 计算和输出质量阶段。
+- 生产状态与回滚：生产 systemd 未修改；实验前后均为 inactive。候选 8080 已恢复 A 配置，
+  health 200、`loaded=true`，server/engine PID 为 `479876/479879`，engine sha256
+  `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。
+- 证据：`/opt/ai/logs/layer-major-l0-20261030T160244Z/`；A1 结果、
+  `b-path.txt`、两轮路径日志、启动日志和脱敏配置均保留。台账见 L-093。
+- 学到什么：必须先证明实验开关进入目标路径，再投入长请求测量；容量门槛和调度开关要分开
+  归因。当前应该验证“显式 layer-major 的 96 MiB 余量 + 较小 super-chunk”能否安全启动，
+  而不是把本轮写成 layer-major 本身无效。
+- 下一步与理由：新目标只测一个容量策略：显式 `STRATA_PREFILL_LAYER_MAJOR=1`，先尝试
+  16K target、host residual；日志必须实际打印 super-chunk 执行，若仍回退则记录原因并停止。
+  只有路径启动且质量/内存安全，才做 150K/210K A-B-A。
+
 ## I-20261028-65 · 上游 37 提交部署并整理工作区：保留有效工具，清理冲突与文档噪音
 
 - 目标 / 指标：把上游 v0.2.7 中有用的改动完整合入并部署，同时处理本地暂存区、未暂存修改和

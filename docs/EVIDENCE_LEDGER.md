@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（93 条：L-000…L-092，按编号）
+## 台账索引（94 条：L-000…L-093，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -107,6 +107,7 @@
 | L-090 | 10-27 06:5xZ | 256K 一小时混合 soak：414 请求、133 waves、0 错误、0 意外 length、74/74 needle；14 次约 245.9K prompt 全通过；swap 未用、最低可用 RAM 2430.4 MiB | **采纳** |
 | L-091 | 10-27 08:5xZ | Nsight 双次硬件计数：32K 冷 prefill 的 SMs Active 77%、SM Issue 13–14%、Tensor 10%、DRAM read 15%；同窗 NVML 40/99% 与 95/98% 均不能代表真实计算利用率 | **结论** |
 | L-092 | 10-28 05:1xZ | v0.2.7 上游 37 提交部署到 `c219fbca`：6 路数字序列约 `164.7 tok/s`、自然语言约 `149.8 tok/s`；2 路低于单路，8 路无吞吐收益且 TTFT 变差；CTest 仍有 6 个已知失败 | **采纳·测试缺口** |
+| L-093 | 10-31 00:0x | 只移除 `--prefill-pipe 1` 未启用 layer-major：888 MiB 显存下最小 super-chunk 也无法分配；A1 150K/210K 六请求 cold 为 2104.1–2373.1 tok/s，中位 2208.55 | **否决 L0 直改假设** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3566,3 +3567,54 @@ CTest 缺口，因此本条不写成“全部测试通过”。
   （sha256 `4d60fb3d547fb38c14cd1a4d3b37f42e1df5ed2619478ef67bd1b2cc4a4e6ced`）
 - `/opt/ai/logs/T-probe-path-20261028.json`
   （sha256 `050b3ccb5fb6f63b91ea62576c9b35aabab7de9875c6c7cd315df1673f0a0424`）
+
+## L-093 直接移除 `--prefill-pipe 1` 未进入 layer-major：显存先于调度门槛失败
+
+**判定**：**否决 L0 直改假设**。A1 是当前候选在 150K/210K 长上下文上的可用基线；B 只移除
+`--prefill-pipe 1`，但首个请求即因最小 super-chunk 无法分配而回退，因此没有 layer-major
+性能或质量样本。不能据此判断 layer-major 本身无效。
+
+**实验边界**：候选 8080，2×RTX 2080 Ti，`layer_split=24`、batch 6、262144 上下文、
+int8 KV 和长期 expert cache 配置均不变。A1/B 各自干净重启；A1 使用固定 seed 完成六个请求，
+B 在路径日志确认回退后停止。用户允许必要重启，但要求权衡每轮约 2.5–3 分钟启动时间和缓存成本。
+
+**A1 基线**：
+
+| 场景 | prompt ms | prompt tok/s | wall |
+| --- | ---: | ---: | ---: |
+| 150K cold | 70,879.4 | 2104.1 | 71.064 s |
+| 150K warm suffix | 7,462.9 | 843.8 | 7.641 s |
+| 150K rewrite25 | 49,981.2 | 2348.9 | 50.147 s |
+| 210K cold | 88,046.0 | 2373.1 | 88.293 s |
+| 210K warm suffix | 11,240.2 | 1097.7 | 11.529 s |
+| 210K rewrite25 | 76,169.6 | 2313.0 | 76.400 s |
+
+六个成功请求的中位数为 `2208.55 tok/s`；请求全部成功，swap 未增长，最低
+MemAvailable 约 3.4 GiB，高于 2560 MiB 停止线。
+
+**B 路径日志**：
+
+```text
+strata prefill: layer-major off for this prompt: no VRAM for a super-chunk (888 MiB free)
+```
+
+默认开启路径保留 512 MiB 余量；当前 batch 和 expert cache 配置下，即使最小 super-chunk
+也无法分配。A2 随后以 A 配置重启，health 200、`loaded=true`，server/engine PID
+`479876/479879`。生产 systemd 未修改且保持 inactive。
+
+**下一步**：不重复删除 pipe。显式设置 `STRATA_PREFILL_LAYER_MAJOR=1` 会把默认余量改成
+96 MiB；先尝试 16K target、host residual，确认路径执行和内存安全后再做 150K/210K A-B-A。
+用户接受稳定、可归因的约 1% 改善，但仍需重复或 A-B-A 排除单次噪声。
+
+**原始证据**：
+
+- `/opt/ai/logs/layer-major-l0-20261030T160244Z/a1-results.json`
+  （sha256 `644c8343493a0746f4bd64894f8596e82c5b5597b5c496fc098a8020b43ac850`）
+- `/opt/ai/logs/layer-major-l0-20261030T160244Z/a1-bench.out`
+  （sha256 `6f6f64b658802dbc252cfe27d339d757c0b90140b8b2695ee6cd33be2130fcdd`）
+- `/opt/ai/logs/layer-major-l0-20261030T160244Z/a1-path.txt`
+  （sha256 `8386b7ae45714fe5b051d012230b173243c8ce111b9febeb5856aa230857eebc`）
+- `/opt/ai/logs/layer-major-l0-20261030T160244Z/b-path.txt`
+  （sha256 `f1cd16fe6cb5616e013f8753265d90d8f97781c4213daca9726d32318cf92c05`）
+- `/opt/ai/logs/layer-major-l0-20261030T160244Z/contract.md`
+  （sha256 `2d2118b9932df0ce9c34f11ea2a5494721c91c36feeba81e4d1e597761733ae8`）

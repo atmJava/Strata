@@ -69,6 +69,7 @@ P7 已搁置，只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢�
 | GPU-UTIL | M13 | 用硬件计数器替代单看 NVML；先验证采集口径，再做内核调优 | 高 | 低；只读、不重启服务 | **完成**：两次 Nsight 双卡 GPU Metrics + NVML 交叉核对可复现 |
 | UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **待做**：先快照再停服，不能附加现役进程 |
 | UTIL-KERNEL | M13 | 按 NCU 证据只改一个瓶颈内核或调度路径，提高 issue/Tensor/warp 占用并缩短 wall | 高 | 中；需要代码级验证 | **下一代码项**：参数 A/B 仅作部署门，不做参数探索 |
+| LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **待做**：L0 仅移除 pipe 已在 888 MiB 余量下被容量门槛否决 |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
 | S8/S1/S7 回归测试 | 稳定性 | 主要防止已有能力回归 | 高 | 低中 | 作为同批低风险补充 |
@@ -116,6 +117,9 @@ P7 已搁置，只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢�
 20. **代码优化验证顺序固定**：先记录 NCU 根因和目标计数器，再改最小内核/调度路径；候选必须在
     同一 32K 冷 prefill 上同时改善目标硬件计数和端到端 wall，并保持输出与稳定性门。参数 A/B
     只在候选已经实现后用于部署验证，不用于寻找候选。
+21. **L0 layer-major 直改被容量门槛否决**：只移除 `--prefill-pipe 1` 时，最小 super-chunk
+    在 888 MiB 显存余量下仍无法分配。下一项只验证显式 layer-major 的 96 MiB 余量策略和
+    16K host-residual super-chunk；路径未实际执行前不再跑长请求性能 A/B。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

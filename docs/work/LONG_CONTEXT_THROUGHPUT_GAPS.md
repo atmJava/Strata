@@ -1,6 +1,6 @@
 # Strata 长上下文吞吐优化遗漏审查（2026-10-30）
 
-**状态：分析记录，不是已实现的优化，也不是新的默认配置。**
+**状态：分析记录及 2026-10-31 L0 执行记录；不是已实现的优化，也不是新的默认配置。**
 
 本文审查 `freeze/server-adapt-0.2.7` 在真实服务器和长上下文负载下仍未被主线覆盖的吞吐
 优化方向。逐项实现和已经测得的局部收益见
@@ -143,6 +143,37 @@ layer-major 不会减少 token 数和矩阵乘法的基本工作量，但会减�
 4. 同时记录 VRAM、pinned RAM、super-chunk 大小、回退原因和 eviction。
 
 如果日志没有进入 layer-major，应把具体拒绝原因作为结果保存，不再继续调相邻参数。
+
+### 2026-10-31 执行结果：L0 被显存门槛否决
+
+受控 A1 保持 `--prefill-pipe 1`，固定 seed 完成 150K/210K 六请求；B 只移除这一项。
+A1 的 prompt 吞吐为：
+
+| 场景 | A1 prompt tok/s | wall |
+| --- | ---: | ---: |
+| 150K cold | 2104.1 | 71.064 s |
+| 150K warm suffix | 843.8 | 7.641 s |
+| 150K rewrite25 | 2348.9 | 50.147 s |
+| 210K cold | 2373.1 | 88.293 s |
+| 210K warm suffix | 1097.7 | 11.529 s |
+| 210K rewrite25 | 2313.0 | 76.400 s |
+
+B 在首个请求即打印：
+
+```text
+layer-major off for this prompt: no VRAM for a super-chunk (888 MiB free)
+```
+
+默认开启路径保留 512 MiB 余量，现役 batch 与 expert cache 配置下连最小 super-chunk 都
+无法分配。因此 L0 的“只移除 pipe 就会启用 layer-major”被判为否决；这不是 layer-major
+计算性能的结论，B 没有完成任何性能样本。A2 已恢复 A 配置并通过 health。
+
+下一步不再重复删除 pipe：先验证显式 `STRATA_PREFILL_LAYER_MAJOR=1` 的 96 MiB 余量策略，
+目标 16K super-chunk、residual 留在 host。日志必须出现真实 super-chunk 执行，之后才做
+150K/210K 性能和质量门。用户已明确稳定、可归因的约 1% 改善也值得保留，但仍需重复或
+A-B-A 排除单次噪声。
+
+证据：`/opt/ai/logs/layer-major-l0-20261030T160244Z/`。
 
 ## 5. P0：QSA selection 的长上下文成本
 

@@ -37,6 +37,9 @@
 12. **上游 37 提交已部署**：`c219fbca`、engine md5 `0e4a9596`、server `11fd33f0`、
     config `023663ba`，health loaded、`NRestarts=0`。数字序列 6 路约 `164.7 tok/s`，
     自然语言 6 路约 `149.8 tok/s`；2 路和 8 路存在独立凹点。
+13. **L0 layer-major 直改已否决**：只移除 `--prefill-pipe 1` 后，首个请求因最小
+    super-chunk 所需显存不足而回退；候选已恢复 A 配置。下一项只验证显式 layer-major 的
+    96 MiB 余量策略和 16K host-residual super-chunk。
 
 ## 候选
 
@@ -61,6 +64,8 @@
 | QSA-SLOTS | 合并 batch window 的 QSA launch | 4/6 路交错 A-B 均稳定改善聚合吞吐 | 否决 | L-081：4 路无收益，6 路首次 +3.5% 不复现，最终相邻 −0.49% | 同配置不再重试 |
 | HEAD-ENGINE | 旧合并源码的 sm_75 可部署验证 | 从当次 HEAD 独立构建；测试、输出 parity、版本 marker、运行路径 hash 与一小时 soak 通过 | 已完成（历史基线） | L-082/L-083/L-089/L-090：当次 256K 变化在 3% 内，一小时 soak 通过 | 记录属于 `a09d78b1`，不能当作 c219 的测试结论 |
 | UPSTREAM-027 | v0.2.7 37 提交的服务器验收 | 独立构建；真实代理接口、工具/图片、并发 health 通过；记录吞吐曲线和测试缺口 | 已完成（测试缺口） | L-092：6 路数字 `164.68`、自然语言 `149.82 tok/s`；CTest 仍有 6 项失败 | 运行可用，不代表测试全绿；2/8 路另立 UTIL-MULTI |
+| LM-L0 | 只移除 pipe 启动 layer-major | 日志进入真实 super-chunk，随后测 150K/210K；质量与内存门通过 | 否决 | L-093：`no VRAM for a super-chunk (888 MiB free)`，未进入性能阶段 | 不重复同形实验 |
+| LM-EXPLICIT | 显式 layer-major 的容量策略 | 96 MiB 余量下 16K host-residual super-chunk 实际执行；150K/210K A-B-A 出现稳定且可归因的 ≥1% 改善，内存与质量不退化 | 待做 | L-093 只证明默认余量路径被容量阻断 | 先确认路径启动，再跑长请求 |
 | S0d | staged 取消不吞他人控制行 | 客户端断开时其它流不丢 token，有回归测试 | 待做 | V2-1 PASS，待固化 | 只差测试与复核 |
 | S8 | SSE 保活 | 空闲 ≥10 s 的流收到保活；有测试 | 待做 | `serve/server.py` 已有实现 | 已有功能，补测试 |
 | S1 | 准入上限 | 超限返回稳定 429/503 与错误体；有测试 | 待做 | `serve/server.py` 已有实现 | 已有功能，补测试 |
@@ -75,7 +80,7 @@
 | F1F2 | 多路准入判据 | 由 S0b/S2 的证据决定可接受上界；不允许首 token 后静默数十秒 | 待做 | R11 旧提案 | AI 根据测量裁决，不等待用户 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀；有测试 | 待做 | | |
 
-未完成采纳项：18
+未完成采纳项：19
 
 ## 搁置
 
