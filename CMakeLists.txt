@@ -618,6 +618,12 @@ if(STRATA_ENABLE_CUDA)
     target_include_directories(head_split_parity PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(head_split_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
     add_test(NAME head_split_parity COMMAND head_split_parity --selftest --reps 20)
+    # UTIL-HEAD-Q8-FUSE: current last-residual write + Q8 final mixer vs one applied Q8 mixer.
+    add_executable(head_q8_fuse_parity src/kernels/head_q8_fuse_parity.cu)
+    target_include_directories(head_q8_fuse_parity PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(head_q8_fuse_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    add_test(NAME head_q8_fuse_parity COMMAND head_q8_fuse_parity 50 3)
+    set_tests_properties(head_q8_fuse_parity PROPERTIES TIMEOUT 600)
     set_tests_properties(head_split_parity PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     # the wide dequant kernels (a thread per 8 values; sm_61's default), bitwise vs the per-group ones (GPU, synthetic,
     # no model; --bench adds old/new timings)
