@@ -626,7 +626,19 @@ stack/local，输出 hash 不变；但普通选择慢 `20.05%`，`QA_SAME=4` 的
 `20.75%`。该设计已否决，不进入长请求，也不再重试同形 cache co-residency。细节见
 [`QSA_UNION_ATTN_RESULT-20261031.md`](QSA_UNION_ATTN_RESULT-20261031.md)。
 
-### 16.5 并发和会话快照
+### 16.5 UTIL-NCU（已完成）
+
+完整请求的 full-section NCU replay 在 `98,329` token prompt 的最终 verify window 等待超过
+60 秒，触发引擎 stall watchdog，没有生成报告。改用候选二进制、真实 GGUF 权重和
+`G=64, T=6` 的 mode-8 微内核后，报告在数秒内完成。`native_gu_fused_kernel<18>` 的
+MIO throttle 为 `29.75%`，long scoreboard `17.50%`，Tensor `0.04%`，SM `58.07%`。
+
+因此下一候选只处理 shared-memory/codebook bank conflict，不恢复 Tensor 路线，也不把
+微内核数字扩大为端到端收益。结果和预注册见
+[`UTIL_NCU_RESULT-20261031.md`](UTIL_NCU_RESULT-20261031.md)、
+[`UTIL_KERNEL_CONTRACT-20261031.md`](UTIL_KERNEL_CONTRACT-20261031.md)。
+
+### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：
 

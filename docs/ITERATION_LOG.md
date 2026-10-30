@@ -3,6 +3,38 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-71 · NCU 根因定为 MIO throttle，完整请求 replay 因等待成本失败
+
+- 目标 / 指标：获取真实长 prompt 热点 kernel 的 SM、occupancy、Tensor、DRAM/L2 和 warp stall，
+  只选择一个代码根因，并预注册一个 UTIL-KERNEL 候选。
+- 假设与预期：此前只有阶段时间和 NVML，不能区分算术、内存、同步或 occupancy；NCU 应给出
+  唯一可执行根因。
+- 审计与失败样本：Nsys CUDA 小程序自检通过，但服务的三次 fork/exec trace 都没有 kernel
+  表。新增 direct-engine wrapper 后，全 section NCU 在 `98,329` token 请求的尾部 verify
+  window 等待 expert copies 超过 60 秒；引擎 watchdog 在 `920 s` 结束请求，没有报告。
+  这次重启和学习成本保留，不用完整请求 NCU 继续迭代。
+- 回退测量：改用同一候选二进制、mode 8、真实 GGUF 权重和 `G=64, T=6` 的
+  `native_expert_bench` 层 36 几何。输出 hash `9a055a5a94e15c87`，两臂 bitwise 相同；
+  NCU 13-pass 与 9-pass 报告均在数秒内完成。
+- 结果：`native_gu_fused_kernel<18>` 的 SM throughput `58.07%`、active warps `71.59%`、
+  FMA `41.15%`、Tensor `0.04%`、DRAM `38.09%`、L2 `15.76%`；stall 依次为 MIO
+  `29.75%`、long scoreboard `17.50%`、short scoreboard `12.80%`、not-selected `9.98%`、
+  wait `9.15%`、math pipe `4.31%`、barrier `3.76%`。
+- 判决：**MIO throttle 为唯一主因；Tensor 路线不恢复。** 开一个 opt-in
+  `native_gu_fused_kernel<18>` shared-codebook bank-rotation 实验；kernel median 至少快 1%，
+  且 MIO 至少降到 28.75%，才允许进入一次 engine A/B。
+- 恢复：原候选已手动恢复 8080，server/engine PID `504632/504639`，engine
+  `105a4171...`，health loaded，无 profiler/QSA 实验 env；生产 systemd 仍
+  inactive/dead、`MainPID=0`、`NRestarts=23`。
+- 证据：`/opt/ai/logs/ncu-micro-gu-metrics-20261030T180641Z.ncu-rep`；result 与 contract
+  见 `docs/work/UTIL_NCU_RESULT-20261031.md`、`docs/work/UTIL_KERNEL_CONTRACT-20261031.md`；
+  台账 L-098。
+- 学到什么：全 section kernel replay 会与双卡流水和 resident-expert 状态冲突，不能把“能启动
+  profiler”当作“profiler 可用于迭代”。真实权重微内核可以低成本区分 MIO、Tensor 和 DRAM；
+  但完整请求结论仍必须由后续 engine A/B 取得。
+- 下一步与理由：实现 4-way bank-rotated shared codebook，先过输出 hash、7 次交替进程时间、
+  MIO 和资源门。默认路径保持不变，失败就回滚并换一个与 shared-memory 冲突不同的机制。
+
 ## I-20261031-70 · QSA 三 query 同 CTA 共享缓存慢 20%，按预注册门否决
 
 - 目标 / 指标：实现一个 opt-in、输出精确的相邻 query selected K/V 共享路径；先过 kernel

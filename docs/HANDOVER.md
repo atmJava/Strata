@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T01:55+08:00。
+> 整理时间：2026-10-31T02:15+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,11 +12,15 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-097。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-098。
 
 ## 2. 当前断点
 
-- 用户已恢复“除非叫停否则持续执行”的全局优化循环；当前断点是 UTIL-NCU。
+- 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，当前断点是
+  UTIL-KERNEL。
+- UTIL-NCU 的完整请求 full-section replay 在 `98,329` token prompt 尾部触发 stall
+  watchdog，没有报告。改用候选二进制的真实权重 mode-8 微内核后，测得 MIO throttle
+  `29.75%`、long scoreboard `17.50%`、Tensor `0.04%`；唯一根因选 MIO。
 - QSA-DIAG 已完成：overlap 中位 `28.0%`，FP16 全选择一致率 `70.9207%`；半精度路线否决，
   candidate-sharing 路线按预注册上界进入一次最小 exact 实现。
 - QSA-UNION-ATTN 已完成并否决：三相邻 query 同 CTA 保持 parity、资源预算和 12 warps/SM，
@@ -39,7 +43,7 @@
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
 | 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 候选 PID | server `491072`、engine `491135` |
+| 候选 PID | server `504632`、engine `504639` |
 | candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -60,7 +64,8 @@ STRATA_SM75_PERF=1
 ```
 
 候选进程中当前没有 `STRATA_PF_WMMA`、`STRATA_PA_V2T`、`STRATA_SEL_OVERLAP`、
-`STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING` 或 `STRATA_PA_GROUP3`。
+`STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING`、`STRATA_PA_GROUP3`、
+`STRATA_PROFILE_*` 或 `STRATA_NCU_*`。
 `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
 引擎子进程，不能替代 service drop-in。
 
@@ -129,6 +134,19 @@ clean `qsa select` 为 `3,929 ms`，占诊断 GPU timeline `4.0%`；同几何 sc
 采纳。报告在 [`work/QSA_DIAGNOSTIC_RESULT-20261031.md`](work/QSA_DIAGNOSTIC_RESULT-20261031.md)，
 原始证据在 `/opt/ai/logs/qsa-diag-20261031T1653Z/`。
 
+### UTIL-NCU 完成：MIO 是 fused gate/up 的唯一主因
+
+完整请求 NCU 在 `98,329` token prompt 最终 verify window 等待超过 60 秒，触发引擎
+watchdog；该次 `920 s` 请求没有生成报告。回退到同一候选二进制、mode 8、真实 GGUF 权重、
+layer 36 `IQ3_XXS/Q2_0`、`G=64, T=6` 后，输出 hash `9a055a5a94e15c87`。NCU 测到 MIO
+`29.75%`、long scoreboard `17.50%`、short scoreboard `12.80%`、SM `58.07%`、active
+warps `71.59%`、DRAM `38.09%`、Tensor `0.04%`。
+
+下一候选只改 `native_gu_fused_kernel<18>` 的 shared codebook bank access，opt-in；kernel
+中位至少快 1%、MIO≤28.75%、active warps≥69% 且 hash 不变，才允许 engine A/B。结果与契约：
+[`work/UTIL_NCU_RESULT-20261031.md`](work/UTIL_NCU_RESULT-20261031.md)、
+[`work/UTIL_KERNEL_CONTRACT-20261031.md`](work/UTIL_KERNEL_CONTRACT-20261031.md)。
+
 ### QSA-UNION-ATTN 否决
 
 实现了一次真正的 kernel 原型：把三个相邻 query 的现有 128-thread 计算放进一个
@@ -184,10 +202,11 @@ query 的 score、top-k、softmax 或输出算术。
 1. 确认用户已明确恢复目标；否则只做文档、只读审计或用户指定的工作。
 2. 核对 service、health、engine/server/launcher/config hash，以及实际运行 env。
 3. 确认没有残留 soak、安装器、bench 或其他竞争负载。
-4. 进入 UTIL-NCU 前保存并校验候选快照，固定 32K cold prefill 热态，使用独立受控 engine
-   独占 GPU；不要附加到现役进程。
-5. NCU 结束后恢复候选 8080，核对 health、PID、engine hash 与实验 env；生产 systemd 不变。
-6. 只有唯一 stall/管线根因和计数器目标预注册后，才开一个 UTIL-KERNEL 代码切片。
+4. UTIL-NCU 已使用快照和独立候选完成；不要把 full-section NCU replay 重新压到完整双卡
+   请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
+5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
+6. 当前只允许 UTIL-KERNEL 的一个 shared-codebook bank-rotation 切片；先过微内核时间、MIO、
+   parity 和资源门，再做一次 engine A/B。
 
 不要把已否决项原样重跑：
 

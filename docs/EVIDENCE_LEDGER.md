@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（97 条：L-000…L-096，按编号）
+## 台账索引（99 条：L-000…L-098，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -111,6 +111,8 @@
 | L-094 | 10-31 00:1xZ | 显式 16K host-residual layer-major 真执行 10/13 个 super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；150K warm wall 优势由缓存命中差异造成 | **否决** |
 | L-095 | 10-31 00:4xZ | 当前默认 attention v2 对 v1 的固定 96K A-B-A：engine read `+1.814%`、wall `+1.905%`；A2 漂移约 1.26%，parity/needle 全过，按用户 1% 门复验通过 | **采纳（当前默认）** |
 | L-096 | 10-31 00:5xZ | 150K QSA：16-query overlap 中位 `28.0%`；FP16 全选择仅 `70.9207%` 相同，否决；候选共享预注册上界 `1.996%`，进入最小实现 | **诊断完成；FP16 否决；候选共享待实现** |
+| L-097 | 10-31 01:0xZ | 三 query 同 CTA 保持 parity 和 12 warps/SM，但普通选择慢 `20.05%`、最强共享上界慢 `20.75%` | **否决** |
+| L-098 | 10-31 02:1xZ | 完整请求 NCU 触发 stall watchdog；同权重 mode-8 fused gate/up 测得 MIO `29.75%`、long scoreboard `17.50%`、Tensor `0.04%`，选 MIO 根因 | **诊断完成；UTIL-KERNEL 待验证** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3827,6 +3829,50 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-098 UTIL-NCU：完整请求 replay 超时，真实权重 fused kernel 测得 MIO `29.75%`
+
+**判定**：**UTIL-NCU 完成；唯一主因是 MIO throttle。** 下一代码切片只处理
+`native_gu_fused_kernel<18>` 的 shared-memory/codebook 访问；Tensor pipe 只有 `0.04%`，
+P7 不恢复。
+
+**失败边界**：候选快照 engine sha256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。三次 Nsys
+服务 trace 均无 CUDA kernel 表；direct-engine wrapper 后，全 section NCU 在 `98,329`
+token 请求的最终 verify window 停在 token `98,322`，等待 expert copies 超过 60 秒。
+引擎 watchdog 在 `920 s` 结束请求，没有生成 `.ncu-rep`。因此不使用全请求 section 采集作为
+后续迭代工装。
+
+**同指令回退测量**：使用候选二进制、mode 8、真实 GGUF 权重、layer 36
+`IQ3_XXS/Q2_0`、`G=64, T=6`。两臂输出 hash 均为 `9a055a5a94e15c87`，bitwise 相同；
+不用 profiler 时 gate/up 约 `474 us`。NCU 单 kernel 报告测得 duration `653.18 us`，
+SM `58.07%`、active warps `71.59%`、FMA `41.15%`、Tensor `0.04%`、DRAM `38.09%`、
+L2 `15.76%`。Stall：MIO `29.75%`、long scoreboard `17.50%`、short scoreboard `12.80%`、
+not-selected `9.98%`、wait `9.15%`、math pipe `4.31%`、barrier `3.76%`。
+
+**预注册**：contract 见 `docs/work/UTIL_KERNEL_CONTRACT-20261031.md`。候选只把 IQ3_XXS
+256-entry codebook 复制 4 份并做 bank rotation，按 lane 选副本；索引、乘积、归约和输出不变，
+由 `STRATA_IQ3_GRID_REPL` opt-in。要求 output hash 不变，7 次交替进程的 kernel 中位至少
+快 1%，至少 5/7 配对同向，MIO ≤28.75%，active warps ≥69% 且无 spill；之后才允许一次
+engine A/B。
+
+**恢复**：profiler/model 进程全部结束；原候选恢复到 8080，server/engine PID
+`504632/504639`，health loaded，engine hash 回到 `105a4171...`，无 profiler/QSA 实验 env。
+生产 `strata.service` 仍 inactive/dead、`MainPID=0`、`NRestarts=23`。
+
+**证据**：
+
+- `/opt/ai/logs/ncu-micro-gu-fused-20261030T180606Z.ncu-rep`
+  （sha256 `d37c4e9c041a850143e93ca86a08d1d601a71fb925d5e0c9efea9657b85125ed`）
+- `/opt/ai/logs/ncu-micro-gu-metrics-20261030T180641Z.ncu-rep`
+  （sha256 `48044aa0f609f87476d7fc4d8a25e21043b5bf115df95fe483c2c9dac9a70df5`）
+- `/opt/ai/logs/ncu-gu-server-20261030T174402Z.log`
+  （sha256 `12e1b64434d38bff9e9423a18c63c1bbd4b93e87dfbdf44a343f919c81282861`）
+- `/opt/ai/logs/ncu-gu-engine-20261030T174402Z.log`
+  （sha256 `9756030e2ac9df1a3525ff0660b04b88703394bd9b49f809c4ef43b142d811a4`）
+
+**没测什么**：微内核只覆盖一个真实层和几何；并不证明所有格式、自然语言、并发或完整服务的
+同一 stall 百分比。完整请求收益必须由后续 engine A/B 取得。
 
 ## L-097 QSA-UNION-ATTN：三 query 同 CTA 资源达标且 parity 相同，但最强共享仍慢 20%，否决
 
