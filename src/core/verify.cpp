@@ -485,8 +485,6 @@ Verifier::~Verifier() {
         for (auto& e : head_split_exec_)
             if (e) cudaGraphExecDestroy(e);
         cudaStreamDestroy(head_split_stream_);
-        if (head_xil_peer_) cudaFree(head_xil_peer_);
-        if (head_xq_peer_) cudaFree(head_xq_peer_);
         if (head_half_peer_) cudaFree(head_half_peer_);
         if (cur >= 0) cudaSetDevice(cur);
     }
@@ -857,13 +855,10 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     }
     cudaMemset(arena_, 0, count.used);
     if (head_split_) {
-        const size_t q8 = strata::kernels::native_q8_1_bytes((int) N, (int) T);
-        const size_t q8il = strata::kernels::native_q8_1_il_bytes((int) N, std::max(4, (int) T));
         const int peer = head_->peer_device();
         {
             const OnDevice on_peer(peer);
             if (cudaStreamCreateWithFlags(&head_split_stream_, cudaStreamNonBlocking) != cudaSuccess ||
-                cudaMalloc(&head_xq_peer_, q8) != cudaSuccess || cudaMalloc(&head_xil_peer_, q8il) != cudaSuccess ||
                 cudaMalloc((void**) &head_half_peer_,
                            (size_t) T * (size_t) head_split_n1_ * sizeof(float)) != cudaSuccess) {
                 err = "verify: the peer head buffers do not fit";
@@ -881,7 +876,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         std::fprintf(stderr, "strata verify: head split active on CUDA%d/CUDA%d (%d+%d vocabulary rows; %.1f MiB "
                              "peer head scratch, %.1f/%.1f MiB free)\n",
                      device_, peer, head_split_n0_, head_split_n1_,
-                     (double) (q8 + q8il + (size_t) T * (size_t) head_split_n1_ * sizeof(float)) / 1048576.0,
+                     (double) ((size_t) T * (size_t) head_split_n1_ * sizeof(float)) / 1048576.0,
                      (double) free_main / 1048576.0, (double) free_peer / 1048576.0);
     }
     if (hflag_out_d_ != nullptr && hcount_d_ == nullptr) {   // the overlapped split's hand-off counter
@@ -2400,19 +2395,13 @@ bool Verifier::capture_head_split_peer(int T, std::string& err) {
     bool ok = true;
     try {
         strata::kernels::wait_flag_ge(head_split_start_d_, 1, head_split_stream_);
-        const size_t q8 = strata::kernels::native_q8_1_bytes((int) g_->n_embd, T);
-        if (cudaMemcpyPeerAsync(head_xq_peer_, peer, xq_, device_, q8, head_split_stream_) != cudaSuccess)
-            ok = false;
+        // cudaMemcpyPeerAsync is not graph-capturable.  The quantized activation is only a few KiB, so the peer
+        // reads the main device's copy through peer access instead of adding a host-side copy to every window.
         if (ok && head_split_il(T)) {
-            const size_t il = strata::kernels::native_q8_1_il_bytes((int) g_->n_embd, std::max(4, T));
-            if (cudaMemcpyPeerAsync(head_xil_peer_, peer, xil_, device_, il, head_split_stream_) != cudaSuccess)
-                ok = false;
-            if (ok)
-                strata::kernels::native_mmvq_il(head_->type(), head_->peer_weights(), head_xq_peer_, head_xil_peer_,
-                                                head_half_peer_, (int) g_->n_embd, head_split_n1_, T,
-                                                head_split_stream_);
+            strata::kernels::native_mmvq_il(head_->type(), head_->peer_weights(), xq_, xil_, head_half_peer_,
+                                            (int) g_->n_embd, head_split_n1_, T, head_split_stream_);
         } else if (ok) {
-            strata::kernels::native_mmvq(head_->type(), head_->peer_weights(), head_xq_peer_, head_half_peer_,
+            strata::kernels::native_mmvq(head_->type(), head_->peer_weights(), xq_, head_half_peer_,
                                          (int) g_->n_embd, head_split_n1_, T, head_split_stream_);
         }
         if (ok) strata::kernels::gpu_flag_set(head_split_done_d_, 1, head_split_stream_);

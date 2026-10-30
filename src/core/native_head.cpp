@@ -211,8 +211,8 @@ bool NativeHead::run(const float* mixed, float* logits, void* stream, std::strin
 }
 
 bool NativeHead::gather_rows_device(const int32_t* ids, int64_t n, uint8_t* dst, void* stream, std::string& err) const {
-    if (!loaded() || !ids || n < 0 || !dst || !stream) {
-        err = "native head row gather requires ids, a destination and a stream";
+    if (!loaded() || !ids || n < 0 || !dst) {
+        err = "native head row gather requires ids and a destination";
         return false;
     }
     try {

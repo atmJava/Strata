@@ -712,7 +712,6 @@ private:
     void* hit_scratch_ = nullptr;
     float *head_mixed_ = nullptr, *head_inj_ = nullptr, *head_logits_ = nullptr;
     float *head_half_main_ = nullptr, *head_half_peer_ = nullptr;
-    void *head_xq_peer_ = nullptr, *head_xil_peer_ = nullptr;
     uint16_t* sh_bf16_ = nullptr;
     uint8_t* arg_scratch_ = nullptr;   ///< argmax_rows' partials and counters
     int32_t* one_ = nullptr;           ///< device {1}: the n_keep of a one-token window, which commits itself

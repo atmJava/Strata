@@ -14,10 +14,13 @@
 
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -439,6 +442,101 @@ int main(int argc, char** argv) {
                 process_index, split_total, split0_peak, split1_peak, split_bound,
                 weight0_bytes + weight1_bytes == weight_bytes ? 1 : 0, memory_ok ? "PASS" : "FAIL");
     if (weight0_bytes + weight1_bytes != weight_bytes || !memory_ok) ++failures;
+
+    // Match the server integration: the peer graph reads the quantized activation from the main device over peer
+    // access after a mapped start flag, runs its head half, and raises a mapped done flag.  Capturing a
+    // cudaMemcpyPeerAsync is not supported by CUDA, so this gate keeps the transport out of the graph.
+    {
+        uint32_t* start_h = nullptr;
+        uint32_t* done_h = nullptr;
+        uint32_t* start_d = nullptr;
+        uint32_t* done_d = nullptr;
+        CK(cudaSetDevice(0));
+        CK(cudaHostAlloc((void**) &start_h, 64, cudaHostAllocMapped | cudaHostAllocPortable));
+        CK(cudaHostAlloc((void**) &done_h, 64, cudaHostAllocMapped | cudaHostAllocPortable));
+        CK(cudaHostGetDevicePointer((void**) &start_d, start_h, 0));
+        CK(cudaHostGetDevicePointer((void**) &done_d, done_h, 0));
+        *start_h = 0;
+        *done_h = 0;
+
+        CK(cudaSetDevice(1));
+        cudaGraph_t graph = nullptr;
+        CK(cudaStreamBeginCapture(stream1, cudaStreamCaptureModeThreadLocal));
+        K::wait_flag_ge(start_d, 1, stream1);
+        const cudaError_t wait_status = cudaGetLastError();
+        cudaError_t launch_status = cudaSuccess;
+        cudaError_t flag_status = cudaSuccess;
+        if (wait_status == cudaSuccess) {
+            launch_projection(weights1, split.xq0, split.xil0, split.half1, kN1, 8, false, stream1);
+            launch_status = cudaGetLastError();
+        }
+        if (launch_status == cudaSuccess) {
+            K::gpu_flag_set(done_d, 1, stream1);
+            flag_status = cudaGetLastError();
+        }
+        const cudaError_t end_status = cudaStreamEndCapture(stream1, &graph);
+        const bool capture_ok = wait_status == cudaSuccess && launch_status == cudaSuccess &&
+                                flag_status == cudaSuccess && end_status == cudaSuccess;
+        std::printf("%s peer-capture wait=%s (%s) projection=%s (%s) flag=%s (%s) end=%s (%s)\n",
+                    capture_ok ? "PASS" : "FAIL", cudaGetErrorName(wait_status), cudaGetErrorString(wait_status),
+                    cudaGetErrorName(launch_status), cudaGetErrorString(launch_status),
+                    cudaGetErrorName(flag_status), cudaGetErrorString(flag_status),
+                    cudaGetErrorName(end_status), cudaGetErrorString(end_status));
+        if (!capture_ok) ++failures;
+        if (capture_ok) {
+            cudaGraphExec_t peer_exec = nullptr;
+            CK(cudaGraphInstantiate(&peer_exec, graph, nullptr, nullptr, 0));
+            CK(cudaGraphDestroy(graph));
+            CK(cudaSetDevice(0));
+            const Reference& ref = reference[8];
+            CK(cudaMemcpyAsync(split.mixed, ref.mixed.data(), ref.mixed.size() * sizeof(float),
+                               cudaMemcpyHostToDevice, stream0));
+            CK(cudaStreamSynchronize(stream0));
+            cudaGraphExec_t main_exec = capture_graph(stream0, 0, [&] {
+                K::native_quantize_q8_1(split.mixed, split.xq0, kNIn, 8, stream0);
+                K::gpu_flag_set(start_d, 1, stream0);
+                launch_projection(weights0, split.xq0, split.xil0, split.half0, kN0, 8, false, stream0);
+                K::wait_flag_ge(done_d, 1, stream0);
+                enqueue_merge(split.half0, split.half1, split.merged, 8, stream0);
+            });
+            auto run_pair = [&] {
+                *start_h = 0;
+                *done_h = 0;
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                CK(cudaSetDevice(0));
+                CK(cudaGraphLaunch(main_exec, stream0));
+                CK(cudaSetDevice(1));
+                CK(cudaGraphLaunch(peer_exec, stream1));
+                CK(cudaSetDevice(0));
+                CK(cudaStreamSynchronize(stream0));
+            };
+            run_pair();
+            std::vector<float> got(ref.logits.size());
+            CK(cudaMemcpy(got.data(), split.merged, got.size() * sizeof(float), cudaMemcpyDeviceToHost));
+            const bool initial_ok = same_bytes(got.data(), ref.logits.data(), got.size() * sizeof(float));
+            CK(cudaSetDevice(0));
+            CK(cudaMemcpyAsync(split.mixed, ref.changed_mixed.data(), ref.changed_mixed.size() * sizeof(float),
+                               cudaMemcpyHostToDevice, stream0));
+            CK(cudaStreamSynchronize(stream0));
+            run_pair();
+            CK(cudaMemcpy(got.data(), split.merged, got.size() * sizeof(float), cudaMemcpyDeviceToHost));
+            const bool changed_ok =
+                same_bytes(got.data(), ref.changed_logits.data(), got.size() * sizeof(float));
+            std::printf("%s peer-reads-main-activation initial=%s changed=%s\n", initial_ok && changed_ok ? "PASS" : "FAIL",
+                        initial_ok ? "pass" : "FAIL", changed_ok ? "pass" : "FAIL");
+            if (!initial_ok || !changed_ok) ++failures;
+            const auto begin = std::chrono::steady_clock::now();
+            for (int i = 0; i < 40; ++i) run_pair();
+            const double pair_us =
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count() / 40.0;
+            std::printf("BENCH peer-reads-main T=8 pair_wall_us=%.3f\n", pair_us);
+            CK(cudaGraphExecDestroy(main_exec));
+            CK(cudaSetDevice(1));
+            CK(cudaGraphExecDestroy(peer_exec));
+        }
+        CK(cudaFreeHost(start_h));
+        CK(cudaFreeHost(done_h));
+    }
 
     auto run_concurrent = [&](const std::vector<float>& mixed, int t, bool il0, bool il1, bool copy_input,
                               bool launch_graphs, cudaGraphExec_t graph0, cudaGraphExec_t graph1) {

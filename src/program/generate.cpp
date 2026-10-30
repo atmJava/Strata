@@ -5032,16 +5032,19 @@ int main(int argc, char** argv) {
             const char* hs = std::getenv("STRATA_HEAD_SPLIT");
             const char* mfh = std::getenv("STRATA_MTP_FULL_HEAD");
             const bool asked = hs != nullptr && hs[0] != '\0' && hs[0] != '0';
-            const bool eligible = asked && stages.size() == 2 && i == 1 && st.dev != stages[0]->dev &&
+            // `stages` holds the later GPUs; the primary device runs stage 0 outside this vector.  The split head
+            // therefore applies to the last GPU of an exactly two-stage run, with the primary owning the peer half.
+            const bool eligible = asked && split_devs.size() == 1 && i + 1 == stages.size() &&
+                                  st.dev != primary_device &&
                                   !(mfh != nullptr && mfh[0] == '1');
             if (asked && !eligible) {
                 std::fprintf(stderr, "strata generate: STRATA_HEAD_SPLIT falls back to the full head "
                                      "(it needs exactly two stages on different devices and no STRATA_MTP_FULL_HEAD)\n");
             }
-            if (eligible && st.head.load_split(o.native_head_shards, g.n_embd, wo_s->ne1, stages[0]->dev, err)) {
+            if (eligible && st.head.load_split(o.native_head_shards, g.n_embd, wo_s->ne1, primary_device, err)) {
                 st.head_split = true;
                 std::fprintf(stderr, "strata generate: STRATA_HEAD_SPLIT on: output vocabulary rows use CUDA%d/CUDA%d\n",
-                             st.dev, stages[0]->dev);
+                             st.dev, primary_device);
             } else {
                 if (!eligible) err.clear();
                 else std::fprintf(stderr, "strata generate: STRATA_HEAD_SPLIT unavailable: %s; loading the full head\n",
