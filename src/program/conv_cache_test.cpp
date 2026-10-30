@@ -20,6 +20,8 @@
 #include <vector>
 
 using strata::program::conv_cache::eviction_victim;
+using strata::program::conv_cache::long_spread_victim;
+using strata::program::conv_cache::long_prompt_checkpoint_cap;
 using strata::program::conv_cache::restore_fits;
 using strata::program::conv_cache::spread_victim;
 
@@ -53,8 +55,39 @@ int64_t reuse_after_edit(bool spread, int64_t root, int64_t turn, int turns, int
     return reuse;
 }
 
+// The same walk with long mode's scale anchors.  A checkpoint lands every `turn` tokens and the
+// edit leaves `back` tokens after the longest reusable prefix.
+int64_t long_reuse_after_edit(int64_t root, int64_t turn, int turns, int64_t back) {
+    std::vector<int64_t> lens = {root};
+    std::vector<uint64_t> stamps = {1};
+    for (int t = 1; t <= turns; ++t) {
+        lens.push_back(root + t * turn);
+        stamps.push_back(uint64_t(t + 1));
+        while (lens.size() > 8) {
+            const size_t v = long_spread_victim(lens.data(), stamps.data(), lens.size(), 8, nullptr, nullptr);
+            lens.erase(lens.begin() + (std::ptrdiff_t) v);
+            stamps.erase(stamps.begin() + (std::ptrdiff_t) v);
+        }
+    }
+    const int64_t edit = lens.back() - back;
+    int64_t reuse = 0;
+    for (int64_t l : lens)
+        if (l <= edit) reuse = l;
+    return reuse;
+}
+
 int main() {
     std::printf("conv_cache_test\n");
+    {
+        check(long_prompt_checkpoint_cap(3, 131071, true) == 3,
+              "long prompt mode: a prompt below 128K keeps its configured cap");
+        check(long_prompt_checkpoint_cap(3, 131072, false) == 3,
+              "long prompt mode: opt-in off keeps its configured cap");
+        check(long_prompt_checkpoint_cap(3, 131072, true) == 8,
+              "long prompt mode: 128K raises a three-slot chain to eight");
+        check(long_prompt_checkpoint_cap(10, 208829, true) == 10,
+              "long prompt mode: never lowers an explicitly larger cap");
+    }
     {   // --prompt-cache-spread: 200 turns of 1,000 tokens after a 9,525-token system prompt, 6 checkpoints
         const int64_t end = 9525 + 200 * 1000;
         const int64_t lru6 = reuse_after_edit(false, 9525, 1000, 200, 6, 6000);
@@ -66,6 +99,29 @@ int main() {
         const int64_t spread42 = reuse_after_edit(true, 9525, 1000, 200, 6, 42000);
         check(end - spread42 < 4 * 42000, "spread: an edit 42K back reads less than 168K again");
         check(reuse_after_edit(true, 9525, 1000, 200, 6, 500) == end - 1000, "spread: the turn before is still kept");
+    }
+    {   // --prompt-cache-long: a 139K prompt with 4K checkpoints, edit at the natural 25% boundary
+        constexpr int64_t root = 8192, turn = 4096;
+        constexpr int turns = 32;   // 8192 + 32 * 4096 = 139264 tokens
+        constexpr int64_t end = root + turns * turn;
+        const int64_t back = end * 3 / 4;
+        const int64_t edit = end / 4;
+        const int64_t reuse = long_reuse_after_edit(root, turn, turns, back);
+        std::printf("  long mode: a 25%% edit reuses %lld of %lld\n", (long long) reuse, (long long) end);
+        check(edit - reuse <= 3 * turn,
+              "long mode: the 25% anchor is within three chunk boundaries");
+        const int64_t near_reuse = long_reuse_after_edit(root, turn, turns, turn);
+        check(end - turn - near_reuse <= 2 * turn,
+              "long mode: a near-tail edit still finds the preceding turn");
+    }
+    {
+        const std::vector<int64_t> lens = {100, 200, 300, 400, 500, 600, 700, 800, 900};
+        const std::vector<uint64_t> stamps = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+        const size_t v = long_spread_victim(lens.data(), stamps.data(), lens.size(), 8, nullptr, nullptr);
+        check(v != 0 && v + 1 != lens.size(), "long mode: the root and newest checkpoint are protected");
+        const bool pinned[] = {false, true, false, false, false, false, false, false, false};
+        check(long_spread_victim(lens.data(), stamps.data(), lens.size(), 8, nullptr, pinned) != 1,
+              "long mode: an explicit pin is never the victim");
     }
     {
         const std::vector<int64_t> lens = {100, 200, 300, 400};

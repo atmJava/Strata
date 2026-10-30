@@ -281,10 +281,13 @@ private:
     int64_t force_chunk_ = 0;           ///< force_chunk, for the next run (0: none)
     bool force_single_ = false, force_planned_ = false;
     bool bind_stage_helper(int64_t T);  // binds the helper's buffers for a one-chunk prompt of T tokens
-    const float* hand_in_ = nullptr;    ///< the previous stage's rows of the chunk being read (host, pinned)
+    const float* hand_in_ = nullptr;    ///< previous stage's rows (host pinned; this stage's R marker for P2P)
     /// STRATA_HANDOFF_PIPE: the previous stage's per-piece "landed in hand_in_" events (cudaEvent_t[hand_pieces_],
     /// on its device) when it copies the chunk in pieces without a host wait; null with the one-copy hand-off
     const void* hand_ev_ = nullptr;
+    /// STRATA_HANDOFF_P2P: the previous stage copied directly into this stage's R.  hand_in_ is a non-null marker
+    /// and hand_ev_ is the source-stream event that makes those rows visible.  Set by the stage before.
+    bool hand_p2p_ = false;
     int hand_pieces_ = 0;
 
     std::string next_err_;

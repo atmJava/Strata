@@ -727,6 +727,10 @@ struct Options {
     int64_t prompt_cache_every = 16384;
     bool prompt_cache_tail = false;   // optional extra checkpoint at an existing near-tail chunk boundary
     bool prompt_cache_spread = false;   ///< --prompt-cache-spread: keep checkpoints spread back from the end, not the latest
+    /// --prompt-cache-long: for prompts >=128K, keep up to eight scale-spread checkpoints instead of only the
+    /// configured LRU chain.  Measured motivation: on 2x RTX 2080 Ti, prompt-cache 3 + 4K interval reused only 8,192
+    /// tokens after a 210K prompt changed at 25%; eight spread checkpoints reuse 155,648.  Opt-in; default unchanged.
+    bool prompt_cache_long = false;
     /// --serve: a prompt read from token 0 is also checkpointed at its first turn boundary - the end of the system
     /// prompt, which every chat of the same client shares - when that is at least N tokens (0 = never)
     int64_t prompt_cache_root = 2048;
@@ -904,6 +908,8 @@ void usage() {
                  "  --prompt-cache-spread  --serve: keep the checkpoints spread back from the conversation's end (dense\n"
                  "                       near it, thinner further back) instead of the most recently used: a client that\n"
                  "                       rewrites its history N tokens back reads about N again, not the whole conversation\n"
+                 "  --prompt-cache-long  --serve: for prompts of 128K+ tokens, keep up to eight checkpoints at useful\n"
+                 "                       edit scales (requires --prompt-cache and --prompt-cache-every; opt-in)\n"
                  "  --turn-token ID      --serve: the token that opens a chat turn (default 248045, <|im_start|>)\n"
                  "  --tail-role-token ID --serve: a turn of this role right before the last turn is left out of\n"
                  "                       the conversation checkpoint (a trailing effort turn; default -1 = off)\n"
@@ -2591,6 +2597,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--prompt-cache-tail") o.prompt_cache_tail = true;
         else if (a == "--prompt-cache-spread") o.prompt_cache_spread = true;
+        else if (a == "--prompt-cache-long") o.prompt_cache_long = true;
         else if (a == "--prompt-cache-every") o.prompt_cache_every = std::max(0LL, std::atoll(next("--prompt-cache-every")));
         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
         else if (a == "--turn-token") o.turn_token = std::atoll(next("--turn-token"));
@@ -2722,6 +2729,9 @@ int main(int argc, char** argv) {
         }
         }
     }
+    if (o.prompt_cache_long)
+        std::fprintf(stderr, "strata serve: prompt-cache-long option enabled (configured cap=%d)\n",
+                     o.prompt_cache);
     strata::core::set_coupled_draft(o.coupled_draft);
     {   // --host-core / STRATA_HOST_CORE, before the pool and the session pin any thread
         std::string hc = o.host_core;
@@ -9571,7 +9581,19 @@ int main(int argc, char** argv) {
             checks.push_back(std::move(c));
             const Clock::time_point te0 = Clock::now();
             const size_t before_evict = checks.size();
-            while ((int) checks.size() > o.prompt_cache) {
+            // A long prompt's old prefixes are more valuable than another near-tail checkpoint.  The opt-in raises
+            // only this chain's cap and switches eviction to the geometric policy; short prompts keep the configured
+            // behavior byte for byte.  `cur` is the complete request prompt here, so the threshold is stable across
+            // chunks and stages.
+            const int chain_cap = strata::program::conv_cache::long_prompt_checkpoint_cap(
+                o.prompt_cache, (int64_t) cur.size(), o.prompt_cache_long);
+            const bool spread = o.prompt_cache_spread ||
+                (o.prompt_cache_long && (int64_t) cur.size() >= strata::program::conv_cache::kLongPromptCacheMinTokens);
+            if (o.prompt_cache_long &&
+                (int64_t) cur.size() >= strata::program::conv_cache::kLongPromptCacheMinTokens)
+                std::fprintf(stderr, "strata serve: prompt-cache-long checkpoint=%lld prompt=%lld have=%zu cap=%d spread=%d\n",
+                             (long long) L, (long long) cur.size(), checks.size(), chain_cap, spread ? 1 : 0);
+            while ((int) checks.size() > chain_cap) {
                 std::vector<uint64_t> stamps;
                 std::vector<char> is_tail;
                 stamps.reserve(checks.size());
@@ -9592,11 +9614,19 @@ int main(int argc, char** argv) {
                     }
                 std::vector<int64_t> lens;
                 for (const ConvCheckpoint& k : checks) lens.push_back((int64_t) k.ids.size());
-                const size_t victim = o.prompt_cache_spread
-                    ? strata::program::conv_cache::spread_victim(lens.data(), stamps.data(), stamps.size(),
-                                                                 o.prompt_cache, tail_flags.get(), pin_flags.get())
-                    : strata::program::conv_cache::eviction_victim(stamps.data(), stamps.size(), o.prompt_cache,
-                                                                   tail_flags.get(), pin_flags.get());
+                // Long prompts use scale anchors, not the ordinary tail-heavy spread: an editing client
+                // rewrites around 25%, 50% or 75% of its history, and the dense near-tail chain spent all
+                // eight slots behind the edit.  Short prompts and --prompt-cache-spread are unchanged.
+                const bool long_mode = o.prompt_cache_long &&
+                    (int64_t) cur.size() >= strata::program::conv_cache::kLongPromptCacheMinTokens;
+                const size_t victim = long_mode
+                    ? strata::program::conv_cache::long_spread_victim(lens.data(), stamps.data(), stamps.size(),
+                                                                      chain_cap, tail_flags.get(), pin_flags.get())
+                    : spread
+                          ? strata::program::conv_cache::spread_victim(lens.data(), stamps.data(), stamps.size(),
+                                                                       chain_cap, tail_flags.get(), pin_flags.get())
+                          : strata::program::conv_cache::eviction_victim(stamps.data(), stamps.size(), chain_cap,
+                                                                         tail_flags.get(), pin_flags.get());
                 ckpt_pool.give(std::move(checks[victim]));   // (STRATA_CKPT_POOL; else nothing)
                 checks.erase(checks.begin() + (std::ptrdiff_t) victim);
             }
@@ -16011,6 +16041,19 @@ int main(int argc, char** argv) {
                 std::snprintf(read_txt, sizeof(read_txt), "%lld of %lld", (long long) read_n, (long long) fresh);
             else
                 std::snprintf(read_txt, sizeof(read_txt), "%lld", (long long) fresh);
+            if (o.prompt_cache_long &&
+                (int64_t) cur.size() >= strata::program::conv_cache::kLongPromptCacheMinTokens) {
+                std::string lens_txt;
+                for (const ConvCheckpoint& c : checks) {
+                    if (!lens_txt.empty()) lens_txt += ",";
+                    lens_txt += std::to_string(c.ids.size());
+                }
+                std::fprintf(stderr, "strata serve: prompt-cache-long: prompt=%lld, cap=%d, positions=[%s]\n",
+                             (long long) cur.size(),
+                             strata::program::conv_cache::long_prompt_checkpoint_cap(o.prompt_cache, (int64_t) cur.size(),
+                                                                                     true),
+                             lens_txt.c_str());
+            }
             std::fprintf(stderr, "strata serve: prompt %lld tokens = %lld reused + %s read in %.0f ms (%.1f tok/s), "
                                  "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld, %zu checkpoints%s\n",
                          (long long) n, (long long) resume, read_txt, prompt_ms,

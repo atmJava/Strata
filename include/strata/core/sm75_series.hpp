@@ -15,9 +15,9 @@
 // card where the PR said so for tests).  Nothing here changes a card that is not a 7.5: the check is the card's compute
 // capability (STRATA_EMULATE_CC=75 counts, so a 75-virtual build on an sm_86 card runs the series for tests).
 //
-// The numerics-changing Turing options are NOT part of this switch and keep their own explicit opt-ins:
-//   STRATA_SELECT_SIMT=1|2 (FP32 tiled block scorer), STRATA_PA_V2T=1 (v2 prompt attention), STRATA_PF_FUSED_SM75=1
-//   (fused int8 prompt experts), STRATA_BF16_TC=1 (FP16 tensor-core projections).
+// The numerics-changing Turing options are NOT part of this switch and keep their own controls:
+//   STRATA_SELECT_SIMT=1|2 (FP32 tiled block scorer), STRATA_PA_V2T=0 (select v1 prompt attention; v2 is the default),
+//   STRATA_PF_FUSED_SM75=1 (fused int8 prompt experts), STRATA_BF16_TC=1 (FP16 tensor-core projections).
 #pragma once
 
 #include "strata/core/emulate.hpp"

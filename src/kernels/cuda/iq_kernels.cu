@@ -1569,6 +1569,44 @@ template<typename dst_t> __device__ __forceinline__ dst_t cvt(float v);
 template<> __device__ __forceinline__ float cvt<float>(float v) { return v; }
 template<> __device__ __forceinline__ __half cvt<__half>(float v) { return __float2half(v); }
 
+// The decoders naturally produce eight adjacent values per thread. Storing them one by one made the
+// IQ3_XXS / IQ4_NL dequant kernels instruction-bound even though the output is contiguous; the fp16
+// paths emit one 16/8-byte store instead. Every call site below starts on at least an 8-byte boundary.
+template<typename dst_t>
+__device__ __forceinline__ void store4(dst_t* y, dst_t a, dst_t b, dst_t c, dst_t d) {
+    if constexpr (std::is_same_v<dst_t, __half>) {
+        const __half2 ab = __halves2half2(a, b), cd = __halves2half2(c, d);
+        *reinterpret_cast<uint2*>(y) = make_uint2(*reinterpret_cast<const uint32_t*>(&ab),
+                                                 *reinterpret_cast<const uint32_t*>(&cd));
+    } else {
+        y[0] = a;
+        y[1] = b;
+        y[2] = c;
+        y[3] = d;
+    }
+}
+
+template<typename dst_t>
+__device__ __forceinline__ void store8(dst_t* y, dst_t a, dst_t b, dst_t c, dst_t d, dst_t e, dst_t f, dst_t g,
+                                       dst_t h) {
+    if constexpr (std::is_same_v<dst_t, __half>) {
+        const __half2 ab = __halves2half2(a, b), cd = __halves2half2(c, d);
+        const __half2 ef = __halves2half2(e, f), gh = __halves2half2(g, h);
+        *reinterpret_cast<uint4*>(y) =
+            make_uint4(*reinterpret_cast<const uint32_t*>(&ab), *reinterpret_cast<const uint32_t*>(&cd),
+                       *reinterpret_cast<const uint32_t*>(&ef), *reinterpret_cast<const uint32_t*>(&gh));
+    } else {
+        y[0] = a;
+        y[1] = b;
+        y[2] = c;
+        y[3] = d;
+        y[4] = e;
+        y[5] = f;
+        y[6] = g;
+        y[7] = h;
+    }
+}
+
 template<typename dst_t>
 __device__ void dq_iq2_xxs(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     const block_iq2_xxs* x = (const block_iq2_xxs*) vx;
@@ -1615,10 +1653,12 @@ __device__ void dq_iq3_xxs(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     const uint32_t aux32 = gas[0] | (gas[1] << 16);
     const float d = (float) x[ibs].d * (0.5f + (aux32 >> 28)) * 0.5f;
     const uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * il) & 127];
+    dst_t v[8];
     for (int j = 0; j < 4; ++j) {
-        y[j + 0] = cvt<dst_t>(d * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f));
-        y[j + 4] = cvt<dst_t>(d * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f));
+        v[j + 0] = cvt<dst_t>(d * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f));
+        v[j + 4] = cvt<dst_t>(d * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f));
     }
+    store8(y, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
 }
 template<typename dst_t>
 __device__ void dq_iq3_s(const void* vx, int64_t ibs, dst_t* yy, int tid) {
@@ -1642,10 +1682,13 @@ __device__ void dq_iq4_nl(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     dst_t* y = yy + 32 * ib + 4 * il;
     const uint8_t* q4 = x[ib].qs + 4 * il;
     const float d = (float) x[ib].d;
+    dst_t v[8];
     for (int j = 0; j < 4; ++j) {
-        y[j + 0] = cvt<dst_t>(d * kvalues_iq4nl[q4[j] & 0xf]);
-        y[j + 16] = cvt<dst_t>(d * kvalues_iq4nl[q4[j] >> 4]);
+        v[j + 0] = cvt<dst_t>(d * kvalues_iq4nl[q4[j] & 0xf]);
+        v[j + 4] = cvt<dst_t>(d * kvalues_iq4nl[q4[j] >> 4]);
     }
+    store4(y, v[0], v[1], v[2], v[3]);
+    store4(y + 16, v[4], v[5], v[6], v[7]);
 }
 template<typename dst_t>
 __device__ void dq_q2_0(const void* vx, int64_t ibs, dst_t* yy, int tid) {
@@ -1694,20 +1737,25 @@ __device__ __forceinline__ void dq_dispatch(int ty, const void* vx, int64_t ibs,
     }
 }
 
-// flat: superblock i -> y + 256 i
+constexpr int DQ_WARPS = 4;
+
+// flat: superblock i -> y + 256 i. Four independent superblocks share one block so the one-warp
+// decoder does not run into Turing's resident-block limit.
 template<typename dst_t>
-__global__ void dequant_flat_kernel(int ty, const void* __restrict__ vx, dst_t* __restrict__ y) {
-    const int64_t i = blockIdx.x;
-    dq_dispatch<dst_t>(ty, vx, i, y + i * QK_K, threadIdx.x);
+__global__ void dequant_flat_kernel(int ty, const void* __restrict__ vx, dst_t* __restrict__ y, int64_t n_blocks) {
+    const int64_t i = (int64_t) blockIdx.x * DQ_WARPS + (threadIdx.x >> 5);
+    if (i >= n_blocks) return;
+    dq_dispatch<dst_t>(ty, vx, i, y + i * QK_K, threadIdx.x & 31);
 }
 // gate/up: superblock i of a role matrix (n_embd/256 per row) -> interleaved row 2r + parity
 __global__ void dequant_gu_kernel(int ty, const void* __restrict__ gate, const void* __restrict__ up, int64_t per_row,
-                                  __half* __restrict__ y) {
-    const int64_t i = blockIdx.x;
+                                  __half* __restrict__ y, int64_t n_blocks) {
+    const int64_t i = (int64_t) blockIdx.x * DQ_WARPS + (threadIdx.x >> 5);
+    if (i >= n_blocks) return;
     const int parity = blockIdx.y;
     const int64_t r = i / per_row, c = i % per_row;
     __half* dst = y + ((2 * r + parity) * per_row + c) * QK_K;
-    dq_dispatch<__half>(ty, parity ? up : gate, i, dst, threadIdx.x);
+    dq_dispatch<__half>(ty, parity ? up : gate, i, dst, threadIdx.x & 31);
 }
 
 // the types dq_dispatch dequantizes
@@ -1731,11 +1779,13 @@ int d_qk(int t) {
         default: return 0;
     }
 }
-bool gu_split(int t) {
-    switch (t) {
-#define STRATA_SP(T) case T: return kSplit<T>;
-        STRATA_GU_FMTS(STRATA_SP)
-#undef STRATA_SP
+// The 16-lane grouped gate/up kernels require both the split format and the exact 80-dot row layout:
+// (n_embd / qk) * groups per block == 80. The launch grid must use the same predicate as launch_gu<T>().
+bool gu_sub16_layout(const NativeExpertLayout& L) {
+    switch (L.gu_type) {
+#define STRATA_SUB16(T) case T: return kSplit<T> && (L.n_embd / Fmt<T>::qk) * Fmt<T>::ipb == 80;
+        STRATA_GU_FMTS(STRATA_SUB16)
+#undef STRATA_SUB16
         default: return false;
     }
 }
@@ -1944,7 +1994,7 @@ void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, con
                const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
                float* gate, float* up) {
     // the sub-16 rows (row_dot_80_sub16) assume 80 dots per row: (n_embd / qk) * ipb == 80.
-    const bool g_no_sub16_gu = ::strata::kernels::g_no_sub16_gu || (L.n_embd / Fmt<TG>::qk) * Fmt<TG>::ipb != 80;
+    const bool g_no_sub16_gu = ::strata::kernels::g_no_sub16_gu || !gu_sub16_layout(L);
     if constexpr (!kSplit<TG>) native_gu_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     else if (g_old_kernels) native_gu_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     else if constexpr (kStageIqGrid<TG>) {
@@ -1975,8 +2025,8 @@ bool launch_gu_swiglu(const NativeExpertLayout& L, int64_t gy, cudaStream_t s, c
         return false;
     } else {
         if (g_old_kernels || g_no_sub16_gu || L.n_embd != 2560 || L.n_ff % 32 != 0 || L.n_ff <= 0) return false;
-        // The 16-lane rows assume 80 dots a row, as launch_gu does.
-        if ((L.n_embd / Fmt<TG>::qk) * Fmt<TG>::ipb != 80) return false;
+        // The 16-lane rows assume the same 80-dot row layout as launch_gu.
+        if (!gu_sub16_layout(L)) return false;
         const dim3 grid((unsigned) (L.n_ff / 32), (unsigned) gy);
         bool stage = false;
         if constexpr (kStageIqGrid<TG>) stage = g_stage_grid && !(TG == 18 && !stage_tables_on());
@@ -2047,7 +2097,9 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
 
 void iq_dequant_f16(int t, const void* src, int64_t n, uint16_t* dst, void* stream) {
     if (n % 256 != 0 || !is_iq(t)) { std::fprintf(stderr, "iq_dequant_f16: bad arguments\n"); std::exit(1); }
-    dequant_flat_kernel<__half><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, (__half*) dst);
+    const int64_t blocks = n / QK_K;
+    dequant_flat_kernel<__half><<<(unsigned) ((blocks + DQ_WARPS - 1) / DQ_WARPS), DQ_WARPS * 32, 0, (cudaStream_t) stream>>>(
+        t, src, (__half*) dst, blocks);
     check("iq_dequant_f16");
 }
 
@@ -2059,20 +2111,57 @@ __global__ void embed_rows_kernel(int ty, const uint8_t* __restrict__ table, siz
     const uint8_t* row = table + (size_t) tokens[t] * row_bytes;
     dq_dispatch<float>(ty, row, b, y + (size_t) t * n_embd + b * QK_K, threadIdx.x);
 }
+
+// IQ3_S's 2560-wide production embedding has ten independent 256-value decoders per token.  The old grid used ten
+// one-warp blocks per token, capping occupancy at 32 active warps on Turing when its block limit was reached.  Here one
+// token's decoders share a block: ten warps at this shape give 60 resident warps with six blocks per SM, and the grid
+// is one-dimensional (the old grid.y also stopped at 65,535 tokens).  Each warp keeps the old decoder and destination
+// arithmetic, so the output bytes do not change.  Narrower embeddings use fewer warps; wider ones wrap over the same
+// row.  The host falls back to the old grid for A/B timing.
+__global__ void embed_rows_grouped_kernel(int ty, const uint8_t* __restrict__ table, size_t row_bytes,
+                                         const int32_t* __restrict__ tokens, int64_t n_embd, int64_t n_blocks,
+                                         float* __restrict__ y) {
+    const int64_t t = blockIdx.x;
+    const uint8_t* row = table + (size_t) tokens[t] * row_bytes;
+    float* out = y + (size_t) t * n_embd;
+    const int warp = threadIdx.x >> 5;
+    const int warps = blockDim.x >> 5;
+    for (int64_t b = warp; b < n_blocks; b += warps)
+        dq_dispatch<float>(ty, row, b, out + b * QK_K, threadIdx.x & 31);
+}
+
+bool g_embed_grouped = true;
 }  // namespace
 
 void iq_embed_rows(int t, const void* table, size_t row_bytes, const int32_t* tokens, int64_t n_tok, int64_t n_embd,
                    float* out, void* stream) {
     if (n_tok <= 0) return;
     if (n_embd % 256 != 0 || !embed_type_supported(t)) { std::fprintf(stderr, "iq_embed_rows: bad arguments\n"); std::exit(1); }
-    embed_rows_kernel<<<dim3((unsigned) (n_embd / 256), (unsigned) n_tok), 32, 0, (cudaStream_t) stream>>>(
-        t, (const uint8_t*) table, row_bytes, tokens, n_embd, out);
+    const int64_t n_blocks = n_embd / 256;
+    if (g_embed_grouped) {
+        // Turing has 64 warp slots per SM.  An exact one-warp-per-block grid is limited to 32 resident blocks, while
+        // 10 warps per block reaches 60 without spilling.  Cap the block at 32 warps for other embedding widths.
+        const int warps = (int) std::min<int64_t>(n_blocks, 32);
+        embed_rows_grouped_kernel<<<(unsigned) n_tok, 32 * warps, 0, (cudaStream_t) stream>>>(
+            t, (const uint8_t*) table, row_bytes, tokens, n_embd, n_blocks, out);
+    } else {
+        if (n_tok > 65535) {
+            std::fprintf(stderr, "iq_embed_rows: the one-warp-per-block A/B path takes at most 65,535 tokens\n");
+            std::exit(1);
+        }
+        embed_rows_kernel<<<dim3((unsigned) n_blocks, (unsigned) n_tok), 32, 0, (cudaStream_t) stream>>>(
+            t, (const uint8_t*) table, row_bytes, tokens, n_embd, out);
+    }
     check("iq_embed_rows");
 }
 
+void iq_set_embed_grouped(bool grouped) { g_embed_grouped = grouped; }
+
 void iq_dequant_f32(int t, const void* src, int64_t n, float* dst, void* stream) {
     if (n % 256 != 0 || !embed_type_supported(t)) { std::fprintf(stderr, "iq_dequant_f32: bad arguments\n"); std::exit(1); }
-    dequant_flat_kernel<float><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, dst);
+    const int64_t blocks = n / QK_K;
+    dequant_flat_kernel<float><<<(unsigned) ((blocks + DQ_WARPS - 1) / DQ_WARPS), DQ_WARPS * 32, 0, (cudaStream_t) stream>>>(
+        t, src, dst, blocks);
     check("iq_dequant_f32");
 }
 
@@ -2080,8 +2169,9 @@ void iq_dequant_gu_f16(int t, const void* gate, const void* up, int64_t n_ff, in
     // checked like the other entry points: an unknown type used to leave `dst` unwritten, a wrong prompt and no error
     if (n_embd % 256 != 0 || !is_iq(t)) { std::fprintf(stderr, "iq_dequant_gu_f16: type %d / %lld\n", t, (long long) n_embd); std::exit(1); }
     const int64_t per_row = n_embd / 256;
-    dequant_gu_kernel<<<dim3((unsigned) (n_ff * per_row), 2), 32, 0, (cudaStream_t) stream>>>(t, gate, up, per_row,
-                                                                                           (__half*) dst);
+    const int64_t blocks = n_ff * per_row;
+    dequant_gu_kernel<<<dim3((unsigned) ((blocks + DQ_WARPS - 1) / DQ_WARPS), 2), DQ_WARPS * 32, 0,
+                        (cudaStream_t) stream>>>(t, gate, up, per_row, (__half*) dst, blocks);
     check("iq_dequant_gu_f16");
 }
 
@@ -2478,7 +2568,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const auto* X = (const block_q8_1*) x_q8_1;
     const bool v1 = g_grouped_v1;
     const int64_t gy = (v1 || grid_groups <= 0 || grid_groups > cap_groups) ? cap_groups : grid_groups;
-    const int gu_rows = (!g_old_kernels && !g_no_sub16_gu && L.n_embd == 2560 && gu_split(L.gu_type)) ? 16 : GU_ROWS;
+    const int gu_rows = (!g_old_kernels && !g_no_sub16_gu && L.n_embd == 2560 && gu_sub16_layout(L)) ? 16 : GU_ROWS;
     const dim3 ggu((unsigned) ((2 * L.n_ff + gu_rows - 1) / gu_rows), (unsigned) gy);
     const int em0 = (grid_groups > 0 && grid_groups < cap_groups) ? 0 : exp_mode();
     bool gu_done = false;

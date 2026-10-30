@@ -667,6 +667,7 @@ system prompt with a billing header that changes on every request; the server pi
 | `--prompt-cache N` | Number of checkpoints (`0` = off, which also disables parking). |
 | `--prompt-cache-every N`, `--prompt-cache-root N`, `--turn-token ID` | Checkpoint interval, the system-prompt checkpoint (`0` = none) and the turn token. |
 | `--prompt-cache-spread` (opt-in) | The checkpoint that leaves is the one whose removal leaves the smallest gap, so the kept points thin out geometrically back from the end. An agent that rewrites its history a few thousand tokens back then resumes near the edit instead of at the system prompt. Same RAM. |
+| `--prompt-cache-long` (opt-in) | For prompts of 128K tokens or more, keep up to eight checkpoints at useful edit scales: about 1/8, 1/4, 1/2, 3/4, 7/8 and 15/16 of the prompt, plus the shared root and newest point. This helps histories that are compressed or edited in the middle rather than only near the end. It uses more host RAM (about 118 MB per checkpoint on the measured Qwen geometry); short prompts keep the configured policy. Requires `--prompt-cache` and `--prompt-cache-every`. |
 | `"strata_checkpoint": false` (per request) | A one-shot request that no later request continues saves no checkpoints and keeps no session. |
 | `"strata_prefix": {"messages": 1}` (per request, opt-in) | One long document, many questions. Marks where the document ends: `{"messages": 1}`, `{"message": 0, "chars": 210000}` or `{"tokens": 12345}`. The checkpoint at the boundary is pinned, so 20 questions cost one read of the document. One pinned prefix at a time per engine; needs `--prompt-cache 3` or more; a malformed field is a 400. See [RESEARCH_RUNS.md](RESEARCH_RUNS.md). |
 | `--conversation-cache-mib N`, `--conversation-cache-slots N` | Park conversations in a bounded host-RAM cache so alternating requests (controller and worker histories, sub-agents) reuse their prompts. Without `--conversation-cache-mib` the budget is 40% of the RAM left above `--conversation-cache-min-free-mib` once the model is loaded, at most 8192 MiB in steps of 256, off when under 1024; the engine log says which. `0` turns it off. It preserves histories; it does not run requests at once. |
@@ -982,8 +983,8 @@ equal to the ones they replace. Nobody on the team has an sm_75 card to confirm 
 that wins in both directions: `STRATA_SM75_IL`, `STRATA_SM75_EXP`, `STRATA_GR_UP75` / `STRATA_GR_DOWN_TG`, `STRATA_SCORES_HALVE`,
 `STRATA_TOPK_SPLIT`, `STRATA_TOPK_SAMPLE`, `STRATA_ATTN_V3`, `STRATA_Q2_WARP`, `STRATA_FUSE_WAIT=2`, `STRATA_QIL`,
 `STRATA_TC_SM75`, `STRATA_PA_V1_PREFETCH`, `STRATA_SCORES_THREAD` (a thread-per-head block scorer; `=1` works on any CUDA card).
-Options that change answers stay separate: `STRATA_SELECT_SIMT=1|2`, `STRATA_PA_V2T=1`, `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1`
-(Q2_0 pack, 7.5 card only) and `STRATA_BF16_TC=1` with `STRATA_XN_F16`.
+Options that change answers stay separate: `STRATA_SELECT_SIMT=1|2`, `STRATA_PA_V2T=0` (select v1; v2 is the default),
+`STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1` (Q2_0 pack, 7.5 card only) and `STRATA_BF16_TC=1` with `STRATA_XN_F16`.
 
 ---
 

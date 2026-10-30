@@ -264,6 +264,17 @@ if(STRATA_ENABLE_CUDA)
     add_executable(qsa_prompt_attn_parity src/kernels/qsa_prompt_attn_parity.cpp)
     target_include_directories(qsa_prompt_attn_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(qsa_prompt_attn_parity PRIVATE strata_kernels CUDA::cudart)
+    if(STRATA_BUILD_TESTS)
+      add_test(NAME qsa_prompt_attn_parity COMMAND qsa_prompt_attn_parity 32768 2048 3)
+      set_tests_properties(qsa_prompt_attn_parity PROPERTIES TIMEOUT 120)
+    endif()
+    add_executable(prefill_gr_broadcast_test tests/cuda/prefill_gr_broadcast_test.cpp)
+    target_include_directories(prefill_gr_broadcast_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(prefill_gr_broadcast_test PRIVATE strata_prefill CUDA::cudart)
+    if(STRATA_BUILD_TESTS)
+      add_test(NAME prefill_gr_broadcast_test COMMAND prefill_gr_broadcast_test)
+      set_tests_properties(prefill_gr_broadcast_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endif()
   endif()
   # #512: the top-k's active-block bound (Turing's dispatch, forced on any card by STRATA_TOPK_ACTIVE_ANY) against
   # the capacity rule, selected ids bitwise
@@ -316,6 +327,11 @@ if(STRATA_ENABLE_CUDA)
     add_executable(qsa_rows_bench EXCLUDE_FROM_ALL src/kernels/qsa_rows_bench.cpp)
     target_include_directories(qsa_rows_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(qsa_rows_bench PRIVATE strata_kernels CUDA::cudart)
+    # Transport-only A/B for a layer split's [T, 10240] FP32 hand-off:
+    # direct peer copy versus the current pinned-host download/upload route.
+    add_executable(nvlink_handoff_bench EXCLUDE_FROM_ALL tests/cuda/nvlink_handoff_bench.cu)
+    target_include_directories(nvlink_handoff_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(nvlink_handoff_bench PRIVATE CUDA::cudart)
   endif()
   # the same on CUDA: the tensor-core scorer (sm_80+) or the FP32 tiled one (below sm_80, and forced on any card by
   # STRATA_QSA_WARP=1 in the second test) against the warp kernel and FP64, at 32K and 131K
@@ -1243,7 +1259,7 @@ if(STRATA_NATIVE_EXPERTS)
   endif()
   # The production Qwen3.8-Flash-Next expert formats and DFlash2's Q8_0 matrices.  Other formats stay on the generic
   # dequantize-to-FP16 prompt path instead of loading MMQ kernels that this server does not use.
-  set(_strata_mmq_types q2_0 iq3_xxs iq4_nl q8_0)
+  set(_strata_mmq_types q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl q8_0)
   if(STRATA_ENABLE_CUDA)
     # prompt-speed plan step 2b: llama.cpp's MMQ kernels (ggml-cuda, MIT) for the prompt path's experts, compiled
     # from the same checkout as ggml above - only mmq.cuh's instances for the packs' types and the quantizer, with
@@ -1289,6 +1305,13 @@ if(STRATA_NATIVE_EXPERTS)
       target_link_libraries(prefill_mmq_scatter_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target})
       add_test(NAME prefill_mmq_scatter_test COMMAND prefill_mmq_scatter_test)
       set_tests_properties(prefill_mmq_scatter_test PROPERTIES TIMEOUT 120)
+      # The IQ2/IQ3 gate/up formats added for the production native packs, through the full MMQ prompt chain.
+      add_executable(mmq_expert_parity tests/cuda/mmq_expert_parity.cpp)
+      target_link_libraries(mmq_expert_parity PRIVATE strata_mmq ggml-base CUDA::cudart)
+      foreach(_type iq2_xxs iq2_xs iq2_s iq3_s)
+        add_test(NAME mmq_expert_parity_${_type} COMMAND mmq_expert_parity ${_type})
+        set_tests_properties(mmq_expert_parity_${_type} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+      endforeach()
     endif()
     # the routed-expert products (MMQ) timed at the prompt path's shapes (16 experts a launch)
     add_executable(mmq_expert_bench src/prefill/mmq_expert_bench.cpp)

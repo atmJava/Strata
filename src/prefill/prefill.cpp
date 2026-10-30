@@ -82,6 +82,8 @@ bool gather_native_group(const GatherGroup&, size_t, size_t, size_t, size_t, voi
 }
 void gather_strata_q2(const uint8_t*, void*, void*, void*) {}
 void swiglu(const float*, float*, int64_t, int64_t, bool, void*) {}
+bool swiglu_quantize_supported(int) { return false; }
+void swiglu_quantize(const float*, void*, int64_t, int64_t, bool, int, void*) {}
 void iota(int32_t*, int64_t, void*) {}
 bool whole_tiles(int, int64_t, int) { return false; }
 }  // namespace strata::prefill::mmq
@@ -114,6 +116,18 @@ constexpr int64_t N = 2560, HC = 4, D = N * HC, LR = 320, K = 10, NE = 512;
 constexpr int64_t C = 10240, ZV = 6144, HV = 48;
 // plan v0.3 P6: staging holds the largest blob of the pack (a native pack's blobs differ per layer)
 inline int64_t MAXBLOB() { return (int64_t) strata::kernels::cpu::expert_layout().max_blob; }
+// 吞吐优化：MMQ 只消费 q8_1 的 H。D4 布局直接融合 SwiGLU 与量化，省掉 H 的 FP32 一写一读和一次 launch；
+// RTX 2080 Ti 上 4K/40K/400K 行分别为 0.094/0.054、0.884/0.502、8.776/5.023 ms（约 1.75x）。
+// 不支持的 q8_1 布局仍保留原两段路径，输出字节由 mmq_expert_parity 对 split/interleaved 两种 GU 布局校验。
+inline void moe_swiglu_quantize(const float* gu, float* h, void* hq, int64_t rows, int64_t n_ff, bool interleaved,
+                                int ggml_type, void* stream) {
+    if (mmq::swiglu_quantize_supported(ggml_type)) {
+        mmq::swiglu_quantize(gu, hq, rows, n_ff, interleaved, ggml_type, stream);
+    } else {
+        mmq::swiglu(gu, h, rows, n_ff, interleaved, stream);
+        mmq::quantize(h, nullptr, hq, ggml_type, n_ff, n_ff, rows, stream);
+    }
+}
 constexpr int STAGE = 8;           // host->device expert staging ring (chunks below stream_all_min())
 // The staged walk's ring when its MMQ groups take the staged experts too: two groups, so a slot is refilled only after
 // the group that read it was gathered (the walk stages at most STAGE_GRP - MMQ_GROUP - 1 entries ahead)
@@ -325,6 +339,19 @@ inline bool bf16x2(bool f16_io) { return bf16x2_mode(f16_io) != 0; }
 // behind them.  The same bytes land in the same rows before the next stage's first kernel: exact.  No device memory;
 // the events and the existing two pinned buffers per stage only.
 static constexpr int kHandPiecesMax = 16;
+// STRATA_HANDOFF_P2P=1 (opt-in): copy from the producing stage's R directly into the consuming stage's R instead of
+// staging through pinned host memory.  A 7,936 x 10,240 FP32 hand-off (325 MB) measured 6.9 ms over this 2080 Ti
+// pair's two 25.781 GB/s NVLink links, against 53.2 ms through pinned host memory (43.9 vs 5.7 GiB/s, 7.7x).
+// The destination event lets the consuming stream start without a host synchronization.  The complete chunk is still
+// copied before its first kernel, so this changes transport only; if either peer direction is unavailable, fall back
+// to the original host route without changing results.
+static bool handoff_p2p_requested() {
+    static const bool v = [] {
+        const char* e = std::getenv("STRATA_HANDOFF_P2P");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
 static int handoff_pipe_pieces() {
     static const int v = [] {
         const char* e = std::getenv("STRATA_HANDOFF_PIPE");
@@ -339,13 +366,14 @@ static void handoff_piece(int64_t T, int P, int i, int64_t& r0, int64_t& nr) {
     r0 = std::min<int64_t>(T, (int64_t) i * per);
     nr = std::min<int64_t>(T, r0 + per) - r0;
 }
-// STRATA_HANDOFF_PIPE: the next stage's chunks run on one thread of the stage's own, started once and pinned once
-// (std::async started a thread per chunk: ~1 ms from the hand-off to the next stage's first call, measured with nsys).
-// The futures are the same (run_impl's result, or what it threw), so the chain's waits do not change.
+// STRATA_HANDOFF_PIPE or STRATA_HANDOFF_P2P: the next stage's chunks run on one thread of the stage's own, started
+// once and pinned once (std::async started a thread per chunk: ~1 ms from the hand-off to the next stage's first
+// call, measured with nsys).  The futures are the same (run_impl's result, or what it threw), so the chain's waits do
+// not change.
 // (STRATA_HANDOFF_PIPE_WORKER=0: a thread per chunk again, for an A/B of the two halves.)
 static bool handoff_pipe_worker() {
     static const bool v = [] { const char* e = std::getenv("STRATA_HANDOFF_PIPE_WORKER"); return !e || std::atoi(e) != 0; }();
-    return handoff_pipe_pieces() > 0 && v;
+    return (handoff_pipe_pieces() > 0 || handoff_p2p_requested()) && v;
 }
 struct HandWorker {
     std::mutex mu;
@@ -988,6 +1016,8 @@ struct Prefill::Impl {
     int hand_pieces = 0;
     cudaEvent_t hand_done[2] = {};
     cudaEvent_t hand_ev[2][kHandPiecesMax] = {};
+    bool hand_p2p = false;             // STRATA_HANDOFF_P2P: the next stage reads this stage's R over peer access
+    bool hand_p2p_checked = false;     // both directions were tested once; false keeps the host route
     std::unique_ptr<HandWorker> hand_worker;   // STRATA_HANDOFF_PIPE: the next stage's chunks' thread (lazily)
     // C-4: the chunk's token ids on the device, for one batched embedding gather
     int32_t* tok_dev = nullptr;
@@ -1156,7 +1186,10 @@ uint64_t qsa_set_bytes(size_t T, int64_t cap, int64_t max_blocks, int64_t sel_ba
 // Step 2b: which layers' experts go through MMQ (both weight types covered; the Strata Q2_0 pack always - its blob
 // is converted to GGUF Q2_0 blocks on the gather), whether any layer keeps the FP16 path (IQ1_M), and the largest
 // gate/up and down matrices a group buffer slot holds.  STRATA_PREFILL_MMQ=0: the FP16 path everywhere (the A/B).
-constexpr int MMQ_GROUP = 16;                  // experts per MMQ launch (the gather is per expert, as blobs arrive)
+// Experts per MMQ launch.  The gather is per expert as blobs arrive.  A 64-expert group was also measured at R=145:
+// isolated MMQ improved, but an adjacent 36K production A/B made the MoE half only 0.8% faster and the full GPU
+// timeline 1.9% slower, so 16 remains the default and the larger group is not kept.
+constexpr int MMQ_GROUP = 16;
 // MMQ reads up to one 256-value tile past a matrix's last row when the row length is not a multiple of it (the down
 // product: 640 values).  Those bytes meet zero activations, which is harmless only if they decode to finite numbers -
 // llama.cpp zero-pads after every tensor, and so does a group buffer: this many zeroed bytes follow its last expert.
@@ -1167,7 +1200,7 @@ struct MmqPlan {
     std::vector<char> fo;                      // per layer: no MMQ here but the native fused kernels cover its formats
                                                // (gfx11: UD-Q4_K_XL's Q4_K / Q5_K and Q5_1 / Q8_0 experts, STRATA_PF_FUSED=1)
     size_t gu_max = 0, d_max = 0;
-    // STRATA_MMQ_GROUP_SORT=1 (without STRATA_MMQ_RESIDENT_SORT_NE): per MMQ layer, whether both products' 16-expert
+    // STRATA_MMQ_GROUP_SORT=1 (without STRATA_MMQ_RESIDENT_SORT_NE): per MMQ layer, whether both products' full-group
     // launches run whole tiles on every visible GPU (mmq::whole_tiles), so its full groups may be taken in row-count order
     std::vector<char> group_sort;
 };
@@ -1285,14 +1318,14 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
             err = "prefill: the layer split's hand-off buffers";
             return false;
         }
-    if (next_ != nullptr && handoff_pipe_pieces() > 0 && m.hand_pieces == 0) {   // events only: no device memory
+    if (next_ != nullptr && (handoff_pipe_pieces() > 0 || handoff_p2p_requested()) && m.hand_pieces == 0) {
         bool ok = true;
         auto make = [](cudaEvent_t& e) { return e != nullptr || cudaEventCreateWithFlags(&e, cudaEventDisableTiming) == cudaSuccess; };
         for (int b = 0; b < 2; ++b) {   // (a retry after a failed init keeps the events it made)
             ok = ok && make(m.hand_done[b]);
             for (int i = 0; ok && i < handoff_pipe_pieces(); ++i) ok = make(m.hand_ev[b][i]);
         }
-        if (!ok) { err = "prefill: the layer split's hand-off events (STRATA_HANDOFF_PIPE)"; return false; }
+        if (!ok) { err = "prefill: the layer split's hand-off events"; return false; }
         m.hand_pieces = handoff_pipe_pieces();
     }
     if (m.tok_dev == nullptr) {
@@ -2553,7 +2586,18 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         const auto tsetup = Clock::now();
         // ---- embeddings, broadcast to the four streams - or, in a later stage of a layer split, the rows the
         // previous stage handed on
-        if (hand_in_ != nullptr && hand_ev_ != nullptr) {
+        if (hand_in_ != nullptr && hand_p2p_) {
+            // P2P hands the rows straight into this stage's R.  The producing stage records `hand_ev_` after the
+            // peer copy on its stream; waiting here makes the rows visible before any attention or MoE kernel reads
+            // them and keeps all bytes and indices unchanged.  A failed wait is fatal: silently reading old R would
+            // produce plausible but wrong output.
+            const auto ev = *static_cast<const cudaEvent_t*>(hand_ev_);
+            if (cudaStreamWaitEvent(m.cs, ev, 0) != cudaSuccess) {
+                err = std::string("prefill: the layer split's P2P hand-off wait failed: ") +
+                      cudaGetErrorString(cudaGetLastError());
+                return false;
+            }
+        } else if (hand_in_ != nullptr && hand_ev_ != nullptr) {
             // STRATA_HANDOFF_PIPE: each piece's upload waits on the GPU for its download on the stage before.  The
             // stage before split the chunk it handed on (n rows); one chunk here is all of it, otherwise (a smaller
             // chunk here) every piece is waited for before the one copy.
@@ -3416,8 +3460,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     // fused_ring() sized the ring and the buffers for it
                     const bool no_peer = !core::peer_portable();
                     const bool fused_only = mmq_plan().any && mmq_plan().fo[(size_t) l];
+                    const bool fused_native_ok = fused::native_supported(mmq_gt, mmq_dt);
                     const bool fused_nat = (use_mmq || fused_only) && stream_all && no_peer && lay.native &&
-                                           fused::native_supported(mmq_gt, mmq_dt);
+                                           fused_native_ok;
                     const bool fused_l = (use_mmq && stream_all && no_peer && !lay.native && fused::enabled()) || fused_nat;
                     // #583 / #954: the fused layout's GU/H/Xq hold the grouping tables and the int8 rows, sized for
                     // stream_all_min() - 1 tokens of MMQ's rows, so a layer that takes MMQ or the FP16 path at the FULL
@@ -4102,8 +4147,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     gu.n = ngx; gu.xq = P.Xq; gu.bounds = P.bounds + j0; gu.ids = P.ident;
                                     gu.total_rows = rows_peer; gu.max_rows = maxr; gu.dst = P.GU; gu.ld_dst = 1280;
                                     P.run_ctx->run(gu, ps);
-                                    mmq::swiglu(P.GU + r0 * 1280, P.H + r0 * 640, nr, 640, !lay.native, ps);
-                                    mmq::quantize(P.H + r0 * 640, nullptr, P.Hq, mmq_dt, 640, 640, nr, ps);
+                                    moe_swiglu_quantize(P.GU + r0 * 1280, P.H + r0 * 640, P.Hq, nr, 640,
+                                                        !lay.native, mmq_dt, ps);
                                     mmq::Product dn;
                                     dn.w = P.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
                                     dn.n = ngx; dn.xq = P.Hq; dn.bounds = P.bounds + n + 1 + g2 * (MMQ_GROUP + 1);
@@ -4293,9 +4338,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;
                                 gu.total_rows = T * K; gu.max_rows = maxr; gu.dst = m.GU; gu.ld_dst = 1280;
                                 m.mmq_ctx->run(gu, m.cs);
-                                mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
                                 pt.mark(kPfGemmD, cs);
-                                mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs);
+                                moe_swiglu_quantize(m.GU + r0 * 1280, m.H + r0 * 640, m.Hq, nr, 640,
+                                                    !lay.native, mmq_dt, m.cs);
                                 mmq::Product dn;
                                 dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
                                 dn.n = ngx; dn.xq = m.Hq; dn.bounds = m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1);
@@ -4538,7 +4583,68 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             // The current hand-off slot was used two chunks ago.
             float* h = m.hand[hand_buf_];
             const int hp = m.hand_pieces;
-            if (hp > 0) {
+            if (handoff_p2p_requested() && !m.hand_p2p_checked) {
+                m.hand_p2p_checked = true;
+                const int peer_dev = next_->impl_->device;
+                int can_send = 0, can_receive = 0, previous_dev = 0;
+                cudaGetDevice(&previous_dev);
+                const bool capable =
+                    peer_dev >= 0 && peer_dev != m.device &&
+                    cudaDeviceCanAccessPeer(&can_send, m.device, peer_dev) == cudaSuccess &&
+                    cudaDeviceCanAccessPeer(&can_receive, peer_dev, m.device) == cudaSuccess && can_send && can_receive;
+                if (capable) {
+                    // Enable both directions as requested by the hardware check.  This stage only sends, but a
+                    // symmetric setup makes the contract explicit and is the same operation a future return path uses.
+                    cudaSetDevice(m.device);
+                    const cudaError_t send = cudaDeviceEnablePeerAccess(peer_dev, 0);
+                    cudaSetDevice(peer_dev);
+                    const cudaError_t receive = cudaDeviceEnablePeerAccess(m.device, 0);
+                    cudaSetDevice(previous_dev);
+                    auto enabled = [](cudaError_t e) { return e == cudaSuccess || e == cudaErrorPeerAccessAlreadyEnabled; };
+                    m.hand_p2p = enabled(send) && enabled(receive);
+                    if (send != cudaSuccess || receive != cudaSuccess)
+                        cudaGetLastError();   // clear "already enabled" and any rejected direction
+                }
+                if (m.hand_p2p)
+                    std::fprintf(stderr, "strata prefill: layer split hand-off uses P2P (CUDA%d -> CUDA%d, "
+                                         "STRATA_HANDOFF_P2P=1)\n", m.device, peer_dev);
+                else
+                    std::fprintf(stderr, "strata prefill: layer-split P2P unavailable (CUDA%d -> CUDA%d); "
+                                         "falling back to pinned host memory\n", m.device, peer_dev);
+            }
+            bool p2p = handoff_p2p_requested() && m.hand_p2p;
+            bool host_piped_events = false;
+            if (p2p) {
+                if (on_stage_chunk && !on_stage_chunk(p0 + T, err)) return false;
+                // Unlike the two host slots, there is one destination R.  Wait for the successor's previous chunk
+                // before writing it; this is the same dependency the host route enforces after its download.
+                if (next_run_.valid() && !next_run_.get()) { err = next_err_; return false; }
+                next_err_.clear();
+                bool ok = cudaMemcpyPeerAsync(next_->impl_->R, next_->impl_->device, m.R, m.device,
+                                              (size_t) T * D * 4, m.cs) == cudaSuccess;
+                if (!ok) {
+                    // An immediate API refusal (driver/IOMMU) can still use the exact host route.  A later async
+                    // fault remains fatal rather than being hidden as a successful prefill.
+                    cudaGetLastError();
+                    m.hand_p2p = false;
+                    p2p = false;
+                    std::fprintf(stderr, "strata prefill: the layer-split P2P copy was refused; "
+                                         "falling back to pinned host memory\n");
+                } else {
+                    ok = cudaEventRecord(m.hand_done[hand_buf_], m.cs) == cudaSuccess;
+                    if (!ok) {
+                        err = std::string("prefill: the layer split's P2P hand-off: ") +
+                              cudaGetErrorString(cudaGetLastError());
+                        return false;
+                    }
+                }
+                if (!ok && (cudaMemcpyAsync(h, m.R, (size_t) T * D * 4, cudaMemcpyDeviceToHost, m.cs) != cudaSuccess ||
+                            cudaStreamSynchronize(m.cs) != cudaSuccess)) {
+                    err = std::string("prefill: the layer split's hand-off: ") + cudaGetErrorString(cudaGetLastError());
+                    return false;
+                }
+            } else if (hp > 0) {
+                host_piped_events = true;
                 // STRATA_HANDOFF_PIPE: the pieces' downloads stay queued; the host waits for the chunk's work only (the
                 // state on_stage_chunk saves, the error check), the next stage's uploads wait on the pieces' events
                 bool ok = cudaEventRecord(m.hand_done[hand_buf_], m.cs) == cudaSuccess;
@@ -4561,12 +4667,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             }
             // Wait only for the DIRECT successor's previous chunk. That successor
             // may already have forwarded its older chunk to later GPUs.
-            if (on_stage_chunk && !on_stage_chunk(p0 + T, err)) return false;
-            if (next_run_.valid() && !next_run_.get()) { err = next_err_; return false; }
-            next_err_.clear();
-            next_->hand_in_ = h;
-            next_->hand_ev_ = hp > 0 ? static_cast<const void*>(m.hand_ev[hand_buf_]) : nullptr;
-            next_->hand_pieces_ = hp;
+            if (!p2p) {
+                if (on_stage_chunk && !on_stage_chunk(p0 + T, err)) return false;
+                if (next_run_.valid() && !next_run_.get()) { err = next_err_; return false; }
+                next_err_.clear();
+            }
+            next_->hand_in_ = p2p ? next_->impl_->R : h;
+            next_->hand_p2p_ = p2p;
+            next_->hand_ev_ = p2p ? static_cast<const void*>(&m.hand_done[hand_buf_])
+                                  : host_piped_events ? static_cast<const void*>(m.hand_ev[hand_buf_]) : nullptr;
+            next_->hand_pieces_ = p2p ? 1 : hp;
             next_->single_chunk_ = single_chunk;
             next_->pipe_chunked_ = pipe_chunked;
             if (handoff_pipe_worker()) {
@@ -4976,6 +5086,7 @@ int64_t Prefill::lm_prepare_chain(int64_t n, std::string& why) {
     for (Prefill* p = next_; p != nullptr; p = p->next_) {
         p->hand_in_ = nullptr;
         p->hand_ev_ = nullptr;
+        p->hand_p2p_ = false;
         p->hand_pieces_ = 0;
     }
     int64_t cap = 0;
@@ -5413,9 +5524,8 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
             gu.n = ngx; gu.xq = m.Xq; gu.bounds = d_bounds + gp.b_at; gu.ids = m.ids_identity;
             gu.total_rows = gp.nr; gu.max_rows = gp.maxr; gu.dst = m.GU; gu.ld_dst = 1280;
             m.mmq_ctx->run(gu, cs);
-            mmq::swiglu(m.GU, m.H, gp.nr, 640, !lay.native, cs);
             pt.mark(kPfGemmD, cs);
-            mmq::quantize(m.H, nullptr, m.Hq, mmq_dt, 640, 640, gp.nr, cs);
+            moe_swiglu_quantize(m.GU, m.H, m.Hq, gp.nr, 640, !lay.native, mmq_dt, cs);
             mmq::Product dn;
             dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
             dn.n = ngx; dn.xq = m.Hq; dn.bounds = d_bounds + gp.b_at; dn.ids = m.ids_identity;

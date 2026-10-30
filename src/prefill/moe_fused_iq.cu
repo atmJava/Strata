@@ -597,7 +597,10 @@ bool native_supported(int gu_type, int d_type) {
     if (!d.ok || !d_covered(d_type)) return false;
     // Turing: the production IQ3_XXS / IQ4_NL pair that dev_info set up.
     if (d.t75 && !(gu_type == T_IQ3_XXS && d_type == T_IQ4_NL)) return false;
-    return requested();
+    // The native kernels have their own setup and coverage checks.  Do not route this through requested(): that asks
+    // the Q2_0 kernels' available(), which on sm_75 also requires STRATA_PF_FUSED_SM75 and would reject the native IQ
+    // pair even though STRATA_PF_FUSED=1 set it up here.
+    return env == 1;
 }
 
 void quantize_act_native(const float* x, int64_t rows, int64_t cols, void* xa, void* stream) {

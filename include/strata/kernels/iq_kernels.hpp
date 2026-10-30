@@ -28,9 +28,12 @@ void iq_mmvq(int ggml_type, const void* w, const void* x_q8_1, float* y, int n_i
 void iq_dequant_f16(int ggml_type, const void* src, int64_t n, uint16_t* dst, void* stream);
 void iq_dequant_f32(int ggml_type, const void* src, int64_t n, float* dst, void* stream);
 /// Rows `tokens[0..n_tok)` (device ids) of a GGUF embedding table (`row_bytes` per row; the table may be mapped
-/// host memory) dequantized to fp32, `n_embd` per row (a multiple of 256).
+/// host memory) dequantized to fp32, `n_embd` per row (a multiple of 256).  The default groups a row's 256-value
+/// blocks into one block, which removes the per-sub-block launch/scheduling overhead; the row is unchanged bit for bit.
 void iq_embed_rows(int ggml_type, const void* table, size_t row_bytes, const int32_t* tokens, int64_t n_tok,
                    int64_t n_embd, float* out, void* stream);
+/// Benchmark/A-B only: false runs the old one-warp-per-256-values launch.  Production keeps the default (true).
+void iq_set_embed_grouped(bool grouped);
 /// One expert's gate and up matrices (n_ff rows of n_embd each) into the interleaved fp16 layout the prompt path
 /// uses: row 2r = gate row r, row 2r+1 = up row r.
 void iq_dequant_gu_f16(int ggml_type, const void* gate, const void* up, int64_t n_ff, int64_t n_embd, uint16_t* dst,

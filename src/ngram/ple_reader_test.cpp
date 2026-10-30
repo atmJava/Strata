@@ -3,6 +3,9 @@
 //   ple_reader_test --selftest [--dir D]        synthetic table file; CPU and disk only, no model, no GPU
 //   ple_reader_test --gguf SHARD2 [--rows N]    the real table: Direct vs Mmap bytes for N random rows (+ the
 //                                               16 rows of every token in --tokens FILE), with read latencies
+//   ple_reader_test --gguf SHARD2 --batch-tokens N [--inflight Q]
+//                                               one production-sized gather_batch, repeated three times on fresh
+//                                               random rows; compares SSD queue depths without a model
 //
 // Every row the synthetic table holds encodes its own index, so a wrong offset, a straddle mishandled or a
 // dedup slot mixed up shows as a mismatch rather than as plausible data.
@@ -682,6 +685,37 @@ int real(const std::string& gguf, int n_random, const std::string& tokens_path, 
     return g_fail ? 1 : 0;
 }
 
+int batch_bench(const std::string& gguf, int n_tokens, uint32_t inflight) {
+    k::PleTable table;
+    k::PleIoOptions io;
+    io.cache_rows = 0;   // this measures table reads, not rows the process had already decoded
+    io.max_inflight = inflight;
+    std::string err;
+    if (!table.open(gguf, err, io)) {
+        std::fprintf(stderr, "open: %s\n", err.c_str());
+        return 2;
+    }
+    const size_t n_rows = (size_t) n_tokens * k::PLE_N_HEADS;
+    std::vector<uint32_t> rows(n_rows);
+    std::vector<float> out((size_t) n_tokens * k::NG_N_EMBD);
+    std::mt19937_64 rng(0x504c4550524f4d50ull);
+    std::vector<double> ms;
+    for (int rep = 0; rep < 3; ++rep) {
+        // Fresh table-wide rows in each repetition: direct reads cannot be served by the process's row cache.
+        for (auto& row : rows) row = (uint32_t) (rng() % table.rows());
+        const double t0 = now_us();
+        if (!table.gather_batch(rows.data(), (size_t) n_tokens, out.data(), err)) {
+            std::fprintf(stderr, "gather_batch: %s\n", err.c_str());
+            return 1;
+        }
+        ms.push_back((now_us() - t0) / 1000.0);
+    }
+    std::sort(ms.begin(), ms.end());
+    std::printf("batch tokens %d, %zu rows, inflight %u: median %.1f ms (%.1f us/token)\n%s\n",
+                n_tokens, n_rows, inflight, ms[1], 1000.0 * ms[1] / (double) n_tokens, table.io_report().c_str());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -689,6 +723,7 @@ int main(int argc, char** argv) {
     std::string gguf, dir = std::filesystem::temp_directory_path().string(), tokens;
     int rows = 20000;
     uint32_t inflight = 64;
+    int batch_tokens = 0;
     bool direct_first = false;
     bool direct_only = false;
     bool sync_submit = false;
@@ -704,10 +739,15 @@ int main(int argc, char** argv) {
         else if (a == "--rows" && i + 1 < argc) rows = std::atoi(argv[++i]);
         else if (a == "--tokens" && i + 1 < argc) tokens = argv[++i];
         else if (a == "--inflight" && i + 1 < argc) inflight = (uint32_t) std::atoi(argv[++i]);
+        else if (a == "--batch-tokens" && i + 1 < argc) batch_tokens = std::atoi(argv[++i]);
         else if (a == "--direct-first") direct_first = true;
         else if (a == "--direct-only") direct_only = true;
         else if (a == "--sync") sync_submit = true;
-        else { std::fprintf(stderr, "usage: ple_reader_test --selftest [--dir D] | --gguf SHARD2 [--rows N] [--tokens F]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: ple_reader_test --selftest [--dir D] | --gguf SHARD2 [--rows N] [--tokens F] "
+                                 "[--batch-tokens N --inflight Q]\n");
+            return 2;
+        }
     }
     if (self) {
         // Sanitizer and normal runs may execute concurrently under the same --dir. Give every process its own
@@ -753,6 +793,7 @@ int main(int argc, char** argv) {
                     (now_us() - t0) / 1e6);
         return ok ? 0 : 1;
     }
+    if (!gguf.empty() && batch_tokens > 0) return batch_bench(gguf, batch_tokens, inflight);
     if (!gguf.empty()) return real(gguf, rows, tokens, inflight, direct_first, direct_only, sync_submit);
     std::fprintf(stderr, "nothing to do\n");
     return 2;

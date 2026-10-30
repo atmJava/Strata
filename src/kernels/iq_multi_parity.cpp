@@ -3,6 +3,7 @@
 //
 //     build/iq_multi_parity            the checks (a ctest; needs the GPU)
 //     build/iq_multi_parity --bench    the checks, then old/new timings of both paths
+//     build/iq_multi_parity --embed-bench  the 36K IQ3_S embedding gather, old/new blocks and timings
 //
 // (1) iq_mmvq, every format it takes, ncols 1..8 and 11 (the > 8 split): the new output must be BITWISE equal to
 //     the old one (iq_set_old_kernels), and within float rounding of a double reference built from the GPU's own
@@ -315,6 +316,50 @@ void bench(cudaStream_t s, std::mt19937& rng) {
     }
 }
 
+uint64_t half_hash(const std::vector<uint16_t>& v) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint16_t x : v) h = (h ^ x) * 1099511628211ull;
+    return h;
+}
+
+// These are the exact per-expert shapes used by the native sm_75 prefill path. The hash fails the
+// benchmark visibly if a faster store changes even one output bit.
+void bench_dequant(cudaStream_t s, std::mt19937& rng) {
+    const int64_t n_embd = 2560, n_ff = 640;
+    std::printf("\n--dequant-bench: microseconds per call, production expert shapes, idle GPU assumed\n");
+    for (int t : {18, 20}) {
+        const int64_t rb = (int64_t) k::iq_row_bytes(t, n_embd);
+        const auto wgu = random_rows(t, 2 * n_ff, n_embd, rng);
+        uint8_t* dw = dalloc<uint8_t>(wgu.size());
+        uint16_t* dy = dalloc<uint16_t>((size_t) 2 * n_ff * n_embd);
+        ck(cudaMemcpy(dw, wgu.data(), wgu.size(), cudaMemcpyHostToDevice), "dequant gu");
+        const float us = 1e3f * time_ms(s, 100, [&] {
+            k::iq_dequant_gu_f16(t, dw, dw + n_ff * rb, n_ff, n_embd, dy, s);
+        });
+        std::vector<uint16_t> out((size_t) 2 * n_ff * n_embd);
+        ck(cudaMemcpy(out.data(), dy, out.size() * 2, cudaMemcpyDeviceToHost), "dequant gu output");
+        std::printf("%-8s gate/up %lld x %lld: %8.3f us  hash %016llx\n", name_of(t), (long long) (2 * n_ff),
+                    (long long) n_embd, us, (unsigned long long) half_hash(out));
+        cudaFree(dw);
+        cudaFree(dy);
+    }
+    for (int t : {20}) {
+        const auto wd = random_rows(t, n_embd, n_ff, rng);
+        uint8_t* dw = dalloc<uint8_t>(wd.size());
+        uint16_t* dy = dalloc<uint16_t>((size_t) n_embd * n_ff);
+        ck(cudaMemcpy(dw, wd.data(), wd.size(), cudaMemcpyHostToDevice), "dequant down");
+        const float us = 1e3f * time_ms(s, 100, [&] {
+            k::iq_dequant_f16(t, dw, n_embd * n_ff, dy, s);
+        });
+        std::vector<uint16_t> out((size_t) n_embd * n_ff);
+        ck(cudaMemcpy(out.data(), dy, out.size() * 2, cudaMemcpyDeviceToHost), "dequant down output");
+        std::printf("%-8s down    %lld x %lld: %8.3f us  hash %016llx\n", name_of(t), (long long) n_embd,
+                    (long long) n_ff, us, (unsigned long long) half_hash(out));
+        cudaFree(dw);
+        cudaFree(dy);
+    }
+}
+
 // #606: the q8_1 activation quantizers (quantize_q8_1_rows, native_quantize_q8_1 and the shared expert's fused
 // native_swiglu_quantize_q8_1) against a host transcription of the 0.1.38 formula: every finite block bit for bit; a
 // block whose sum (or scale) overflowed fp16 is now stored finite (the largest half, its sign), with its values in the
@@ -391,6 +436,65 @@ void check_q8_1_finite(cudaStream_t s, std::mt19937& rng) {
     cudaFree(dq);
 }
 
+uint64_t float_hash(const std::vector<float>& v) {
+    uint64_t h = 1469598103934665603ull;
+    for (float x : v) {
+        uint32_t u;
+        std::memcpy(&u, &x, 4);
+        h = (h ^ u) * 1099511628211ull;
+    }
+    return h;
+}
+
+// The production prompt shape.  The table is deliberately mapped host memory, as NativeEmbed uses: fewer, fuller blocks
+// can hide the same PCIe reads without changing the ten IQ3_S decoders per row.  This also covers the old path's
+// 65,535-token grid.y boundary indirectly with a 36K row and checks both paths bit for bit.
+void bench_embed(cudaStream_t s, std::mt19937& rng) {
+    constexpr int kType = 21;   // IQ3_S, the SC117 native token embedding
+    constexpr int64_t kEmbedding = 2560, kTokens = 36864;
+    const size_t row_bytes = k::iq_row_bytes(kType, kEmbedding);
+    const auto host_rows = random_rows(kType, kTokens, kEmbedding, rng);
+    void* pinned = nullptr;
+    void* table = nullptr;
+    ck(cudaHostAlloc(&pinned, host_rows.size(), cudaHostAllocMapped | cudaHostAllocPortable), "embedding table");
+    std::memcpy(pinned, host_rows.data(), host_rows.size());
+    ck(cudaHostGetDevicePointer(&table, pinned, 0), "embedding device alias");
+    int32_t* tokens = dalloc<int32_t>(kTokens);
+    std::vector<int32_t> tok((size_t) kTokens);
+    for (auto& t : tok) t = (int32_t) (rng() % (unsigned) kTokens);
+    ck(cudaMemcpy(tokens, tok.data(), tok.size() * 4, cudaMemcpyHostToDevice), "embedding tokens");
+    float* out = dalloc<float>((size_t) kTokens * kEmbedding);
+    auto run = [&] {
+        k::iq_embed_rows(kType, table, row_bytes, tokens, kTokens, kEmbedding, out, s);
+    };
+    auto timed = [&](bool grouped) {
+        k::iq_set_embed_grouped(grouped);
+        float ms[5];
+        for (float& m : ms) m = time_ms(s, 5, run);
+        std::sort(std::begin(ms), std::end(ms));
+        return ms[2];
+    };
+    const float old_ms = timed(false), new_ms = timed(true);
+    ck(cudaStreamSynchronize(s), "embedding sync");
+    std::vector<float> got((size_t) kTokens * kEmbedding);
+    ck(cudaMemcpy(got.data(), out, got.size() * 4, cudaMemcpyDeviceToHost), "embedding output");
+    const uint64_t new_hash = float_hash(got);
+    k::iq_set_embed_grouped(false);
+    run();
+    ck(cudaStreamSynchronize(s), "embedding old sync");
+    ck(cudaMemcpy(got.data(), out, got.size() * 4, cudaMemcpyDeviceToHost), "embedding old output");
+    const uint64_t old_hash = float_hash(got);
+    k::iq_set_embed_grouped(true);
+    std::printf("IQ3_S embedding %lld x %lld: old %.3f ms, grouped %.3f ms (%.2fx); hashes %016llx/%016llx %s\n",
+                (long long) kTokens, (long long) kEmbedding, old_ms, new_ms, old_ms / new_ms,
+                (unsigned long long) old_hash, (unsigned long long) new_hash,
+                old_hash == new_hash ? "bitwise equal" : "DIFFER");
+    g_fail += old_hash != new_hash;
+    cudaFreeHost(pinned);
+    cudaFree(tokens);
+    cudaFree(out);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -398,6 +502,17 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     ck(cudaStreamCreate(&s), "stream");
     std::mt19937 rng(18);
+    if (argc > 1 && std::string(argv[1]) == "--dequant-bench") {
+        bench_dequant(s, rng);
+        cudaStreamDestroy(s);
+        return 0;
+    }
+    if (argc > 1 && std::string(argv[1]) == "--embed-bench") {
+        bench_embed(s, rng);
+        std::printf("iq_multi_parity embed: %d failures\n", g_fail);
+        cudaStreamDestroy(s);
+        return g_fail ? 1 : 0;
+    }
     for (int t : {18, 20, 42, 8}) {
         check_mmvq(t, 2560, 67, s, rng);   // the model's n_embd; 67 rows: a partial block of 4 rows
         check_mmvq(t, 1024, 5, s, rng);

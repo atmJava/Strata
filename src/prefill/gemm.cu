@@ -162,9 +162,34 @@ __global__ void bf16_to_f16_kernel(const uint16_t* __restrict__ in, __half* __re
         out[i] = __float2half_rn(f);
     }
 }
+// Four adjacent BF16 values per thread: one 8-byte load/store removes per-element address and transaction
+// instructions while each value keeps the exact clamp and round-to-nearest-even conversion above. The caller takes
+// this path only for a multiple-of-four length with both buffers 8-byte aligned; all other layouts use the scalar kernel.
+__global__ void bf16x4_to_f16_kernel(const uint2* __restrict__ in, uint2* __restrict__ out, int64_t n4) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n4) return;
+    const uint2 packed = in[i];
+    const uint16_t b[4] = {(uint16_t) packed.x, (uint16_t) (packed.x >> 16), (uint16_t) packed.y,
+                           (uint16_t) (packed.y >> 16)};
+    __half h[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        float f = __uint_as_float((uint32_t) b[j] << 16);
+        if (f > 65504.0f && !isinf(f)) f = 65504.0f;
+        else if (f < -65504.0f && !isinf(f)) f = -65504.0f;
+        h[j] = __float2half_rn(f);
+    }
+    out[i] = make_uint2((uint32_t) __half_as_ushort(h[0]) | ((uint32_t) __half_as_ushort(h[1]) << 16),
+                        (uint32_t) __half_as_ushort(h[2]) | ((uint32_t) __half_as_ushort(h[3]) << 16));
+}
 void bf16_to_f16(const uint16_t* in, uint16_t* out, int64_t n, cudaStream_t st) {
     if (n <= 0) return;
-    bf16_to_f16_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, st>>>(in, reinterpret_cast<__half*>(out), n);
+    if ((n & 3) == 0 && (((uintptr_t) in | (uintptr_t) out) & 7) == 0) {
+        bf16x4_to_f16_kernel<<<(unsigned) ((n / 4 + 255) / 256), 256, 0, st>>>(
+            reinterpret_cast<const uint2*>(in), reinterpret_cast<uint2*>(out), n / 4);
+    } else {
+        bf16_to_f16_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, st>>>(in, reinterpret_cast<__half*>(out), n);
+    }
 }
 // The current device's compute capability as 10 * major + minor, per device (a layer split can mix cards); 0: not
 // known, read as "not an old card" so a failed query keeps the cuBLAS BF16 call.

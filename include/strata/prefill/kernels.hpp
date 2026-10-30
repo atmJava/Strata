@@ -24,10 +24,12 @@ void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint1
 void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float* gated, float* mixed, uint16_t* mixed16,
               int64_t T, void* stream, uint16_t* mixed_h = nullptr, uint16_t* mixed16_lo = nullptr);
 /// F-2: gr_write, then gr_norm_rs of the next half (its norm weights) over the rows just written - the same bits as
-/// the two calls, without reading R back.
+/// the two calls.  The default rereads the just-written row from cache: on sm_75 that is 32-35% faster than keeping
+/// all 40 values per thread in registers because the lower register count raises occupancy.  `reread_r=false` keeps
+/// the old bit-identical implementation for measurement.
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
                       float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr,
-                      int64_t ldx = 0, bool f16img = false);
+                      int64_t ldx = 0, bool f16img = false, bool reread_r = true);
 /// S23 (STRATA_CVEC_FUSE=1): gr_write, then the control vector (v_l = layer l's direction row, *s_l its scale,
 /// *on the request flag, mode 0 project / 1 add; cvec_kernel's arithmetic), then gr_norm_rs with the next half's
 /// norm - one pass over R, the same bits as the three kernels.

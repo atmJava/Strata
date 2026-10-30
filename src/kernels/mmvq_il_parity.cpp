@@ -245,7 +245,9 @@ int check_tables() {
                 const int a = native_mmvq_il_rows_for(75, type, nc, n_out);
                 if (a != 0 && a != 1 && a != 2 && a != 4) { ++bad; std::printf("FAIL table: rows %d\n", a); }
             }
-    if (native_mmvq_il_rows_for(75, 14, 2, 2560) != 2) {
+    // The converged Turing table measured Q6_K at 2560 outputs as native_mmvq (0), not the
+    // pre-convergence two-row choice that this check originally carried over with.
+    if (native_mmvq_il_rows_for(75, 14, 2, 2560) != 0) {
         ++bad;
         std::printf("FAIL table: the sm_75 Q6_K cell changed\n");
     }

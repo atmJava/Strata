@@ -88,6 +88,55 @@ int check(ggml_type t, int64_t T, uint32_t seed) {
     return diff ? 1 : 0;
 }
 
+// The prompt MMQ path gathers kGatherGroupMax native experts per launch.  This checks that launch byte for byte: every
+// expert's gate, up and down regions land in the right group slot, and the two MMQ tails after the final slot are zero.
+int check_group_gather() {
+    constexpr ggml_type gu_type = GGML_TYPE_IQ3_XXS;
+    constexpr ggml_type d_type = GGML_TYPE_IQ4_NL;
+    const size_t gub = mmq::matrix_bytes((int) gu_type, 1280, kCols);
+    const size_t db = mmq::matrix_bytes((int) d_type, kCols, 640);
+    const size_t up_off = gub / 2, down_off = gub, blob_bytes = gub + db, tail = 4096;
+    std::vector<Dev*> blobs;
+    for (int e = 0; e < mmq::kGatherGroupMax; ++e) {
+        blobs.push_back(new Dev(blob_bytes));
+        const uint8_t base = (uint8_t) (0x11 + 3 * e);
+        ck(cudaMemset(blobs.back()->p, base, up_off), "fill gate");
+        ck(cudaMemset((uint8_t*) blobs.back()->p + up_off, base + 1, gub - up_off), "fill up");
+        ck(cudaMemset((uint8_t*) blobs.back()->p + down_off, base + 2, db), "fill down");
+    }
+    Dev gu(mmq::kGatherGroupMax * gub + tail), down(mmq::kGatherGroupMax * db + tail);
+    ck(cudaMemset(gu.p, 0xA5, mmq::kGatherGroupMax * gub + tail), "clear gate/up");
+    ck(cudaMemset(down.p, 0xA5, mmq::kGatherGroupMax * db + tail), "clear down");
+    mmq::GatherGroup group;
+    group.n = mmq::kGatherGroupMax;
+    for (int e = 0; e < group.n; ++e) group.blob[e] = (const uint8_t*) blobs[(size_t) e]->p;
+    if (!mmq::gather_native_group(group, up_off, up_off, down_off, db, gu.p, gub, down.p, db, nullptr, tail)) {
+        std::printf("FAIL group gather rejected aligned production data\n");
+        for (Dev* d : blobs) delete d;
+        return 1;
+    }
+    ck(cudaDeviceSynchronize(), "group gather");
+    std::vector<uint8_t> hgu(mmq::kGatherGroupMax * gub + tail), hdown(mmq::kGatherGroupMax * db + tail);
+    ck(cudaMemcpy(hgu.data(), gu.p, hgu.size(), cudaMemcpyDeviceToHost), "gate/up back");
+    ck(cudaMemcpy(hdown.data(), down.p, hdown.size(), cudaMemcpyDeviceToHost), "down back");
+    size_t diff = 0;
+    for (int e = 0; e < group.n; ++e) {
+        const uint8_t base = (uint8_t) (0x11 + 3 * e);
+        for (size_t i = 0; i < up_off; ++i) diff += hgu[(size_t) e * gub + i] != base;
+        for (size_t i = up_off; i < gub; ++i) diff += hgu[(size_t) e * gub + i] != (uint8_t) (base + 1);
+        for (size_t i = 0; i < db; ++i) diff += hdown[(size_t) e * db + i] != (uint8_t) (base + 2);
+    }
+    for (size_t i = 0; i < tail; ++i) {
+        diff += hgu[mmq::kGatherGroupMax * gub + i] != 0;
+        diff += hdown[mmq::kGatherGroupMax * db + i] != 0;
+    }
+    std::printf("%s %d-expert group gather: %zu of %zu bytes differ\n", diff ? "FAIL" : "ok  ",
+                mmq::kGatherGroupMax, diff,
+                hgu.size() + hdown.size());
+    for (Dev* d : blobs) delete d;
+    return diff ? 1 : 0;
+}
+
 void bench(ggml_type t, int64_t T) {
     std::mt19937 rng(7);
     std::vector<int32_t> slot, src;
@@ -123,6 +172,7 @@ void bench(ggml_type t, int64_t T) {
     cudaEventDestroy(e0);
     cudaEventDestroy(e1);
 }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -133,6 +183,7 @@ int main(int argc, char** argv) {
         uint32_t seed = 11;
         for (ggml_type t : types)
             for (int64_t T : {1, 2, 7, 600, 2099}) fails += check(t, T, seed++);
+        fails += check_group_gather();
         if (do_bench) {
             std::printf("--bench (median of 20):\n");
             for (ggml_type t : {GGML_TYPE_IQ3_XXS, GGML_TYPE_Q2_0}) {

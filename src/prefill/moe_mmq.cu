@@ -109,6 +109,60 @@ __global__ void swiglu_kernel(const float* __restrict__ gu, float* __restrict__ 
     h[i] = g / (1.0f + __expf(-g)) * u;
 }
 
+// 吞吐优化：生产 MMQ 的 down 只需要 q8_1 的 H，不需要可读回的 FP32 H。原路径先写 H、再启动
+// quantize_mmq_q8_1 读回，消耗一次 launch 和 H 的一写一读；这里每个 warp 直接计算 128 个 H 值并写成
+// block_q8_1_mmq。计算顺序、SwiGLU 的 __expf 表达式、amax shuffle 和量化舍入都照搬原路径，因此适用于
+// D4 q8_1 布局（IQ2/IQ3/IQ4_NL/Q2_0/Q8_0）且输出应当逐字节不变；其他布局仍走原两段路径。
+__global__ void swiglu_quantize_d4_kernel(const float* __restrict__ gu, void* __restrict__ vy, int64_t rows,
+                                          int64_t n_ff, bool interleaved) {
+    const int64_t row = blockIdx.x;
+    const int64_t i0 = ((int64_t) blockDim.x * blockIdx.y + threadIdx.x) * 4;
+    const int64_t k_block = i0 / QK8_1_MMQ;
+
+    float4 h = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const float* gr = gu + row * 2 * n_ff;
+    if (i0 < n_ff) {
+        float4 g, u;
+        if (interleaved) {
+            // Strata pack: gate 2k, up 2k+1.  Eight source floats produce this lane's four H values.
+            const float4 a = *(const float4*) (gr + 2 * i0);
+            const float4 b = *(const float4*) (gr + 2 * i0 + 4);
+            g = make_float4(a.x, a.z, b.x, b.z);
+            u = make_float4(a.y, a.w, b.y, b.w);
+        } else {
+            // GGUF native layout: the gate row is followed by the up row.
+            g = *(const float4*) (gr + i0);
+            u = *(const float4*) (gr + n_ff + i0);
+        }
+        h.x = g.x / (1.0f + __expf(-g.x)) * u.x;
+        h.y = g.y / (1.0f + __expf(-g.y)) * u.y;
+        h.z = g.z / (1.0f + __expf(-g.z)) * u.z;
+        h.w = g.w / (1.0f + __expf(-g.w)) * u.w;
+    }
+
+    float amax = fabsf(h.x);
+    amax = fmaxf(amax, fabsf(h.y));
+    amax = fmaxf(amax, fabsf(h.z));
+    amax = fmaxf(amax, fabsf(h.w));
+#pragma unroll
+    for (int offset = 4; offset > 0; offset >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, offset));
+    }
+
+    const float d_inv = 127.0f / amax;
+    char4 q;
+    q.x = roundf(h.x * d_inv);
+    q.y = roundf(h.y * d_inv);
+    q.z = roundf(h.z * d_inv);
+    q.w = roundf(h.w * d_inv);
+    const float d = 1.0f / d_inv;
+
+    // quantize_mmq_q8_1_cuda stores the block axis first: y[k_block * rows + row].
+    block_q8_1_mmq* y = (block_q8_1_mmq*) vy + k_block * rows + row;
+    ((char4*) y->qs)[threadIdx.x & 31] = q;
+    if ((threadIdx.x & 31) % 8 == 0) y->d4[(threadIdx.x & 31) / 8] = d;
+}
+
 __global__ void iota_kernel(int32_t* dst, int64_t n) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = (int32_t) i;
@@ -123,7 +177,12 @@ bool built() { return true; }
 bool supported(int t) {
     switch ((ggml_type) t) {
         case GGML_TYPE_Q2_0:
-        case GGML_TYPE_IQ3_XXS: case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ3_S:
+        case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_Q8_0:   // the draft layer's dense matrices (E-9)
             return true;
         default:
@@ -208,7 +267,11 @@ void Context::run(const Product& p, void* stream) {
     const cudaStream_t s = (cudaStream_t) stream;
     switch (t) {
         case GGML_TYPE_Q2_0: mul_mat_q_case<GGML_TYPE_Q2_0>(ctx, a, s); break;
+        case GGML_TYPE_IQ2_XXS: mul_mat_q_case<GGML_TYPE_IQ2_XXS>(ctx, a, s); break;
+        case GGML_TYPE_IQ2_XS: mul_mat_q_case<GGML_TYPE_IQ2_XS>(ctx, a, s); break;
+        case GGML_TYPE_IQ2_S: mul_mat_q_case<GGML_TYPE_IQ2_S>(ctx, a, s); break;
         case GGML_TYPE_IQ3_XXS: mul_mat_q_case<GGML_TYPE_IQ3_XXS>(ctx, a, s); break;
+        case GGML_TYPE_IQ3_S: mul_mat_q_case<GGML_TYPE_IQ3_S>(ctx, a, s); break;
         case GGML_TYPE_IQ4_NL: mul_mat_q_case<GGML_TYPE_IQ4_NL>(ctx, a, s); break;
         case GGML_TYPE_Q8_0: mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, a, s); break;
         default:
@@ -304,6 +367,36 @@ void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interlea
     if (rows <= 0) return;
     swiglu_kernel<<<blocks(rows * n_ff), 256, 0, (cudaStream_t) stream>>>(gu, h, rows, n_ff, interleaved);
     ck(cudaGetLastError(), "swiglu");
+}
+
+bool swiglu_quantize_supported(int t) {
+    switch ((ggml_type) t) {
+        case GGML_TYPE_Q2_0:
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ3_S:
+        case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_Q8_0:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void swiglu_quantize(const float* gu, void* hq, int64_t rows, int64_t n_ff, bool interleaved, int t, void* stream) {
+    if (rows <= 0) return;
+    if (!swiglu_quantize_supported(t) || n_ff % 4 != 0) {
+        std::fprintf(stderr, "prefill mmq: swiglu_quantize does not cover type %d, n_ff %lld\n", t, (long long) n_ff);
+        std::exit(1);
+    }
+    const int64_t padded = pad512(n_ff);
+    constexpr int kThreads = 128;
+    swiglu_quantize_d4_kernel<<<dim3((unsigned) rows, (unsigned) (padded / (4 * kThreads))),
+                               kThreads, 0, (cudaStream_t) stream>>>(
+        gu, hq, rows, n_ff, interleaved);
+    ck(cudaGetLastError(), "swiglu_quantize");
 }
 
 void iota(int32_t* dst, int64_t n, void* stream) {

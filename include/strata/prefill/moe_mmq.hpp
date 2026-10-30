@@ -12,7 +12,7 @@ namespace strata::prefill::mmq {
 
 /// This build has the MMQ path (the ggml sources were available to the build).
 bool built();
-/// MMQ covers IQ3_XXS gate/up, IQ4_NL or Q2_0 down, and Q8_0 for DFlash2.
+/// MMQ covers the production IQ2/IQ3 gate/up formats, IQ4_NL or Q2_0 down, and Q8_0 for DFlash2.
 bool supported(int ggml_type);
 /// #420: `supported`, and on every visible GPU llama.cpp's MMQ has a tile for this type and a weight matrix of
 /// `w_rows` rows that fits the card's shared memory - the same test its tile choice makes, which aborts the process
@@ -34,6 +34,10 @@ void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64
 void quantize_scatter(const float* x, const int32_t* slot, const int32_t* src, void* xq, int ggml_type, int64_t cols,
                       int64_t ld, int64_t tokens, int k_used, void* stream);
 
+// Keep the production prompt's measured 16-expert native group.  A 64-expert launch looked faster in isolation, but
+// an adjacent 36K production A/B moved gate/up -4.5%, down +6.8% and total GPU time +1.9%, so the larger group did not
+// generalize to the real stream/gather pipeline.  This cap is only for native blobs with the aligned layout checked by
+// gather_native_group; the synthetic MMQ bench remains free to vary its expert count.
 constexpr int kGatherGroupMax = 16;
 /// One launch over n experts whose weights lie `expert_bytes` apart from `w`: for expert e, the activation rows
 /// [bounds[e], bounds[e+1]) of `xq` (bounds on the device, n+1 entries) times its [w_rows, w_cols] matrix into
@@ -89,6 +93,13 @@ void gather_strata_q2(const uint8_t* blob, void* gu_dst, void* d_dst, void* stre
 /// h[r, k] = silu(gate) * up of GU rows [2 n_ff wide]: interleaved (gate 2k, up 2k+1: the Strata pack) or split
 /// (gate k, up n_ff + k: GGUF).  FP32 out (the down product's quantizer reads floats).
 void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interleaved, void* stream);
+/// True when swiglu_quantize() can write MMQ's q8_1 layout directly (the D4 layouts used by the production down types).
+bool swiglu_quantize_supported(int ggml_type);
+/// Byte-identical replacement for swiglu() followed by quantize(h, ..., ggml_type): computes four H values per lane in
+/// SwiGLU order and writes MMQ's D4 q8_1 blocks, avoiding the FP32 H write/read and one kernel launch.  Only call when
+/// swiglu_quantize_supported(ggml_type); hq must hold q8_bytes(rows, n_ff).
+void swiglu_quantize(const float* gu, void* hq, int64_t rows, int64_t n_ff, bool interleaved, int ggml_type,
+                     void* stream);
 /// dst[i] = i for i < n (the identity row map MMQ's MoE mode writes through).
 void iota(int32_t* dst, int64_t n, void* stream);
 

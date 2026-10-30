@@ -24,10 +24,25 @@
 // the oldest checkpoint leaves - the previous behaviour, one slot = the newest point only.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace strata::program::conv_cache {
+
+// --prompt-cache-long: a 128K+ conversation is expensive enough that three LRU checkpoints
+// collapse onto the root and the last two chunk boundaries.  An edit even a quarter back
+// then rereads almost the entire prompt.  Keeping eight and using the same geometric
+// spread as --prompt-cache-spread costs about eight vectors (~118 MB each on the measured
+// Qwen geometry) but leaves useful prefixes across the conversation.  Explicit and
+// opt-in: the default chain and its memory use stay unchanged.
+constexpr int64_t kLongPromptCacheMinTokens = 131072;
+constexpr int kLongPromptCacheCheckpoints = 8;
+inline int long_prompt_checkpoint_cap(int configured, int64_t prompt_tokens, bool enabled) {
+    if (!enabled || prompt_tokens < kLongPromptCacheMinTokens) return configured;
+    return std::max(configured, kLongPromptCacheCheckpoints);
+}
 
 /// The index in `stamps` of the chain item to drop once the chain holds more than `cap` items.  `stamps`
 /// are the items' last-use stamps; the caller owns the chain and erases the returned index.  Pure and
@@ -116,6 +131,84 @@ inline size_t spread_victim(const int64_t* lens, const uint64_t* stamps, size_t 
         if (v != n) return v;
     }
     return eviction_victim(stamps, n, cap, tail, pinned);
+}
+
+/// --prompt-cache-long: retain representatives at the scales a long conversation is edited.
+///
+/// The original spread policy keeps the newest half dense but leaves a single huge gap from the
+/// shared root into that half.  On the measured 140K prompt it kept 8K and then jumped to 74K, so
+/// a 25% rewrite still resumed at 8K.  Long mode instead places six interior anchors at
+/// 1/8, 1/4, 1/2, 3/4, 7/8 and 15/16 of the latest length.  Each anchor protects the closest
+/// distinct checkpoint; the remaining slot rotates by LRU.  Thus an edit at any of those natural
+/// compression boundaries finds the previous anchor instead of a dense run of points behind it.
+///
+/// `lens` is the ascending checkpoint chain.  The root and the newest item are never victims.
+/// Tail and pinned flags retain their existing priority.  The function is pure, so the test can
+/// walk a whole prompt at every `--prompt-cache-every` boundary.
+inline size_t long_spread_victim(const int64_t* lens, const uint64_t* stamps, size_t n, int64_t cap,
+                                 const bool* tail, const bool* pinned) {
+    if (cap < 8 || n < 3) return spread_victim(lens, stamps, n, cap, tail, pinned);
+
+    // Tail checkpoints and explicit pins already have a stronger contract.  Drop one of those
+    // before changing the scale anchors.
+    if (tail != nullptr)
+        for (size_t i = 1; i + 1 < n; ++i)
+            if (tail[i] && !(pinned && pinned[i])) return i;
+
+    const int64_t newest = lens[n - 1], root = lens[0];
+    std::vector<int64_t> targets;
+    targets.reserve((size_t) std::max<int64_t>(0, cap - 2));
+    auto add_target = [&](int64_t at) {
+        if (at <= root || at >= newest) return;
+        if (std::find(targets.begin(), targets.end(), at) == targets.end()) targets.push_back(at);
+    };
+    // The first six anchors are the useful edit scales.  A configured cap above eight adds
+    // points by repeatedly splitting the widest remaining interval, without moving an anchor.
+    add_target(newest / 8);
+    add_target(newest / 4);
+    add_target(newest / 2);
+    add_target(newest - newest / 4);
+    add_target(newest - newest / 8);
+    add_target(newest - newest / 16);
+    while ((int64_t) targets.size() < cap - 2) {
+        std::vector<int64_t> cuts{root};
+        cuts.insert(cuts.end(), targets.begin(), targets.end());
+        cuts.push_back(newest);
+        std::sort(cuts.begin(), cuts.end());
+        size_t widest = 0;
+        for (size_t i = 1; i + 1 < cuts.size(); ++i)
+            if (cuts[i] - cuts[i - 1] > cuts[widest + 1] - cuts[widest]) widest = i;
+        add_target(cuts[widest] + (cuts[widest + 1] - cuts[widest]) / 2);
+    }
+
+    // Assign every scale to a distinct closest checkpoint.  Assigning the narrow scales first
+    // avoids two nearby tail targets both claiming the same item and leaving an early target
+    // without a representative.
+    std::vector<char> protected_item(n, 0);
+    protected_item[0] = protected_item[n - 1] = 1;
+    if (pinned != nullptr)
+        for (size_t i = 0; i < n; ++i) protected_item[i] = protected_item[i] || pinned[i];
+    for (int64_t target : targets) {
+        size_t best = n;
+        int64_t best_distance = 0;
+        for (size_t i = 1; i + 1 < n; ++i) {
+            if (protected_item[i]) continue;
+            const int64_t distance = lens[i] > target ? lens[i] - target : target - lens[i];
+            if (best == n || distance < best_distance) {
+                best = i;
+                best_distance = distance;
+            }
+        }
+        if (best != n) protected_item[best] = 1;
+    }
+
+    // More than one unprotected interior exists for the normal cap=8 case.  Keep the one whose
+    // position best serves its nearest scale and rotate an otherwise redundant point by LRU.
+    size_t victim = n;
+    for (size_t i = 1; i + 1 < n; ++i)
+        if (!protected_item[i] && (victim == n || stamps[i] < stamps[victim])) victim = i;
+    if (victim != n) return victim;
+    return spread_victim(lens, stamps, n, cap, tail, pinned);
 }
 
 }  // namespace strata::program::conv_cache

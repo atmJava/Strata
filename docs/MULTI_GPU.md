@@ -98,8 +98,9 @@ last card also runs the output head and the draft (MTP) layer. Each card keeps a
 cards hold about twice the experts one card holds.
 
 This is pipeline parallelism, not tensor parallelism. A token crosses from one card to the next once per verify window (a few
-hundred KB through pinned RAM). No NVLink or peer-to-peer access is needed, cards on x4 or x1 slots work, and each card's PCIe
-share is probed on its own link. A `--pcie-frac` you give applies to every card and skips those probes.
+hundred KB through pinned RAM by default). No NVLink or peer-to-peer access is needed, cards on x4 or x1 slots work, and each
+card's PCIe share is probed on its own link. A `--pcie-frac` you give applies to every card and skips those probes. On a
+P2P/NVLink pair, `STRATA_HANDOFF_P2P=1` can carry the same bytes directly between the stages; it falls back to pinned RAM.
 
 **What each card holds**
 
@@ -152,6 +153,7 @@ restart. Defaults are off unless the table says otherwise.
 | `STRATA_SPLIT_RING=N` | Sets the prompt path's streamed ring to N slots (`0`: the pinned-share rule). A split uses 96 when at least 75% of the (layer, expert) pairs sit in some card's cache. | The startup line `lend sizing: ...` shows the result. |
 | `STRATA_SPLIT_CHUNK16K=1` | Keeps the 16384-token auto chunk on AMD gfx12 splits (default 8192). | |
 | `STRATA_SPLIT_OVERLAP=1` | Overlapped hand-off between stages on different cards. | Helps AMD; no gain on NVIDIA. See [below](#overlapped-hand-off). |
+| `STRATA_HANDOFF_P2P=1` | The prompt path copies each layer-split chunk directly from the producing card's residual buffer to the consuming card's buffer, with a device event for ordering. | Opt-in. On 2x RTX 2080 Ti, a 7,936 x 10,240 FP32 chunk (325 MB) took 6.9 ms over two NVLink links versus 53.2 ms through pinned host memory. The end-to-end effect was about 0.2 s on 57–85 s long-context rewrites, so the host route remains the default. Unsupported peer access falls back automatically. |
 | `--split-device D1[,D2..]` | The later stages' devices (default: the next visible ones). `--layer-split K --split-device 0` runs both stages on one card; a bit-exact hand-off check, not a speed mode. | |
 
 **The resident RAM mode works on a split.** `--resident-experts` (the low-RAM mode) leaves out of the RAM copy the experts any

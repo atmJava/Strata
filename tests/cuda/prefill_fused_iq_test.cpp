@@ -521,6 +521,13 @@ void timing_part(const Pair& p, int T, cudaStream_t s) {
     std::sort(tf2.begin(), tf2.end());
     std::printf("  (fused back to back: median %.3f ms, min %.3f; alternating min %.3f; MMQ min %.3f)\n", tf2[4],
                 tf2[0], tf[0], tm[0]);
+    // The timing loop's final operation is direct_run(), which exists only to time MMQ's products without gathers.
+    // Re-run the production gather + MMQ sequence before validating its output: direct launches use the original blob
+    // layout and are useful timing controls, but they are not the data path whose result this test is meant to compare.
+    if (!no_mmq) {
+        mmq_run();
+        ck(cudaStreamSynchronize(s), "sync MMQ comparison");
+    }
     const std::vector<float> y_mmq = mq ? download(mb.dm, (size_t) rows * N) : std::vector<float>((size_t) rows * N, 0.0f),
                              y_f = download(fb.dm, (size_t) rows * N);
     const std::vector<int32_t> slot = download_i(fb.slot, (size_t) rows);
