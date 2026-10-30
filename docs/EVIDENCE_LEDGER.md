@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（106 条：L-000…L-105，按编号）
+## 台账索引（107 条：L-000…L-106，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -120,6 +120,7 @@
 | L-103 | 10-31 21:4x | read-only IQ3 weight loads 真实生成 48 条 `LDG.E.U16.CONSTANT.SYS`，hash 不变但只从 `472.6` 到 `471.0 us`（+0.339%）、6/7 胜 | **UTIL-WEIGHT-RO 否决；转 UTIL-PIPED-MTP** |
 | L-104 | 10-31 19:2xZ | piped MTP 六槽/两组真实启用，2 路 `78.3 → 93.9 tok/s`（+19.92%，5/6 胜），但 4/6 路 `-3.82%/-9.79%`，固定 greedy 文本在 B 内不重复 | **UTIL-PIPED-MTP 否决；转 cache-neutral 隔离** |
 | L-105 | 10-31 19:2xZ | cache-neutral 候选只恢复 `10065 + 7209` cache，但 device1 是额外 helper cache；双卡 layer split 在读取权重前 exit 2 | **UTIL-PIPED-MTP-CACHE 启动门否决；转 CPU-order parity** |
+| L-106 | 10-31 19:4xZ | CPU-order piped MTP 保持 6 slots / 2 groups，但自然语言 greedy 探针仍两次不同且与 A 不同；未跑候选吞吐 | **UTIL-PIPED-MTP-ORDER parity 门否决；转 1-vs-2 batch-group fit** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3836,6 +3837,51 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-106 UTIL-PIPED-MTP-ORDER：CPU-order expert 算术未消除 greedy 漂移
+
+**判定**：**UTIL-PIPED-MTP-ORDER 在 parity 门否决。** 候选只给已否决的 piped-MTP B 追加
+`--expert-cache-cpu-order`，保持 `--batch-mtp`、`STRATA_PIPED_MTP=1`、
+`STRATA_BATCH_SELF_COMMIT=0`、6 slots / 2 groups、expert-cache auto 和其他参数不变。它正常
+loaded，但固定 greedy 探针仍不可重复且不同于 A，因此按契约没有运行候选吞吐。
+
+**A3 基线**：恢复后的 A 在 2/4/6 路各跑 3 reps、每请求最多 400 tokens。聚合中位分别为
+`81.0/116.1/133.2 tok/s`，墙钟中位 `9.9/13.6/17.8 s`，TTFT 中位
+`142.0/293.0/967.5 ms`。draft 接受率为 `79.77%/81.30%/82.39%`；所有窗口请求数准确，
+外来请求为 0。固定 prompt 出现合法早停：4 路一个 `367` token，6 路 `362/376/395` token，
+6 路轮次的单请求一个 `392` token；全部 `finish_reason=stop`，无传输错误。
+
+**parity**：探针 0（`STRATA_PARITY_ALPHA`）和探针 1（算术结果 `944`）两次都重复且等于 A。
+探针 2 两次分别输出以 `Because the target model accepts only tokens...` 和
+`Speculative decoding preserves greedy output because...` 开头的不同文本；两段都与上一轮 B
+逐字相同，而 A 的 96-token 回答可重复。CPU-order 开关没有改变这个形状的输出。
+
+**静态分析**：`src/program/generate.cpp` 把 `--expert-cache-cpu-order` 写入
+`ExpertDispatch::hit_cpu_order`；layer-split verifier 构造的 `VerifyHits` 没有对应字段。
+这只是解释开关为何无可见效果，判决仍以两次运行 parity 为准。
+
+**恢复与成本**：A→候选停机 8 秒、启动至 loaded 146 秒；候选→A4 停机 9 秒、启动至 loaded
+171 秒，端到端中断 `6:51`。恢复后 server/engine/vision PID `525579/525603/525588`，health
+loaded，`batch_slots=6`、`batch_groups=2`、`expert_slots=17274`、engine
+`105a4171...`、config `88de996a...`；production systemd 仍 inactive/dead、`MainPID=0`、
+`NRestarts=23`。
+
+**下一步**：`UTIL-BATCH-GROUP-FIT`。在不变模型算术的恢复 A 上补 8 路 A3，然后只把
+`--batch-groups 2` 改为 `1`，先过相同 parity，再测 2/4/6/8 路并恢复 A4。2 路改善至少 1%
+且 5/6 胜，4/6/8 路不得回退超过 1%。若收益只存在于低并发，则否决固定 group 配置，把实测
+crossover 作为后续 concurrency-aware 调度的依据。
+
+**证据**：
+
+- `docs/work/UTIL_PIPED_MTP_ORDER_RESULT-20261031.md`
+- `/opt/ai/logs/util-piped-mtp-order-a3-20261030T193825Z.log`
+  （sha256 `267589d3cffb87e46fff854646527cb9a3cba4f0bd6c952e3b217dd613814acf`）
+- `/opt/ai/logs/util-piped-mtp-order-a3-final-metrics-20261030T193825Z.json`
+  （sha256 `224b3b9fbd7fae0b8ac975c5a9e1cd250b2a13779a48c6d8a2fa4cdbb96d34e4`）
+- `/opt/ai/logs/util-piped-mtp-order-parity-D-20261030T1945Z.json`
+  （sha256 `6c1c3304bf884d008c1ac74f03541424523116a1c036f9e20694aad71f9f90eb`）
+- `/opt/ai/logs/util-piped-mtp-order-restore-A-20261030T194542Z.out`
+  （sha256 `184f2454b2d411cbca7a5f39a0c8c0f6386b23454fd11c071c5f4a098b428743`）
 
 ## L-105 UTIL-PIPED-MTP-CACHE：双卡 layer split 无法用 device1 指定第二级槽数
 

@@ -744,6 +744,23 @@ B 的 CUDA1 expert cache 为 `7040` slots，A 为 `7209`，总数为 `17104` 对
 [`UTIL_PIPED_MTP_CACHE_RESULT-20261031.md`](UTIL_PIPED_MTP_CACHE_RESULT-20261031.md)，契约见
 [`UTIL_PIPED_MTP_ORDER_CONTRACT-20261031.md`](UTIL_PIPED_MTP_ORDER_CONTRACT-20261031.md)。
 
+### 16.5.8 UTIL-PIPED-MTP-ORDER（已完成，parity 门否决）
+
+候选只给原 B 加 `--expert-cache-cpu-order`，仍以 6 slots / 2 groups loaded，engine hash、
+health 和槽数均正确。`STRATA_PARITY_ALPHA` 与算术结果 `944` 两个探针可重复且等于 A；自然
+语言探针两次仍是不同文本，并与上一轮 B 逐字相同。固定质量门失败后没有跑候选吞吐。
+
+恢复 A3 的 2/4/6 路聚合中位为 `81.0/116.1/133.2 tok/s`，TTFT 中位
+`142.0/293.0/967.5 ms`，所有窗口外来请求为 0。合法早停均为 `finish_reason=stop`，已计入
+各自的 token 总数。A→候选启动和候选→A4 恢复分别耗时至 loaded `146/171` 秒，总中断
+`6:51`。结果见 [`UTIL_PIPED_MTP_ORDER_RESULT-20261031.md`](UTIL_PIPED_MTP_ORDER_RESULT-20261031.md)。
+
+下一步 `UTIL-BATCH-GROUP-FIT` 不改模型算术，只比较当前两组与一组调度。A3 先补 8 路；
+candidate 先过相同 parity，再同测 2/4/6/8 路并恢复 A4。2 路改善至少 1% 且 5/6 胜，
+4/6/8 路不得回退超过 1%。若收益只在低并发出现，固定一组的配置仍否决，并保留实测
+crossover 作为 concurrency-aware 调度的预注册依据。契约见
+[`UTIL_BATCH_GROUP_FIT_CONTRACT-20261031.md`](UTIL_BATCH_GROUP_FIT_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

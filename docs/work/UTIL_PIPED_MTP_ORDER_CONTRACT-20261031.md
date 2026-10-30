@@ -1,6 +1,8 @@
 # UTIL-PIPED-MTP-ORDER contract
 
-Status: pre-registered before implementation.
+Status: **rejected at the parity gate.** See
+[`UTIL_PIPED_MTP_ORDER_RESULT-20261031.md`](UTIL_PIPED_MTP_ORDER_RESULT-20261031.md) (evidence
+L-106). The contract below is retained as the pre-registered record.
 
 ## Evidence and selected problem
 

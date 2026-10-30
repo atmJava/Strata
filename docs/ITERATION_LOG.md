@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-79 · CPU-order arithmetic leaves piped-MTP text drift unchanged
+
+- 目标 / 指标：只给已否决的 piped-MTP B 增加 `--expert-cache-cpu-order`，保持六槽、两组、
+  MTP 和 cache 设置不变；两次固定 greedy 探针必须逐字重复且等于 A，才允许跑候选吞吐。
+- 假设与预期：若偏差来自 GPU/CPU expert 累加顺序，CPU-order 路径应消除自然语言探针的
+  两次差异，并让输出等于 A。
+- 为什么选这条路线：它直接隔离上一轮 cache-neutral 路线未能测试的算术混淆，不需第三块
+  GPU，也不扩大为参数扫描。
+- 改动与实验：从 B config 复制独立候选，只追加 `--expert-cache-cpu-order`。启动仍为
+  6 slots / 2 groups、engine hash 正确且 health loaded；先用三组固定 greedy 探针各跑两次。
+- 结果：探针 0 和算术探针 1 可重复且等于 A；探针 2 两次仍是不同文本，并与上一轮 B 逐字
+  相同，而 A 的回答可重复并 `finish=length`。因此没有运行候选吞吐。
+- 判决：**UTIL-PIPED-MTP-ORDER 在 parity 门否决。** 不扫描其他算术、cache、草稿深度、
+  槽数或组数。
+- 预期被推翻：现有开关只进入 `ExpertDispatch::hit_cpu_order`，layer-split 的
+  `VerifyHits` 路径没有对应字段；源码不足以证明波及实际 dispatch，但两次运行与静态分析
+  方向一致。
+- 生产状态与回滚：A 已恢复，server/engine/vision PID `525579/525603/525588`，health
+  loaded，6/2 slots/groups、`expert_slots=17274`、engine/config hash 正确；production
+  systemd 仍 inactive/dead、`MainPID=0`、`NRestarts=23`。A→候选停机 8 秒、启动 146 秒；
+  候选→A4 停机 9 秒、启动 171 秒，总中断 `6:51`。
+- 证据：`docs/work/UTIL_PIPED_MTP_ORDER_RESULT-20261031.md`、台账 L-106、
+  `/opt/ai/logs/util-piped-mtp-order-parity-D-20261030T1945Z.json`。
+- 学到什么：质量门必须按它冻结的两个维度同时检查“候选内可重复”和“等于基线”；一个探针
+  通过不能代表自然语言生成可重复。
+- 下一步与理由：`UTIL-BATCH-GROUP-FIT`。A3 的 2 路 `81.0 tok/s` 仍明显低于 4/6 路，而
+  一组在当前二进制上的 2 路成本尚未隔离。先补 A3 八路，再只比较 groups=1 与 2；2 路须
+  +1%/5-of-6，4/6/8 不退 >1%。若只有低并发胜，就把 crossover 作为后续
+  concurrency-aware 调度的实测输入。契约见
+  `docs/work/UTIL_BATCH_GROUP_FIT_CONTRACT-20261031.md`。
+
 ## I-20261031-78 · cache-neutral piped MTP cannot start on two layer-split GPUs
 
 - 目标 / 指标：从已否决的 B 配置只恢复 A 的 primary/CUDA1 expert-cache 槽数，保持 6 slots /

@@ -81,7 +81,8 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | UTIL-WEIGHT-RO | M13 | IQ3 weight `qs`/aux 使用显式只读加载，降低 long-scoreboard stall | 已证伪 | 低中；SASS 检查、7 组进程 | **否决**：机器码已变为 `LDG.E.U16.CONSTANT.SYS`，但只改善 `0.339%` |
 | UTIL-PIPED-MTP | M14 | 保留两组流水，用每槽 MTP 草稿修复低并发吞吐凹点 | 已证伪（当前形状） | 中；两次候选切换、2/4/6 路 A-B-A、显存检查 | **否决**：2 路 `+19.92%`/5-of-6，但 4/6 路 `-3.82%/-9.79%`，greedy 输出不重复 |
 | UTIL-PIPED-MTP-CACHE | M14 | 只消除 slot drafters 对 expert-cache 的挤压，隔离 parity 混淆 | 已证伪（参数语义） | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **否决**：`--expert-cache-device1` 是额外 helper cache；双卡 layer split 在读取权重前 exit 2 |
-| UTIL-PIPED-MTP-ORDER | M14 | 用 CPU-order expert 算术隔离 GPU/CPU expert 位置造成的小数舍入 | 高信息量 | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **下一项**：只给原 B 加 `--expert-cache-cpu-order`；parity 不逐字相等就停止 |
+| UTIL-PIPED-MTP-ORDER | M14 | 用 CPU-order expert 算术隔离 GPU/CPU expert 位置造成的小数舍入 | 已证伪 | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **否决**：6/2 正常 loaded，但自然语言探针仍两次不同且与 A 不同；未跑候选吞吐 |
+| UTIL-BATCH-GROUP-FIT | M14 | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | 高信息量 | 中；补 A3 八路，一次 candidate 启动和一次 A4 恢复 | **下一项**：A 补 8 路；B 只把 groups 2→1；先 parity，再测 2/4/6/8；若仅低并发胜则否决固定配置 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -153,10 +154,14 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 27. **UTIL-PIPED-MTP-CACHE 在启动门否决**：B 的 CUDA1 expert cache 少 169 slots
     （`7040` 对 `7209`），但 `--expert-cache-device1` 被定义为额外 helper GPU 的 cache；
     双卡都跑 layer-split stage 时没有可用 helper，候选在读取权重前 exit 2，未 loaded。
-28. **下一项 UTIL-PIPED-MTP-ORDER**：原 B 配置只追加现有
-    `--expert-cache-cpu-order`，让 GPU expert reduction 匹配 CPU 浮点顺序，直接测试 parity
-    漂移是否由 expert 位置舍入造成。仍先过两次逐字 greedy parity；失败就停止，不扫描
-    cache、顺序、草稿深度、槽数或组数。
+28. **UTIL-PIPED-MTP-ORDER 已否决**：原 B 配置只追加
+    `--expert-cache-cpu-order`，候选保持 6 slots / 2 groups 并正常 loaded，但自然语言
+    greedy 探针仍两次不同且不同于 A。固定 hard gate 不因 2 路曾有 19.92% 峰值而放宽；不跑
+    候选吞吐，也不扫描 cache、顺序、草稿深度、槽数或组数。
+29. **下一项 UTIL-BATCH-GROUP-FIT**：先补当前 A 的 8 路 A3，再从同一 config 只把
+    `--batch-groups 2` 改为 `1`。候选先过相同 parity，再测 2/4/6/8 路并恢复 A4。2 路改善
+    至少 1% 且 5/6 胜，4/6/8 路退不超过 1%。若只赢低并发，否决固定配置并转
+    concurrency-aware 调度。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 
