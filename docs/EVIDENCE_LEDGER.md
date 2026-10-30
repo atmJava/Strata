@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（95 条：L-000…L-094，按编号）
+## 台账索引（96 条：L-000…L-095，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -100,7 +100,7 @@
 | L-083 | 10-26 05:4xZ | 新引擎 `a09d78b1` 自身 1 小时 mixed soak：618 请求零错误、零意外 length、needle 全对，RSS 后段平台、swap 未用；T-probe 通过；P4 严格归因待补 | **采纳/候选** |
 | L-084 | 10-26 06:1xZ | 新引擎同 boot A-B-A：代码 41.188→5.074 s（−87.7%），96K by_kind/wave +2.761%/+2.202%，短 JSON 3.980 s；P4 采纳但余量小 | **采纳** |
 | L-085 | 10-26 06:2xZ | P5：96K 冷读 GPU timeline 中位 32.653 s、phase 总墙钟 35.441 s，host staging 仅 0.341 s；成本主要在 GPU 计算，timing 工装开销 +0.72% | **结论** |
-| L-086 | 10-26 06:5xZ | P6 `STRATA_PA_V2T=1`：同 boot A-B-A 全门禁通过但 engine read/wall 只改善 2.346%/2.297%，低于 3%，生产不采纳 | **未定** |
+| L-086 | 10-26 06:5xZ | P6 `STRATA_PA_V2T=1`：同 boot A-B-A 全门禁通过但 engine read/wall 只改善 2.346%/2.297%，低于 3%，生产不采纳 | **未定（后由 L-095 按 1% 门采纳）** |
 | L-087 | 10-26 06:5xZ | P7 `STRATA_PF_WMMA=1`：A1 首个请求期间被用户中断，无有效 JSONL/summary；实验暂停、待从全新 A1 重跑 | **结论** |
 | L-088 | 10-26 08:0xZ | 生产 `6×192K→6×256K`：6 槽保留，expert slots 17248；222K/253K needle 命中，6 路短并发 6/6；一小时混合 soak 待做 | **采纳·待 soak** |
 | L-089 | 10-27 06:2xZ | 256K 生产 A-B-A：新版单路 decode `80.45` 对旧版 `82.7`（−2.72%），4 路 `136.05` 对 `139.6`（−2.54%），冷读 −0.26%；无显著回退 | **结论** |
@@ -109,6 +109,7 @@
 | L-092 | 10-28 05:1xZ | v0.2.7 上游 37 提交部署到 `c219fbca`：6 路数字序列约 `164.7 tok/s`、自然语言约 `149.8 tok/s`；2 路低于单路，8 路无吞吐收益且 TTFT 变差；CTest 仍有 6 个已知失败 | **采纳·测试缺口** |
 | L-093 | 10-31 00:0x | 只移除 `--prefill-pipe 1` 未启用 layer-major：888 MiB 显存下最小 super-chunk 也无法分配；A1 150K/210K 六请求 cold 为 2104.1–2373.1 tok/s，中位 2208.55 | **否决 L0 直改假设** |
 | L-094 | 10-31 00:1xZ | 显式 16K host-residual layer-major 真执行 10/13 个 super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；150K warm wall 优势由缓存命中差异造成 | **否决** |
+| L-095 | 10-31 00:4xZ | 当前默认 attention v2 对 v1 的固定 96K A-B-A：engine read `+1.814%`、wall `+1.905%`；A2 漂移约 1.26%，parity/needle 全过，按用户 1% 门复验通过 | **采纳（当前默认）** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3166,6 +3167,9 @@ launcher `34271059`、config `05c9d253`，health 200、`loaded=true`；实际进
 都改善约 2.3%，方向一致但低于预注册的 3% 门槛；没有足够证据把噪声级收益写入生产。P6 配置已恢复，
 不为补门限而事后改变判据。
 
+**后续判决**：用户后来把稳定、可归因的采纳线下调到约 1%；L-095 在当前默认 v2 上重新做了
+独立 A-B-A 并通过。本条历史数字和旧 3% 判据保留不改写。
+
 **实验条件**：双 RTX 2080 Ti、sm_75、6×192K、INT8 KV、groups=2、parallel=6，engine
 `a09d78b13c39378d1532a024b983d286` / `0.1.51`。判据在首请求前写入
 `/opt/ai/logs/P6-fixed-criteria-20261026T063612Z.txt`，sha256
@@ -3688,3 +3692,75 @@ prompt 运行 `STRATA_SEL_OVERLAP=1` 与 `STRATA_IDX_FP16_CHECK=1`，只有 over
   （sha256 `d4e838aa4be7bf6946d8ba730a22fd4f3ccc42af901d5739ec9bb88f61395fde`）
 - `/opt/ai/logs/lm-explicit-20261030T161831Z/contract.md`
   （sha256 `81cb555a5458caa3b71d804dc15897092b09dcc166bf1a43745495ab88186e69`）
+
+## L-095 当前默认 attention v2 在 1% 门下复验通过：read +1.814%，wall +1.905%
+
+**判定**：**采纳（当前默认）**。P6 的旧实验用 `STRATA_PA_V2T=1` 对比 v1，并按旧 3% 门
+判为未采纳。当前候选源码已把 v2 设为默认，所以本轮把方向反过来：A1/A2 使用当前默认 v2，
+B 只增加 `STRATA_PA_V2T=0` 回退 v1。按用户新的约 1% 门，当前默认 v2 保留。
+
+**实验边界**：候选 8080，HEAD `c219fbca` 的受控脏工作树，engine sha256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`，
+QSA prompt-attention 源码 sha256
+`1d1181f6901b223468d309cd37e5492f21c5e508f011167956a6fbfac6affa04`。
+A/A2 配置 sha256 `88de996a...e443f`，B 为 `00500433...ff2c`，二者只有
+`STRATA_PA_V2T=0` 一项不同。所有其它 engine 参数、API key、模型、INT8 KV、6 槽和
+`STRATA_SM75_PERF=1` 均相同。
+
+**方法**：新增 `tools/server/long-context-sequential.py`，从固定 salt 生成同一组三个唯一
+96K prompt；每次重启后顺序发送，确认 `cached_tokens=0`。顺序为
+A1(v2) → B(v1) → A2(v2)，B 与 A2 各一次干净重启，每次约 2.5–3 分钟。
+运行环境从 engine `/proc/<pid>/environ` 读取：A/A2 没有 `STRATA_PA_V2T` 或
+`STRATA_PROMPT_ATTN_V1`，B 为 `STRATA_PA_V2T=0`。
+
+**性能**：
+
+| 臂 | engine read 中位 | wall 中位 | 错误 | needle |
+| --- | ---: | ---: | ---: | ---: |
+| A1：默认 v2 | 40063.1 ms | 40.368 s | 0 | 3/3 |
+| B：v1 fallback | 41022.6 ms | 41.382 s | 0 | 3/3 |
+| A2：默认 v2 | 40564.9 ms | 40.878 s | 0 | 3/3 |
+
+A1+A2 六请求合并 read 中位 `40278.25 ms`、wall 中位 `40.5935 s`。以 B 为分母，
+v2 的 engine read 改善 `1.814%`、wall 改善 `1.905%`，两项过 1% 门。A2 相对 A1
+漂移 `+1.253%/+1.263%`，低于 3%。三臂 prompt token 数为 `98353/98350/98353`。
+
+**正确性与资源**：三臂均 0 HTTP/执行错误、0 `finish=length`、needle 3/3；greedy parity
+text sha 都为 `b17bc92de6ba8a97`。最低 MemAvailable 为 `9745.5 MiB`，SwapFree 始终
+`4088.4 MiB`，GPU0/GPU1 最大占用约 `21128/21028 MiB`；无 OOM、swap 增长或 6 槽下降。
+
+**生产状态与回滚**：生产 systemd 未修改且保持 inactive。A2 也是恢复后的安全基线：
+health 200、`loaded=true`，server/engine PID `486207/486247`，metrics 为
+engine `0.1.51`、6 slots、17274 expert slots、INT8 KV、1006 MiB VRAM free。
+不新增 `STRATA_PA_V2T=1`；如未来要回退 v1，只需在候选配置设置 `STRATA_PA_V2T=0`。
+
+**没测什么**：只覆盖三个固定冷 96K prompt、单流、两卡 2080 Ti；未覆盖 32K/64K、
+150K/210K、并发、取消或更广质量集。不能把 1.8% 扩大为所有负载收益。
+
+**下一步**：真实 150K prompt 的 QSA-DIAG，同时读取 selected-cell overlap 与 FP16
+选择一致性；诊断不足时停止该实现方向。
+
+**原始证据**：
+
+- `/opt/ai/logs/P6-current-20261030T162623Z/a1-run2.jsonl`
+  （sha256 `283ee500f2172aab8abf9de9be82b9b51f2fc853a647c2a02b81af24db0e1a46`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/a1-run2.summary.json`
+  （sha256 `7d411b14c28328d30a567a364bd0708d45c0782213e72d8a694457e1d7ba6fd8`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/b.jsonl`
+  （sha256 `f1f42b47ff5fc709c85996f6a233177377ff0df0f23758a40c8768135af59cad`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/b.summary.json`
+  （sha256 `72d81825ea75cf1fb6b1a9bc5fd3fb5ebd8bca06cd528a4976da3d7027fb545a`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/a2.jsonl`
+  （sha256 `187f6d72c8aa11ca894ae60234ed1c1d7867b4953260d1fa513e7cb76a7ca17e`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/a2.summary.json`
+  （sha256 `473cfa22bb1d91350688c0a551cccc98580bfa0eb094d8acf4b440150f12e428`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/a1.parity.txt`
+  （sha256 `a380b8d9580d46ea691d9667375e5d7c228e15c4bf9eb731530d62058e9836c7`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/b.parity.txt`
+  （sha256 `18bf8b466589a85549608028ba3ec9eb07ee386174571e09e72585ba46b82c41`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/a2.parity.txt`
+  （sha256 `b1116ca381d5cd8e1ed9b82931158f27db86efb30353fd6c56fd0d3184cd6163`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/contract.md`
+  （sha256 `622bf210c7a717648c8689ea9a50e64545eb9ad6c97689a2990057b5876efeb4`）
+- `/opt/ai/logs/P6-current-20261030T162623Z/comparison.md`
+  （sha256 `dd591964c4eba559bb08e211a23e20888824faf1c79d566c5821d641c4df7d26`）

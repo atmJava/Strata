@@ -6,17 +6,19 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：P6-1PCT（先在候选配置复验 P6 的约 2.3% A-B-A 收益与质量，满足约 1% 门后
-  评估采纳）。
-- 上一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
+- 当前项：QSA-DIAG（用真实 150K prompt 同时读取 selected-cell overlap 与 FP16 选择
+  一致性诊断；不先改 kernel）。
+- 上一项：P6-1PCT 已完成并通过。当前默认 v2 对 v1 的固定 96K A-B-A 中，engine read
+  改善 `1.814%`、wall 改善 `1.905%`，A2 漂移约 1.26%，parity/needle 全过。
+- 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前迭代：无运行中实验。用户已把采纳门改为稳定、可归因的约 1%；P6 已有约 2.3% 的
-  A-B-A 改善，但当时按 3% 门未采纳，需要按新门槛复验。
-- 下一动作：先在候选配置复验 `STRATA_PA_V2T=1` 的 P6 收益与质量，满足约 1% 门后评估采纳；
-  随后用真实 150K prompt 读取 QSA overlap 与 FP16 一致性诊断，再决定是否改内核。
-- 当前候选：P6-1PCT，其次是 QSA-DIAG。UTIL-KERNEL 仍需 NCU 根因；P7 只有证据表明
-  Tensor 管线是直接瓶颈时才恢复，并仍需完整 A-B-A。
+- 当前迭代：无运行中实验。attention v2 已是当前默认并完成 1% 门复验；不要再次用
+  `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。
+- 下一动作：先审计已有 `STRATA_SEL_OVERLAP` / `STRATA_IDX_FP16_CHECK` 触发条件与旧诊断；
+  用真实 150K prompt 得到 overlap、选择差异 cells 和 `qsa select` 占比，再判断是否实现。
+- 当前候选：QSA-DIAG，其次是 UTIL-NCU / UTIL-KERNEL。P7 只有证据表明 Tensor 管线是直接
+  瓶颈时才恢复，并仍需完整 A-B-A。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
@@ -92,9 +94,10 @@
   仅 0.341 s；主要 phase 为 `gemm gate/up` 5.807 s、`embed+steps` 3.692 s、`qsa attn`
   3.422 s、`gemm down` 3.031 s。timing/plain engine read 为 37.841/37.571 s（+0.72%），
   3/3 needle 正确、零执行错误，恢复后 T-probe `problems=[]`。
-- P6 已完成但未采纳：A1/B/A2 的 engine read 中位 37.3342/36.4583/37.5456 s，wall 中位
-  37.609/36.745/37.856 s；B 相对 A 合并中位为 −2.622%/−2.617%，低于 3% 门槛；A2 漂移
-  +0.57%，parity 与 needle 全过，生产配置已恢复。
+- P6 已按新 1% 门复验并采纳为当前默认：当前 v2 与 v1 fallback 的固定 96K A-B-A 中，
+  A1/B/A2 engine read 中位 `40063.1/41022.6/40564.9 ms`，wall 中位
+  `40.368/41.382/40.878 s`；A 合并中位相对 B 为 `+1.814%/+1.905%`，A2 漂移约 1.26%，
+  parity/needle 全过。无需再设 `STRATA_PA_V2T=1`。
 - QSA slots 已否决：4 路 off/on/off 为 125.7/114.6/115.5 tok/s；6 路首次 on/off
   151.9/146.8 的 +3.5% 未在交错臂复现，最终 B4 对 A4 反向 0.49%。生产保持 off。
 - S2 已完成：流式最终块与非流式响应都有 per-request metrics，mock regression 2/2 通过。
@@ -151,6 +154,8 @@
   都必须重新做同配置 A-B-A，不能把本轮“无显著回退”扩大成“没有性能代价”。
 - layer-major 的计算路径目前比现役 pipe 路径慢约 14%；不能通过继续缩小或放大 16K target
   来假设它会转为收益。下一候选必须同路径复验并同时核对 cached/read tokens。
+- P6 的 1.8%/1.9% 收益只在三个固定冷 96K 单流 prompt 上复验；32K/64K、150K/210K 和并发
+  尚未覆盖，不能扩大成所有负载收益。
 - 性能 A/B 前必须先证明实验开关真的进入目标路径；否则 on/off 两臂可能完全相同。
 - C1 的 6/8 槽受控边界已测；不同邻居长度和真实混合流量下的准入上限仍未覆盖。
 - 新引擎进入 GPU A/B 前必须用 T-probe 证明 running engine/server hash；版本戳已不再从旧目录猜路径。

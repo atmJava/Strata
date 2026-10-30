@@ -691,8 +691,9 @@ STRATA_ROUTE_TAIL_SKIP=0
 ## 19. 结论
 
 layer-major 的调度收益假设没有通过端到端验证：容量策略成功打开路径，但当前 16K
-host-residual 配置整体慢 14.29%。短 prompt 的 kernel 微调仍可能有用，但长 prompt 的下一个
+host-residual 配置整体慢 14.29%。attention v2 已按 1% 门复验为当前默认。长 prompt 的下一个
 高信息量热点是 QSA selection：先用真实 150K prompt 读取 overlap 与 FP16 一致性，再决定
 是否实现候选复用或半精度选择。
 
-本文没有修改引擎代码，没有重启候选服务，也没有改变生产配置。
+本文没有修改引擎代码，也没有改变生产配置。P6 复验在候选 8080 上重启两次，生产
+`strata.service` 始终未触动。

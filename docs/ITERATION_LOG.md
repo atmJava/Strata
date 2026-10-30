@@ -3,6 +3,39 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-68 · 当前默认 attention v2 在 1% 门下复验通过：read +1.814%，wall +1.905%
+
+- 目标 / 指标：按用户新的约 1% 采纳门复验 P6。当前源码已把 prompt-attention v2 设为默认，
+  因此比较当前默认 v2 与 `STRATA_PA_V2T=0` 回退 v1；要求 engine read 和 wall 均改善 ≥1%。
+- 审计发现：`src/kernels/cuda/qsa_prompt_attn.cu` 只在
+  `STRATA_PA_V2T=0` 或 `STRATA_PROMPT_ATTN_V1` 有值时选择 v1；候选 engine 的实际环境里
+  两者都未设置。当前 engine sha256 仍为
+  `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。
+- 改动与实验：新增可复用的 `tools/server/long-context-sequential.py`，支持固定 salt 生成
+  同一组冷 prompt 并同步采样 metrics、RAM、swap 与 GPU。A1(v2) → B(v1) → A2(v2)；
+  B 和 A2 各干净重启一次，每轮约 2.5–3 分钟。
+- 输入：每臂三个顺序、唯一、重启后冷读的 96K prompt，token 数为
+  `98353/98350/98353`；三臂使用完全相同的文本。
+- 结果：A1 engine read 中位 `40063.1 ms`、wall `40.368 s`；B 为 `41022.6 ms`、
+  `41.382 s`；A2 为 `40564.9 ms`、`40.878 s`。A1+A2 合并 read 中位
+  `40278.25 ms`、wall `40.5935 s`。
+- 收益与稳定性：当前 v2 相对 v1 的 engine read 改善 `1.814%`、wall 改善 `1.905%`，
+  两项均跨过 1% 门；A2 相对 A1 漂移 `+1.253%/+1.263%`，均在 3% 内。
+- 正确性与资源：三臂各 0 HTTP/执行错误、0 意外 length、needle 3/3；greedy parity
+  text sha 均为 `b17bc92de6ba8a97`。MemAvailable 最低 `9745.5 MiB`，SwapFree 始终
+  `4088.4 MiB`，两卡占用峰值约 `21128/21028 MiB`，没有 OOM 或槽位下降。
+- 判决：**P6 在当前版本按 1% 门复验通过，当前默认 v2 保留并视为已采纳**。这项收益已经在
+  候选默认路径中，不需要再添加 `STRATA_PA_V2T=1`，也不新增生产配置变更。
+- 生产状态与回滚：生产 systemd 未修改且保持 inactive。候选 8080 已恢复 A 配置，
+  server/engine PID `486207/486247`，health `loaded=true`、6 槽、INT8 KV、17274 expert slots。
+- 证据：`/opt/ai/logs/P6-current-20261030T162623Z/`；三臂 JSONL/summary、三份 parity、
+  两次启动输出、预注册 contract、比较表和工具源码均保留。台账见 L-095。
+- 学到什么：旧实验的 env-on A/B 不能直接复用到已把候选设默认的新版本；每次复验都要先核对
+  当前 branch/default，再设计 on/off 方向，否则两臂会相同。
+- 下一步与理由：进入 QSA-DIAG。在真实 150K prompt 上同时读取现有
+  `STRATA_SEL_OVERLAP=1` 与 `STRATA_IDX_FP16_CHECK=1` 输出，先判断 selected-cell overlap
+  和 FP16 一致性；诊断不支持时不实现选择复用或半精度 kernel。
+
 ## I-20261031-67 · 显式 layer-major 真实执行，但长上下文吞吐整体回退约 14%，否决
 
 - 目标 / 指标：验证显式 `STRATA_PREFILL_LAYER_MAJOR=1` 能否在默认 512 MiB 余量之外，以

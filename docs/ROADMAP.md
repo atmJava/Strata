@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T01:00+08:00。
+> 最后更新：2026-10-31T01:05+08:00。
 
 ## 用户目标
 
@@ -23,7 +23,7 @@
 | M9 | 未预期错误/限流 | 未系统测 | 0 未预期错误 | 未测 |
 | M10 | 96K prefill 邻居下短请求 wall | 3.40 s 中位（P3 A-B-A） | ≤36.75 s（−10%） | 达成 |
 | M11 | 96K prefill 邻居下 41-token 代码请求 wall | P3 E 臂 41.51 s；P4 旧候选 4.424 s；新引擎 A-B-A 5.074 s | ≤10 s，且 96K 按预先固定的 wave 与单请求门限均不退 >3% | 达成：wave +2.202%，单请求 +2.761% |
-| M12 | 96K 冷 prefill GPU/host 成本 | GPU timeline 32.653 s、phase 总墙钟 35.441 s、host staging 0.341 s | 找到并验证稳定、可归因的 ≥1% GPU 路径改善 | P5 已完成归因；P6 已有约 2.3% 改善，待按新门槛复验 |
+| M12 | 96K 冷 prefill GPU/host 成本 | 当前默认 v2 的 engine read 合并中位 40.27825 s、wall 40.5935 s；v1 fallback 为 41.0226/41.382 s | 找到并验证稳定、可归因的 ≥1% GPU 路径改善 | P6 复验通过：read `+1.814%`、wall `+1.905%` |
 | M13 | 32K 冷 prefill GPU 管线占用 | SMs Active 77%、SM Issue 13–14%、Tensor 10%、DRAM read 15%；NVML 40/99% 与 95/98% | 用 NCU 定位 stall 后改内核/调度；瓶颈计数器和端到端 wall 同向改善 | Nsight 双次已验证；NCU 后进入代码优化 |
 | M14 | 多并发吞吐曲线 | 数字 1/2/4/6/8 路中位约 `104.05/94.85/139.92/164.68/138.76 tok/s` | 2 路高于单路，8 路不回退且 TTFT 可控 | 2 路与 8 路均未达；6 路为峰值 |
 
@@ -44,14 +44,14 @@ swap 未用且 RSS 后段进入平台；staged 2048 与 P4 组合均已进入生
 96K 冷读仍需约 42 s，满槽晚到请求约 11–14 s，长读期间更广泛请求的尾延迟尚未覆盖。P5 已把
 96K 冷读拆到 GPU event：phase 总墙钟 35.441 s，其中 `gemm gate/up` 5.807 s、`embed+steps`
 3.692 s、`qsa attn` 3.422 s、`gemm down` 3.031 s；host staging 仅 0.341 s。P6 的
-`STRATA_PA_V2T=1` 在 A-B-A 中改善约 2.3%；用户现已明确稳定、可归因的约 1% 也应保留，
-因此需要按新门槛在候选配置复验后决定采纳。P7 原本用于验证
+当前源码已默认使用 v2，本轮以 `STRATA_PA_V2T=0` 回退 v1 作对照：固定 96K prompt 的
+engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过。P7 原本用于验证
 `STRATA_PF_WMMA=1` 对最大 `gemm gate/up` phase 的影响，但 A1 首个请求期间被用户中断，
 没有有效样本。`CTX256` 一小时 soak 已通过并冻结 `0.1.51`，Nsight 双次显示 32K 冷 prefill
 不是 DRAM 饱和，而是多数 SM 参与但 issue、Tensor 与 warp residency 不高。后续重点转为提高
 真实资源利用率：NCU 只用于定位 stall，随后必须落到内核或调度代码改动。显式 layer-major
-虽然真实执行，但六请求中位慢 14.29%，已否决。当前无运行中实验；下一项按 1% 门复验 P6，
-之后做真实 150K prompt 的 QSA overlap/FP16 诊断。P7 只有 NCU 证明 Tensor 管线是直接瓶颈时
+虽然真实执行，但六请求中位慢 14.29%，已否决。P6 已按 1% 门复验通过。当前无运行中实验；
+下一项做真实 150K prompt 的 QSA overlap/FP16 诊断。P7 只有 NCU 证明 Tensor 管线是直接瓶颈时
 才恢复，恢复后必须从全新 A1 重跑。
 
 ## 候选路线
@@ -67,7 +67,8 @@ swap 未用且 RSS 后段进入平台；staged 2048 与 P4 组合均已进入生
 | P3 长 prefill 公平性 | M5/M10 | 短 JSON 由 40.21 s 降到 3.40 s，96K 只 +2.2% | 高 | 中 | **完成**：400 ms lead-in + 750 ms 等待 |
 | P4 中请求公平性 | M11 | 让 41-token 代码请求也尽早完成，同时守住长档 | 高 | 中高，涉及两个重叠调度开关 | **采纳**：新引擎 A-B-A 代码 −87.681%，96K +2.761%/+2.202%；余量小 |
 | P5 96K 相位归因 | M12 | 区分 GPU、host 与固定开销，给下一项实验定目标 | 高 | 低 | **完成**：GPU 主导，host staging 0.341 s |
-| P6 Turing prompt-attention v2 | M12 | 直接替换 `qsa attn` 的 v1 路径，尝试减少 96K 冷读 | 中 | 低，env-only 且可回滚 | **待按 1% 门复验**：旧 A-B-A engine read/wall −2.346%/−2.297%，parity 与 needle 均过 |
+| P6 Turing prompt-attention v2 | M12 | 直接替换 `qsa attn` 的 v1 路径，尝试减少 96K 冷读 | 中 | 低，env-only 且可回滚 | **采纳（当前默认）**：L-095 read/wall `+1.814%/+1.905%`，parity 与 needle 均过 |
+| QSA-DIAG | 150K selection 诊断 | 读取 16-query overlap、FP16 一致率、差异 cells 和 select 成本 | 高信息量 | 低；优先只读诊断 | **下一项**：诊断不足则不实现候选复用或 FP16 |
 | P7 Turing FP16 tensor-core prompt experts | M12/M13 | 用 tensor-core prompt experts 攻击最大 `gemm gate/up` 5.807 s | 中 | 低中，输出可能变化 | **搁置**：A1 中断；只有 NCU 证明 Tensor 是直接瓶颈时才恢复 |
 | GPU-UTIL | M13 | 用硬件计数器替代单看 NVML；先验证采集口径，再做内核调优 | 高 | 低；只读、不重启服务 | **完成**：两次 Nsight 双卡 GPU Metrics + NVML 交叉核对可复现 |
 | UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **待做**：先快照再停服，不能附加现役进程 |
@@ -105,9 +106,10 @@ swap 未用且 RSS 后段进入平台；staged 2048 与 P4 组合均已进入生
     96K `+2.761%/+2.202%`，短 JSON `3.980 s`；采纳 1600 ms + 2048 优先，保留回滚快照。
 14. **P5 已完成**：96K timing 相位归因显示 GPU 计算主导，host staging 只有 0.341 s；timing 工装
     开销 +0.72%，不启用为生产默认。
-15. **P6 按新门槛待复验**：`STRATA_PA_V2T=1` 的 engine read/wall 为 −2.346%/−2.297%，
-    A2 漂移在 3% 内，parity 与 needle 通过。旧 3% 门槛下未采纳；用户现已明确约 1% 的稳定
-    改善也值得保留，下一轮应在候选配置复验后评估采纳。
+15. **P6 按 1% 门复验通过**：当前源码已默认 v2，复验用 `STRATA_PA_V2T=0` 回退 v1。
+    A1/B/A2 engine read 为 `40063.1/41022.6/40564.9 ms`，wall 为
+    `40.368/41.382/40.878 s`；A 合并中位相对 B 改善 `1.814%/1.905%`，A2 漂移约 1.26%，
+    parity/needle 全过。保留当前默认，不再重复 env-on A/B。
 16. **P7 搁置**：预注册判据和 P7 前快照已存在，但 A1 首个请求期间被用户中断，
     没有 JSONL/summary、parity 或质量结果。只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复；
     恢复后只增加 `STRATA_PF_WMMA=1`，从全新 A1 起重跑同 boot A-B-A，并追加输出质量门。
@@ -124,9 +126,9 @@ swap 未用且 RSS 后段进入平台；staged 2048 与 P4 组合均已进入生
 21. **layer-major 配置路线已否决**：只移除 `--prefill-pipe 1` 被 512 MiB 容量余量挡住；
     显式 96 MiB、16K host-residual 虽真实执行 10/13 个 super-chunk，六请求 prompt 吞吐中位
     仍慢 `14.29%`。不再重复同路径或扫描邻近 target。
-22. **先兑现已有 1% 级收益**：P6 已有两方向同向、A2 稳定、parity/needle 通过的约 2.3%
-    A-B-A 证据；按用户新门槛先在候选复验。随后用真实 150K prompt 做 QSA overlap/FP16 诊断，
-    只有诊断支持时才实现选择复用或半精度路径。
+22. **P6 收益已兑现，转向 QSA-DIAG**：当前默认 v2 的 read/wall 均超过 1%，且输出 parity
+    不变。接下来用真实 150K prompt 读取 overlap、FP16 一致率和 select 成本；只有诊断支持时
+    才实现选择复用或半精度路径。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

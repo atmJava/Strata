@@ -6,7 +6,8 @@
   A-B-A 采纳为当前生产配置，不再是候选。
 - 当前生产 engine 为 `a09d78b13c39378d1532a024b983d286` / `0.1.51`；
   `STRATA_PF_WMMA`、`STRATA_PA_V2T`、`STRATA_PREFILL_TIMING` 均不在生产进程中。
-- P6 `STRATA_PA_V2T=1` 只改善约 2.3%，未达到 3% 门槛，未采纳。
+- P6 prompt-attention v2 现已是默认。2026-10-31 用 `STRATA_PA_V2T=0` 回退 v1 复验，
+  engine read/wall 改善 `1.814%/1.905%`，按用户 1% 门采纳当前默认（L-095）。
 - P7 `STRATA_PF_WMMA=1` 的 A1 首个请求期间被用户中断，没有有效 JSONL/summary；状态为
   **暂停/待做**。恢复时必须从全新 A1 重跑，不能复用中断样本。
 

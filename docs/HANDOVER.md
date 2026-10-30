@@ -101,12 +101,14 @@ STRATA_SM75_PERF=1
 timing/plain engine read 为 `37.841/37.571 s`，工装开销 `+0.72%`。结论是 GPU 计算主导，
 host staging 不是当前长读主瓶颈。
 
-### P6 未采纳
+### P6 已按 1% 门采纳
 
-`STRATA_PA_V2T=1` 的 A1/B/A2 engine read 中位为
-`37.3342/36.4583/37.5456 s`，wall 中位为 `37.609/36.745/37.856 s`。
-B 相对 A 合并中位改善 `−2.622%/−2.617%`，方向一致但低于 3% 门槛。A2 漂移在 3% 内，
-parity 与 needle 均通过；生产不采纳。
+旧 L-086 在 3% 门槛下保留为“未定”。当前 `qsa_prompt_attn.cu` 已默认选择 v2，
+`STRATA_PA_V2T=0` 才回退 v1。L-095 用同一组三个固定冷 96K prompt 做 A1(v2)/B(v1)/A2(v2)：
+engine read 中位 `40063.1/41022.6/40564.9 ms`，wall 中位
+`40.368/41.382/40.878 s`。A1+A2 合并相对 B 的 engine read/wall 改善
+`1.814%/1.905%`，A2 漂移约 `1.26%`，parity 与 needle 全过。当前默认 v2 保留；
+不要再设 `STRATA_PA_V2T=1` 做同形 A/B。
 
 ### P7 无有效结果
 

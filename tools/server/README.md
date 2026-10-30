@@ -50,6 +50,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `passive_windows.py` | what real traffic did, per engine session (acceptance, hit rate, truncation, read sizes) | stdout |
 | `bench-strata.py` | single stream + 4 concurrent, fixed corpus | `/opt/ai/logs/bench-results.jsonl` |
 | `mixed-soak.py` | 2/3/4-way short JSON, code, agent-tool and 32K/64K/96K needle soak; `--profile fairness --waves 5` repeats the 96K-neighbor case; samples metrics/RAM/GPU | `/opt/ai/logs/P2-mixed-soak-*.jsonl` + summary |
+| `long-context-sequential.py` | fixed-salt sequential long-context A/B; same cold prompts across arms and samples metrics/RAM/swap/GPU | `/opt/ai/logs/P6-current-*/{a1,b,a2}.jsonl` + summaries |
 | `piped_scenario.py` | one stream decoding while another reads a cold prompt: stalls, char rates | stdout |
 | `concurrent_reads.py` | what the concurrent read is worth, from the engine's own lines | stdout |
 | `cold-prefill.py` | a never-seen prompt, so every token is fresh | `/opt/ai/logs/cold-prefill.jsonl` |

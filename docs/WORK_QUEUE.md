@@ -14,8 +14,8 @@
 3. **P5 已完成**：96K 的 GPU timeline 中位 32.653 s、phase 总墙钟 35.441 s，host staging 仅
    0.341 s；主要成本在 `gemm gate/up`、`embed+steps`、`qsa attn` 与 `gemm down`。timing 工装
    开销 +0.72%，不进入生产默认。
-4. **P6 已完成但未采纳**：A1/B/A2 的 engine read 中位为 37.3342/36.4583/37.5456 s，B 相对
-   A 的合并中位只改善 2.622%；A2 漂移 +0.57%，parity 和 needle 都通过，但未达 3% 门槛。
+4. **P6 已按 1% 门采纳**：当前默认 v2 对 v1 fallback 的固定 96K A-B-A 中，A 合并中位
+   engine read `+1.814%`、wall `+1.905%`；A2 漂移约 1.26%，parity/needle 全过。
 5. **P7 已搁置**：A1 首个请求期间被用户中断，没有有效性能或质量判决。只有 NCU 证明 Tensor
    管线是直接瓶颈时才恢复；恢复后仍需从全新 A1 起重跑同 boot A-B-A。
 6. **旧部署与 soak 已完成（历史）**：`a09d78b1` / `0.1.51`、server `de09cffd`、
@@ -40,8 +40,10 @@
 13. **layer-major 配置路线已否决**：只移除 `--prefill-pipe 1` 被容量门槛挡住；显式
     96 MiB、16K host-residual 虽真实执行，六请求 prompt 吞吐中位仍慢 `14.29%`。候选已
     恢复 A 配置。
-14. **按 1% 门兑现已有收益**：P6 的旧 A-B-A 已有约 2.3% 改善且 parity/needle 通过；用户
-    已明确约 1% 也保留，下一轮先复验 P6，再进入 QSA overlap/FP16 诊断。
+14. **P6 已兑现**：当前源码默认 v2，复验不再设 `STRATA_PA_V2T=1`；只以 `=0` 回退 v1
+    作对照。L-095 已证明 read/wall 均超过 1%，保留当前默认。
+15. **下一项 QSA-DIAG**：真实 150K prompt 同时读取 selected-cell overlap、FP16 一致率和
+    `qsa select` 占比；诊断不足时不做候选复用或半精度 kernel。
 
 ## 候选
 
@@ -54,8 +56,8 @@
 | P3 | 长 prefill 下短 decode 公平性 | 96K 邻居下短请求 wall 降 ≥10%；96K wave 不退 >3%；零错误且 needle 全对 | 已完成 | L-078：A 40.21 s → E 3.40 s（−91.5%）；96K +2.2%；A-B-A 通过 | 400 ms lead-in + 750 ms 等待已部署 |
 | P4 | 长 prefill 下中请求 decode 公平性 | 96K 邻居下 41-token 代码请求 wall ≤10 s；96K 按 wave 与单请求中位均不退 >3%；零错误 | 已完成 | L-078–L-080、L-083–L-084：新引擎 A-B-A 代码 −87.681%，96K +2.761%/+2.202%，短 JSON 3.980 s | **采纳但余量小**；生产保持 1600 ms + 2048 优先 |
 | P5 | 96K 冷 prefill 相位归因 | 3 个唯一 96K prompt 可解析 21 相与 host 成本；3 个同形状 plain prompt 能量化工装开销；零执行错误，恢复后 T-probe 无 problems | 已完成 | L-085：GPU timeline 中位 32.653 s、phase 总墙钟 35.441 s、host staging 0.341 s；timing 开销 +0.72% | 结论是 GPU 计算主导，不直接改生产 |
-| P6 | Turing prompt-attention v2 A-B-A | 同 boot A-B-A；每臂 3 个唯一 96K prompt；B 的 engine read 与 wall 中位均改善 ≥1%；A2 回到 A 的 3% 内；零执行错误、needle 3/3；greedy parity 一致或过质量门 | 已完成 | L-086：B 相对 A1 −2.346%/−2.297%，A2 漂移 +0.57%，parity 一致 | 按用户新 1% 门已满足旧数据，待候选部署复验 |
-| P6-1PCT | P6 新门槛复验与采纳 | 同 boot A-B-A 再确认 engine read/wall 均改善 ≥1%；A2 漂移 ≤3%；零错误、needle/parity 通过；候选配置可回滚 | 待做 | L-086 的旧 A-B-A；用户 2026-10-31 明确 1% 也算 | 先兑现已有低风险收益，再接 QSA |
+| P6 | Turing prompt-attention v2 A-B-A | 同 boot A-B-A；每臂 3 个唯一 96K prompt；当前 v2 的 engine read 与 wall 中位均优于 v1 ≥1%；A2 回到 A 的 3% 内；零执行错误、needle 3/3；greedy parity 一致或过质量门 | 已完成 | L-086 旧结果；L-095 当前 v2 相对 v1：read `+1.814%`、wall `+1.905%` | **采纳为当前默认**；回退开关为 `STRATA_PA_V2T=0` |
+| P6-1PCT | P6 新门槛复验与采纳 | 同 boot A-B-A 再确认 engine read/wall 均改善 ≥1%；A2 漂移 ≤3%；零错误、needle/parity 通过；候选配置可回滚 | 已完成 | L-095：read `+1.814%`、wall `+1.905%`；A2 漂移约 1.26%；parity/needle 全过 | 当前默认已保留；不再设 `PA_V2T=1` |
 | P7 | Turing FP16 tensor-core prompt experts | 同 boot A-B-A；每臂 3 个唯一 96K prompt；B 的 engine read 与 wall 中位均改善 ≥3%；A2 回到 3% 内；零错误、needle 3/3；输出变化时必须过质量门 | 搁置 | L-087：A1 被中断，无有效 JSONL/summary | 只有 NCU 证明 Tensor 是直接瓶颈时才恢复；否则不作为后续方向 |
 | CTX256 | 256K 生产混合负载 soak | 至少 1 小时 mixed traffic；覆盖 32K/64K/96K、接近 256K 的长读与短请求并发；零意外错误、零 needle 失败、6 槽不降级；记录 TTFT/wall、KV host read、expert hit、RAM/swap 与最低显存余量 | 已完成 | L-090：414 请求、133 waves、0 错误、0 意外 length、74/74 needle；14 次约 245.9K 长读全通过；slots 始终 6 | 已冻结 `0.1.51` 基线；最高并发 4、最长 245,856 token，不能写成 6 路或满窗口 |
 | GPU-UTIL | 真实 GPU 利用率探测 | Nsight 双卡计数器完整、请求质量门通过；结果能区分 SM 活动、issue、Tensor、warp 与 DRAM；失败样本不得进入汇总 | 已完成 | L-091：两次 32K prefill 的 SMs Active 77%、SM Issue 13–14%、Tensor 10%、DRAM read 15%；NVML 95/98% 与 40/99% 均只表示有活动 | 最终脚本 `tools/server/probe-gpu-utilization.py` 完整 run `verified`，15 项本地测试通过 |
@@ -64,6 +66,7 @@
 | UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 待做 | L-092：2 路数字 `94.85 tok/s` 低于单路 `104.05`；8 路 `138.76` 低于 6 路 `164.68`，TTFT 约 `5.8 s` | 先查调度/批窗口固定成本，不先做参数扫描 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
+| QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 待做 | 旧 153K profile 中 `qsa select` 约 7.0%/3874 ms；尚无 overlap/FP16 数据 | 先诊断，不先改 kernel；用现有 env 和日志 |
 | QSA-SLOTS | 合并 batch window 的 QSA launch | 4/6 路交错 A-B 均稳定改善聚合吞吐 | 否决 | L-081：4 路无收益，6 路首次 +3.5% 不复现，最终相邻 −0.49% | 同配置不再重试 |
 | HEAD-ENGINE | 旧合并源码的 sm_75 可部署验证 | 从当次 HEAD 独立构建；测试、输出 parity、版本 marker、运行路径 hash 与一小时 soak 通过 | 已完成（历史基线） | L-082/L-083/L-089/L-090：当次 256K 变化在 3% 内，一小时 soak 通过 | 记录属于 `a09d78b1`，不能当作 c219 的测试结论 |
 | UPSTREAM-027 | v0.2.7 37 提交的服务器验收 | 独立构建；真实代理接口、工具/图片、并发 health 通过；记录吞吐曲线和测试缺口 | 已完成（测试缺口） | L-092：6 路数字 `164.68`、自然语言 `149.82 tok/s`；CTest 仍有 6 项失败 | 运行可用，不代表测试全绿；2/8 路另立 UTIL-MULTI |
