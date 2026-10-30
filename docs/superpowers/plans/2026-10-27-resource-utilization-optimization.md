@@ -871,6 +871,10 @@ G0A 生产 Gate 继续 CLOSED，G0B 仍不启动。
   retention/GC；模型或宿主库变化仍可能改变同一 release 的外部输入。
 - [ ] 生产侧从 LKG schema 2 迁移到 schema 3 尚未演练；首次切换必须受控，并在一次
   完整 health/generation 验证后生成新 LKG，不能把旧记录自动迁移成未经证明的 release。
+- [ ] 2026-10-30 检查确认 `systemctl --user` 和 `systemd-run --user` 可用，但该账号
+  `Linger=no`。当前 `strata_control.runtime --host` 直接入口依赖 CLI `runtime start`
+  先回收 stale owner；systemd 直接重启不能跳过这一步，因此尚不能宣称 systemd 级
+  自动回滚已验证。后续需单独实现并隔离演练带 stale recovery 的服务入口。
 - [ ] 真实模型启动、真实 GPU drain、真实 owner/systemd 重启恢复仍未演练。
 - [ ] engine smoke、stream smoke、tool smoke 和 session restore 尚未组合成 G0B 的
   完整验收门。
