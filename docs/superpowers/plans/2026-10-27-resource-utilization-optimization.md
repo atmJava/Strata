@@ -829,6 +829,9 @@ collection errors，因此不能写成“全仓 pytest 通过”。
 下一安全检查点是“隔离原生协议演练”：只有在不挤占当前生产显存、不重启生产且能记录完整
 `X-Request-ID -> DONE/BDONE -> BTRACE` 链时执行。若硬件条件不成立，就保持 Gate 关闭，
 先完成 owner runtime、LKG 和回滚演练，不重复重启生产来换一次不可复核的观测。
+2026-10-30 复测时生产实例仍在运行，两卡仅余 `819/920 MiB` 显存，RAM available
+约 `6.5 GiB`；起第二真实模型实例会挤占或驱逐生产，因此本轮不执行原生协议演练，
+G0A 生产 Gate 继续 CLOSED，G0B 仍不启动。
 
 ### G0A.1 owner runtime 持久 LKG
 

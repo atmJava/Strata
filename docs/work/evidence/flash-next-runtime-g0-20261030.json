@@ -1002,7 +1002,18 @@
       "production_observability": "closed",
       "reason": "the instrumented engine/server are not deployed and the new binary has not completed a real-model protocol run",
       "g0b_allowed": false,
-      "next_safe_checkpoint": "run an isolated native X-Request-ID -> DONE/BDONE -> BTRACE drill only when it fits beside production without restarting or evicting it"
+      "next_safe_checkpoint": "run an isolated native X-Request-ID -> DONE/BDONE -> BTRACE drill only when it fits beside production without restarting or evicting it",
+      "native_protocol_resource_check": {
+        "captured_at": "2026-10-30T10:46:39Z",
+        "result": "blocked_without_eviction",
+        "gpu_free_mib": [
+          819,
+          920
+        ],
+        "ram_available_mib": 6694,
+        "production_generation_process_present": true,
+        "decision": "do not start a second real-model instance; keep the production observability gate closed and G0B not started"
+      }
     }
   },
   "confirmed_findings": [
