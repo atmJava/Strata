@@ -43,11 +43,18 @@
       ]
     },
     "terminal_suite": {
-      "result": "NOT_ALL_GREEN",
-      "summary": "207 passed, 45 skipped, 93 subtests passed, 1 failed",
-      "failure": "ReadyFileTests.test_mock_server_publishes_bound_port_and_cleans_on_sigterm",
-      "classification": "Independent existing serve.server startup-window race",
-      "reproduction": "Immediate SIGTERM after ready publication exited -2 for delays 0, 0, 0.01, and 0.05 seconds; delays 0.1 and 1.0 seconds exited 0"
+      "result": "PASS",
+      "summary": "208 passed, 45 skipped, 93 subtests passed",
+      "regression_found_and_fixed": "Immediate SIGTERM after ready publication previously exited -2 for delays 0, 0, 0.01, and 0.05 seconds; ready publication and the serving wait now share the same clean-stop scope, and ten immediate-signal repetitions exited 0"
+    },
+    "serve_lifecycle": {
+      "result": "PASS",
+      "summary": "20 passed, 6 subtests passed",
+      "files": [
+        "serve/test_lifecycle.py",
+        "serve/test_lifeline.py",
+        "serve/test_ready_timeout.py"
+      ]
     }
   },
   "gates": {

@@ -854,9 +854,9 @@ collection errors，因此不能写成“全仓 pytest 通过”。
 **隔离结果（2026-10-30）：** fake-runtime `tests/terminal/test_runtime.py` 为
 `58 passed, 11 subtests passed`。新增覆盖首次写入、成功替换、失败回滚、损坏拒绝、
 符号链接拒绝、fresh-process 持久读取，以及普通端口失败后不误报 source switch。
-完整 `tests/terminal` 运行到 `207 passed, 45 skipped, 93 subtests passed`，另有 1 个
-与本切片无关的既有 SIGTERM 启动窗口竞态：mock server 发布 ready 后 0–10 ms 内发送
-SIGTERM 会以 `-2` 退出，等待 50 ms 后为 0；该问题另立切片处理。
+完整 `tests/terminal` 为 `208 passed, 45 skipped, 93 subtests passed`。运行过程中还
+定位并修复了 mock server 的既有 SIGTERM 启动窗口竞态：ready 发布与 serving wait
+现在处于同一个 clean-stop 作用域，ready 后立即发送 SIGTERM 不再以 `-2` 退出。
 
 证据见 `docs/work/evidence/flash-next-runtime-lkg-20261030.json`。
 

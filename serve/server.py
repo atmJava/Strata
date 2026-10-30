@@ -9438,28 +9438,25 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             name="strata-open-browser",
             failure="the browser was not opened",
         )
-    if ready_path is not None or event_sink is not None:
-        ready_host = f"[{here}]" if ":" in here and not here.startswith("[") else here
-        record = {"schema_version": 1, "instance_id": svc.instance_id, "pid": os.getpid(),
-                  "api_url": f"http://{ready_host}:{bound_port}", "bound_host": a.host, "bound_port": bound_port,
-                  "model_id": svc.model, "model_state": "unloaded" if lazy else "ready",
-                  "api_state": "ready", "created_at": time.time(),
-                  **svc.request_identity()}
-    if ready_path is not None:
-        try:
-            ready_file.publish(ready_path, record)
-        except OSError as e:
-            print(f"[strata] could not write ready file ({type(e).__name__})", file=sys.stderr)
-            for close in (httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
-                          getattr(svc.images, "shutdown", None), hub.close if hub is not None else None):
-                if close:
-                    close()
-            return 6
-    if event_sink is not None:
-        notify_lifecycle("ready", record)
+    # SIGTERM can arrive immediately after the ready file appears; keep publication and serving in one clean-stop scope.
     interrupted = False
     drained = True
     try:
+        if ready_path is not None or event_sink is not None:
+            ready_host = f"[{here}]" if ":" in here and not here.startswith("[") else here
+            record = {"schema_version": 1, "instance_id": svc.instance_id, "pid": os.getpid(),
+                      "api_url": f"http://{ready_host}:{bound_port}", "bound_host": a.host, "bound_port": bound_port,
+                      "model_id": svc.model, "model_state": "unloaded" if lazy else "ready",
+                      "api_state": "ready", "created_at": time.time(),
+                      **svc.request_identity()}
+        if ready_path is not None:
+            try:
+                ready_file.publish(ready_path, record)
+            except OSError as e:
+                print(f"[strata] could not write ready file ({type(e).__name__})", file=sys.stderr)
+                return 6
+        if event_sink is not None:
+            notify_lifecycle("ready", record)
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
