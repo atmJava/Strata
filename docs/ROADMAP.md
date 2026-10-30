@@ -82,7 +82,7 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | UTIL-PIPED-MTP | M14 | 保留两组流水，用每槽 MTP 草稿修复低并发吞吐凹点 | 已证伪（当前形状） | 中；两次候选切换、2/4/6 路 A-B-A、显存检查 | **否决**：2 路 `+19.92%`/5-of-6，但 4/6 路 `-3.82%/-9.79%`，greedy 输出不重复 |
 | UTIL-PIPED-MTP-CACHE | M14 | 只消除 slot drafters 对 expert-cache 的挤压，隔离 parity 混淆 | 已证伪（参数语义） | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **否决**：`--expert-cache-device1` 是额外 helper cache；双卡 layer split 在读取权重前 exit 2 |
 | UTIL-PIPED-MTP-ORDER | M14 | 用 CPU-order expert 算术隔离 GPU/CPU expert 位置造成的小数舍入 | 已证伪 | 中；一次 candidate 启动和一次恢复，先后做 parity 与 2/4/6 路 | **否决**：6/2 正常 loaded，但自然语言探针仍两次不同且与 A 不同；未跑候选吞吐 |
-| UTIL-BATCH-GROUP-FIT | M14 | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | 高信息量 | 中；补 A3 八路，一次 candidate 启动和一次 A4 恢复 | **下一项**：A 补 8 路；B 只把 groups 2→1；先 parity，再测 2/4/6/8；若仅低并发胜则否决固定配置 |
+| UTIL-BATCH-GROUP-FIT | M14 | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | 已证伪（当前配置） | 中；补 A3 八路，一次 candidate 启动和一次 A4 恢复 | **否决**：A3 8 路 `104.4 tok/s` 低于 6 路；单组候选正常 loaded 但自然语言 parity 不同，未跑吞吐 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -158,10 +158,15 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
     `--expert-cache-cpu-order`，候选保持 6 slots / 2 groups 并正常 loaded，但自然语言
     greedy 探针仍两次不同且不同于 A。固定 hard gate 不因 2 路曾有 19.92% 峰值而放宽；不跑
     候选吞吐，也不扫描 cache、顺序、草稿深度、槽数或组数。
-29. **下一项 UTIL-BATCH-GROUP-FIT**：先补当前 A 的 8 路 A3，再从同一 config 只把
-    `--batch-groups 2` 改为 `1`。候选先过相同 parity，再测 2/4/6/8 路并恢复 A4。2 路改善
-    至少 1% 且 5/6 胜，4/6/8 路退不超过 1%。若只赢低并发，否决固定配置并转
-    concurrency-aware 调度。
+29. **UTIL-BATCH-GROUP-FIT 已否决**：A3 的 2/4/6/8 路中位为
+    `81.0/116.1/133.2/104.4 tok/s`，确认 8 路低于 6 路。B 只把 groups 2→1，正常以
+    6 slots / 1 group loaded，但自然语言探针在 B 内可重复、与 A 不同且提前以
+    `finish=stop` 结束。parity 门失败后未跑吞吐；只改 group 数也会改变数值路径，不扫描其他
+    固定组数。
+30. **下一项先短路验证 UTIL-EXPDEC-GU**：`STRATA_EXPDEC=1` 是独立 opt-in 路径，现有 A
+    未启用。候选只有在两张卡的 gate/up 都真实进入 `expdec_gu_kernel`、down 保持默认，并通过
+    三组冻结 greedy parity 后，才允许预注册 2/4/6/8 路性能 A-B-A。模拟/局部微内核数字不能
+    替代端到端 1% 门。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T03:50+08:00。
+> 整理时间：2026-10-31T04:05+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,14 +12,15 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-106。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-107。
 
 ## 2. 当前断点
 
 - 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，UTIL-KERNEL、
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的
-  `UTIL-PIPED-MTP-ORDER` 又在 parity 门否决；当前断点是 `UTIL-BATCH-GROUP-FIT`。
+  `UTIL-PIPED-MTP-ORDER` 又在 parity 门否决；`UTIL-BATCH-GROUP-FIT` 也已过启动门，
+  但在自然语言 parity 门否决。当前断点是短路验证 `UTIL-EXPDEC-GU`。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -44,7 +45,8 @@
 - 当前目标链路是：融合 gate/up 的五次局部重排都未过 1%，read-only load 已真实生成
   `LDG.E.U16.CONSTANT.SYS` 但仍只有 `0.339%`。Pipelined MTP 的 2 路确有 `+19.92%`，但 4/6 路
   分别回退 `3.82%/9.79%`，且 greedy 文本不重复。直接指定 CUDA1 cache 的路线在双卡上不可启动；
-  CPU-order expert 算术也没有改变输出。下一步回到不改变模型算术的 batch-group 调度。
+  CPU-order expert 算术也没有改变输出；单组调度仍在自然语言上产生不同但可重复的文本。
+  当前 A3 的 8 路中位 `104.4 tok/s` 比 6 路 `133.2` 低，但固定单组不能通过质量门。
 
 ## 3. 当前生产
 
@@ -55,7 +57,7 @@
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
 | 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 候选 PID | server `525579`、engine `525603`；vision `525588` |
+| 候选 PID | server `529088`、engine `529112`；vision `529097` |
 | candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -310,10 +312,10 @@ query 的 score、top-k、softmax 或输出算术。
 4. UTIL-NCU 已使用快照和独立候选完成；不要把 full-section NCU replay 重新压到完整双卡
    请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
 5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
-6. 当前只允许 `UTIL-BATCH-GROUP-FIT`：先补恢复 A 的 8 路基线，再从同一 config 复制候选，
-   只把 `--batch-groups 2` 改为 `1`。候选先过相同两次 greedy parity，再测 2/4/6/8 路并恢复
-   A4；2 路改善 ≥1% 且 5/6 胜，4/6/8 路不退 >1%。若只赢低并发，否决固定配置并转
-   concurrency-aware 调度。
+6. 当前只允许 `UTIL-EXPDEC-GU` 的短路验证：从 A config 复制独立候选，只给 env 增加
+   `STRATA_EXPDEC=1`。启动日志必须证明两张卡的 gate/up 都进入 `expdec_gu_kernel`，down
+   保持默认。路径未真实接管即否决；接管后先过三组冻结 greedy parity，通过才预注册并测
+   2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、并发回退和资源 hard gate 不放宽。
 
 不要把已否决项原样重跑：
 
@@ -321,7 +323,7 @@ query 的 score、top-k、softmax 或输出算术。
 - 固定 `STRATA_PIPED_READ_PIECE=32768/65536`；
 - `STRATA_QSA_SLOTS=1`；
 - `STRATA_PA_GROUP3=1` 的同 CTA cache co-residency；
-- groups=1、groups=1 + batch-MTP、split25/26；
+- groups=1、groups=1 + batch-MTP、split25/26；任何只改固定 group 数的配置；
 - 1200/1400/2000 ms 固定 lead-in。
 
 完整判决见 [`WORK_QUEUE.md`](WORK_QUEUE.md) 和台账。

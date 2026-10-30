@@ -761,6 +761,26 @@ candidate 先过相同 parity，再同测 2/4/6/8 路并恢复 A4。2 路改善�
 crossover 作为 concurrency-aware 调度的预注册依据。契约见
 [`UTIL_BATCH_GROUP_FIT_CONTRACT-20261031.md`](UTIL_BATCH_GROUP_FIT_CONTRACT-20261031.md)。
 
+### 16.5.9 UTIL-BATCH-GROUP-FIT（已完成，parity 门否决）
+
+A3 的 2/4/6/8 路聚合中位为 `81.0/116.1/133.2/104.4 tok/s`，TTFT 中位为
+`142.0/293.0/967.5/1926.0 ms`。8 路低于 6 路，说明真实并发平台存在；8 路三次为
+`103.4/115.4/104.4`，draft 接受率 `75.48%`，没有外来请求。
+
+候选只把 `--batch-groups` 从 JSON 字符串 `"2"` 改成数字 `1`，深拷贝恢复后与 A 完全相等。
+B 正常以 6 slots / 1 group loaded，但两次自然语言 greedy 输出同一段 94-token 文本并以
+`finish=stop` 结束；A 可重复生成不同的 96-token 文本并以 `finish=length` 结束。parity 门
+失败后没有运行候选吞吐，也不能把历史 4 路回退写成新的候选实测。
+
+这次失败推翻了“只改 group 调度不改模型算术”的假设。A 已恢复，6 slots / 2 groups、health
+loaded、engine/config hash 正确；A→B 和 B→A 分别停机 8/9 秒，启动至 loaded
+`206/180` 秒，总中断 `3:10`。结果见
+[`UTIL_BATCH_GROUP_FIT_RESULT-20261031.md`](UTIL_BATCH_GROUP_FIT_RESULT-20261031.md)。
+
+下一步先短路验证 `UTIL-EXPDEC-GU`：候选只增加 `STRATA_EXPDEC=1`，启动日志必须证明两张卡的
+gate/up 都进入 expdec 路径，down 保持默认；真实路径接管并通过冻结 parity 后，才允许做
+2/4/6/8 路 A-B-A 和端到端 1% 门。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

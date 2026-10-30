@@ -1,6 +1,7 @@
 # UTIL-BATCH-GROUP-FIT contract
 
-Status: pre-registered before implementation.
+Status: rejected on 2026-10-31 by the frozen greedy-parity gate. See
+[`UTIL_BATCH_GROUP_FIT_RESULT-20261031.md`](UTIL_BATCH_GROUP_FIT_RESULT-20261031.md).
 
 ## Evidence and selected problem
 

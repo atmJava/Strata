@@ -3,6 +3,34 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-80 · 单组调度既未修复 8 路平台，也未保持 greedy parity
+
+- 目标 / 指标：先补当前 A 的 8 路基线，再把 groups 2→1 作为唯一候选变化；B 必须逐字等于
+  A 后，才测 2/4/6/8 路并守住 2 路 +1%/5-of-6、高并发不退 >1% 和资源门。
+- 假设与预期：若 2 路凹点来自两组各只携带一行，单组可减少跨卡交接且不改变模型算术；
+  预期固定单组至少隔离低并发成本，并可能以配置方式改善吞吐。
+- 为什么选这条路线：A3 的 2 路只到 `81.0 tok/s`，而历史单组只在高并发被否决；先补当前
+  8 路能同时验证并发平台，并只需一次候选启动和一次恢复。
+- 改动与实验：A3 测得 8 路三次 `103.4/115.4/104.4 tok/s`，中位 `104.4`，确认 8 路低于
+  6 路 `133.2`。候选从 A 深拷贝，只把 `--batch-groups` 从 JSON 字符串 `"2"` 改为数字 `1`；
+  6 slots / 1 group、health loaded、engine/config hash 和资源均正确，随后跑三组固定探针各两次。
+- 结果：B 两次生成同一 94-token 文本并以 `finish=stop` 结束；A 可重复生成不同的 96-token
+  文本并以 `finish=length` 结束。探针 0 和算术探针均等于 A，失败集中在自然语言序列。
+- 判决：**UTIL-BATCH-GROUP-FIT 在 parity 门否决，候选吞吐未运行。** 契约“只改调度、不改
+  模型算术”的假设被推翻；不扫描其他固定 group 数。
+- 预期被推翻：group 数会改变真实层上的数值结果。候选内部可重复只证明漂移稳定，不能替代
+  与基线逐字一致。
+- 生产状态与回滚：A 已恢复，server/engine/vision PID `529088/529112/529097`，health loaded，
+  6 slots / 2 groups、`expert_slots=17274`、`expert_cache_mib=28267`，engine/config hash 正确；
+  production systemd 仍 inactive/dead、`MainPID=0`、`NRestarts=23`。A→B 停机 8 秒、启动至
+  loaded 206 秒；B→A 停机 9 秒、启动至 loaded 180 秒，总中断 `3:10`。
+- 证据：`docs/work/UTIL_BATCH_GROUP_FIT_RESULT-20261031.md`、台账 L-107。
+- 学到什么：配置级并发实验也必须先冻结自然语言 parity。一次重启成本虽低，但性能数据不能
+  补偿质量路径变化。
+- 下一步与理由：先对 `UTIL-EXPDEC-GU` 做短路验证。源码和既有微内核证据表明
+  `STRATA_EXPDEC=1` 只接管 IQ3_XXS gate/up，而 down 保持默认，且当前模型几何满足条件；
+  启动日志若不能证明两张卡都进入 gate/up 路径就立即否决，通过后再做 parity 和端到端 1% 门。
+
 ## I-20261031-79 · CPU-order arithmetic leaves piped-MTP text drift unchanged
 
 - 目标 / 指标：只给已否决的 piped-MTP B 增加 `--expert-cache-cpu-order`，保持六槽、两组、

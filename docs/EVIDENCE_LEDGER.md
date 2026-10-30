@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（107 条：L-000…L-106，按编号）
+## 台账索引（108 条：L-000…L-107，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -121,6 +121,7 @@
 | L-104 | 10-31 19:2xZ | piped MTP 六槽/两组真实启用，2 路 `78.3 → 93.9 tok/s`（+19.92%，5/6 胜），但 4/6 路 `-3.82%/-9.79%`，固定 greedy 文本在 B 内不重复 | **UTIL-PIPED-MTP 否决；转 cache-neutral 隔离** |
 | L-105 | 10-31 19:2xZ | cache-neutral 候选只恢复 `10065 + 7209` cache，但 device1 是额外 helper cache；双卡 layer split 在读取权重前 exit 2 | **UTIL-PIPED-MTP-CACHE 启动门否决；转 CPU-order parity** |
 | L-106 | 10-31 19:4xZ | CPU-order piped MTP 保持 6 slots / 2 groups，但自然语言 greedy 探针仍两次不同且与 A 不同；未跑候选吞吐 | **UTIL-PIPED-MTP-ORDER parity 门否决；转 1-vs-2 batch-group fit** |
+| L-107 | 10-31 20:0xZ | A3 8 路中位 `104.4 tok/s`，低于 6 路 `133.2`；单组候选正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | **UTIL-BATCH-GROUP-FIT parity 门否决；未跑候选吞吐** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3837,6 +3838,57 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-107 UTIL-BATCH-GROUP-FIT：单组调度改变自然语言数值路径
+
+**判定**：**UTIL-BATCH-GROUP-FIT 在 parity 门否决。** 候选正常以 6 slots / 1 group loaded，
+但两次自然语言 greedy 回答虽然彼此一致，却与 A 不同且提前结束。按契约没有运行候选吞吐，
+也不扫描其他固定 group 数。
+
+**A3 基线**：恢复 A 的 2/4/6 路中位为 `81.0/116.1/133.2 tok/s`。新增 8 路三次为
+`103.4/115.4/104.4 tok/s`，中位 `104.4`；墙钟中位 `30.1 s`、TTFT `1926.0 ms`、
+`slot_wait=1468.5 ms`、decode `8567 ms`、decode rate `21.9 tok/s`。27 个请求的 draft
+接受率为 `75.48%`，外来请求为 0；两个请求在 `363/375` tokens `finish=stop`，其余按 length
+结束。这确认 8 路比 6 路慢，而不是继续扩展到更多槽即可线性提高吞吐。
+
+**候选隔离**：B 从 A 深拷贝到
+`/opt/ai/logs/qsa-diag-20261031T1653Z/e-batch-groups-1.json`，只把
+`--batch-groups` 从 JSON 字符串 `"2"` 改为数字 `1`。深拷贝恢复 `"2"` 后与 A 完全相等，
+排除了其他参数变化。B 的 config sha256 为
+`0437977f454de71f3f5423598b501f50671fc590d5cd81fe4d7a2a5f06cdc700`；启动后
+`batch_slots=6`、`batch_groups=1`、`expert_slots=17274`、`expert_cache_mib=28267`，
+health loaded 且 engine hash 正确。
+
+**parity**：B 两次输出同一段 94-token 文本，以
+`Because the target model accepts only tokens that match its own greedy argmax choice, so the
+accepted sequence is identical to standard greedy decoding.` 结束，`finish=stop`。A 输出不同
+的 96-token 文本，以 `... leaves the output identical to standard` 结束，`finish=length`。
+探针 0（`STRATA_PARITY_ALPHA`）与算术探针（`944`）均等于 A。因此失败不是请求错误或候选内
+随机漂移，而是单组路径真实改变了这个自然语言序列的生成结果。
+
+**恢复与成本**：A→B 停机 8 秒、启动至 loaded 206 秒；B→A 停机 9 秒、启动至 loaded
+180 秒，总中断 `3:10`。恢复后 server/engine/vision PID `529088/529112/529097`，health
+loaded，`batch_slots=6`、`batch_groups=2`、`expert_slots=17274`、
+`expert_cache_mib=28267`，engine `105a4171...`、config `88de996a...`；RAM available
+`14.1 GiB`、swap `12 MiB`、GPU idle、VRAM free `1006 MiB`。production systemd 仍
+inactive/dead、`MainPID=0`、`NRestarts=23`。
+
+**下一步**：先短路验证 `UTIL-EXPDEC-GU`。从 A config 复制独立候选，只增加
+`STRATA_EXPDEC=1`；启动日志必须证明两张卡的 gate/up 都进入 `expdec_gu_kernel`，down 保持
+默认。任一 gate/up 未接管即否决；真实路径接管后再跑三组冻结 greedy parity，通过才预注册
+2/4/6/8 路 A-B-A，并以端到端至少 1% 改善、高并发不回退和资源完整性为门。
+
+**证据**：
+
+- `docs/work/UTIL_BATCH_GROUP_FIT_RESULT-20261031.md`
+- `/opt/ai/logs/util-batch-group-fit-a3-n8-20261030T195241Z.log`
+  （sha256 `76b3c96cd01262f0cbb2e7b42f0a90077e67810dfc2677de377cd423e164fcff`）
+- `/opt/ai/logs/util-batch-group-fit-a3-n8-final-metrics-20261030T195241Z.json`
+  （sha256 `78b78e61ec83a60f6cc2b3fe6a5e69d27ea46c49377996d8481b0bd2257a5877`）
+- `/opt/ai/logs/util-batch-group-fit-parity-B-20261030T2001Z.json`
+  （sha256 `6221d00e17d3a123af5bade9688d08f61396fccf1c8f2489dc0d9aacc249fd0b`）
+- `/opt/ai/logs/util-batch-group-fit-restore-A-20261030T200045Z.out`
+  （sha256 `7055aa71115c2c0265ac6ebe0d5ba25564f04769340c960d8272fd3758e8c2d0`）
 
 ## L-106 UTIL-PIPED-MTP-ORDER：CPU-order expert 算术未消除 greedy 漂移
 

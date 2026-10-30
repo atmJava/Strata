@@ -6,10 +6,14 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-PIPED-MTP-ORDER 已完成并在 parity 门否决。候选保持六槽/两组，只增加
+- 当前项：UTIL-BATCH-GROUP-FIT 已完成并在 parity 门否决。A3 的 2/4/6/8 路中位为
+  `81.0/116.1/133.2/104.4 tok/s`，确认 8 路平台真实存在；候选保持 6 slots / 1 group 并正常
+  loaded，但自然语言探针在 B 内可重复、与 A 不同且提前以 `finish=stop` 结束，因此没有跑
+  候选吞吐。下一步以低成本短路筛选 `UTIL-EXPDEC-GU`，只在真实 gate/up 路径接管且 parity
+  通过时进入性能门。
+- 上一项：UTIL-PIPED-MTP-ORDER 已完成并在 parity 门否决。候选保持六槽/两组，只增加
   `--expert-cache-cpu-order`；自然语言探针仍两次不同且与 A 不同，CPU-order 对 layer-split
-  verifier 路径无可见效果，因此没有跑候选吞吐。下一步是 `UTIL-BATCH-GROUP-FIT`，只比较
-  当前两组与一组调度在 2/4/6/8 路下的吞吐和 2 路凹点。
+  verifier 路径无可见效果，因此没有跑候选吞吐。
 - 上一项：UTIL-PIPED-MTP-CACHE 已完成并在启动门否决。`--expert-cache-device1 7209`
   被引擎解释为 helper cache，而双卡 layer split 已占用两块 GPU，候选在读取权重前以 exit 2
   退出；没有跑 parity 或性能。
@@ -41,18 +45,19 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线与 CPU-order parity 均已否决，batch-group 调度
-  contract 已预注册。attention v2 已是当前默认并完成 1% 门复验；不要再次用
+- 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity 与 1-vs-2 batch-group
+  调度均已否决。attention v2 已是当前默认并完成 1% 门复验；不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：从 A config 复制独立候选，只把 `--batch-groups 2` 改为 `1`；先补 A 的 8 路
-  基线，再启动候选做 parity 和 2/4/6/8 路 A-B-A。2 路须 +1%/5-of-6，4/6/8 不退 >1%。
-- 当前候选：UTIL-BATCH-GROUP-FIT。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
+- 下一动作：先从当前 A config 复制独立候选，只在 env 增加 `STRATA_EXPDEC=1`；启动日志必须
+  证明两张卡上的 gate/up 都走 `expdec_gu_kernel`、down 保持默认。任一 gate/up 未接管即否决；
+  三组冻结 greedy 探针逐字重复且等于 A 后，才预注册并测 2/4/6/8 路 A-B-A。
+- 当前候选：无。`UTIL-EXPDEC-GU` 尚未启动。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
   Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
-- 未完成采纳项：18。
+- 未完成采纳项：17。
 - 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
   该测量路线不阻塞主线。
 
@@ -60,10 +65,10 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；ORDER 失败后恢复的 server/engine/vision PID 为
-  `525579/525603/525588`，engine 为 `105a4171...`，没有 `STRATA_PIPED_MTP`、
-  `--expert-cache-cpu-order` 或实验 profiler/QSA/kernel env。A→候选停机 8 秒，候选启动
-  146 秒；候选→A4 停机 9 秒、启动至 loaded 171 秒。
+  `loaded=true`；BATCH-GROUP-FIT 失败后恢复的 server/engine/vision PID 为
+  `529088/529112/529097`，engine 为 `105a4171...`，6 slots / 2 groups，没有
+  `STRATA_PIPED_MTP`、`--expert-cache-cpu-order` 或实验 profiler/QSA/kernel env。
+  A3→候选停机 8 秒、启动至 loaded 206 秒；候选→A4 停机 9 秒、启动至 loaded 180 秒。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
@@ -100,6 +105,9 @@
 - UTIL-PIPED-MTP-ORDER 已在 parity 门否决：候选只加 `--expert-cache-cpu-order`，自然语言
   探针仍两次不同且与 A 不同，输出与上一轮 B 完全相同。源码中该开关接在
   `ExpertDispatch`，layer-split 的 `VerifyHits` 没有对应字段；候选未跑吞吐。
+- UTIL-BATCH-GROUP-FIT 已在 parity 门否决：A3 8 路中位 `104.4 tok/s`，低于 6 路 `133.2`；
+  单组候选正常启动且两次一致，但自然语言回答为 94-token `finish=stop`，A 为 96-token
+  `finish=length`。只改组数也会改变数值路径，候选未跑吞吐。
 - V3-1 容量预设已收口：4 路中位 `6×192K` 聚合 120.6、`8×128K` 133.9、`8×192K` 122.8；
   默认保持 `6×192K`。8×128K 的 +11% 以 192K→128K 上下文为代价。
 - 256K 生产切换已完成：config 仅把 `max_context` 从 `192000` 改为 `262144`，同时保留
