@@ -10,15 +10,15 @@
   staged 专家源关闭、长上下文无法停车；内核 NCU 降为条件项。
 - 当前迭代：无运行中实验。工作区整理、上游合并部署和吞吐复测已完成；Nsight GPU Metrics 已完成，
   NCU 尚未执行，P7 搁置。
-- 下一动作：按 v3 计划先做阶段 0 自愈演练与阶段 1 基线复核，再验证候选 A
-  （`BATCH_MTP=1`、`PIPED_MTP=1`、`SELF_COMMIT=0`）与候选 B（`PIPED_READ_PIECE`）。
+- 下一动作：按 v4 计划先做 M0 自愈演练与性能账本（解码窗口、预填、启动），再依次推进
+  W1 并发草稿、W2 窗口效率、W3 预填复用、W4 多路与冷读、W5 快启动。
   参数只在机制假设下做 A/B/A，不做独立参数探索。
-- 当前候选：UTIL-CONCURRENCY（v3 阶段 2–3）；UTIL-KERNEL 只有在结构性修复后仍不达标时启动。
+- 当前候选：UTIL-CONCURRENCY（v4 W1/W3）；UTIL-KERNEL 只有在结构性修复后仍不达标时启动。
   P7 只有在证据表明 Tensor 管线是直接瓶颈时才恢复，并仍需完整 A-B-A。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
-  阶段 0–4 先修自愈、并发 MTP、预填让路与能力矩阵防护；内核 NCU 见附录 B。
+  M0 建账本，W1–W5 分工作流逼近解码 200 / 预填 5000 / 快启动；内核 NCU 为条件项。
 - 未完成采纳项：18。
 - 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
   该测量路线不阻塞主线。
