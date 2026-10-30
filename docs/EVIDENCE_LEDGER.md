@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（103 条：L-000…L-102，按编号）
+## 台账索引（104 条：L-000…L-103，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -117,6 +117,7 @@
 | L-100 | 10-31 19:5xZ | 显式 activation reload hash 相同但 `475.2` 对 `475.1 us`（−0.021%）、3/7 胜；shared-load 指令与寄存器完全不变，编译器已复用 | **UTIL-ACT 否决；转 UTIL-WEIGHT** |
 | L-101 | 10-31 20:1xZ | weight decode 复用 `473.2` 对 `475.8 us`（+0.546%）、6/7 胜，但 shared/global load 指令完全相同；寄存器 73→80，未达 1% | **UTIL-WEIGHT 否决；转 UTIL-GRID-PAD** |
 | L-102 | 10-31 21:0x | padded four-copy IQ3 codebook 使用 stride 257，hash 不变但 `489.3` 对 `475.7 us`（−2.86%）、仅 3/7 胜；剔除首组后仍慢约 1.2% | **UTIL-GRID-PAD 否决；转 UTIL-WEIGHT-RO** |
+| L-103 | 10-31 21:4x | read-only IQ3 weight loads 真实生成 48 条 `LDG.E.U16.CONSTANT.SYS`，hash 不变但只从 `472.6` 到 `471.0 us`（+0.339%）、6/7 胜 | **UTIL-WEIGHT-RO 否决；转 UTIL-PIPED-MTP** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3833,6 +3834,47 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-103 UTIL-WEIGHT-RO：机器码变化真实，但只改善 0.339%
+
+**判定**：**UTIL-WEIGHT-RO 否决。** fused IQ3 gate/up 的显式只读 weight 加载保持
+hash `9a055a5a94e15c87`，SASS 从 baseline 的 56 条 `LD.E.U16.SYS` 变为候选的 48 条
+`LDG.E.U16.CONSTANT.SYS`；但七组 gate/up 中位为 `472.6/471.0 us`，改善 `0.339%`，
+candidate 6/7 胜、p75 `471.8 us`。方向为正但未达 1%，不进入 NCU 或 engine A/B。
+
+**七组交替进程**：baseline
+`665.6/472.3/472.7/470.9/473.1/471.5/472.6 us`；candidate
+`583.7/471.0/471.0/471.8/469.0/470.9/470.5 us`。剔除第一组冷时钟离群后约
+`472.45/470.95 us`，改善 `0.317%`，不是 outlier 造成的方向。
+
+**资源与路径**：默认 kernel 73 registers、候选 80 registers，二者 `STACK:0`、`LOCAL:0`。
+早先同时把 scale 改走 `__ldg` 的版本产生 8-byte stack 和 `STL/LDL`；最终候选将 scale
+保留原路径，并用独立三-block wrapper 消除 stack。所有 baseline/candidate hash 和两组
+parity 均通过。
+
+**恢复**：从 `/opt/ai/tmp/pre-util-weight-ro-20261030T1845Z/` 恢复；source
+`47009da533...`、bench `8255d36e...`、engine `105a4171...`。停机 8 秒，恢复 loaded health
+162 秒，总中断约 `2:50`；最终 server/engine/vision PID `514867/514949/514871`，production
+systemd 仍 inactive/dead、`MainPID=0`、`NRestarts=23`。
+
+**下一步**：`UTIL-PIPED-MTP`。生产 pipeline 当前关闭槽内 MTP，2 路聚合低于单路。v0.2.7
+已有 `--batch-mtp` + `STRATA_PIPED_MTP=1`，双卡 A6000 文档记录 2 路 `+16.0%`、4 路
+`+10.2%`。当前 2080 Ti 必须保住 6 slots / 2 groups，按 A1-B-A2 跑 2/4/6 路；不扫描
+槽数、组数或草稿深度。
+
+**证据**：
+
+- `docs/work/UTIL_WEIGHT_RO_RESULT-20261031.md`
+- `/opt/ai/logs/util-weight-ro-sass-20261031T2048Z.txt`
+  （sha256 `c79e7e7fdaa55fbe4e26ca9bfc41128557b65e71918c4cba4e16346cfa78ff36`）
+- `/opt/ai/logs/util-weight-ro-ab-20261031T2050Z.log`
+  （sha256 `0e7fe82e12904a0826d462499d38252ae78851f7e542763fc45e05e9e957c20f`）
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/restore-util-weight-ro.out`
+  （sha256 `19b2089f8cea8775938040531b9db548c16f06182081919032f7279e731c11d2`）
+- `/opt/ai/tmp/pre-util-weight-ro-20261030T1845Z/`
+
+**没测什么**：只有一个真实层、mode-8 微内核，没有 NCU、engine A/B、并发或自然语言输出。
+不能把 `0.339%` 扩大为端到端收益，也不能因机器码变化而保留候选。
 
 ## L-102 UTIL-GRID-PAD：32-bank padded codebook 仍慢 2.86%，shared 地址路线关闭
 

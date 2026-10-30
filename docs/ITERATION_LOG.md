@@ -3,6 +3,41 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-76 · read-only loads changed SASS but stopped at 0.339%; turn to pipelined MTP
+
+- 目标 / 指标：只把 fused IQ3 gate/up 的 weight `qs`、aux/sign word 和 scale 改走显式只读
+  加载；要求 principal 16-bit load 的 SASS 变化，7 组 gate/up 中位至少快 1%、5/7 胜，
+  再以 long-scoreboard≤16.5%、global loads≤296,960、active warps≥69%、register≤85 裁决。
+- 假设与预期：UTIL-NCU 的 long-scoreboard 占 `17.50%`，而当前 weight 块是
+  `LD.E.U16.SYS`；若只读缓存路径降低该依赖延迟，时间应出现可测量改善。
+- 为什么选这条路线：前四次 shared-memory 重组均失败；read-only path 不改变 codebook、
+  activation、算术或输出，是 long-scoreboard 假设最便宜的直接测试。
+- 改动与实验：默认关闭 `STRATA_IQ3_WEIGHT_RO`；最终用独立
+  `native_gu_fused_kernel_ro` 和 `__launch_bounds__(256, 3)` 消除早先版本的 8-byte stack
+  frame。默认 kernel 保持 73 registers，候选 80 registers；跑默认/分组 parity、SASS 核对和
+  7 组双顺序交替进程。
+- 结果：56 条 `LD.E.U16.SYS` 变为 48 条 `LDG.E.U16.CONSTANT.SYS`，两臂无 stack，14 个 hash
+  都是 `9a055a5a94e15c87`。baseline/candidate 中位 `472.6/471.0 us`（+0.339%），candidate
+  6/7 胜，p75 `471.8 us` 低于 baseline 中位；剔除第一组后约 `+0.317%`，方向稳定但未达 1%。
+- 判决：**UTIL-WEIGHT-RO 否决。** 时间门先失败，不运行 NCU 或 engine A/B；不扫描 cache
+  operator、row-pair、NTC 或邻近几何。
+- 预期被推翻：long-scoreboard 的一部分可由显式只读路径改善，但真实机器码变化只带来约
+  0.3% 收益；继续在 fused gate/up 上做单指令/load-policy 微调已无足够信息收益。
+- 生产状态与回滚：源码、bench/parity 从
+  `/opt/ai/tmp/pre-util-weight-ro-20261030T1845Z/` 恢复；source 回到 `47009da533...`，
+  bench `8255d36e...`，engine `105a4171...`，两组 parity 0 failure。停机 8 秒、
+  恢复 loaded health 162 秒，总中断约 `2:50`；最终 server/engine PID `514867/514949`，
+  production systemd 不变。
+- 证据：`docs/work/UTIL_WEIGHT_RO_RESULT-20261031.md`、台账 L-103、
+  `/opt/ai/logs/util-weight-ro-sass-20261031T2048Z.txt` 和
+  `/opt/ai/logs/util-weight-ro-ab-20261031T2050Z.log`。
+- 学到什么：源码改动必须用 SASS 证明，但 SASS 变化也只证明机制生效，不证明用户收益。
+  五次 fused gate/up 局部实验均未过 1%，应关闭这个局部方向，转向已被上游测量但本机尚未
+  开启的结构性并发机会。
+- 下一步与理由：`UTIL-PIPED-MTP`。v0.2.7 的两卡基准记录 `--batch-mtp` +
+  `STRATA_PIPED_MTP=1` 在 2 路改善 `16.0%`、4 路改善 `10.2%`，且每槽输出一致；当前
+  2080 Ti 六槽只差配置验证和显存风险。按 A1-B-A2 跑 2/4/6 路，先保住 6 slots / 2 groups。
+
 ## I-20261031-75 · 32-bank padded codebook still regressed; rotate to read-only weight loads
 
 - 目标 / 指标：四副本 IQ3_XXS codebook 使用 stride 257，使每个 replica 的物理 bank 为

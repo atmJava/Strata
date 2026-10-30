@@ -693,6 +693,23 @@ candidate `489.3 us`（−2.86%），candidate 仅 3/7 胜。剔除第一组冷�
 `qs`、aux/sign word 和 scale 改走显式只读路径，先检查机器码，再过 1% 时间与 counter 门。
 契约见 [`UTIL_WEIGHT_RO_CONTRACT-20261031.md`](UTIL_WEIGHT_RO_CONTRACT-20261031.md)。
 
+### 16.5.5 UTIL-WEIGHT-RO（已完成，否决）
+
+显式只读加载真实改变了 SASS：默认 56 条 `LD.E.U16.SYS`，候选产生 48 条
+`LDG.E.U16.CONSTANT.SYS`；两臂输出 hash 相同，默认/候选分别为 73/80 registers 且无 stack。
+但七组 gate/up 中位仅从 `472.6` 降到 `471.0 us`（+0.339%），candidate 6/7 胜，未达 1%。
+因此没有运行 NCU 或 engine A/B，源码和测试二进制已恢复。
+
+候选停机 8 秒、恢复 loaded health 162 秒，总中断约 `2:50`。结果说明 fused gate/up 的
+load-policy 微调仍是正向但不足；不扫描 cache operator、row-pair、NTC 或邻近几何。结果见
+[`UTIL_WEIGHT_RO_RESULT-20261031.md`](UTIL_WEIGHT_RO_RESULT-20261031.md)。
+
+下一项 `UTIL-PIPED-MTP` 转为用户可感知的并发凹点。v0.2.7 已有保留两组流水且每槽 MTP
+草稿的 `--batch-mtp` + `STRATA_PIPED_MTP=1`，双卡 A6000 文档记录 2 路 `+16.0%`、4 路
+`+10.2%`；当前 2080 Ti 六槽尚未开启。必须保留 6 slots / 2 groups，按 A1-B-A2 测 2/4/6 路，
+并守住输出、health 和 RAM/VRAM 门。契约见
+[`UTIL_PIPED_MTP_CONTRACT-20261031.md`](UTIL_PIPED_MTP_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

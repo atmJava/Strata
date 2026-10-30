@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T21:10+08:00。
+> 最后更新：2026-10-31T21:50+08:00。
 
 ## 用户目标
 
@@ -78,7 +78,8 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | UTIL-ACT | M13 | 每个 k 只加载一次 q8_1 activation words/scale，供 gate/up 两个 row dot 复用 | 中高 | 中；隔离 GPU、7 组进程与 NCU | **否决**：编译器已复用，shared-load 指令完全不变 |
 | UTIL-WEIGHT | M13 | 每个 k 只解码一次 weight-side codebook/aux/scale，复用于 NTC chunk 的多个 token | 高 | 中；隔离 GPU、7 组进程与 NCU | **否决**：`+0.546%`、6/7 胜，但 load 指令完全相同且寄存器升高 |
 | UTIL-GRID-PAD | M13 | 四副本 codebook 使用 stride 257，使每个 replica 覆盖全部 32 banks | 已证伪 | 中；隔离 GPU、7 组进程 | **否决**：`489.3` 对 `475.7 us`（−2.86%），3/7 胜；不再扫副本或 stride |
-| UTIL-WEIGHT-RO | M13 | IQ3 weight `qs`/aux/scale 使用显式只读加载，降低 long-scoreboard stall | 中 | 低中；SASS 检查、7 组进程，通过后 NCU | **下一代码项**：先证明 `LD.E.U16.SYS → LDG...CONSTANT`，再过 1% 时间门 |
+| UTIL-WEIGHT-RO | M13 | IQ3 weight `qs`/aux 使用显式只读加载，降低 long-scoreboard stall | 已证伪 | 低中；SASS 检查、7 组进程 | **否决**：机器码已变为 `LDG.E.U16.CONSTANT.SYS`，但只改善 `0.339%` |
+| UTIL-PIPED-MTP | M14 | 保留两组流水，用每槽 MTP 草稿修复低并发吞吐凹点 | 高 | 中；两次候选切换、2/4/6 路 A-B-A、显存检查 | **下一项**：验证 `--batch-mtp` + `STRATA_PIPED_MTP=1`；先守住 6 slots / 2 groups |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -141,10 +142,13 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 24. **UTIL-GRID-PAD 已否决**：四副本 stride 257 保持 hash，但 gate/up 中位 `489.3` 对
     `475.7 us`（−2.86%），仅 3/7 胜；剔除第一组冷时钟离群后仍慢约 1.2%。地址旋转与复制
     成本超过任何 bank 冲突收益；不扫描副本数或邻近 stride。
-25. **下一项 UTIL-WEIGHT-RO**：SASS 静态读取显示 fused IQ3 weight 块使用
-    `LD.E.U16.SYS`，而只读参数使用 `LDG.E.CONSTANT.SYS`。只把 `DotG<18>` 的 weight
-    `qs`、aux/sign word 和 scale 改走显式只读加载；先证明机器码变化，再由 7 组 kernel
-    时间门和 bounded NCU 决定是否进入 engine A/B。
+25. **UTIL-WEIGHT-RO 已否决**：默认 SASS 的 56 条 `LD.E.U16.SYS` 在候选中变为 48 条
+    `LDG.E.U16.CONSTANT.SYS`，80 registers、无 stack；但 gate/up 中位只从 `472.6` 降到
+    `471.0 us`（`0.339%`），6/7 胜，未达 1%。只看机器码变化不足以采纳。
+26. **下一项 UTIL-PIPED-MTP**：当前生产候选的 pipeline 关闭槽内 MTP，已实测 2 路聚合
+    `94.85 tok/s` 低于单路 `104.05`。v0.2.7 已实现并测量 `--batch-mtp` +
+    `STRATA_PIPED_MTP=1`：双卡 A6000 的 2 路 `+16.0%`、4 路 `+10.2%`。当前 2080 Ti
+    六槽先验证 6 slots / 2 groups 仍保留，再按 A1-B-A2 测 2/4/6 路；不扫描草稿深度或组数。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

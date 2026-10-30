@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T21:10+08:00。
+> 整理时间：2026-10-31T21:50+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -17,7 +17,8 @@
 ## 2. 当前断点
 
 - 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，UTIL-KERNEL、
-  UTIL-ACT、UTIL-WEIGHT 与 UTIL-GRID-PAD 均按预注册门否决，当前断点是 UTIL-WEIGHT-RO。
+  UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD 与 UTIL-WEIGHT-RO 均按预注册门否决，当前断点是
+  UTIL-PIPED-MTP。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -39,9 +40,9 @@
   needle 或性能结论。
 - 中断后只读核对到服务 active、health 200、生产配置已恢复，未发现残余 soak 或 P7 输出。
 - 恢复 P7 时必须从全新的 A1 起跑完整同 boot A-B-A，不能复用中断前的首请求。
-- 当前目标链路是：UTIL-NCU 已取得 MIO 根因和 `17.50%` long-scoreboard 次级证据；四副本、
-  activation reload、weight working set 与 padded four-copy 均被实测否决。下一项只把 IQ3
-  weight 的 `LD.E.U16.SYS` 读取改为只读缓存路径，先用机器码与 1% 时间门裁决。
+- 当前目标链路是：融合 gate/up 的五次局部重排都未过 1%，read-only load 已真实生成
+  `LDG.E.U16.CONSTANT.SYS` 但仍只有 `0.339%`。下一项转回用户可感知的并发凹点，验证
+  v0.2.7 已有但默认关闭的 `STRATA_PIPED_MTP=1`：保留两组流水，同时让每槽使用 MTP 草稿。
 
 ## 3. 当前生产
 
@@ -52,7 +53,7 @@
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
 | 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 候选 PID | server `511649`、engine `511741` |
+| 候选 PID | server `514867`、engine `514949`；vision `514871` |
 | candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -75,7 +76,8 @@ STRATA_SM75_PERF=1
 候选进程中当前没有 `STRATA_PF_WMMA`、`STRATA_PA_V2T`、`STRATA_SEL_OVERLAP`、
 `STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING`、`STRATA_PA_GROUP3`、
 `STRATA_IQ3_GRID_REPL`、`STRATA_IQ3_ACT_RELOAD`、`STRATA_IQ3_WEIGHT_REUSE`、
-`STRATA_IQ3_GRID_PAD`、`STRATA_IQ3_WEIGHT_RO`、`STRATA_PROFILE_*` 或 `STRATA_NCU_*`。
+`STRATA_IQ3_GRID_PAD`、`STRATA_IQ3_WEIGHT_RO`、`STRATA_BATCH_MTP`、
+`STRATA_PIPED_MTP`、`STRATA_PROFILE_*` 或 `STRATA_NCU_*`。
 `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
 引擎子进程，不能替代 service drop-in。
 
@@ -205,10 +207,19 @@ NCU 或 engine A/B。源码/测试二进制已恢复，parity 0 failure。为独
 loaded health 用时 161 秒，总中断约 `2:53`。完整结果见
 [`work/UTIL_GRID_PAD_RESULT-20261031.md`](work/UTIL_GRID_PAD_RESULT-20261031.md)。
 
-下一项只做 `UTIL-WEIGHT-RO`：当前 SASS 的 IQ3 weight 块使用 `LD.E.U16.SYS`，而只读参数使用
-`LDG.E.CONSTANT.SYS`；候选只把 fused gate/up 的 IQ3 weight `qs`、aux/sign word 和 scale
-改走显式只读加载，不动共享 codebook 布局和其他算术。门限见
-[`work/UTIL_WEIGHT_RO_CONTRACT-20261031.md`](work/UTIL_WEIGHT_RO_CONTRACT-20261031.md)。
+### UTIL-WEIGHT-RO 否决：机器码生效，但只改善 0.339%
+
+候选 SASS 出现 48 条 `LDG.E.U16.CONSTANT.SYS`，默认 kernel 仍为 73 registers，候选为 80
+registers，两者都没有 stack frame；输出 hash 全部保持 `9a055a5a94e15c87`。七组 gate/up
+中位为 `471.0` 对 `472.6 us`，改善 `0.339%`，6/7 胜，p75 `471.8 us`。方向为正但未达 1%，
+因此没有运行 NCU 或 engine A/B。源码和测试二进制已恢复，parity 0 failure。停机 8 秒，
+恢复 loaded health 162 秒，总中断约 `2:50`。完整结果见
+[`work/UTIL_WEIGHT_RO_RESULT-20261031.md`](work/UTIL_WEIGHT_RO_RESULT-20261031.md)。
+
+下一项只做 `UTIL-PIPED-MTP`：当前 pipeline 在并发时关闭槽内 MTP，实测 2 路聚合低于单路。
+v0.2.7 已有 `--batch-mtp` + `STRATA_PIPED_MTP=1`，两卡文档记录 2 路 `+16.0%`、4 路
+`+10.2%`；当前 2080 Ti 六槽尚未验证。门限见
+[`work/UTIL_PIPED_MTP_CONTRACT-20261031.md`](work/UTIL_PIPED_MTP_CONTRACT-20261031.md)。
 
 ### QSA-UNION-ATTN 否决
 
@@ -268,9 +279,9 @@ query 的 score、top-k、softmax 或输出算术。
 4. UTIL-NCU 已使用快照和独立候选完成；不要把 full-section NCU replay 重新压到完整双卡
    请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
 5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
-6. 当前只允许 UTIL-WEIGHT-RO 的 IQ3 weight 只读加载切片；先证明 SASS 从
-   `LD.E.U16.SYS` 变为 `LDG...CONSTANT`，再过 7 组微内核时间、long scoreboard、寄存器、
-   parity 和资源门，之后才做一次 engine A/B。
+6. 当前只允许 UTIL-PIPED-MTP：复制候选 config，增加 `--batch-mtp`、`STRATA_PIPED_MTP=1`
+   并关闭 `STRATA_BATCH_SELF_COMMIT`。必须保留 6 slots / 2 groups，按 A1-B-A2 跑 2/4/6 路；
+   2 路改善 ≥1%，4/6 路不退 >1%，输出、health、RAM/VRAM 门通过后才能保留。
 
 不要把已否决项原样重跑：
 
