@@ -39,15 +39,40 @@ class LaunchIdentityTests(unittest.TestCase):
     def test_attested_lazy_model_reports_unloaded_without_generation(self):
         ready = {"bound_host": "127.0.0.1", "bound_port": 1234,
                  "model_id": "fake", "model_state": "unloaded"}
-        with mock.patch.object(readiness, "_request", return_value={
-                "instance": {"id": "one", "launch_attestation": "f" * 64},
-                "model": {"id": "fake", "loaded": False}}) as request:
+        with mock.patch.object(readiness, "_request", side_effect=[
+                {"instance": {"id": "one", "launch_attestation": "f" * 64},
+                 "model": {"id": "fake", "loaded": False}},
+                {"status": "ok", "service": "strata", "model": "fake", "loaded": False}]) as request:
             result = readiness.verify(ready, b'{"model_name":"fake"}',
                                       expected_host="127.0.0.1", expected_instance="one",
                                       expected_attestation="f" * 64, timeout=1)
         self.assertTrue(result["launch_attested"])
+        self.assertTrue(result["health_verified"])
         self.assertFalse(result["generation_ready"])
-        self.assertEqual(request.call_count, 1)
+        self.assertEqual([item.args[2:4] for item in request.call_args_list],
+                         [("GET", "/v1/telemetry"), ("GET", "/health")])
+
+    def test_unhealthy_or_inconsistent_health_rejects_before_generation(self):
+        ready = {"bound_host": "127.0.0.1", "bound_port": 1234,
+                 "model_id": "fake", "model_state": "ready"}
+        telemetry = {"instance": {"id": "one", "launch_attestation": "f" * 64},
+                     "model": {"id": "fake", "loaded": True}}
+        cases = (
+            ("status", "degraded", "probe_health_not_ok"),
+            ("service", "other", "probe_service_mismatch"),
+            ("model", "other", "probe_model_mismatch"),
+            ("loaded", False, "probe_model_state_mismatch"),
+        )
+        for field, value, error in cases:
+            health = {"status": "ok", "service": "strata", "model": "fake", "loaded": True}
+            health[field] = value
+            with self.subTest(field=field), mock.patch.object(
+                    readiness, "_request", side_effect=[telemetry, health]) as request:
+                with self.assertRaisesRegex(readiness.ReadinessError, error):
+                    readiness.verify(ready, b'{"model_name":"fake"}',
+                                     expected_host="127.0.0.1", expected_instance="one",
+                                     expected_attestation="f" * 64, timeout=1)
+                self.assertEqual(request.call_count, 2)
 
 
 if __name__ == "__main__":

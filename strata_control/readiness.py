@@ -115,8 +115,19 @@ def verify(ready: dict, source_bytes: bytes, *, expected_host: str,
     loaded = model.get("loaded")
     if type(loaded) is not bool:
         raise ReadinessError("probe_model_state_unavailable")
+    health = _request(host, port, "GET", "/health", key,
+                      max(0.1, deadline - time.monotonic()))
+    if health.get("status") != "ok":
+        raise ReadinessError("probe_health_not_ok")
+    if health.get("service") != "strata":
+        raise ReadinessError("probe_service_mismatch")
+    if health.get("model") != ready.get("model_id"):
+        raise ReadinessError("probe_model_mismatch")
+    if type(health.get("loaded")) is not bool or health["loaded"] != loaded:
+        raise ReadinessError("probe_model_state_mismatch")
     if not loaded and not force_load:
-        return {"api_identity_verified": True, "launch_attested": True, "generation_ready": False,
+        return {"api_identity_verified": True, "launch_attested": True, "health_verified": True,
+                "generation_ready": False,
                 "readiness_state": "unloaded", "model_state": "unloaded", "api_url": api_url}
     probe = {"model": ready.get("model_id"), "messages": [{"role": "user", "content": "hi"}],
              "max_tokens": 1, "temperature": 0, "stream": False}
@@ -139,5 +150,6 @@ def verify(ready: dict, source_bytes: bytes, *, expected_host: str,
     if not isinstance(usage, dict) or type(usage.get("completion_tokens")) is not int or \
             usage["completion_tokens"] < 1:
         raise ReadinessError("probe_generation_no_tokens")
-    return {"api_identity_verified": True, "launch_attested": True, "generation_ready": True,
+    return {"api_identity_verified": True, "launch_attested": True, "health_verified": True,
+            "generation_ready": True,
             "readiness_state": "generation_ready", "model_state": "ready", "api_url": api_url}

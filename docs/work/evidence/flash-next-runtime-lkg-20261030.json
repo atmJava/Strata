@@ -6,7 +6,7 @@
   "scope": "Isolated POSIX owner runtime with a fake engine; no production restart or synthetic production generation",
   "implementation": {
     "manifest": "owner-private <runtime>/<profile>.lkg.json",
-    "commit_point": "after model state and generation readiness verification",
+    "commit_point": "after model state, /health, and generation readiness verification",
     "durable_fields": [
       "exact source config bytes",
       "source SHA-256 and size",
@@ -47,6 +47,17 @@
         "a fresh owner runtime process reads the same LKG"
       ]
     },
+    "readiness_health_gate": {
+      "result": "PASS",
+      "summary": "4 passed, 6 subtests passed",
+      "covered": [
+        "telemetry identity and launch attestation precede /health",
+        "a lazy unloaded model passes /health without a generation request",
+        "status, service, model, and loaded mismatches reject readiness before generation",
+        "runtime start and verify expose health_verified",
+        "the operation journal records health_verified"
+      ]
+    },
     "fresh_owner_startup_fallback": {
       "result": "PASS",
       "covered": [
@@ -62,7 +73,7 @@
     },
     "terminal_suite": {
       "result": "PASS",
-      "summary": "214 passed, 45 skipped, 93 subtests passed",
+      "summary": "215 passed, 45 skipped, 97 subtests passed",
       "regression_found_and_fixed": "Immediate SIGTERM after ready publication previously exited -2 for delays 0, 0, 0.01, and 0.05 seconds; ready publication and the serving wait now share the same clean-stop scope, and ten immediate-signal repetitions exited 0"
     },
     "serve_lifecycle": {
@@ -77,6 +88,7 @@
   },
   "gates": {
     "isolated_persistent_lkg": "PASS",
+    "isolated_health_gate": "PASS",
     "production_automatic_rollback": "CLOSED",
     "g0b": "NOT_STARTED"
   },
@@ -85,9 +97,10 @@
     "No production configuration was changed",
     "No production generation load was sent",
     "The LKG is not a signed append-only record; it relies on the owner-only runtime directory",
+    "The LKG does not pin engine binary, Python server, model pack, or shared-library digests",
     "Rollback does not preserve an in-flight HTTP or SSE request",
     "Startup fallback covers a fresh owner candidate that never reaches ready; a candidate that reaches ready and later fails stays outside this path",
     "A real systemd-level restart and real-model startup recovery have not been exercised",
-    "Health, engine smoke, stream smoke, tool smoke, and session restore are not yet one G0B gate"
+    "Engine smoke, stream smoke, tool smoke, and session restore are not yet one G0B gate"
   ]
 }
