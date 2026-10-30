@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（112 条：L-000…L-111，按编号）
+## 台账索引（113 条：L-000…L-112，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -125,7 +125,8 @@
 | L-108 | 10-31 20:0xZ | A 的进程/config 均为 mode 8；fused/LDS gate/up 先完成，down 的 LDS 分支直接 return，`STRATA_EXPDEC=1` 无法到达 EXPDEC 内核 | **UTIL-EXPDEC-GU 启动前路径门否决** |
 | L-109 | 10-31 21:0xZ | checkpoint move parity 全过；同周期 2/4/6/8 路 `81.5/110.9/123.1/107.8 tok/s`，2/4 胜率仅 4/6、3/6，6 `+0.122%`，8 `-3.014%` | **UTIL-SLOT-CKPT-MOVE 吞吐门否决；A 已恢复** |
 | L-110 | 10-31 22:0xZ | GDN grouped self-commit 输出/state bitwise 全过；2/4/6/8 路 `+0.777%/-8.011%/+0.913%/-1.386%`，胜场均不足，漂移全超 3% | **UTIL-GDN-GROUPS 吞吐/漂移门否决；A 已恢复** |
-| L-111 | 10-31 22:5xZ | A-P-A2 每级 3 波；P 的 6/8 路 `113.352/103.373 tok/s`；8 路 occupancy `5.010`、tail `1.1349`、max slot wait `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`；head 每窗口约 `1.04 ms` | **UTIL-WINDOW-PROFILE 完成；下一项 UTIL-BATCH-HEAD** |
+| L-111 | 10-31 21:5xZ | A-P-A2 每级 3 波；P 的 6/8 路 `113.352/103.373 tok/s`；8 路 occupancy `5.010`、tail `1.1349`、max slot wait `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`；head 每窗口约 `1.04 ms` | **UTIL-WINDOW-PROFILE 完成；下一项 UTIL-BATCH-HEAD** |
+| L-112 | 10-31 22:1xZ | 两个 pipeline group 在末级严格串行；每级只有一个 verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 每次只绑定一个 group，`batch_poll` 返回时才释放末级 | **UTIL-BATCH-HEAD 源码门否决；未构建、未重启；转 UTIL-HEAD-SPLIT** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3842,6 +3843,40 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-112 UTIL-BATCH-HEAD：端到端合并会制造大于 head 的流水线空窗
+
+**判定**：**UTIL-BATCH-HEAD 在源码门否决，未构建、未启动、未消耗重启。**
+
+profile 里的 `1.04 ms/window` head 是真实固定成本，但现有两 group 流水并没有让两个 group
+同时占据末级。`n_pipe = stages.size() + 1`；每级只有一条
+`stage_verifier(k)`，`stage_group[k]` 每次只绑定一个 group。一个 group 的末级 graph
+完成后，`batch_poll` 才让 scheduler 释放末级并启动另一个 group。末级的
+`head_mixed_`、`head_logits_`、`m_out_` 也各只有一套，下一 group 会覆盖它们。
+
+要拼接两组 head，先在末级算完的 group 必须保留 mixed/logits 并延迟 verdict，直到另一
+group 也过完末级。二组流水随后进入以下循环：末级先等待前一 group 的 head，stage-0
+又因 pending group 尚未拿到 token 而不能启动其下一窗口；至少产生一个 10–19 ms 的
+stage 窗口空档。它比一次合并最多省下的约 `1.04 ms` 大一个数量级。双缓冲并拆 graph
+只能保住数据，不能消除“必须等另一组算完才能给第一组采样”的依赖。
+
+因此“两个 group 同时 ready 后直接一次 native head”不是现有控制流的小改动。按预注册
+源码门先否决，不实现复杂 graph 拆分，也不把理想 batching 微基准当作端到端收益。
+
+**证据**：
+
+- `src/program/generate.cpp`：`PGroup`、`stage_group`、`pump()`、
+  `batch_poll()` 后释放末级。
+- `src/core/verify.cpp`：`Verifier::record_window` 的单一 head 缓冲和
+  `batch_poll` 完成后才提供 `batch_out()`。
+- [`UTIL_BATCH_HEAD_CONTRACT-20261031.md`](work/UTIL_BATCH_HEAD_CONTRACT-20261031.md)
+- [`UTIL_BATCH_HEAD_RESULT-20261031.md`](work/UTIL_BATCH_HEAD_RESULT-20261031.md)
+
+**下一步**：`UTIL-HEAD-SPLIT`。保持两个 group 的现有异步调度，不延迟任何 verdict；
+把 vocabulary 行平均放到两张卡，各自在独立 head stream 上计算一半 logits。总 head
+权重不增加，先以 GPU harness 验证半区 logits、合并顺序和并发临界路径，再决定是否接进
+server。契约见
+[`UTIL_HEAD_SPLIT_CONTRACT-20261031.md`](work/UTIL_HEAD_SPLIT_CONTRACT-20261031.md)。
 
 ## L-111 UTIL-WINDOW-PROFILE：8 路尾部是六槽轮换后的 underfilled group
 

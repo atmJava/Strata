@@ -843,6 +843,19 @@ slowest/median tail 从 `1.0026` 升到 `1.1349`，最大 slot wait 从 `1,859 m
 把 ready rows 合并后可一次读 output projection，理论上有 1%+ 空间。
 契约见 [`UTIL_BATCH_HEAD_CONTRACT-20261031.md`](UTIL_BATCH_HEAD_CONTRACT-20261031.md)。
 
+### 16.5.14 UTIL-BATCH-HEAD（源码门否决）与 UTIL-HEAD-SPLIT
+
+后续源码审计否定了“两个 group 同时 ready”的前提。每个 stage 只有一个 verifier，末级的
+`head_mixed_`、`head_logits_` 和 `m_out_` 都只有一套；`stage_group` 每次只绑定一个 group，
+`batch_poll()` 返回后 scheduler 才释放末级。等齐两组会延迟前一组 token，在二组流水里制造
+至少一个 `16.9–19.2 ms` 窗口空窗，而合并只可能省约 `1.04 ms`，因此没有构建或重启。
+
+新的 `UTIL-HEAD-SPLIT` 沿 vocabulary 维拆分 output projection。两张卡各持有一半权重（总
+显存不高于当前完整 head），由独立 head stream 并发计算，再按 vocab offset 组合 logits；
+group verdict 时序不变。第一道门是独立 GPU harness：半区 logits、greedy、固定种子采样与
+draw counter 必须和 full head `memcmp` 相等，accepted path 实测投影端到端至少 1% 后才接
+server。契约见 [`UTIL_HEAD_SPLIT_CONTRACT-20261031.md`](UTIL_HEAD_SPLIT_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

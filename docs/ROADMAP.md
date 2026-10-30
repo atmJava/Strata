@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T06:08+08:00。
+> 最后更新：2026-10-31T06:14+08:00。
 
 ## 用户目标
 
@@ -55,9 +55,11 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 候选 attention 读取共享值得做一次最小实现。checkpoint move 与 GDN recurrence 合并也都没有
 改善完整并发曲线；后者虽然 parity 精确，但 4 路慢 8.011%，所有级别的 A3/A4 漂移都超过
 3%。window-profile 已把 8 路尾部拆开：活跃行/window 下降 9.07%，slot tail 与 wait 显著上升，
-padding 和 KV resolve 都不是原因；按活跃行计 stage 2 固定成本上升 4.54%。下一候选只做
-pipeline group 间 final-stage head rows 合并。当前无运行中 server 候选。P7 只有 NCU 证明
-Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
+padding 和 KV resolve 都不是原因；按活跃行计 stage 2 固定成本上升 4.54%。跨 group 延迟合并
+head 已在源码门否决：末级每级只有一个 verifier 和一套 head 缓冲，等齐两组会制造大于
+合并收益的 10–19 ms 流水线空窗。下一候选改为 vocabulary-row head split，不延迟任何 group。
+当前无运行中 server 候选。P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从
+全新 A1 重跑。
 
 ## 候选路线
 
@@ -91,7 +93,8 @@ Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
 | UTIL-SLOT-CKPT-MOVE | M14 | 准入时移动而不是复制约 112 MiB turn checkpoint | 已证伪 | 中；parity 与 2/4/6/8 A3-B-A4 | **否决**：parity 全过，但 8 路 `-3.014%`/胜 2/6；2/4 胜率不足，6 仅 `+0.122%` |
 | UTIL-GDN-GROUPS | M14 | 把窗口内各 slot 的 GDN recurrence 合并为每层一次 launch，并保留 self-commit 状态 | 已证伪 | 中；源码 parity、一次候选启动与 A3-B-A4 | **否决**：输出/状态 bitwise 全过，但 4 路 `-8.011%`，最佳 6 路仅 `+0.913%` 且 3/6 胜；漂移全超 3% |
 | UTIL-WINDOW-PROFILE | M14 | 用现有 stage/BSTAT 拆分 2/4/6/8 路 | 已完成 | 低；A1-P-A2，每级 3 波 | 8 路 occupancy/tail/wait 与 active rows/window 均退化；padding、KV resolve 否决 |
-| UTIL-BATCH-HEAD | M14 | 合并两个 pipeline group 的 final-stage head rows，一次读 output projection | 进行中 | 高；源码重构、GPU harness、A1-B-A2 | 每窗口 head 约 `1.04 ms`；目标至少一级 ≥1%、5/6 胜且其他级不退 >1% |
+| UTIL-BATCH-HEAD | M14 | 合并两个 pipeline group 的 final-stage head rows，一次读 output projection | 已证伪（源码控制流） | 高；源码重构、GPU harness、A1-B-A2 | **否决**：两个 group 在末级严格串行；延迟 A 的 verdict 会制造一个 16.9–19.2 ms 空窗，远大于约 1.04 ms head 收益 |
+| UTIL-HEAD-SPLIT | M14 | vocabulary rows 分到两张卡并并发各算一半 head | 进行中 | 高；harness、双卡事件、最终 A1-B-A2 | 总权重显存不增；先过半区 logits bitwise 与并发临界路径 ≥1% |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |

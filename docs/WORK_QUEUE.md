@@ -89,6 +89,11 @@
     `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`。padding 没有上升，
     KV resolve 为 `0.000 ms`，但按活跃行计的 stage 2 成本上升 `4.54%`。下一项只做 final-stage
     head rows 跨两个 pipeline group 合并的源码门。
+28. **UTIL-BATCH-HEAD 已在源码门否决**：每级只有一个 verifier 和一套
+    `head_mixed_/head_logits_/m_out_`，`stage_group` 每次只绑定一个 group；末级 graph
+    完成并由 `batch_poll()` 返回后才释放。等齐两组会延迟前一 verdict 一个 16.9–19.2 ms
+    窗口，而节省约 1.04 ms 的 head，因此未构建、未重启。下一项改为 `UTIL-HEAD-SPLIT`：
+    两张卡各算 vocabulary 的一半，不延迟 group，先用独立 GPU harness 过 bitwise 与临界路径门。
 
 ## 候选
 
@@ -118,9 +123,10 @@
 | UTIL-BATCH-GROUP-FIT | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | A 补 8 路；B 只把 groups 2→1；先过相同两次 greedy parity，再同测 2/4/6/8 路并恢复 A4；2 路 +≥1% 且 5/6 胜，4/6/8 不退>1%，零请求/资源错误 | 否决 | L-107：A3 `2/4/6/8=81.0/116.1/133.2/104.4 tok/s`；B 正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | parity 失败，未跑吞吐；只改 group 数也会改变数值路径，不扫其他固定组数 |
 | UTIL-EXPDEC-GU | 验证 mode-8 gate/up 的 EXPDEC opt-in 接管 | 启动前证明两张卡 gate/up 均可到 `expdec_gu_kernel` 且 down 保持默认；通过后 6/2、正确 hash、parity 逐字相等，再测 2/4/6/8 路且 1% 门与资源/请求 hard gate 全过 | 否决 | L-108：进程/config 为 mode 8，fused/LDS 先完成 gate/up，down 分支直接 return；EXPDEC 调用不可达 | 启动前否决；未重启、未跑 parity/吞吐 |
 | UTIL-SLOT-CKPT-MOVE | 准入 checkpoint 从复制改为移动 | A 深拷贝且只加 `STRATA_SLOT_CKPT_MOVE=1`；6 slots / 2 groups、hash/health/资源正确；三组 greedy 两次逐字等于 A；A3-B-A4 的 2/4/6/8 路至少一级 ≥1% 且 5/6 胜，其他级不回退 >1%，零错误/外来请求 | 否决 | L-109：parity 全过；2/4 名义 `+3.099%/+2.259%`、胜 4/6 与 3/6，6 `+0.122%`，8 `-3.014%`、胜 2/6；A 漂移最大 8.944% | 不扫 checkpoint/cache/copy 邻近设置 |
-| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107/L-109/L-110/L-111：8 路尾部来自六槽轮换后的 underfilled groups；GDN/checkpoint 合并没有改善 | 不再扫 launch 聚合；转 final-stage head rows 合并 |
+| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107/L-109/L-110/L-111：8 路尾部来自六槽轮换后的 underfilled groups；GDN/checkpoint 合并没有改善 | 不再扫 launch 聚合；转 vocab-row head split |
 | UTIL-WINDOW-PROFILE | 拆当前 2/4/6/8 路窗口 | 同 boot 记录 active rows、stage hand-off、KV resolve、slot turnover 与 ITL；至少两项指标能区分 6 路峰值和 8 路尾部，并据此预注册一个不同机制候选 | 已完成 | L-111：occupancy `5.010`、tail `1.1349`、max wait `12,596 ms`；active rows/window `2.6837` 对 `2.9515`；padding/KV resolve 否决 | 只开现有 profiler/telemetry；PSTAT 未交付 |
-| UTIL-BATCH-HEAD | 合并两个 ready pipeline group 的 final-stage head rows | 源码门先证明 row ownership/order/一次额外 sync；GPU harness 的 logits、greedy、fixed-seed、state 全部 bitwise；A1-B-A2 的 2/4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不退 >1%，漂移 ≤3%、零错误/外来请求 | 进行中 | 待 L-112 | opt-in `STRATA_BATCH_HEAD_MERGE=1`；默认路径不变 |
+| UTIL-BATCH-HEAD | 合并两个 ready pipeline group 的 final-stage head rows | 源码门先证明 row ownership/order/一次额外 sync；GPU harness 的 logits、greedy、fixed-seed、state 全部 bitwise；A1-B-A2 的 2/4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不退 >1%，漂移 ≤3%、零错误/外来请求 | 否决 | L-112：末级 group 严格串行；等齐两组会阻塞同组下一窗口 16.9–19.2 ms，远大于 head 1.04 ms | 未构建、未重启；不重试延迟 verdict 的同形设计 |
+| UTIL-HEAD-SPLIT | 两张卡并发计算 output projection 的两个 vocabulary 区间 | 无损拆分；半区 logits 与 full call `memcmp` 相等，greedy/fixed-seed/counter 不变；并发临界路径投影端到端 ≥1%；接 server 后 A1-B-A2 过 2/4/6/8 门 | 进行中 | 待 harness | opt-in `STRATA_HEAD_SPLIT=1`；总 head 权重显存不增加，不延迟 group verdict |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |

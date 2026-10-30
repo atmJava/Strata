@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T06:08+08:00。
+> 整理时间：2026-10-31T06:14+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -26,7 +26,9 @@
   状态写回后通过输出/状态 bitwise parity，但 4 路回退 `8.011%`，2/4/6/8 路胜场均不足。
   `UTIL-WINDOW-PROFILE` 随后完成：8 路平均占用 `5.010`、tail `1.1349`、最大 slot wait
   `12,596 ms`，BSTAT active rows/window `2.6837`（6 路 `2.9515`）；padding 更低，KV resolve
-  为 `0.000 ms`。当前断点转到 final-stage 跨 group head 合并的源码审计。
+  为 `0.000 ms`。由此提出的跨 group head 合并在源码门否决：末级每级只有一个 verifier 和
+  一套 head 缓冲，延迟前一组 verdict 会在二组流水制造大于 `1.04 ms` 收益的 10–19 ms 空窗。
+  当前断点改为 vocab-row head split 的独立 GPU harness。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -54,8 +56,8 @@
   CPU-order expert 算术也没有改变输出；单组调度仍在自然语言上产生不同但可重复的文本。
   最新 A1/A2 合并中位 8 路 `107.214 tok/s` 仍比 6 路 `122.703` 低；固定单组不能通过质量门；
   EXPDEC 因 mode 8 控制流短路而不可达；checkpoint move 与 GDN recurrence 合并都没有越过
-  多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；下一步只审计 final-stage
-  head rows 跨两个 pipeline group 的合并，不再合并同类 kernel launch。
+  多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；跨 group 延迟合并已否决，
+  下一步验证两张卡各算一半 vocabulary 的独立 head harness，不改变 group verdict 时序。
 
 ## 3. 当前生产
 

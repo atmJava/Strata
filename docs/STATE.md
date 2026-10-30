@@ -6,10 +6,14 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-BATCH-HEAD
-- 当前工作：先只读审计 piped `PGroup` 的 final-stage residual/mixed/logit 所有权，证明两个
-  ready group 可以按 group/slot 顺序拼成一次 `T<=8` 的 native head，再实现 opt-in
-  `STRATA_BATCH_HEAD_MERGE=1` 和 separate-vs-merged bitwise harness。源码门不过就不重启。
+- 当前项：UTIL-HEAD-SPLIT
+- 当前工作：先只写独立 GPU harness，把 native head 的 vocabulary rows 分成两个互斥区间，
+  在两块 RTX 2080 Ti 上分别计算并与完整 head 做 logits、greedy、固定种子与 draw counter
+  的 bitwise 对照；再测串行、并发与 peer 合并的临界路径。harness 不过不接 server、不重启。
+- 上一项：UTIL-BATCH-HEAD 已在源码门否决。两个 group 在末级并非同时 ready；每级只有一个
+  verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 一次只绑定一个 group。
+  等齐后再合并会把 A 的 verdict 延迟一个 16.9–19.2 ms 的末级窗口，远大于约 1.04 ms 的
+  合并收益。未构建、未重启。
 - 上一项：UTIL-WINDOW-PROFILE 已完成。A1/P/A2 各 12 波；P 的 6/8 路为
   `113.352/103.373 tok/s`，8 路 occupancy `5.010`、tail `1.1349`、max slot wait
   `12,596 ms`，BSTAT active rows/window `2.6837` 对 6 路 `2.9515`。按活跃行计的
@@ -63,15 +67,16 @@
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
 - 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
-  调度、EXPDEC、checkpoint move 和 GDN recurrence 合并均已否决；window profile 已完成。
+  调度、EXPDEC、checkpoint move、GDN recurrence 合并和跨 group head 延迟合并均已否决；
+  window profile 已完成。
   attention v2 已是当前默认并完成 1% 门复验；
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：先做 `UTIL-BATCH-HEAD` 源码门。检查两个 `PGroup` 在 final stage 的 residual、
-  mixed、logits 和 sampling 生命周期；任何覆盖活 group、改变 slot 顺序或引入超过一次额外
-  sync 的设计都在构建前否决。不得重跑 window profile、GDN groups、checkpoint move、固定
-  groups、QSA slots 或 piped MTP。
+- 下一动作：实现 `UTIL-HEAD-SPLIT` 的独立 harness。总 head 权重显存不增加；半区 logits
+  必须逐字节拼接为完整结果，greedy/sampler/counter 不变，并发临界路径按实测至少投影
+  端到端 1% 才允许接 server。不得重跑 window profile、batch-head、GDN groups、checkpoint
+  move、固定 groups、QSA slots 或 piped MTP。
 - 当前候选：无运行中 server 候选。A2 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
   仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为

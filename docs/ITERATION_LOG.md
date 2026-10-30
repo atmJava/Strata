@@ -3,6 +3,32 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-85 · Cross-group head batching loses to its own pipeline bubble
+
+- 目标 / 指标：验证 profile 暴露的 final-stage head 固定成本能否通过合并两个 pipeline
+  group 的 rows 降到端到端至少 1%，并在构建前证明所有权、顺序与临界路径。
+- 假设与预期：如果末级可同时持有两个 group 的 mixed rows，一次 native output projection
+  可替掉两次约 `1.04 ms` 的 head 调用。
+- 为什么选这条路线：window profile 已排除 padding 与 KV resolve，并把 8 路尾部定位到
+  underfilled groups 的固定每窗口工作。
+- 改动与实验：只读审计 `PGroup`、`stage_group`、`pump()`、`record_window()` 与
+  `batch_poll()`。没有实现候选、构建或重启。
+- 结果：两个逻辑 group 并不在末级并行；每级只有一个 verifier 和一套
+  `head_mixed_/head_logits_/m_out_`。`stage_group[k]` 一次只绑定一个 group，graph
+  完成并由 `batch_poll()` 返回 picks 后才释放末级。
+- 判决：**UTIL-BATCH-HEAD 源码门否决。** 要等齐两组，第一组 verdict 必须延迟一个
+  16.9–19.2 ms 的末级窗口；这会阻塞同组下一窗口并阻止另一级换入，远大于合并省下的
+  约 1.04 ms。双缓冲不能消除 verdict 依赖。
+- 预期部分推翻：head 固定成本真实，但“两个 group 同时 ready”不是现有控制流事实。
+- 生产状态与回滚：A2 保持 server/engine/vision `557432/557442/557436`，health loaded、
+  6 slots / 2 groups；没有候选二进制或配置改变，无需回滚。
+- 证据：台账 L-112、`UTIL_BATCH_HEAD_RESULT-20261031.md` 与源码位置。
+- 学到什么：不能只看 kernel 叠加上限；在流水线里，延迟 verdict 的代价必须与被替换的
+  串行段比较，而不是与一次 launch 比较。
+- 下一步与理由：预注册 `UTIL-HEAD-SPLIT`。vocabulary rows 天然独立，可让两张卡并发各算
+  一半且不延迟任何 group。先做独立 GPU harness，证明半区 logits bitwise、合并顺序、
+  sampler/counter 不变和并发临界路径超过 1%，过门后才接 server。
+
 ## I-20261031-84 · The eight-stream tail is an underfilled six-slot turnover
 
 - 目标 / 指标：在同 boot 的 A1/P/A2 中用现有 stage stamps 与 batch telemetry 跑 2/4/6/8 路，

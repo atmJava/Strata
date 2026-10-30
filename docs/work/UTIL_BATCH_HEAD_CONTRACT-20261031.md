@@ -1,6 +1,7 @@
 # UTIL-BATCH-HEAD contract
 
-Status: proposed on 2026-10-31; source audit precedes implementation.
+Status: rejected at the source gate on 2026-10-31. See
+[`UTIL_BATCH_HEAD_RESULT-20261031.md`](UTIL_BATCH_HEAD_RESULT-20261031.md).
 
 ## Evidence and selected problem
 
