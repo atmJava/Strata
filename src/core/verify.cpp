@@ -385,7 +385,7 @@ bool Verifier::release_gpu_waits(int timeout_ms) {
     // the words the spin kernels read (wait_flag_ge, wait_flag_ge_or) are mapped host memory, so a store here
     // reaches them with no API call; UINT32_MAX is past every ring.  (E-6's skip words are device memory, but
     // wait_flag_ge_or also returns on its flag.)  A host function raising flag B later only raises.
-    for (uint32_t* p : {h_flag_, h_flagA_, h_flagB_, hflag_in_h_})   // + an overlapped split's hand-off wait
+    for (uint32_t* p : {h_flag_, h_flagA_, h_flagB_, hflag_in_h_, head_split_start_h_, head_split_done_h_})
         if (p != nullptr) *(volatile uint32_t*) p = UINT32_MAX;
     std::atomic_thread_fence(std::memory_order_seq_cst);
     _mm_sfence();
@@ -477,6 +477,19 @@ void Verifier::diag(std::FILE* f) const {
 
 
 Verifier::~Verifier() {
+    if (head_split_stream_) {
+        int cur = -1;
+        cudaGetDevice(&cur);
+        if (head_ != nullptr && head_->peer_device() >= 0) cudaSetDevice(head_->peer_device());
+        cudaStreamSynchronize(head_split_stream_);
+        for (auto& e : head_split_exec_)
+            if (e) cudaGraphExecDestroy(e);
+        cudaStreamDestroy(head_split_stream_);
+        if (head_xil_peer_) cudaFree(head_xil_peer_);
+        if (head_xq_peer_) cudaFree(head_xq_peer_);
+        if (head_half_peer_) cudaFree(head_half_peer_);
+        if (cur >= 0) cudaSetDevice(cur);
+    }
     const Verifier* self = this;
     g_diag_verifier.compare_exchange_strong(self, nullptr);
     for (auto& slot : g_live) {
@@ -529,7 +542,8 @@ Verifier::~Verifier() {
     if (arena_) cudaFree(arena_);
     if (hcount_d_) cudaFree(hcount_d_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
-                     h_flagA_, h_plan_, h_flagB_, h_plan_err_, h_nf_, herr_h_, hdrop_h_, h_bal_};
+                     h_flagA_, h_plan_, h_flagB_, h_plan_err_, h_nf_, herr_h_, hdrop_h_, h_bal_,
+                     head_split_start_h_, head_split_done_h_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
 }
@@ -616,6 +630,14 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     const WeightRef* wo = wt.find("output.weight");
     if (wo == nullptr) { err = "verify: output.weight is missing"; return false; }
     n_vocab_ = wo->ne1;
+    head_split_ = head_ != nullptr && head_->loaded() && head_->split() && head_->device() == device_ &&
+                  head_->peer_device() >= 0 && head_->peer_device() != device_ && le_ == g.n_layers;
+    head_split_n0_ = head_split_ ? head_->split_rows0() : 0;
+    head_split_n1_ = head_split_ ? head_->split_rows1() : 0;
+    if (head_ != nullptr && head_->split() && !head_split_) {
+        std::fprintf(stderr, "strata verify: head split falls back to the full path on CUDA%d (stage layers [%lld, %lld))\n",
+                     device_, (long long) lb_, (long long) le_);
+    }
 
     const strata::kernels::QsaShapes s = shapes_of(g);
     cap_ = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);
@@ -818,6 +840,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             strata::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff),
             strata::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff)));
         head_mixed_ = b.take<float>(T * N); head_inj_ = b.take<float>(HC);
+        if (head_split_) head_half_main_ = b.take<float>(T * (uint64_t) head_split_n0_);
         sh_bf16_ = b.take<uint16_t>(T * N); sh_gate_ = b.take<float>(T * (uint64_t) g.n_ff);
         sh_up_ = b.take<float>(T * (uint64_t) g.n_ff); sh_g_ = b.take<float>(T + 4);
         head_logits_ = b.take<float>(T * (uint64_t) n_vocab_);
@@ -833,6 +856,34 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         return false;
     }
     cudaMemset(arena_, 0, count.used);
+    if (head_split_) {
+        const size_t q8 = strata::kernels::native_q8_1_bytes((int) N, (int) T);
+        const size_t q8il = strata::kernels::native_q8_1_il_bytes((int) N, std::max(4, (int) T));
+        const int peer = head_->peer_device();
+        {
+            const OnDevice on_peer(peer);
+            if (cudaStreamCreateWithFlags(&head_split_stream_, cudaStreamNonBlocking) != cudaSuccess ||
+                cudaMalloc(&head_xq_peer_, q8) != cudaSuccess || cudaMalloc(&head_xil_peer_, q8il) != cudaSuccess ||
+                cudaMalloc((void**) &head_half_peer_,
+                           (size_t) T * (size_t) head_split_n1_ * sizeof(float)) != cudaSuccess) {
+                err = "verify: the peer head buffers do not fit";
+                return false;
+            }
+        }
+        if (!mapped(64, (void**) &head_split_start_h_, (void**) &head_split_start_d_) ||
+            !mapped(64, (void**) &head_split_done_h_, (void**) &head_split_done_d_)) {
+            err = "verify: the peer head handshake allocation failed";
+            return false;
+        }
+        size_t free_main = 0, total_main = 0, free_peer = 0, total_peer = 0;
+        cudaMemGetInfo(&free_main, &total_main);
+        { const OnDevice on_peer(peer); cudaMemGetInfo(&free_peer, &total_peer); }
+        std::fprintf(stderr, "strata verify: head split active on CUDA%d/CUDA%d (%d+%d vocabulary rows; %.1f MiB "
+                             "peer head scratch, %.1f/%.1f MiB free)\n",
+                     device_, peer, head_split_n0_, head_split_n1_,
+                     (double) (q8 + q8il + (size_t) T * (size_t) head_split_n1_ * sizeof(float)) / 1048576.0,
+                     (double) free_main / 1048576.0, (double) free_peer / 1048576.0);
+    }
     if (hflag_out_d_ != nullptr && hcount_d_ == nullptr) {   // the overlapped split's hand-off counter
         if (cudaMalloc((void**) &hcount_d_, 64) != cudaSuccess) { err = "verify: hand-off counter allocation failed"; return false; }
         cudaMemset(hcount_d_, 0, 64);
@@ -2179,7 +2230,21 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (head_ != nullptr && head_->loaded()) {
             try {
                 native_quantize_q8_1(head_mixed_, xq_, (int) N, T, cs);
-                if (g_mmvq_il() && strata::kernels::native_mmvq_il_supported(head_->type(), (int) T, (int) n_vocab_)) {
+                if (head_split_) {
+                    const bool il = head_split_il(T);
+                    if (il && T >= 2) strata::kernels::native_q8_1_interleave(xq_, xil_, (int) N, (int) T, cs);
+                    strata::kernels::gpu_flag_set(head_split_start_d_, 1, cs);
+                    if (il)
+                        strata::kernels::native_mmvq_il(head_->type(), head_->weights(), xq_, xil_, head_half_main_,
+                                                        (int) N, head_split_n0_, (int) T, cs);
+                    else
+                        strata::kernels::native_mmvq(head_->type(), head_->weights(), xq_, head_half_main_,
+                                                     (int) N, head_split_n0_, (int) T, cs);
+                    strata::kernels::wait_flag_ge(head_split_done_d_, 1, cs);
+                    strata::kernels::merge_head_halves(head_half_main_, head_half_peer_, head_logits_, T,
+                                                       head_split_n0_, head_split_n1_, cs);
+                } else if (g_mmvq_il() &&
+                           strata::kernels::native_mmvq_il_supported(head_->type(), (int) T, (int) n_vocab_)) {
                     if (T >= 2) strata::kernels::native_q8_1_interleave(xq_, xil_, (int) N, (int) T, cs);
                     strata::kernels::native_mmvq_il(head_->type(), head_->weights(), xq_, xil_, head_logits_, (int) N,
                                                     (int) n_vocab_, (int) T, cs);
@@ -2316,6 +2381,95 @@ void Verifier::refresh_ar() {
     }
 }
 
+bool Verifier::head_split_il(int T) const {
+    return head_split_ && T >= 2 && g_mmvq_il() && head_ != nullptr &&
+           strata::kernels::native_mmvq_il_supported(head_->type(), T, head_split_n0_) &&
+           strata::kernels::native_mmvq_il_supported(head_->type(), T, head_split_n1_);
+}
+
+bool Verifier::capture_head_split_peer(int T, std::string& err) {
+    if (!head_split_ || T < 1 || T > max_t_) return !head_split_;
+    if (head_split_exec_[T] != nullptr) return true;
+    const int peer = head_->peer_device();
+    const OnDevice on_peer(peer);
+    cudaGraph_t graph = nullptr;
+    if (cudaStreamBeginCapture(head_split_stream_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+        err = "verify: peer head begin capture failed";
+        return false;
+    }
+    bool ok = true;
+    try {
+        strata::kernels::wait_flag_ge(head_split_start_d_, 1, head_split_stream_);
+        const size_t q8 = strata::kernels::native_q8_1_bytes((int) g_->n_embd, T);
+        if (cudaMemcpyPeerAsync(head_xq_peer_, peer, xq_, device_, q8, head_split_stream_) != cudaSuccess)
+            ok = false;
+        if (ok && head_split_il(T)) {
+            const size_t il = strata::kernels::native_q8_1_il_bytes((int) g_->n_embd, std::max(4, T));
+            if (cudaMemcpyPeerAsync(head_xil_peer_, peer, xil_, device_, il, head_split_stream_) != cudaSuccess)
+                ok = false;
+            if (ok)
+                strata::kernels::native_mmvq_il(head_->type(), head_->peer_weights(), head_xq_peer_, head_xil_peer_,
+                                                head_half_peer_, (int) g_->n_embd, head_split_n1_, T,
+                                                head_split_stream_);
+        } else if (ok) {
+            strata::kernels::native_mmvq(head_->type(), head_->peer_weights(), head_xq_peer_, head_half_peer_,
+                                         (int) g_->n_embd, head_split_n1_, T, head_split_stream_);
+        }
+        if (ok) strata::kernels::gpu_flag_set(head_split_done_d_, 1, head_split_stream_);
+    } catch (const std::exception& e) {
+        err = std::string("verify: peer head capture: ") + e.what();
+        ok = false;
+    }
+    const cudaError_t ce = cudaStreamEndCapture(head_split_stream_, &graph);
+    if (!ok || ce != cudaSuccess) {
+        if (graph) cudaGraphDestroy(graph);
+        if (err.empty()) err = std::string("verify: peer head end capture: ") + cudaGetErrorString(ce);
+        return false;
+    }
+    if (cudaGraphInstantiate(&head_split_exec_[T], graph, nullptr, nullptr, 0) != cudaSuccess) {
+        cudaGraphDestroy(graph);
+        head_split_exec_[T] = nullptr;
+        err = "verify: peer head graph does not fit";
+        return false;
+    }
+    cudaGraphDestroy(graph);
+    const cudaError_t ue = cudaGraphUpload(head_split_exec_[T], head_split_stream_);
+    const cudaError_t us = cudaStreamSynchronize(head_split_stream_);
+    if (ue != cudaSuccess || us != cudaSuccess) (void) cudaGetLastError();
+    std::fprintf(stderr, "strata verify: captured the %d-row peer head graph (upload %s, sync %s)\n", T,
+                 cudaGetErrorString(ue), cudaGetErrorString(us));
+    return true;
+}
+
+bool Verifier::prepare_head_split_launch() {
+    if (!head_split_) return true;
+    *(volatile uint32_t*) head_split_start_h_ = 0;
+    *(volatile uint32_t*) head_split_done_h_ = 0;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    _mm_sfence();
+    return true;
+}
+
+bool Verifier::launch_head_split_peer(int T, std::string& err) {
+    if (!head_split_) return true;
+    if (T < 1 || T > max_t_ || head_split_exec_[T] == nullptr) {
+        err = "verify: peer head graph was not captured";
+        *(volatile uint32_t*) head_split_done_h_ = UINT32_MAX;
+        return false;
+    }
+    const int peer = head_->peer_device();
+    const OnDevice on_peer(peer);
+    const cudaError_t le = cudaGraphLaunch(head_split_exec_[T], head_split_stream_);
+    if (le != cudaSuccess) {
+        *(volatile uint32_t*) head_split_done_h_ = UINT32_MAX;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        _mm_sfence();
+        err = std::string("verify: peer head launch: ") + cudaGetErrorString(le);
+        return false;
+    }
+    return true;
+}
+
 bool Verifier::capture(int T, std::string& err) {
     cudaGraphExec_t& exec_t = ar_off_ ? exec_nr_[T] : exec_[T];
     if (exec_t != nullptr) return true;
@@ -2385,7 +2539,7 @@ bool Verifier::capture(int T, std::string& err) {
         (void) cudaGetLastError();
         std::fprintf(stderr, "strata verify: the %d-token window's upload was skipped (the first launch does it)\n", T);
     }
-    return true;
+    return capture_head_split_peer(T, err);
 }
 
 bool Verifier::capture_commit(std::string& err) {
@@ -2656,9 +2810,11 @@ bool Verifier::prelaunch(int T, const int32_t* tokens, int64_t pos0, std::string
     // 0.1.43: the same gate run() applies before it launches (the adaptive tier's copies land first)
     if (adapt_gate_ != nullptr && adapt_gate_->active.load(std::memory_order_acquire) && ar_on() &&
         !adapt_gate_wait((int32_t) g_->n_layers, err)) return false;
+    if (!prepare_head_split_launch()) return false;
     const cudaError_t le = cudaGraphLaunch(exec_t, cs_);
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
+    if (!launch_head_split_peer(T, err)) return false;
     (void) cudaStreamQuery(cs_);
     prelaunched_ = T;
     return true;
@@ -2747,12 +2903,14 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             const char* value = std::getenv("STRATA_VERIFY_ASYNC_LAUNCH");
             return value != nullptr && value[0] == '1';
         }();
+        if (!prepare_head_split_launch()) return false;
         launch_o.emplace(ar_off_ ? exec_nr_[T] : exec_[T], cs_, device_, threaded_launch,
                          [this] { (void) release_gpu_waits(5000); });
         const cudaError_t le = launch_o->status();
         trace_ev("LAUNCHED", -1, -1, (int64_t) le);
         graph_launched = true;
         if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
+        if (!launch_head_split_peer(T, err)) return false;
         (void) launch_o->query();
         VDBG("launched\n");
     }
@@ -3313,6 +3471,7 @@ bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err
     if (!made) return false;
     if (cudaGraphUpload(ex, cs_) != cudaSuccess || cudaStreamSynchronize(cs_) != cudaSuccess)
         (void) cudaGetLastError();   // only a warm-up: the first launch uploads it (see capture)
+    if (!capture_head_split_peer(S, err)) return false;
     std::string list;
     for (int t = 0; t < S; ++t) list += (t ? "," : "") + std::to_string(rows[t]);
     std::fprintf(stderr, "strata verify: captured the batch window over slots %s\n", list.c_str());
@@ -3616,7 +3775,9 @@ bool Verifier::batch_launch_rows(const int* rows, int S, int hbase, const int32_
     staging_deferred_ = false;
     if (!staged || !capture_deferred(rows, S, hbase, err)) return false;
     const auto key = bkey(rows, S, hbase);
+    if (!prepare_head_split_launch()) return false;
     cudaError_t le = cudaGraphLaunch(exec_bm_[key], cs_);
+    if (le == cudaSuccess && !launch_head_split_peer(S, err)) return false;
     if (le == cudaSuccess) le = cudaGraphLaunch(save_bm_[key], cs_);   // the rows the commit replays, kept for it
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
@@ -3846,8 +4007,10 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     const ModelGeometry& g = *g_;
     if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     if (!stage_batch(rows, S, 0, tokens, pos, err)) return false;
+    if (!prepare_head_split_launch()) return false;
     const cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, 0)], cs_);
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
+    if (!launch_head_split_peer(S, err)) return false;
     (void) cudaStreamQuery(cs_);
     volatile uint32_t* const seq = h_seq_;
     volatile uint32_t* const flag = h_flag_;
@@ -4014,7 +4177,9 @@ bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_
     for (int t = 0; t < S && t < 8; ++t) rows[t] = base + t;
     if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     if (!stage_batch(rows, S, base, tokens, pos, err)) return false;
+    if (!prepare_head_split_launch()) return false;
     cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, base)], cs_);
+    if (le == cudaSuccess && !launch_head_split_peer(S, err)) return false;
     if (le == cudaSuccess && !batch_self_commits(rows, S))   // (else the window has kept its rows itself)
         le = cudaGraphLaunch(commit_bm_[bkey(rows, S, base)], cs_);   // right behind it: every row is kept
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
@@ -4319,9 +4484,11 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
     std::atomic_thread_fence(std::memory_order_seq_cst);
     trace_ev("WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
     ms_host += ms_since(t0);
+    if (!prepare_head_split_launch()) return false;
     const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
+    if (!launch_head_split_peer(T, err)) return false;
     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
     if (cudaEventRecord(ev_done_, cs_) != cudaSuccess) { err = "verify: event record failed"; return false; }
     (void) cudaStreamQuery(cs_);   // WDDM: submit now

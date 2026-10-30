@@ -160,6 +160,16 @@ void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, 
                        void* stream);
 /// dst row i = src row ids[i] (row_bytes each, multiple of 16), for n rows.
 void gather_rows(const uint8_t* src, int64_t row_bytes, const int32_t* ids, int64_t n, uint8_t* dst, void* stream);
+/// Two contiguous vocabulary halves held on peer-accessible devices.  `ids` are global rows; the launch device
+/// must be able to read both `src0` and `src1`, and writes `dst[r] = rows[ids[r]]` in the requested order.
+void gather_rows_split(const uint8_t* src0, int64_t rows0, const uint8_t* src1, int64_t row_bytes,
+                       const int32_t* ids, int64_t n, uint8_t* dst, void* stream);
+/// A graph-capturable one-thread store to mapped memory.  The following system fence makes the value visible to a
+/// peer device waiting in wait_flag_ge.
+void gpu_flag_set(uint32_t* flag, uint32_t value, void* stream);
+/// Join compact vocabulary halves into the existing row-major [T][n0+n1] logits layout.  This is a pure byte copy:
+/// it preserves every float bit produced by the two native head calls.
+void merge_head_halves(const float* half0, const float* half1, float* out, int n_rows, int n0, int n1, void* stream);
 /// ids[t] = table[ids[t]] for n entries (a subset index back to a token id).
 void map_ids(int32_t* ids, const int32_t* table, int n, void* stream);
 /// probs[t] = softmax(logits[t])[ids[t]] for n_rows rows of n_vocab (the probability of each row's argmax).

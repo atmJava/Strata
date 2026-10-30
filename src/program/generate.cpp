@@ -1217,6 +1217,7 @@ struct GpuStage {
     strata::core::WeightTable wt;
     strata::core::NativeDense dense;
     strata::core::NativeHead head;
+    bool head_split = false;   ///< STRATA_HEAD_SPLIT: the head holds vocabulary halves on CUDA0 and CUDA1
     strata::core::SessionState ss;
     cudaStream_t stream = nullptr;
     strata::core::ExpertCache cache;
@@ -5026,8 +5027,30 @@ int main(int argc, char** argv) {
         }
         const bool last = i + 1 == stages.size();
         const strata::core::WeightRef* wo_s = st.wt.find("output.weight");
-        if (wo_s == nullptr ||
-            (last && !o.native_head_gguf.empty() && !st.head.load(o.native_head_shards, g.n_embd, wo_s->ne1, err))) {
+        bool head_ok = wo_s != nullptr;
+        if (head_ok && last && !o.native_head_gguf.empty()) {
+            const char* hs = std::getenv("STRATA_HEAD_SPLIT");
+            const char* mfh = std::getenv("STRATA_MTP_FULL_HEAD");
+            const bool asked = hs != nullptr && hs[0] != '\0' && hs[0] != '0';
+            const bool eligible = asked && stages.size() == 2 && i == 1 && st.dev != stages[0]->dev &&
+                                  !(mfh != nullptr && mfh[0] == '1');
+            if (asked && !eligible) {
+                std::fprintf(stderr, "strata generate: STRATA_HEAD_SPLIT falls back to the full head "
+                                     "(it needs exactly two stages on different devices and no STRATA_MTP_FULL_HEAD)\n");
+            }
+            if (eligible && st.head.load_split(o.native_head_shards, g.n_embd, wo_s->ne1, stages[0]->dev, err)) {
+                st.head_split = true;
+                std::fprintf(stderr, "strata generate: STRATA_HEAD_SPLIT on: output vocabulary rows use CUDA%d/CUDA%d\n",
+                             st.dev, stages[0]->dev);
+            } else {
+                if (!eligible) err.clear();
+                else std::fprintf(stderr, "strata generate: STRATA_HEAD_SPLIT unavailable: %s; loading the full head\n",
+                                  err.c_str());
+                err.clear();
+                head_ok = st.head.load(o.native_head_shards, g.n_embd, wo_s->ne1, err);
+            }
+        }
+        if (!head_ok) {
             std::fprintf(stderr, "strata generate: layer split, CUDA%d head: %s%s\n", st.dev,
                          wo_s == nullptr ? "output.weight is missing" : err.c_str(),
                          wo_s == nullptr ? "" : vram_free_note().c_str());

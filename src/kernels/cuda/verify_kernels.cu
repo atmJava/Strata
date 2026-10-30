@@ -652,6 +652,20 @@ __global__ void gather_rows_kernel(const E* __restrict__ src, long long row_e, c
     }
 }
 
+template<typename E>
+__global__ void gather_rows_split_kernel(const E* __restrict__ src0, long long rows0, const E* __restrict__ src1,
+                                         long long row_e, const int32_t* __restrict__ ids, long long n,
+                                         E* __restrict__ dst) {
+    const long long total = n * row_e;
+    for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (long long) gridDim.x * blockDim.x) {
+        const long long r = i / row_e, o = i - r * row_e;
+        const long long row = ids[r];
+        const E* base = row < rows0 ? src0 : src1;
+        const long long local = row < rows0 ? row : row - rows0;
+        dst[i] = base[local * row_e + o];
+    }
+}
+
 __global__ void map_ids_kernel(int32_t* ids, const int32_t* __restrict__ table, int n) {
     const int i = threadIdx.x;
     if (i < n) ids[i] = table[ids[i]];
@@ -705,6 +719,23 @@ __global__ void dense_steps_kernel(const int32_t* __restrict__ cells, int n, int
 __global__ void force_token_kernel(int32_t* tok, const int32_t* force, int j) {
     const int32_t f = ((const volatile int32_t*) force)[j];
     if (f >= 0) *tok = f;
+}
+
+__global__ void gpu_flag_set_kernel(uint32_t* flag, uint32_t value) {
+    *flag = value;
+    __threadfence_system();
+}
+
+__global__ void merge_head_halves_kernel(const float* __restrict__ half0, const float* __restrict__ half1,
+                                         float* __restrict__ out, int n_rows, int n0, int n1) {
+    const int width = n0 + n1;
+    const long long total = (long long) n_rows * width;
+    for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < total;
+         i += (long long) gridDim.x * blockDim.x) {
+        const int row = (int) (i / width);
+        const int col = (int) (i - (long long) row * width);
+        out[i] = col < n0 ? half0[(long long) row * n0 + col] : half1[(long long) row * n1 + col - n0];
+    }
 }
 
 }  // namespace
@@ -778,6 +809,33 @@ void gather_rows(const uint8_t* src, int64_t row_bytes, const int32_t* ids, int6
     else
         gather_rows_kernel<<<48 * 8, 256, 0, s>>>(src, row_bytes, ids, n, dst);
     check("gather_rows");
+}
+
+void gather_rows_split(const uint8_t* src0, int64_t rows0, const uint8_t* src1, int64_t row_bytes,
+                       const int32_t* ids, int64_t n, uint8_t* dst, void* stream) {
+    cudaStream_t s = (cudaStream_t) stream;
+    if (row_bytes % 16 == 0)
+        gather_rows_split_kernel<<<48 * 8, 256, 0, s>>>((const uint4*) src0, rows0, (const uint4*) src1,
+                                                        row_bytes / 16, ids, n, (uint4*) dst);
+    else if (row_bytes % 4 == 0)
+        gather_rows_split_kernel<<<48 * 8, 256, 0, s>>>((const uint32_t*) src0, rows0, (const uint32_t*) src1,
+                                                        row_bytes / 4, ids, n, (uint32_t*) dst);
+    else
+        gather_rows_split_kernel<<<48 * 8, 256, 0, s>>>(src0, rows0, src1, row_bytes, ids, n, dst);
+    check("gather_rows_split");
+}
+
+void gpu_flag_set(uint32_t* flag, uint32_t value, void* stream) {
+    gpu_flag_set_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value);
+    check("gpu_flag_set");
+}
+
+void merge_head_halves(const float* half0, const float* half1, float* out, int n_rows, int n0, int n1, void* stream) {
+    const long long total = (long long) n_rows * (n0 + n1);
+    const int block = 256;
+    const int grid = (int) std::min<long long>(4096, (total + block - 1) / block);
+    merge_head_halves_kernel<<<grid, block, 0, (cudaStream_t) stream>>>(half0, half1, out, n_rows, n0, n1);
+    check("merge_head_halves");
 }
 
 void map_ids(int32_t* ids, const int32_t* table, int n, void* stream) {

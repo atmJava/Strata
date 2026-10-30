@@ -20,25 +20,40 @@ public:
     NativeHead& operator=(const NativeHead&) = delete;
 
     bool load(const std::vector<std::string>& shards, int64_t n_in, int64_t n_out, std::string& err);
+    /// STRATA_HEAD_SPLIT: load two contiguous vocabulary ranges directly from output.weight.  `device()` is the
+    /// current device and owns the first half; `peer_device` owns the second.  No complete third copy is allocated.
+    bool load_split(const std::vector<std::string>& shards, int64_t n_in, int64_t n_out, int peer_device,
+                    std::string& err);
     void unload();
     bool run(const float* mixed, float* logits, void* stream, std::string& err) const;
     uint64_t weight_bytes() const { return bytes_; }
     bool loaded() const { return weights_ != nullptr; }
     /// Plan v0.3 P6: the GGUF blocks, for the verify window's multi-column head.
     const void* weights() const { return weights_; }
+    /// The second vocabulary half (null unless load_split succeeded).
+    const void* peer_weights() const { return peer_weights_; }
+    int peer_device() const { return peer_device_; }
+    bool split() const { return peer_weights_ != nullptr; }
+    int split_rows0() const { return split_rows0_; }
+    int split_rows1() const { return split_rows1_; }
     int type() const { return type_; }
     /// The device whose memory holds the weights (the one current when `load` ran; -1 before).
     int device() const { return device_; }
     /// Bytes of one vocabulary row.
     size_t row_bytes() const { return n_out_ > 0 ? (size_t) (bytes_ / (uint64_t) n_out_) : 0; }
+    /// Gather global vocabulary rows through one or two peer-accessible ranges into `dst` on the current device.
+    bool gather_rows_device(const int32_t* ids, int64_t n, uint8_t* dst, void* stream, std::string& err) const;
 
 private:
     void* weights_ = nullptr;
+    void* peer_weights_ = nullptr;
     void* scratch_ = nullptr;
     uint64_t bytes_ = 0;
     int n_in_ = 0, n_out_ = 0;
     int type_ = -1;
     int device_ = -1;
+    int peer_device_ = -1;
+    int split_rows0_ = 0, split_rows1_ = 0;
 };
 
 /// Plan v0.3 P6: `token_embd.weight` in its GGUF form (the IQ model files), in mapped pinned host memory: a row

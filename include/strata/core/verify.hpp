@@ -410,6 +410,10 @@ public:
 private:
     RemoteExpertOpt* remote_opt_ = nullptr;
     bool capture(int T, std::string& err);
+    bool capture_head_split_peer(int T, std::string& err);
+    bool prepare_head_split_launch();
+    bool launch_head_split_peer(int T, std::string& err);
+    bool head_split_il(int T) const;
     // batch windows (see init_slots)
     std::vector<SessionState*> slots_;
     bool batch_rec_ = false;               ///< record_window is capturing a batch window
@@ -581,6 +585,14 @@ private:
     SessionState* ss_ = nullptr;
     VerifyHits hits_;
     const NativeHead* head_ = nullptr;
+    bool head_split_ = false;
+    int head_split_n0_ = 0, head_split_n1_ = 0;
+    cudaStream_t head_split_stream_ = nullptr;
+    cudaGraphExec_t head_split_exec_[9] = {};
+    uint32_t* head_split_start_h_ = nullptr;
+    uint32_t* head_split_start_d_ = nullptr;
+    uint32_t* head_split_done_h_ = nullptr;
+    uint32_t* head_split_done_d_ = nullptr;
     int max_t_ = 0;
     float* ple_key_ = nullptr;   ///< STRATA_PLE_BATCH: the window rows' PLE key / value projections
     float* ple_val_ = nullptr;
@@ -699,6 +711,8 @@ private:
     float* hit_xs_ = nullptr;
     void* hit_scratch_ = nullptr;
     float *head_mixed_ = nullptr, *head_inj_ = nullptr, *head_logits_ = nullptr;
+    float *head_half_main_ = nullptr, *head_half_peer_ = nullptr;
+    void *head_xq_peer_ = nullptr, *head_xil_peer_ = nullptr;
     uint16_t* sh_bf16_ = nullptr;
     uint8_t* arg_scratch_ = nullptr;   ///< argmax_rows' partials and counters
     int32_t* one_ = nullptr;           ///< device {1}: the n_keep of a one-token window, which commits itself
