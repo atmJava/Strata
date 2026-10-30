@@ -838,6 +838,8 @@ G0A 生产 Gate 继续 CLOSED，G0B 仍不启动。
 **目的:** 把“候选失败后重新启动旧 argv”的内存态补救，升级为 owner 进程退出后仍可读取、
 校验和审计的 last-known-good。
 
+当前交接断点见 `docs/work/FLASH-NEXT-RUNTIME-HANDOFF-20261030.md`。
+
 - [x] 只有 `/v1/telemetry` 身份、launch attestation 和模型 state 检查通过后，才原子写入
   owner-private `<runtime>/<profile>.lkg.json`；配置 bytes、SHA-256、profile revision、
   server argv 和验证 instance 一并记录。
