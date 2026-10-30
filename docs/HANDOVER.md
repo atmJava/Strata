@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T07:33+08:00。
+> 整理时间：2026-10-31T07:50+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-114。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-115。
 
 ## 2. 当前断点
 
@@ -34,7 +34,10 @@
   `1..8` 行 peer graph 全命中，三组固定 greedy 各两轮逐字一致，6 slots / 2 groups、
   health loaded，A2 同样通过。但 A1-B-A2 的 2/4/6/8 路相对变化为
   `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 路回退超过 1%，因此 head split 最终否决，默认关闭。
-  当前断点转为 `UTIL-HEAD-Q8-FUSE` 的源码与独立 GPU 门。
+  `UTIL-HEAD-Q8-FUSE` 随后也在独立 GPU/正确性门否决：5 个交替进程覆盖 `T=1..8`，
+  direct 与 captured graph 的 80 个逐字比较全部失败；最大节省仅 `1.315 µs`，远低于
+  `182.7 µs` 的 1% 门槛，graph 在 `T=4..8` 还慢约 `1–3 µs`。没有构建服务器候选、
+  没有重启。当前断点转为 `UTIL-POLL-TURNOVER` 的源码与现有 telemetry 门。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -62,8 +65,10 @@
   CPU-order expert 算术也没有改变输出；单组调度仍在自然语言上产生不同但可重复的文本。
   最新 A1/A2 合并中位 8 路 `107.214 tok/s` 仍比 6 路 `122.703` 低；固定单组不能通过质量门；
   EXPDEC 因 mode 8 控制流短路而不可达；checkpoint move 与 GDN recurrence 合并都没有越过
-  多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；跨 group 延迟合并已否决，
-  下一步验证两张卡各算一半 vocabulary 的独立 head harness，不改变 group verdict 时序。
+  多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；跨 group 延迟合并、
+  vocabulary-row head split 和 Q8 write/mixer fusion 都已否决。下一步只审计 `pump()` 的
+  `batch_poll -> verdict -> hand-off -> batch_launch` 周转，先用现有 BSTAT/stage stamp 找到
+  真实且可归因的 1% 固定成本；不足即否决，不重启。
 
 ## 3. 当前生产
 
@@ -348,11 +353,11 @@ query 的 score、top-k、softmax 或输出算术。
 4. UTIL-NCU 已使用快照和独立候选完成；不要把 full-section NCU replay 重新压到完整双卡
    请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
 5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
-6. `UTIL-EXPDEC-GU` 和 `UTIL-SLOT-CKPT-MOVE` 均已否决，不再启动。下一步只允许 one-row
-   GDN batch 与流水窗口状态的只读审计；新候选必须用不同机制，先证明不会改变 token 选择和
-   数值路径，再预注册冻结 greedy parity 与 2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、
-   并发回退和资源 hard gate 不放宽。只有代码路径明确需要实测且预计收益高于约 3-7 分钟
-   重启成本时才重启。
+6. `UTIL-EXPDEC-GU`、`UTIL-SLOT-CKPT-MOVE`、`UTIL-GDN-GROUPS`、`UTIL-HEAD-SPLIT` 和
+   `UTIL-HEAD-Q8-FUSE` 均已否决，不再启动。当前只允许 `UTIL-POLL-TURNOVER` 的源码与
+   telemetry 审计；新实现必须用不同机制，先证明不会改变事件顺序、token 选择和数值路径，
+   再预注册冻结 greedy parity 与 2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、并发回退和
+   资源 hard gate 不放宽。只有代码路径明确需要实测且预计收益高于约 3-7 分钟重启成本时才重启。
 
 不要把已否决项原样重跑：
 

@@ -6,11 +6,16 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-HEAD-Q8-FUSE（源码与独立 GPU 门）
-- 当前工作：现有 `STRATA_HC_Q8=1` 路径在末层仍先执行一次 `gr_write_multi`，随后以
-  `apply=false` 读取最终 mixer；Q8 multi-read 内核本身已有把 pending write 折入 `apply=true`
-  的算术。先核实真实触发率、重复读写位置、数值/bitwise 影响和可测的 ≥1% 依据，再预注册
-  独立 harness。源码或 GPU 门不足时不构建服务器候选、不重启。
+- 当前项：UTIL-POLL-TURNOVER（源码与现有 telemetry 门）
+- 当前工作：`pump()` 每 tick 先按 stage 顺序 `batch_poll`，再按 `k=n_pipe-1..0` 启动空闲
+  stage。只读审计一次完成到下一次 launch 之间的 host/driver polling、group hand-off 和
+  doorbell 周转，先证明真实触发率与 ≥1% 临界路径依据；现有 BSTAT/stage stamps 能回答时
+  不写代码、不重启。候选必须改变周转机制，不能重做已否决的 launch 聚合。
+- 上一项：UTIL-HEAD-Q8-FUSE 在独立 GPU/正确性门否决。5 个交替进程、每进程 200 iters、
+  5 rounds；每个 `T=1..8` 的 direct 与 captured-graph 共 16 个逐字比较全部失败，五进程共
+  80 个失败。最大单次节省仅 `1.315 µs`，远低于最快 stage-2 窗口 1% 的 `182.7 µs`；
+  captured graph 在 `T=4..8` 反而慢约 `1–3 µs`。没有构建服务器候选、没有重启，
+  `STRATA_FUSE_HEAD_GR` 不在运行环境。
 - 上一项：UTIL-HEAD-SPLIT 服务端集成通过启动、路径命中、输出与资源门，但吞吐门否决。
   `1/2/3/4/5/6/7/8` 行 peer graph 全部捕获；6 slots / 2 groups、health loaded，三组固定
   greedy 各两轮逐字等于期望值，A2 同样通过。A1-B-A2 的 2/4/6/8 路为 A
@@ -74,17 +79,17 @@
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
 - 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
-  调度、EXPDEC、checkpoint move、GDN recurrence 合并、跨 group head 延迟合并和
-  vocabulary-row head split 均已否决；window profile 已完成。
+  调度、EXPDEC、checkpoint move、GDN recurrence 合并、跨 group head 延迟合并、
+  vocabulary-row head split 和 Q8 head write/mixer fusion 均已否决；window profile 已完成。
   attention v2 已是当前默认并完成 1% 门复验；
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：为 `UTIL-HEAD-Q8-FUSE` 写源码门结论和契约。检查
-  `Verifier::record_window` 末层写回、最终 mixer、`gr_write_multi` 与 Q8 multi-read 的
-  `apply` 路径；用独立 GPU harness 对 pending-write Q8/BF16 mixer 与
-  `gr_write_multi + apply=false mixer` 做 logits/激活逐字节比较并计时。通过后才允许一次
-  A1-B-A2；不得重跑 head split、window profile、batch-head、GDN groups、checkpoint move、
+- 下一动作：执行 `UTIL-POLL-TURNOVER` 只读门。审计 `pump()` 的
+  `batch_poll -> verdict -> stage hand-off -> batch_launch` 临界路径、`batch_poll` 的 query
+  语义和 `conc_serving` 的 doorbell 等待；用既有 BSTAT/stage stamp 判断周转间隙是否真实、
+  多大且是否在 2/4/6/8 路不同。只有命中率与保守临界路径收益达到 1% 才预注册实现。
+  不得重跑 head split、Q8 fusion、window profile、batch-head、GDN groups、checkpoint move、
   固定 groups、QSA slots 或 piped MTP。
 - 当前候选：无运行中 server 候选。A2 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
   仅 `0.04%`。
@@ -136,6 +141,9 @@
 - UTIL-HEAD-SPLIT 已否决：独立 harness 的 T=1..8 logits/采样全 bitwise，并发 head 临界
   路径投影中位 `1.813–9.936%`；server 集成也命中 `1..8` 行 peer graph 且 greedy 全过。
   但端到端 4/6 路为 `-1.305%/-8.659%`，违反其他级不回退 >1% 的门，默认关闭。
+- UTIL-HEAD-Q8-FUSE 已否决：5 个交替进程的 `T=1..8` direct/captured graph 共 80 个逐字
+  比较全部失败；最大节省 `1.315 µs`，远低于 `182.7 µs` 的 1% 窗口门槛。graph 在 `T=4..8`
+  慢约 `1–3 µs`，未构建、未重启。
 - UTIL-PIPED-MTP 已否决：A1/A2 合并中位 `78.3/108.55/125.7 tok/s`，B 为
   `93.9/104.4/113.4`；2 路 `+19.92%`、5/6 胜，但 4/6 路 `-3.82%/-9.79%`。固定 greedy
   文本 B 两次不同；B 的 CUDA1 cache 比 A 少 169 slots，下一项先做 cache-neutral 隔离。

@@ -129,6 +129,7 @@
 | L-112 | 10-31 22:1xZ | 两个 pipeline group 在末级严格串行；每级只有一个 verifier 和一套 `head_mixed_/head_logits_/m_out_`，`stage_group` 每次只绑定一个 group，`batch_poll` 返回时才释放末级 | **UTIL-BATCH-HEAD 源码门否决；未构建、未重启；转 UTIL-HEAD-SPLIT** |
 | L-113 | 10-31 22:2xZ | HEAD-SPLIT GPU harness 七进程全过：`T=1..8` 半区/合并 logits、greedy、固定种子、counter、graph 改变输入全 bitwise；并发投影中位 `1.813–9.936%`，split peak `453,189,152 B` < 上界 `461,577,760 B` | **GPU harness 通过；进入 opt-in server integration；未重启** |
 | L-114 | 10-31 23:4xZ | HEAD-SPLIT server 正确性全过：`1..8` 行 peer graph 全命中、三组 greedy 两轮等于期望、6/2 与资源正常；A1-B-A2 2/4/6/8 路 `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 回退超 1% | **UTIL-HEAD-SPLIT 吞吐门否决；A2 已恢复；转 UTIL-HEAD-Q8-FUSE 源码/GPU 门** |
+| L-115 | 10-31 23:4xZ | Q8 head fusion 五交替进程各 `T=1..8` direct/graph：80 个逐字比较全失败；最大节省 `1.315 µs`，1% 窗口门槛 `182.7 µs`，graph `T=4..8` 慢约 `1–3 µs` | **UTIL-HEAD-Q8-FUSE GPU/正确性门否决；未构建、未重启；转 UTIL-POLL-TURNOVER 只读门** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3845,6 +3846,71 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-115 UTIL-HEAD-Q8-FUSE：位差不通过，最大节省也远低于 1% 窗口门槛
+
+**判定**：**独立 GPU/正确性门否决。** 候选既没有达到逐字一致，也没有达到用户接受的 1%
+性能门槛；未构建服务器候选、未重启 Strata。
+
+**源码事实**：生产 `STRATA_HC_Q8=1` 在末层先执行 `gr_write_multi`，随后 Q8
+`fused_gr_read_multi(apply=false)` 再读 `R` 做最终 mixer。Q8 内核已有 `apply=true`，
+因此测试序列为：
+
+```text
+copy R
+gr_write_multi(R, block_out, inject, R)
+Q8 fused_gr_read_multi(apply=false, R)
+```
+
+对：
+
+```text
+copy R
+Q8 fused_gr_read_multi(apply=true, R, block_out, inject)
+```
+
+**实验**：production geometry `n_embd=2560, hc=4, hc_lr=320`；独立
+`head_q8_fuse_parity` 在 remote CUDA0 上运行 5 个交替进程，每进程 200 iters、5 rounds。
+每个 `T=1..8` 比较 `R/lo/rs/mixed/Q8_1`，direct 与 captured graph 各算一组。
+
+**正确性**：每进程 `T=1..8` 的 direct 和 graph 逐字比较全部失败，每组 16 个失败；
+五进程合计 80 个失败。所有进程 `result=REJECT`，不允许进入 server。
+
+**性能**：
+
+| process | 最大 direct saving | 1% 门槛 | graph 结果 |
+| ---: | ---: | ---: | --- |
+| 0 | `1.308 µs` | `182.700 µs` | `T=4..8` 慢，最大慢 `3.123 µs` |
+| 1 | `1.315 µs` | `182.700 µs` | `T=3..8` 慢，最大慢 `3.048 µs` |
+| 2 | `0.921 µs` | `182.700 µs` | `T=3..8` 慢，最大慢 `3.080 µs` |
+| 3 | `1.113 µs` | `182.700 µs` | `T=3..8` 慢，最大慢 `3.030 µs` |
+| 4 | `1.098 µs` | `182.700 µs` | `T=3..8` 慢，最大慢 `3.019 µs` |
+
+最快 stage-2 窗口为 `18.27 ms`；最大节省只有门槛的约 `0.72%`，即收益本身远不到 1% 门槛。
+graph 路径没有提供可复现收益，部分行反而回退。
+
+**生产状态**：未动 A。server/engine/vision 为 `573407/573418/573413`，engine sha256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`，config sha256
+`88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`；health loaded、
+6 slots / 2 groups，systemd inactive/dead，运行环境无 `STRATA_FUSE_HEAD_GR`。
+
+**证据**：
+
+- `/opt/ai/logs/util-head-q8-fuse-20261031T0740CST/process-{0,1,2,3,4}.log`
+  sha256 依次为 `cae5fc1c0a5668f72ae39ef3383d26d46a295f7ceb971ad70c99931c1d1f59f9`、
+  `6c485a7f79752758518e77c2a03d7eb209f6ce5417ae0d629665940e02588df2`、
+  `44365ce80eafba4e5ecb8a000cef9649cdd63e20444424cec4025bcb60803f9a`、
+  `a7830b23457901719aa8788025ab5de19d407e1d556ed2e0c15590ba14ac2a04`、
+  `b196d7b22531b5b89120d16f4a69f17446f07638d6d14f57a11efceed8910645`
+- harness binary sha256
+  `3474ea97fb4a6ce55f48f427381e7b74ea0a1ee9487dcf5df52500956b67c0e3`
+- 证据目录 `all-sha256.txt` sha256
+  `5ccba05c4f060ef85f3a845ec7e377cccec16eec0bea484e13f6c1ff338af9a4`
+
+**下一步**：`UTIL-POLL-TURNOVER`。只读审计 `pump()` 每 tick 的
+`batch_poll -> verdict -> stage hand-off -> batch_launch`，以及 `conc_serving` 的 doorbell
+交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
+实现；普通循环顺序重排不足以构成候选。
 
 ## L-114 UTIL-HEAD-SPLIT：服务端正确性通过，4/6 路端到端回退导致否决
 

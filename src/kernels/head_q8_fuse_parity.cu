@@ -92,7 +92,7 @@ void bind_args(MixerPath& p, const float* w_norm, const uint8_t* q8_down, const 
         k::FusedGrArgs& a = p.args[t];
         a = k::FusedGrArgs();
         a.R = p.r + (size_t) t * kD;
-        a.R_out = a.R;
+        a.R_out = p.r + (size_t) t * kD;
         a.apply = apply;
         a.bo_prev = bo + (size_t) t * kN;
         a.inj_prev = inj + (size_t) t * kHC;

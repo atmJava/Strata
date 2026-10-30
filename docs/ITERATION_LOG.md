@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-88 · Q8 head fusion fails both exactness and the 1% window floor
+
+- 目标 / 指标：把 `STRATA_HC_Q8=1` 末层的独立 `gr_write_multi` 与最终 Q8 mixer 合并；
+  先要求末层 `R/lo/rs/mixed/Q8_1` 逐字相等，再证明至少一个窗口临界路径节省 ≥1%。
+- 假设与预期：移除一次 pending write 和 `R'` 往返可减少固定每窗口成本；最快 stage-2 窗口
+  `18.27 ms`，因此至少应节省约 `182.7 µs`。
+- 为什么选这条路线：源码确实存在两次独立操作，且生产 Q8 multi-read 已有 `apply=true`；
+  它不延迟 group verdict，是 head split 失败后的独立内核路径。
+- 改动与实验：新增独立 `head_q8_fuse_parity` harness，在 production geometry
+  `2560/4/320` 上交替运行 5 个进程；每进程 200 iters、5 rounds，比较
+  `gr_write_multi + apply=false` 与单次 `apply=true` 的 direct 和 captured graph。
+- 结果：每进程 `T=1..8` 的两类比较共 16 个、五进程合计 80 个逐字比较全部失败。最大单次
+  节省 `1.315 µs`，另四个进程最好只有 `0.921–1.113 µs`；graph 在 `T=4..8` 反而慢约
+  `1–3 µs`。所有进程均为 `result=REJECT`。
+- 判决：**UTIL-HEAD-Q8-FUSE 源码/GPU 门否决。** 正确性和性能独立失败，即使忽略位差，
+  收益也远低于门槛；不构建 server candidate、不重启。
+- 预期部分推翻：Q8 `apply=true` 的理论融合没有转成可测关键路径节省，编译器、kernel 波形
+  和末层有限的 30–95 µs 工作使省下的 launch/往返淹没在噪声中。
+- 生产状态与回滚：A 未动，server/engine/vision 仍为 `573407/573418/573413`，engine
+  sha256 `105a4171...`、config `88de996a...`、health loaded、6 slots / 2 groups；
+  systemd inactive/dead，`STRATA_FUSE_HEAD_GR` 不在运行环境。
+- 证据：台账 L-115、`UTIL_HEAD_Q8_FUSE_RESULT-20261031.md`、远端
+  `/opt/ai/logs/util-head-q8-fuse-20261031T0740CST/`；五份日志分别以
+  `cae5fc1c...`、`6c485a7f...`、`44365ce8...`、`a7830b23...`、`b196d7b2...` 开头，
+  harness binary sha256 `3474ea97...`，清单 sha256 `5ccba05c...`。
+- 学到什么：生产已有 `apply=true` 不代表融合必然更快；必须按单窗口绝对门槛衡量，不能被
+  几十微秒的方向性变化误导。
+- 下一步与理由：预注册 `UTIL-POLL-TURNOVER` 只读门。`pump()` 在单线程中先串行问每个在飞
+  stage，再按逆 stage 顺序启动可用 group；先量化完成检测、hand-off 与 launch 之间是否
+  有真实 ≥1% 空隙，并冻结事件顺序要求。数据不足就否决，不把普通 pulse 优化写成收益。
+
 ## I-20261031-87 · Head split is exact and fast in isolation, but loses at server concurrency
 
 - 目标 / 指标：在独立 GPU harness 通过后，把 vocabulary-row head split 接入单请求与 batch

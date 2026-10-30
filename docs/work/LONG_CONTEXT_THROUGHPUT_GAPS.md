@@ -890,6 +890,30 @@ server。契约见 [`UTIL_HEAD_SPLIT_CONTRACT-20261031.md`](UTIL_HEAD_SPLIT_CONT
 末层 pending write + final mixer 的融合，先用独立 GPU harness 验证触发、bitwise 与临界路径；
 没有 1% 依据就不重启服务器。
 
+### 16.5.17 UTIL-HEAD-Q8-FUSE：位差与 1% 门槛同时失败
+
+生产 Q8 末层先做 `gr_write_multi`，再以 `apply=false` 读取最终 mixer；内核已有
+`apply=true`，但独立 production-geometry harness 在 5 个交替进程中测得每个
+`T=1..8` 的 direct 与 captured-graph 逐字比较全部失败，共 80 个失败。最大单次节省仅
+`1.315 µs`，而最快 stage-2 窗口 `18.27 ms` 的 1% 门槛是 `182.7 µs`；graph 在
+`T=4..8` 反而慢约 `1–3 µs`。
+
+因此本轮不构建 server candidate、不重启。A 保持 server/engine/vision
+`573407/573418/573413`、health loaded、6 slots / 2 groups，运行环境没有
+`STRATA_FUSE_HEAD_GR`。完整结果见
+[`UTIL_HEAD_Q8_FUSE_RESULT-20261031.md`](UTIL_HEAD_Q8_FUSE_RESULT-20261031.md)。
+
+### 16.5.18 UTIL-POLL-TURNOVER：下一道只读门
+
+`pump()` 每个 tick 先按 `k=0..n_pipe-1` 对在飞 stage 调用 `batch_poll`，完成后推进 group；
+随后按 `k=n_pipe-1..0` 启动空闲 stage。这条单线程周转链包含 host polling、group ownership
+hand-off 与下一次 launch，可能对低占用窗口支付固定成本，但当前没有证据证明它达到 1%。
+
+下一项不改循环顺序，也不做 launch 聚合。先审计 `batch_poll` 的 query/event 语义、
+`conc_serving` 的 doorbell 交接和 stage stamp 的空隙；必须证明真实触发率、临界路径至少
+`1%`、事件顺序不变和明确回滚，才允许实现。若现有 telemetry 已把空隙解释为非优化项，
+直接否决并转下一机制。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

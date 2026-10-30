@@ -1,7 +1,8 @@
 # UTIL-HEAD-Q8-FUSE contract
 
-Status: proposed on 2026-10-31. Source and independent GPU gates precede any server
-candidate or restart.
+Status: rejected on 2026-10-31 by the independent GPU gate. See
+[`UTIL_HEAD_Q8_FUSE_RESULT-20261031.md`](UTIL_HEAD_Q8_FUSE_RESULT-20261031.md).
+Source and independent GPU gates precede any server candidate or restart.
 
 ## Source-backed problem
 

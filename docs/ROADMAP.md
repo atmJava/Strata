@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T06:14+08:00。
+> 最后更新：2026-10-31T07:50+08:00。
 
 ## 用户目标
 
@@ -57,7 +57,11 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 3%。window-profile 已把 8 路尾部拆开：活跃行/window 下降 9.07%，slot tail 与 wait 显著上升，
 padding 和 KV resolve 都不是原因；按活跃行计 stage 2 固定成本上升 4.54%。跨 group 延迟合并
 head 已在源码门否决：末级每级只有一个 verifier 和一套 head 缓冲，等齐两组会制造大于
-合并收益的 10–19 ms 流水线空窗。下一候选改为 vocabulary-row head split，不延迟任何 group。
+合并收益的 10–19 ms 流水线空窗。vocabulary-row head split 的 harness 与 server parity 均通过，
+但 4/6 路端到端回退 `1.305%/8.659%`，已否决。随后 Q8 末层 write/mixer fusion 在 GPU 门测得
+80 个 direct/graph 逐字比较全部失败，最大节省 `1.315 µs`，远低于 `182.7 µs` 的 1% 门槛；
+没有构建或重启。下一候选转 `UTIL-POLL-TURNOVER`，审计 `pump()` 的完成检测、group hand-off
+与下一 stage launch 之间是否存在可用现有 telemetry 证明的 1% 固定间隙。
 当前无运行中 server 候选。P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从
 全新 A1 重跑。
 
@@ -95,7 +99,8 @@ head 已在源码门否决：末级每级只有一个 verifier 和一套 head �
 | UTIL-WINDOW-PROFILE | M14 | 用现有 stage/BSTAT 拆分 2/4/6/8 路 | 已完成 | 低；A1-P-A2，每级 3 波 | 8 路 occupancy/tail/wait 与 active rows/window 均退化；padding、KV resolve 否决 |
 | UTIL-BATCH-HEAD | M14 | 合并两个 pipeline group 的 final-stage head rows，一次读 output projection | 已证伪（源码控制流） | 高；源码重构、GPU harness、A1-B-A2 | **否决**：两个 group 在末级严格串行；延迟 A 的 verdict 会制造一个 16.9–19.2 ms 空窗，远大于约 1.04 ms head 收益 |
 | UTIL-HEAD-SPLIT | M14 | vocabulary rows 分到两张卡并并发各算一半 head | 已证伪（server 编排） | 高；双卡事件、单/batch window、最终 A1-B-A2 | **否决**：harness 与 server parity 全过，但 4/6 路端到端 `-1.305%/-8.659%`；默认关闭 |
-| UTIL-HEAD-Q8-FUSE | M14 | 在现有 Q8 mixer 中把末层 pending write 与最终 mixer 合并 | 源码/GPU 门 | 中；独立 harness 后可有一次 A1-B-A2 | 目标：省一次 `gr_write_multi` 与 R 往返；先证明真实触发、bitwise 与 ≥1% 临界路径依据 |
+| UTIL-HEAD-Q8-FUSE | M14 | 在现有 Q8 mixer 中把末层 pending write 与最终 mixer 合并 | 已证伪（GPU/正确性） | 中；独立 harness 后可有一次 A1-B-A2 | **否决**：5 个交替进程的 80 个 direct/graph 逐字比较全失败；最大节省 `1.315 µs`，门槛 `182.7 µs`；未构建、未重启 |
+| UTIL-POLL-TURNOVER | M14 | 降低完成 poll、group hand-off 与下一 stage launch 的串行周转成本 | 信息不足，先做源码/telemetry 门 | 低中；优先零重启审计，之后才可能一次 A1-B-A2 | 目标不是重做 launch 聚合；必须证明真实命中、≥1% 临界路径、事件顺序和数值路径不变 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
