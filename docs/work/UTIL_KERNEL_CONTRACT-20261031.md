@@ -1,7 +1,7 @@
 # UTIL-KERNEL contract
 
-Status: pre-registered before implementation. This file records the only candidate allowed by the
-UTIL-NCU evidence.
+Status: rejected; see [`UTIL_KERNEL_RESULT-20261031.md`](UTIL_KERNEL_RESULT-20261031.md). This file
+records the only candidate allowed by the original UTIL-NCU evidence.
 
 ## Selected problem
 

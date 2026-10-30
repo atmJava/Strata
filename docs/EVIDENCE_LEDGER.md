@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（99 条：L-000…L-098，按编号）
+## 台账索引（100 条：L-000…L-099，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -113,6 +113,7 @@
 | L-096 | 10-31 00:5xZ | 150K QSA：16-query overlap 中位 `28.0%`；FP16 全选择仅 `70.9207%` 相同，否决；候选共享预注册上界 `1.996%`，进入最小实现 | **诊断完成；FP16 否决；候选共享待实现** |
 | L-097 | 10-31 01:0xZ | 三 query 同 CTA 保持 parity 和 12 warps/SM，但普通选择慢 `20.05%`、最强共享上界慢 `20.75%` | **否决** |
 | L-098 | 10-31 02:1xZ | 完整请求 NCU 触发 stall watchdog；同权重 mode-8 fused gate/up 测得 MIO `29.75%`、long scoreboard `17.50%`、Tensor `0.04%`，选 MIO 根因 | **诊断完成；UTIL-KERNEL 待验证** |
+| L-099 | 10-31 19:2xZ | 四路 rotated codebook 副本 hash 相同，但 gate/up `474.5` 对 `474.1 us`（−0.084%）、仅 2/7 胜；bank conflicts 反升 2.5%，寄存器 73→80 | **UTIL-KERNEL 否决；转 UTIL-ACT** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3829,6 +3830,57 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-099 UTIL-KERNEL：四路 codebook 复制反升 bank conflict，时间门否决
+
+**判定**：**UTIL-KERNEL 否决。** IQ3_XXS 四副本、bank rotation 路径保持 bitwise 输出，
+但 gate/up 中位从 `474.1` 变为 `474.5 us`（−0.084%），仅 `2/7` 配对胜出，候选 p75
+`475.35 us` 高于 baseline 中位。没有进入 engine A/B，也不扫描 2/8/16 副本。
+
+**候选**：`STRATA_IQ3_GRID_REPL=1` 把 256-entry IQ3_XXS codebook 存为
+`4 * index + (lane & 3)`，让同一逻辑 word 在四个 lane rotation 下落到不同 bank。未设置时
+走原单副本 kernel。真实 GGUF 层 36、`G=64, T=6`；14 个进程的 hash 均为
+`9a055a5a94e15c87`，0 differing。
+
+**七组交替进程**：baseline gate/up 为
+`664.1/474.1/471.3/471.8/473.3/475.1/475.5 us`，candidate 为
+`472.4/471.7/474.5/475.1/473.8/475.6/476.3 us`。第一组 baseline 冷时钟是明确离群值，
+按预注册总体中位仍未通过。
+
+**counter 解释**：一次 bounded NCU 显示 bank conflicts 从 `7,115,366` 升到 `7,293,965`；
+shared-load wavefronts `17,698,406 → 17,877,005`；register/thread `73 → 80`；static shared
+memory `2,048 → 5,120 B`。同一 baseline pass 有 `10,583,040` 条 shared-load instruction，
+global load 仅 `296,960`。随机 codebook 索引下复制没有消除真实冲突，只增加 staging、size
+与 register pressure。
+
+**恢复**：源码恢复为
+`47009da533393ff4bcb62e6831427204237da3a1f9679ad4a691d4ddc897971b`；bench/parity 重建后
+`native_expert_parity --synthetic iq3_xxs/q2_0` 与 `iq_multi_parity` 均 0 failure，
+restored bench hash `9a055a5a94e15c87`。candidate engine 仍为
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。
+
+**重启成本与状态**：候选为独占 GPU 微基准停止一次，kernel 完成后只冷启动一次，实测
+`2:45`。当前 server/engine PID `507164/507178`，health 200、`loaded=true`，无实验 env；
+生产 `strata.service` 仍 inactive/dead、`MainPID=0`、`NRestarts=23`。
+
+**下一步**：contract `docs/work/UTIL_ACT_RELOAD_CONTRACT-20261031.md`。在每个 k 迭代把 q8_1
+activation words/scale 显式装入寄存器一次，供 gate/up 两个 row dot 复用；目标仍是 ≥1%
+kernel 中位、MIO≤28.75%、wavefronts 下降、active warps≥69%、输出不变。
+
+**证据**：
+
+- `/opt/ai/logs/util-kernel-ab-20261031T1914Z.log`
+  （sha256 `fe4bd0dd9b77af1046eedf83beafc008faf885af586305a10fb86b804c5e9536`）
+- `/opt/ai/logs/util-lds-counters-20261031T1918Z.ncu-rep`
+  （sha256 `12814ae612e7140959e084cd3024654ec6f203ecbb79b3376dfc8c19cededd20`）
+- `/opt/ai/logs/util-lds-repl-counters-20261031T1921Z.ncu-rep`
+  （sha256 `873517088c55436c931235aab6c64d5dd212b0b91139a6b38ee030ad86d71e3e`）
+- `/opt/ai/logs/util-kernel-restore-build-20261031T1925Z.log`
+  （sha256 `669bde5b249538e46e4281cabc3e53ea1abff10bcb7606fdce73b9b34150601f`）
+- `/opt/ai/tmp/pre-util-kernel-20261031T1910Z/`
+
+**没测什么**：只覆盖一个真实层和 mode-8 几何；否决的是四副本 bank rotation，不是所有
+shared-memory 优化。activation-reload 候选必须独立通过完整门。
 
 ## L-098 UTIL-NCU：完整请求 replay 超时，真实权重 fused kernel 测得 MIO `29.75%`
 

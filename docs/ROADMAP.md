@@ -73,8 +73,9 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | QSA-UNION-ATTN | 相邻 query 共享选中 K/V | opt-in 且保持每 query 的 selection/attention 输出；长读 A-B-A 的 wall 与 `qsa attn` 同向改善 ≥1%，质量与资源门通过 | 已证伪 | 低 | **否决**：三 query 同 CTA parity/资源达标，但普通选择 +20.05%、最强共享 `QA_SAME=4` 仍 +20.75% |
 | P7 Turing FP16 tensor-core prompt experts | M12/M13 | 用 tensor-core prompt experts 攻击最大 `gemm gate/up` 5.807 s | 中 | 低中，输出可能变化 | **搁置**：A1 中断；只有 NCU 证明 Tensor 是直接瓶颈时才恢复 |
 | GPU-UTIL | M13 | 用硬件计数器替代单看 NVML；先验证采集口径，再做内核调优 | 高 | 低；只读、不重启服务 | **完成**：两次 Nsight 双卡 GPU Metrics + NVML 交叉核对可复现 |
-| UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **下一项**：先快照再停服，不能附加现役进程 |
-| UTIL-KERNEL | M13 | 按 NCU 证据只改一个瓶颈内核或调度路径，提高 issue/Tensor/warp 占用并缩短 wall | 高 | 中；需要代码级验证 | **下一代码项**：参数 A/B 仅作部署门，不做参数探索 |
+| UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **完成**：MIO `29.75%` 为唯一主因；Tensor `0.04%` |
+| UTIL-KERNEL | M13 | 按 NCU 证据只改一个瓶颈内核或调度路径，提高 issue/Tensor/warp 占用并缩短 wall | 高 | 中；需要代码级验证 | **否决**：四副本 codebook `−0.084%`，仅 2/7 胜，bank conflicts 反升 |
+| UTIL-ACT | M13 | 每个 k 只加载一次 q8_1 activation words/scale，供 gate/up 两个 row dot 复用 | 中高 | 中；隔离 GPU、7 组进程与 NCU | **下一代码项**：contract、1% 与 counter 门已预注册 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -134,8 +135,9 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 23. **QSA-UNION-ATTN 已否决**：三 query 同 CTA 保持 parity、168 registers/thread 和无 spill，
     但普通选择慢 `20.05%`，`QA_SAME=4` 最强共享上界仍慢 `20.75%`。按预注册内核门停止，
     不消耗 150K A-B-A，也不重复同形 cache co-residency。
-24. **下一项 UTIL-NCU**：用独立受控 engine 和固定热态采集 SM/occupancy/Tensor/DRAM/stall；
-    先快照、后停服，结束后恢复候选 8080 并核对实际运行环境。
+24. **下一项 UTIL-ACT**：UTIL-NCU 已把 MIO 定为唯一主因；四副本 codebook 因无时间收益且
+    反升冲突而关闭。现在只测试“每个 k 显式加载一次 q8_1 activation，供 gate/up 两行复用”，
+    先过 7 组 kernel 与 NCU，再决定是否做一次 engine A/B。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

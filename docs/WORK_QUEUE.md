@@ -45,6 +45,9 @@
 15. **QSA-DIAG 已完成**：真实 150K prompt 的 16-query selected-cell union 中位 `28.0%`；
     FP16 全选择一致率 `70.9207%`，半精度路线否决；候选共享按预注册公式仍有 `1.996%`
     乐观上界，因此下一项只做一次 exact attention-side K/V 共享读取实现。
+16. **UTIL-KERNEL 已否决**：四副本 rotated IQ3_XXS codebook 输出不变，但 gate/up
+    `474.5` 对 `474.1 us`（−0.084%）、仅胜 2/7；反升 bank conflicts 与寄存器。下一项
+    UTIL-ACT 改为复用同一 q8_1 activation 的显式寄存器加载，不扫描副本数。
 
 ## 候选
 
@@ -62,8 +65,9 @@
 | P7 | Turing FP16 tensor-core prompt experts | 同 boot A-B-A；每臂 3 个唯一 96K prompt；B 的 engine read 与 wall 中位均改善 ≥3%；A2 回到 3% 内；零错误、needle 3/3；输出变化时必须过质量门 | 搁置 | L-087：A1 被中断，无有效 JSONL/summary | 只有 NCU 证明 Tensor 是直接瓶颈时才恢复；否则不作为后续方向 |
 | CTX256 | 256K 生产混合负载 soak | 至少 1 小时 mixed traffic；覆盖 32K/64K/96K、接近 256K 的长读与短请求并发；零意外错误、零 needle 失败、6 槽不降级；记录 TTFT/wall、KV host read、expert hit、RAM/swap 与最低显存余量 | 已完成 | L-090：414 请求、133 waves、0 错误、0 意外 length、74/74 needle；14 次约 245.9K 长读全通过；slots 始终 6 | 已冻结 `0.1.51` 基线；最高并发 4、最长 245,856 token，不能写成 6 路或满窗口 |
 | GPU-UTIL | 真实 GPU 利用率探测 | Nsight 双卡计数器完整、请求质量门通过；结果能区分 SM 活动、issue、Tensor、warp 与 DRAM；失败样本不得进入汇总 | 已完成 | L-091：两次 32K prefill 的 SMs Active 77%、SM Issue 13–14%、Tensor 10%、DRAM read 15%；NVML 95/98% 与 40/99% 均只表示有活动 | 最终脚本 `tools/server/probe-gpu-utilization.py` 完整 run `verified`，15 项本地测试通过 |
-| UTIL-NCU | 独立实例 stall 归因 | 停服前保存并校验快照；用受控 engine 实例采集 SM throughput、occupancy、Tensor pipe、DRAM 和 stall reason；目标 prompt 与热态固定；结束后恢复生产并 T-probe 无问题 | 下一项 | L-091 只给出管线占用，不能指定 stall reason | 只做根因归因；不能附加现役进程，不得用 Nsight GPU Metrics 替代 |
-| UTIL-KERNEL | 按根因提高资源利用率 | 预先固定目标计数器和 wall 门限；只改一个瓶颈内核或调度路径；同负载下目标硬件计数与端到端 wall 同向改善；输出和稳定性门通过 | 待做 | NCU 根因待补 | 下一代码项；参数 A/B 只作部署验证，不做独立参数探索 |
+| UTIL-NCU | 独立实例 stall 归因 | 停服前保存并校验快照；用受控 engine 实例采集 SM throughput、occupancy、Tensor pipe、DRAM 和 stall reason；目标 prompt 与热态固定；结束后恢复生产并 T-probe 无问题 | 已完成 | L-098：MIO `29.75%`、active warps `71.59%`、Tensor `0.04%`；全请求 replay 超时后用真实权重微内核完成 | 不恢复 Tensor/P7 |
+| UTIL-KERNEL | 按根因提高资源利用率 | 预先固定目标计数器和 wall 门限；只改一个瓶颈内核或调度路径；同负载下目标硬件计数与端到端 wall 同向改善；输出和稳定性门通过 | 否决 | L-099：四副本 rotated codebook hash 不变，但 `474.5` 对 `474.1 us`，2/7 胜；bank conflicts 反升 | 不扫描 2/8/16 副本 |
+| UTIL-ACT | 消除 gate/up 的重复 activation shared load | 每个 k 只显式读取一次 q8_1 words/scale 并复用于两 row dot；7 组 process 中位 ≥1%、5/7 胜、p75 优于 baseline 中位；MIO≤28.75%、wavefronts 下降、active warps≥69%、hash/parity 不变 | 待做 | contract 已预注册；baseline shared loads `10,583,040` 对 global `296,960` | 通过后仅做一次 engine A/B；同形失败后换机制 |
 | UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 待做 | L-092：2 路数字 `94.85 tok/s` 低于单路 `104.05`；8 路 `138.76` 低于 6 路 `164.68`，TTFT 约 `5.8 s` | 先查调度/批窗口固定成本，不先做参数扫描 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |

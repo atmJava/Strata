@@ -6,10 +6,12 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-NCU 已完成。完整请求 full-section replay 触发 stall watchdog；同候选二进制的
+- 当前项：UTIL-KERNEL 已完成并否决。四副本 rotated IQ3_XXS codebook 保持 hash
+  `9a055a5a94e15c87`，但 gate/up 中位 `474.5` 对 `474.1 us`（−0.084%），仅胜 2/7；
+  bank conflicts `7,115,366 → 7,293,965`，寄存器 73→80。下一项是 UTIL-ACT。
+- 上一项：UTIL-NCU 已完成。完整请求 full-section replay 触发 stall watchdog；同候选二进制的
   真实权重 mode-8 微内核测得 MIO throttle `29.75%`、long scoreboard `17.50%`、Tensor
-  `0.04%`，唯一主因选 MIO。下一项是 opt-in shared-codebook bank rotation，先过 ≥1% kernel
-  时间、MIO≤28.75% 和 parity/资源门。
+  `0.04%`，唯一主因选 MIO。
 - 上一项：QSA-UNION-ATTN 已完成并否决。三个相邻 query 同 CTA 的实验保持 parity 和
   `168 registers/thread`、无 spill，但普通选择慢 `20.05%`，`QA_SAME=4` 最强共享上界仍慢
   `20.75%`；按预注册 kernel 门停止，未消耗 150K A-B-A 或重启预算。
@@ -20,12 +22,13 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前迭代：UTIL-NCU 已完成，UTIL-KERNEL 尚未开始实现。attention v2 已是当前默认并完成 1% 门复验；不要再次用
+- 当前迭代：UTIL-KERNEL 已否决，UTIL-ACT contract 已预注册。attention v2 已是当前默认并完成 1% 门复验；不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：实现一个 opt-in IQ3_XXS shared-codebook 4-way bank-rotation 候选；要求 kernel
-  中位至少快 1%、MIO≤28.75%、active warps≥69%、hash 不变。通过后再做一次 engine A/B。
-- 当前候选：UTIL-KERNEL。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
+- 下一动作：实现 `STRATA_IQ3_ACT_RELOAD`，每个 k 只显式加载一次 q8_1 activation words/scale，
+  供 gate/up 两个 row dot 复用；要求 kernel 中位至少快 1%、MIO≤28.75%、shared wavefronts
+  下降、active warps≥69%、hash 不变。通过后再做一次 engine A/B。
+- 当前候选：UTIL-ACT。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
@@ -38,8 +41,8 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；UTIL-NCU 后恢复的 server/engine PID 为 `504632/504639`，engine 为
-  `105a4171...`，profiler 和 QSA 诊断 env 不存在。
+  `loaded=true`；UTIL-KERNEL 恢复后的 server/engine PID 为 `507164/507178`，engine 为
+  `105a4171...`，profiler、QSA 和 kernel 实验 env 不存在。冷启动实测 `2:45`。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
@@ -56,6 +59,8 @@
 
 ## 已知结果
 
+- UTIL-KERNEL 已否决：四路 rotated IQ3_XXS codebook 保持输出，但 `474.5` 对 `474.1 us`
+  （−0.084%），2/7 胜；NCU bank conflicts 反升 `2.5%`。不要扫描副本数，转 UTIL-ACT。
 - V3-1 容量预设已收口：4 路中位 `6×192K` 聚合 120.6、`8×128K` 133.9、`8×192K` 122.8；
   默认保持 `6×192K`。8×128K 的 +11% 以 192K→128K 上下文为代价。
 - 256K 生产切换已完成：config 仅把 `max_context` 从 `192000` 改为 `262144`，同时保留

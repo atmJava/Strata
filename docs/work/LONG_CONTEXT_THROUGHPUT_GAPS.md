@@ -638,6 +638,20 @@ MIO throttle 为 `29.75%`，long scoreboard `17.50%`，Tensor `0.04%`，SM `58.0
 [`UTIL_NCU_RESULT-20261031.md`](UTIL_NCU_RESULT-20261031.md)、
 [`UTIL_KERNEL_CONTRACT-20261031.md`](UTIL_KERNEL_CONTRACT-20261031.md)。
 
+### 16.5.1 UTIL-KERNEL（已完成，否决）
+
+四副本 rotated IQ3_XXS codebook 在真实权重层 36、`G=64, T=6` 上进行了 7 组交替进程。
+输出 hash 全部保持 `9a055a5a94e15c87`，但 gate/up 中位从 `474.1` 变为 `474.5 us`
+（−0.084%），candidate 仅胜 2/7。NCU 计数进一步显示 bank conflicts
+`7,115,366 → 7,293,965`，shared-load wavefronts `17,698,406 → 17,877,005`，寄存器
+73→80。随机 codebook 访问下复制没有减少真实冲突，反而增加了 staging 和资源成本。
+
+该机制关闭，不扫描 2/8/16 副本。同一次 counter 还测得 shared-load instructions
+`10,583,040`，global-load instructions 仅 `296,960`；下一候选改为每个 k 显式装入一次
+q8_1 activation，并让 gate/up 两个 row dot 复用。详见
+[`UTIL_KERNEL_RESULT-20261031.md`](UTIL_KERNEL_RESULT-20261031.md) 和
+[`UTIL_ACT_RELOAD_CONTRACT-20261031.md`](UTIL_ACT_RELOAD_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

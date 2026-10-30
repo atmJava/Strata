@@ -3,6 +3,43 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-72 · 四路 codebook 复制不降 bank conflict，UTIL-KERNEL 按时间门否决
+
+- 目标 / 指标：只改 `native_gu_fused_kernel<18>` 的 IQ3_XXS codebook 访问，保持输出算术；
+  kernel 中位至少快 1%、MIO≤28.75%、active warps≥69%，通过后才允许一次 engine A/B。
+- 假设与预期：NCU 的 MIO 主因来自随机 codebook 的 shared-bank conflict；四副本按 lane
+  rotation 应把同时访问分散到更多 bank，至少抵消复制成本并降低 MIO。
+- 为什么选这条路线：它只改 shared 地址、不改任何数值算术，风险低、回滚清晰，也是 UTIL-NCU
+  预注册的唯一候选；相比之下直接改 CTA/row 几何会同时改变多个变量。
+- 改动与预注册：opt-in `STRATA_IQ3_GRID_REPL=1` 把 256-entry codebook 以
+  `4 * index + lane_rotation` 复制四份；未设置时保留一份路径。真实权重、层 36、
+  `G=64, T=6`，先做 7 组交替进程 A/B。
+- 正确性：14 个 baseline/candidate 进程的 hash 均为 `9a055a5a94e15c87`，0 differing；
+  candidate 与 baseline 的输出算术一致。
+- 时间：baseline 中位 `474.1 us`，candidate `474.5 us`，改善 `-0.084%`；candidate
+  仅胜 2/7，p75 `475.35 us` 高于 baseline 中位。第一组 baseline 冷时钟 `664.1 us`
+  不改变中位判决。
+- 计数器：一次有界 NCU 解释否决原因。shared-load bank conflicts 从 `7,115,366` 升到
+  `7,293,965`，wavefronts 从 `17,698,406` 升到 `17,877,005`，寄存器 73→80，静态 shared
+  memory 2,048→5,120 B。随机索引下复制只改变地址置换，没有减少实际冲突，还增加 staging。
+- 判决：**UTIL-KERNEL 否决。** 不扫描 2/8/16 副本。新增 counter 证据表明 kernel 共执行
+  `10,583,040` 条 shared load、仅 `296,960` 条 global load；下一机制改为消除 gate/up 两行
+  对同一 q8_1 activation block 的重复 shared-memory 读取。
+- 预期被推翻：MIO 不是可继续压低的 codebook bank-conflict 余量；原布局已接近随机访问下限。
+  真正仍可删除的是同一 activation 被两个 row dot 重复读取的 shared-load 指令。
+- 恢复与成本：停候选一次用于独占 GPU 微基准；恢复源码 hash
+  `47009da533...`、engine hash `105a4171...`，重建后 `native_expert_parity` 和
+  `iq_multi_parity` 均 0 failure。候选冷启动实测 `2:45`，新 PID server/engine
+  `507164/507178`，health loaded；生产 systemd 不变。
+- 证据：`/opt/ai/logs/util-kernel-ab-20261031T1914Z.log`；baseline/candidate counter
+  `.ncu-rep` 分别为 `util-lds-counters-20261031T1918Z` 与
+  `util-lds-repl-counters-20261031T1921Z`。详情见
+  `docs/work/UTIL_KERNEL_RESULT-20261031.md`，台账 L-099。
+- 学到什么：MIO 是症状，不代表 codebook bank conflict 可继续下降。实测原始 256-entry
+  layout 已接近随机访问的 bank 下限；优化应减少 shared load 指令/重复读取，而不是复制同一表。
+- 下一步与理由：执行预注册 `UTIL-ACT`，在每次 k 迭代把 q8_1 activation words 和 scale
+  显式装入寄存器一次，供 gate/up 两个 row dot 复用；所有门限不变，失败则不扫描相邻形状。
+
 ## I-20261031-71 · NCU 根因定为 MIO throttle，完整请求 replay 因等待成本失败
 
 - 目标 / 指标：获取真实长 prompt 热点 kernel 的 SM、occupancy、Tensor、DRAM/L2 和 warp stall，
