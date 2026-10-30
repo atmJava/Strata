@@ -719,9 +719,11 @@ class Host:
     def __init__(self, name: str, shutdown_timeout: float, startup_wait: float = 300,
                  expected_profile_revision: str | None = None,
                  expected_source_sha256: str | None = None,
-                 die_with: tuple[int, str] | None = None):
+                 die_with: tuple[int, str] | None = None,
+                 service_entry: bool = False):
         self.name = _name(name)
         self.die_with = die_with           # (pid, start token): stop the server when that process is gone
+        self.service_entry = service_entry
         self.shutdown_timeout = shutdown_timeout
         self.expected_profile_revision = expected_profile_revision
         self.expected_source_sha256 = expected_source_sha256
@@ -762,6 +764,25 @@ class Host:
         if pid is not None and ready is not None:
             payload.update(pid=pid, ready=str(ready))
         profiles._atomic(_child_marker(self.name, self.token), (json.dumps(payload) + "\n").encode())
+
+    def _bind_and_publish(self, listener) -> str:
+        """Bind the owner socket and publish its exclusive state lease."""
+        bound_address = listener.bind()
+
+        def shutdown(signum, frame):
+            self.running = False
+
+        signal.signal(signal.SIGTERM, shutdown)
+        signal.signal(signal.SIGINT, shutdown)
+        state = {
+            "schema_version": 1,
+            "profile": self.name,
+            "socket": bound_address,
+            "token": self.token,
+            "host_pid": os.getpid(),
+        }
+        self.state_fd = _write_new(self.state_path, (json.dumps(state) + "\n").encode())
+        return bound_address
 
     def _plan(self) -> tuple[dict, list[str], Path, bytes]:
         from strata_cli.cli import _launch_plan
@@ -1445,14 +1466,17 @@ class Host:
         listener = owner_transport.Listener(self.socket_path, timeout=1.0)
         self.startup_supervisor_active = True
         try:
-            bound_address = listener.bind()
-            def shutdown(signum, frame):
-                self.running = False
-            signal.signal(signal.SIGTERM, shutdown)
-            signal.signal(signal.SIGINT, shutdown)
-            self.state_fd = _write_new(self.state_path, (json.dumps({"schema_version": 1, "profile": self.name,
-                                                                     "socket": bound_address, "token": self.token,
-                                                                     "host_pid": os.getpid()}) + "\n").encode())
+            if self.service_entry:
+                lock_name = "rt" + hashlib.sha256(self.name.encode("utf-8")).hexdigest()[:24]
+                with profiles._lock(lock_name):
+                    procs.end_leftovers(profile=self.name)
+                    if _read_state(self.name) is not None:
+                        _recover_stale(self.name, wait=self.probe_timeout)
+                    if _read_state(self.name) is not None:
+                        raise ProfileError("this profile already has a live managed runtime", 6)
+                    self._bind_and_publish(listener)
+            else:
+                self._bind_and_publish(listener)
             try:
                 plan, args, source, source_bytes = self._plan()
                 if (self.expected_profile_revision is not None and
@@ -1550,6 +1574,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-source-sha256")
     parser.add_argument("--die-with-pid", type=int)
     parser.add_argument("--die-with-token")
+    parser.add_argument("--service", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not 0 <= args.shutdown_timeout <= 300 or not 1 <= args.startup_wait <= MAX_START_WAIT:
         parser.error("shutdown timeout must be 0..300")
@@ -1560,7 +1585,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         die_with = (args.die_with_pid, args.die_with_token) if args.die_with_pid and args.die_with_token else None
         return Host(args.host, args.shutdown_timeout, args.startup_wait,
-                    args.expected_profile_revision, args.expected_source_sha256, die_with).serve()
+                    args.expected_profile_revision, args.expected_source_sha256, die_with,
+                    service_entry=args.service).serve()
     except (ProfileError, OSError) as exc:
         print(f"[strata runtime] host failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 6

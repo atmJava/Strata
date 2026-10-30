@@ -2,8 +2,8 @@
   "schema_version": 1,
   "captured_at": "2026-10-30",
   "branch": "hw/server-adapt-0.2.3",
-  "base_commit": "8e51da3c9e0c3c82266339cf7816065a04e89135",
-  "scope": "Isolated POSIX owner runtime with a fake engine, immutable release rollback and artifact identity gate; no production restart or synthetic production generation",
+  "base_commit": "04a6b850f8df29d417990e3799eb6cb3b18f137d",
+  "scope": "Isolated POSIX owner runtime with a fake engine, immutable release rollback, systemd user restart and artifact identity gate; no production restart or synthetic production generation",
   "implementation": {
     "manifest": "owner-private <runtime>/<profile>.lkg.json",
     "commit_point": "after model state, /health, and generation readiness verification",
@@ -41,7 +41,8 @@
       "verify private ownership, manifest shape, safe relative paths and every digest",
       "refuse tampered engine, service code, assets, config or launcher",
       "restart and startup fallback load the release named by the LKG release_id",
-      "the running release and LKG artifact IDs must still match before drain or fallback"
+      "the running release and LKG artifact IDs must still match before drain or fallback",
+      "the direct service entry recovers verified stale owner state before publishing new state"
     ],
     "restart_policy": [
       "validate LKG before drain",
@@ -64,7 +65,7 @@
   "verification": {
     "runtime_suite": {
       "result": "PASS",
-      "summary": "76 passed, 11 subtests passed",
+      "summary": "77 passed, 11 subtests passed",
       "command_environment": "Linux, Python 3.12.3, MP_BASE_URL=http://127.0.0.1:9"
     },
     "artifact_identity_gate": {
@@ -129,8 +130,25 @@
     },
     "terminal_suite": {
       "result": "PASS",
-      "summary": "271 passed, 1 skipped, 189 subtests passed",
+      "summary": "272 passed, 1 skipped, 189 subtests passed",
       "regression_found_and_fixed": "Immediate SIGTERM after ready publication previously exited -2 for delays 0, 0, 0.01, and 0.05 seconds; ready publication and the serving wait now share the same clean-stop scope, and ten immediate-signal repetitions exited 0"
+    },
+    "systemd_user_drill": {
+      "result": "PASS",
+      "environment": "Linux user systemd manager, fake engine",
+      "restart_policy": "Restart=on-failure, RestartSec=1, KillMode=control-group",
+      "unit": "strata-rollback-drill-87a0a3de07",
+      "covered": [
+        "service entry starts the fake runtime under systemd --user",
+        "SIGKILL to the owner causes systemd to start a new owner",
+        "the new owner recovers verified stale state before publishing a new lease",
+        "the broken candidate engine fails generation and the LKG release is restored",
+        "the systemd unit returns to active and the LKG artifact ID remains unchanged"
+      ],
+      "artifact_id": "a204ec18847e7bdc8af5ff3082f40aa81ad2d65983a745469faa40cf4519ce73",
+      "release_id": "1a4d653b114a218cabe8575173d2fee2d41a428e9f2a9ab144a0b17986db980c",
+      "rolled_back": true,
+      "systemd_active": "active"
     },
     "serve_lifecycle": {
       "result": "PASS",
@@ -147,6 +165,7 @@
     "isolated_health_gate": "PASS",
     "isolated_artifact_identity_gate": "PASS",
     "isolated_immutable_release": "PASS",
+    "isolated_systemd_owner_restart": "PASS",
     "production_automatic_rollback": "CLOSED",
     "g0b": "NOT_STARTED"
   },
@@ -160,9 +179,10 @@
     "The LKG does not pin the Python interpreter, installed site-packages, model pack, or shared-library digests",
     "A changed or overwritten release is rejected; it is never silently repaired or replaced",
     "LKG schema 2 is rejected rather than migrated; the first schema 3 launch needs a controlled verified transition",
+    "The systemd drill used a user service with a fake engine; Linger=no means logout and reboot continuity are not proven",
     "Rollback does not preserve an in-flight HTTP or SSE request",
     "Startup fallback covers a fresh owner candidate that never reaches ready; a candidate that reaches ready and later fails stays outside this path",
-    "A real systemd-level restart and real-model startup recovery have not been exercised",
+    "A production systemd service and real-model startup recovery have not been exercised",
     "Engine smoke, stream smoke, tool smoke, and session restore are not yet one G0B gate"
   ]
 }

@@ -1559,6 +1559,62 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(runtime._pid_exists(old_child))
         self.assertFalse(orphan.exists())
 
+    def test_service_entry_recovers_stale_owner_and_uses_lkg_release(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
+        engine = self.root / "engine.py"
+        engine.write_text(
+            "#!" + sys.executable + "\n"
+            "import sys\n"
+            "print('READY 4096 stop', flush=True)\n"
+            "for line in sys.stdin:\n"
+            "    if line.strip() == 'QUIT': break\n"
+            "    if line.startswith(('GEN ', 'BGEN ')):\n"
+            "        print('ERR service-candidate-failed', flush=True)\n",
+            encoding="utf-8",
+        )
+        engine.chmod(0o700)
+        owned = runtime._STARTED_HOSTS.pop("local")
+        os.kill(first["host_pid"], signal.SIGKILL)
+        self.assertEqual(owned.wait(timeout=3), -signal.SIGKILL)
+        root = Path(__file__).resolve().parents[2]
+        service = subprocess.Popen(
+            [sys.executable, "-m", "strata_control.runtime", "--host", "local",
+             "--service", "--shutdown-timeout", "2", "--startup-wait", "10"],
+            cwd=root,
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 20
+            current = runtime.status("local")
+            while time.monotonic() < deadline:
+                current = runtime.status("local")
+                if current.get("state") == "ready" and \
+                        current.get("owner_id") != first["owner_id"]:
+                    break
+                if service.poll() is not None:
+                    self.fail(service.stderr.read())
+                time.sleep(0.2)
+            self.assertEqual(current.get("state"), "ready", current)
+            self.assertTrue(current.get("rolled_back"), current)
+            self.assertEqual(current["artifact_id"], original["artifact"]["artifact_id"])
+            self.assertNotEqual(current["instance_id"], first["instance_id"])
+        finally:
+            try:
+                runtime.stop("local", timeout=12)
+            except (OSError, profiles.ProfileError):
+                pass
+            try:
+                service.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                service.kill()
+                service.wait(timeout=5)
+
     def test_recovery_refuses_a_still_present_child(self):
         state_path, socket_path, _ = runtime._paths("local")
         token = "a" * 64

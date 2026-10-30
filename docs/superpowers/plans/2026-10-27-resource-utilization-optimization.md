@@ -871,10 +871,11 @@ G0A 生产 Gate 继续 CLOSED，G0B 仍不启动。
   retention/GC；模型或宿主库变化仍可能改变同一 release 的外部输入。
 - [ ] 生产侧从 LKG schema 2 迁移到 schema 3 尚未演练；首次切换必须受控，并在一次
   完整 health/generation 验证后生成新 LKG，不能把旧记录自动迁移成未经证明的 release。
-- [ ] 2026-10-30 检查确认 `systemctl --user` 和 `systemd-run --user` 可用，但该账号
-  `Linger=no`。当前 `strata_control.runtime --host` 直接入口依赖 CLI `runtime start`
-  先回收 stale owner；systemd 直接重启不能跳过这一步，因此尚不能宣称 systemd 级
-  自动回滚已验证。后续需单独实现并隔离演练带 stale recovery 的服务入口。
+- [x] 新增 `--service` 直接服务入口：启动时在 profile 锁内先清理已验证的 stale
+  owner/server 记录，再发布新的 owner state；普通 CLI `runtime start` 路径保持不变。
+  隔离 `systemd --user` 演练中强杀 owner 后，systemd 自动拉起服务入口，候选 engine
+  生成失败后从旧 release 回滚，unit 恢复为 active。该账号 `Linger=no`，因此用户级
+  service 的登出/重启持续性仍未证明。
 - [ ] 真实模型启动、真实 GPU drain、真实 owner/systemd 重启恢复仍未演练。
 - [ ] engine smoke、stream smoke、tool smoke 和 session restore 尚未组合成 G0B 的
   完整验收门。
@@ -886,8 +887,8 @@ Python 服务代码或 server 资产变化后仍能从不可变 release 恢复�
 release 复用、同代码不同配置隔离、私有目录/文件、engine 与资产篡改拒绝、engine
 覆盖后的 restart fallback、chat template 覆盖后的 fallback，以及最新 LKG 回滚使用
 最新配置。隔离结果为 `tests/terminal/test_runtime.py` 的
-`76 passed, 11 subtests passed`、完整 `tests/terminal` 的
-`271 passed, 1 skipped, 189 subtests passed`，以及 serve lifecycle、lifeline 和
+`77 passed, 11 subtests passed`、完整 `tests/terminal` 的
+`272 passed, 1 skipped, 189 subtests passed`，以及 serve lifecycle、lifeline 和
 ready-timeout 的 `20 passed, 6 subtests passed`。运行过程中还定位并修复了 mock server
 的既有 SIGTERM 启动窗口竞态：ready 发布与 serving wait 现在处于同一个 clean-stop
 作用域，ready 后立即发送 SIGTERM 不再以 `-2` 退出。
@@ -896,9 +897,10 @@ ready-timeout 的 `20 passed, 6 subtests passed`。运行过程中还定位并�
 
 **Gate:** 隔离持久 LKG 与 startup fallback：PASS。生产自动回滚：CLOSED。当前实现证明
 候选 activation 失败后，新 owner 可以在 fake runtime 中从不可变 release 恢复旧
-engine、Python 代码和资产；这不等价于零中断切换，也没有证明真实模型、生产 systemd、
-模型/动态库身份或会话恢复。`/health` 与隔离 release 回滚为 PASS，但生产自动回滚
-继续 CLOSED。
+engine、Python 代码和资产；隔离 `systemd --user` 也能在 owner 强杀后自动拉起并从
+LKG 回滚。这不等价于零中断切换，也没有证明真实模型、生产 systemd、模型/动态库身份
+或会话恢复。`/health`、隔离 release 回滚和隔离 systemd owner 恢复为 PASS，但生产
+自动回滚继续 CLOSED。
 
 ### G0B：受控基线与恢复演练
 
