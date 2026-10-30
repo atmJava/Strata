@@ -1,0 +1,901 @@
+{
+  "schema_version": 1,
+  "evidence_id": "flash-next-runtime-g0-20261030",
+  "status": "partial_pass_g0_gate_closed",
+  "collected_at_utc": "2026-10-30T06:39:45Z",
+  "scope": {
+    "objective": "冻结 Qwen3.8-Flash-Next 在双 RTX 2080 Ti 上的当前生产运行身份、硬件环境、真实请求形状、控制链和可观测边界。",
+    "non_goals": [
+      "不发送合成负载",
+      "不运行 Nsight 或 NCU",
+      "不加载第二模型",
+      "不修改生产配置",
+      "不重启 strata.service 或当前手工实例"
+    ],
+    "load_generated": false,
+    "production_restarted": false
+  },
+  "repo": {
+    "local_path": "D:/temp/strata",
+    "branch": "hw/server-adapt-0.2.3",
+    "head": "6a94ecde73ef00595c7c0779b1ec85a6d3aadd4f",
+    "plan": "docs/superpowers/plans/2026-10-27-resource-utilization-optimization.md"
+  },
+  "host": {
+    "name": "ubuntu-server",
+    "ssh": "atm@192.168.9.103",
+    "os": "Ubuntu 24.04.5 LTS",
+    "kernel": "7.0.0-38-generic",
+    "boot_cmdline": "BOOT_IMAGE=/boot/vmlinuz-7.0.0-38-generic root=UUID=edbbc897-9356-42e5-a790-503ae73cb5b6 ro",
+    "nvidia_driver": "595.71.05",
+    "driver_reported_cuda": "13.2",
+    "engine_cuda_lib_dirs": [
+      "/usr/local/cuda-13.0/bin",
+      "/usr/local/cuda-13.0/lib64"
+    ]
+  },
+  "hardware": {
+    "gpu": [
+      {
+        "index": 0,
+        "name": "NVIDIA GeForce RTX 2080 Ti",
+        "uuid": "GPU-7cfb54d5-77b7-8f9d-ba3a-61d4d18d8759",
+        "pci": "0000:03:00.0",
+        "compute_capability": "7.5",
+        "memory_total_mib": 22528,
+        "memory_used_mib": 21182,
+        "memory_free_mib": 819,
+        "utilization_gpu_percent": 0,
+        "pstate": "P8",
+        "temperature_c": 36,
+        "power_draw_w": 46.14,
+        "power_limit_w": 250,
+        "power_default_limit_w": 250,
+        "power_min_limit_w": 100,
+        "power_max_limit_w": 280,
+        "graphics_clock_current_mhz": 300,
+        "graphics_clock_max_mhz": 2100,
+        "memory_clock_current_mhz": 405,
+        "memory_clock_max_mhz": 7000,
+        "pcie_current": "Gen1 x16",
+        "pcie_max": "Gen3 x16",
+        "pcie_note": "空闲省电状态，不能据此判断负载时链路代数"
+      },
+      {
+        "index": 1,
+        "name": "NVIDIA GeForce RTX 2080 Ti",
+        "uuid": "GPU-079483e5-1081-10ff-6ee7-dcf21fcfc66a",
+        "pci": "0000:04:00.0",
+        "compute_capability": "7.5",
+        "memory_total_mib": 22528,
+        "memory_used_mib": 21082,
+        "memory_free_mib": 920,
+        "utilization_gpu_percent": 0,
+        "pstate": "P8",
+        "temperature_c": 32,
+        "power_draw_w": 47.99,
+        "power_limit_w": 250,
+        "power_default_limit_w": 250,
+        "power_min_limit_w": 100,
+        "power_max_limit_w": 280,
+        "graphics_clock_current_mhz": 300,
+        "graphics_clock_max_mhz": 2100,
+        "memory_clock_current_mhz": 405,
+        "memory_clock_max_mhz": 7000,
+        "pcie_current": "Gen1 x16",
+        "pcie_max": "Gen3 x16",
+        "pcie_note": "空闲省电状态，不能据此判断负载时链路代数"
+      }
+    ],
+    "gpu_topology": {
+      "gpu0_to_gpu1": "NV2",
+      "p2p_read_test": "OK",
+      "p2p_supported": true,
+      "p2p_atomics_supported": true,
+      "nvlink_links_per_gpu": 2,
+      "advertised_bandwidth_per_link_gbs": 25.781,
+      "advertised_bonded_bandwidth_gbs": 51.562,
+      "bandwidth_note": "厂商报告的双链路值，尚未做负载带宽微基准"
+    },
+    "nvlink_errors_at_capture": {
+      "gpu0_link0": {
+        "crc": 192,
+        "replay": 0,
+        "recovery": 0
+      },
+      "gpu0_link1": {
+        "crc": 192,
+        "replay": 0,
+        "recovery": 0
+      },
+      "gpu1_link0": {
+        "crc": 188,
+        "replay": 0,
+        "recovery": 0
+      },
+      "gpu1_link1": {
+        "crc": 4,
+        "replay": 0,
+        "recovery": 0
+      }
+    },
+    "nvlink_trend_20261030": [
+      {
+        "at_utc": "2026-10-30T01:00:01Z",
+        "gpu0_link0_crc": 168,
+        "gpu0_link1_crc": 162,
+        "gpu1_link0_crc": 169,
+        "gpu1_link1_crc": 3
+      },
+      {
+        "at_utc": "2026-10-30T03:00:00Z",
+        "gpu0_link0_crc": 186,
+        "gpu0_link1_crc": 174,
+        "gpu1_link0_crc": 180,
+        "gpu1_link1_crc": 3
+      },
+      {
+        "at_utc": "2026-10-30T05:00:00Z",
+        "gpu0_link0_crc": 192,
+        "gpu0_link1_crc": 192,
+        "gpu1_link0_crc": 188,
+        "gpu1_link1_crc": 4
+      },
+      {
+        "at_utc": "2026-10-30T06:00:00Z",
+        "gpu0_link0_crc": 192,
+        "gpu0_link1_crc": 192,
+        "gpu1_link0_crc": 188,
+        "gpu1_link1_crc": 4
+      }
+    ],
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz",
+      "cores": 14,
+      "threads": 28,
+      "sockets": 1,
+      "numa_nodes": 1,
+      "l3_mib": 35,
+      "flags_note": "有 AVX2/FMA，无 AVX-512",
+      "boost_supported": true,
+      "boost_active": true,
+      "governor": "schedutil",
+      "current_reported_mhz": 2200,
+      "min_mhz": 1200,
+      "max_mhz": 3300,
+      "engine_pool": {
+        "workers": 13,
+        "host_thread_cpu": 0,
+        "worker_cpus": "1-13",
+        "aux_cpu": 14,
+        "note": "13 个 strata-pool 线程一一绑定 CPU 1-13；strata-host 与 8 个 strata-stage 线程在 CPU 0；CUDA/I/O 线程允许 0-27"
+      }
+    },
+    "memory": {
+      "mem_total_kib": 65731020,
+      "mem_available_kib_at_capture": 6850288,
+      "swap_total_kib": 4194300,
+      "swap_free_kib_at_capture": 4188688,
+      "transparent_hugepage": "always",
+      "transparent_hugepage_defrag": "madvise"
+    },
+    "storage": {
+      "device": "nvme0n1",
+      "model": "KLEVV CRAS C710 M.2 NVMe SSD 512GB",
+      "rotational": false,
+      "root_filesystem": "ext4",
+      "root_size": "468G",
+      "root_used": "279G",
+      "root_available": "165G",
+      "root_used_percent": 63
+    }
+  },
+  "runtime": {
+    "instance_id": "f34be3ec0dc54490b1cdc4dfe750e9df",
+    "metrics_since_utc": "2026-10-30T03:04:47Z",
+    "health": {
+      "http_success": "20/20",
+      "latency_ms": {
+        "min": 0.692,
+        "p50": 0.745,
+        "p90": 1.028,
+        "max": 1.181
+      },
+      "loaded": true,
+      "model": "qwen3.8-flash-next-iq3_xxs-abliterated",
+      "max_context": 262144,
+      "api_key_required": true
+    },
+    "server_process": {
+      "pid": 340994,
+      "ppid": 1,
+      "started_utc": "2026-10-30T03:02:33Z",
+      "executable": "/usr/bin/python3.12",
+      "launched_executable": "/opt/ai/venvs/test-027/bin/python",
+      "argv": [
+        "serve/server.py",
+        "--engine",
+        "strata",
+        "--config",
+        "/tmp/strata-freeze-candidate-long.json",
+        "--port",
+        "8080"
+      ],
+      "cwd": "/opt/ai/src/strata-freeze-throughput-20261029T0812Z",
+      "cgroup": "/user.slice/user-1000.slice/session-2144.scope",
+      "threads": 8,
+      "rss_kib": 279948,
+      "listen": "0.0.0.0:8080",
+      "script_sha256": "e00764e9dd652632644973cb1a0f951d788bd13b6235a30f09c6ceaf55cd3edf",
+      "script_md5": "e23cd4b2d52617f9ac01f19eb79faa51"
+    },
+    "engine_process": {
+      "pid": 341001,
+      "ppid": 340994,
+      "started_utc": "2026-10-30T03:02:47Z",
+      "binary": "/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata",
+      "cwd": "/opt/ai/src/strata-freeze-throughput-20261029T0812Z",
+      "version": "0.1.51",
+      "threads": 58,
+      "rss_kib": 54862816,
+      "vmswap_kib": 0,
+      "cgroup": "/user.slice/user-1000.slice/session-2144.scope",
+      "sha256": "105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3",
+      "md5": "8539fef58b8364b1451722fadf997a4b",
+      "mtime_utc": "2026-10-29T17:25:34Z"
+    },
+    "config": {
+      "path": "/tmp/strata-freeze-candidate-long.json",
+      "sha256": "88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f",
+      "md5": "ebe04efaeacd880e54898d2ce4ae6175",
+      "mtime_utc": "2026-10-29T16:50:36Z",
+      "api_key": "111",
+      "sampling_defaults": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "repetition_penalty": 1.0
+      },
+      "parallel": 6,
+      "reasoning_budget_tokens": 12288,
+      "context": 262144
+    },
+    "engine_argv": [
+      "--serve",
+      "--pack",
+      "/opt/ai/strata-data/packs/sc117_iq3_xxs",
+      "--native",
+      "/opt/ai/models/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00001-of-00002.gguf",
+      "--ple-gguf",
+      "/opt/ai/models/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00002-of-00002.gguf",
+      "--expert-profile",
+      "/opt/ai/src/strata-0.1.40.1/data/expert-profile.bin",
+      "--expert-cache",
+      "auto",
+      "--prefill",
+      "auto",
+      "--prefill-pipe",
+      "1",
+      "--spec",
+      "8",
+      "--mtp-max-t",
+      "4",
+      "--spec-min-p",
+      "0.7",
+      "--mtp",
+      "/opt/ai/strata-data/mtp/rt",
+      "--mtp-hnorm",
+      "stream",
+      "--max-context",
+      "262144",
+      "--kv",
+      "int8",
+      "--resident-experts",
+      "--vision",
+      "--kv-resident",
+      "32768",
+      "--conversation-cache-mib",
+      "12288",
+      "--conversation-cache-slots",
+      "12",
+      "--conversation-cache-min-tokens",
+      "4096",
+      "--prompt-cache",
+      "3",
+      "--prompt-cache-every",
+      "4096",
+      "--vram-reserve-mib",
+      "1280",
+      "--vram-reserve-later-mib",
+      "1435",
+      "--pcie-frac",
+      "0.31",
+      "--suffix-draft",
+      "4",
+      "--gpu",
+      "0,1",
+      "--batch-groups",
+      "2",
+      "--prompt-cache-long",
+      "--layer-split",
+      "24",
+      "--batch",
+      "6"
+    ],
+    "engine_environment": {
+      "STRATA_ADMIT_MERGE_FIRST": "1",
+      "STRATA_BATCH_SELF_COMMIT": "1",
+      "STRATA_BATCH_STAGED_READ": "1",
+      "STRATA_BF16_TC": "1",
+      "STRATA_CKPT_POOL": "1",
+      "STRATA_CKPT_THREADS": "1",
+      "STRATA_EXP_MODE": "8",
+      "STRATA_HC_Q8": "1",
+      "STRATA_MP_STAGED_READ": "1",
+      "STRATA_MTP_STAGE0": "1",
+      "STRATA_PIPED_CONCURRENT": "1",
+      "STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS": "4096",
+      "STRATA_PIPED_DECODE_LEADIN_MS": "1600",
+      "STRATA_PIPED_DECODE_LEADIN_WAIT_MS": "750",
+      "STRATA_PIPE_BYIELD_NODRAIN": "1",
+      "STRATA_ROUTE_TAIL_SKIP": "0",
+      "STRATA_SELECT_SIMT": "1",
+      "STRATA_SHARED_SLOT_ROPE": "1",
+      "STRATA_SLOT_COPY_BATCHSYNC": "1",
+      "STRATA_SLOT_COPY_DIRECT": "1",
+      "STRATA_SM75_PERF": "1",
+      "STRATA_STAGE_TRIM": "1"
+    },
+    "missing_engine_environment": [
+      "STRATA_BATCH_MTP",
+      "STRATA_PIPED_MTP"
+    ],
+    "topology": {
+      "mode": "layer split pipeline parallel",
+      "split_layers": 24,
+      "stage0": {
+        "device": 0,
+        "layers": "0-23"
+      },
+      "stage1": {
+        "device": 1,
+        "layers": "24-47"
+      },
+      "replicas": [],
+      "slots": 6,
+      "groups": 2
+    },
+    "live_cache": {
+      "conversation_cache_enabled": true,
+      "budget_mib": 12288,
+      "slots": 12,
+      "parked": 4,
+      "parked_bytes": 6689111808,
+      "evictions": 6,
+      "parks": 31,
+      "restores": 3,
+      "active_held_tokens": {
+        "slot0": 477,
+        "slot1": 474,
+        "slot2": 0,
+        "slot3": 278,
+        "slot4": 0,
+        "slot5": 0
+      }
+    },
+    "model_identity": {
+      "pack_path": "/opt/ai/strata-data/packs/sc117_iq3_xxs",
+      "native_shards": [
+        {
+          "path": "/opt/ai/models/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00001-of-00002.gguf",
+          "size": 47342144896,
+          "mtime_utc": "2026-10-11T07:33:28Z"
+        },
+        {
+          "path": "/opt/ai/models/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00002-of-00002.gguf",
+          "size": 28800138432,
+          "mtime_utc": "2026-10-06T15:54:59Z"
+        }
+      ],
+      "pack_component_sha256": {
+        "conversions.json": "83946994e5bd9d8c81e40aef6362968dd589637f4299dd5735a7d9a6c1f91ede",
+        "dense.bin": "d2af3d8331e5c7a1985d1d589747230f9d56719a6d33c7cddc9ee6b81cde6b13",
+        "experts.bin": "e36074027afdaee202aeac14ce8a9c897738ba7630434b6f81ed2a593877dc55",
+        "experts.bin.src.json": "a2922a3e8c76f3789ac87d6b2c273a7a89932b873d353731b429d4eafaaba5c9",
+        "index.txt": "307fb25d7410cb414aae032b9b36347c525e6b7a010438fcd7dc0f95cf2b6041",
+        "native_experts.txt": "346daeadb77b0bacfd71eb8a72026f2260d80afa5db542f5a762fd93ced84008",
+        "tokenizer/chat_template.jinja": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce",
+        "tokenizer/merges.txt": "4ba698529766c7a2f5052083ea10cdf2485577f5237a332ee291054eb11e3332",
+        "tokenizer/tokenizer.json": "c0bd435efbc6c3b28964b47999afe16c4ad268c7c7c4e8cb3af410796a6f30bf",
+        "tokenizer/token_type.json": "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b",
+        "tokenizer/vocab.json": "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"
+      },
+      "draft_sha256": {
+        "dense.bin": "c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a",
+        "dense.txt": "991456cf4eb266eb8a888c349e548d11bc640f5dbd9149439aa9786af0f732fd",
+        "draft_vocab.bin": "b1e1d3a7a9e4bf862dcd5923ce661fb59bbd07907e594df5cf86a62ac235cb91",
+        "experts.bin": "09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f"
+      },
+      "expert_profile_sha256": "8f59b4aa8873209dff11c11e37bcda9529a1335b724a1afeea37bf6388975baf",
+      "native_shards_hash_note": "两个原生 GGUF 仅冻结大小、mtime 与 pack 内 native experts 哈希；没有重复读取 76G 原始分片。"
+    }
+  },
+  "control_chain": {
+    "systemd": {
+      "unit": "strata.service",
+      "unit_file_state": "enabled",
+      "active_state": "inactive",
+      "sub_state": "dead",
+      "main_pid": 0,
+      "n_restarts": 23,
+      "exec_start": "/opt/ai/bin/run-strata-official-027.sh",
+      "last_start_utc": "2026-10-29T12:05:13Z",
+      "last_exit_utc": "2026-10-29T12:05:14Z",
+      "unit_runs": "/opt/ai/src/strata-0.2.7",
+      "unit_config": "/opt/ai/src/strata-0.2.7/strata-live.json",
+      "matches_current_process": false
+    },
+    "current_instance": {
+      "owner": "none observed",
+      "server_parent": 1,
+      "cgroup": "/user.slice/user-1000.slice/session-2144.scope",
+      "login_session": {
+        "id": 2144,
+        "class": "user",
+        "type": "tty",
+        "remote": true,
+        "active": true,
+        "state": "closing",
+        "linger": false
+      },
+      "rollback_target_recorded": false,
+      "health_and_smoke_gate_verified": false,
+      "strata_on_path": false,
+      "runtime_cli_observed": false,
+      "server_internal_engine_restart": "代码实现存在；当前实例没有做过失败重启演练，也没有 LKG 回滚"
+    },
+    "samplers": {
+      "vram_perf_cron": "*/5 * * * * /opt/ai/bin/vram-perf-sample.sh",
+      "nvlink_crc_timer": "nvlink-crc-sample.timer",
+      "nvlink_crc_last_run_utc": "2026-10-30T06:00:00Z"
+    },
+    "residual_process_check": {
+      "tool": "tools/server/four-questions.py",
+      "residual": [],
+      "result": "pass"
+    }
+  },
+  "requests": {
+    "snapshot": {
+      "returned": 97,
+      "requests_kept": 97,
+      "source": "GET /metrics?requests=all",
+      "first_start_utc": "2026-10-30T03:04:56Z",
+      "last_start_utc": "2026-10-30T04:09:27Z",
+      "last_finish_utc": "2026-10-30T04:09:37.934Z",
+      "finish_counts_all": {
+        "stop": 90,
+        "length": 7
+      },
+      "totals_all": {
+        "requests": 97,
+        "prompt_tokens": 7247465,
+        "reused": 6721423,
+        "output_tokens": 151933,
+        "prompt_ms": 462137.8,
+        "decode_ms": 1995495.4,
+        "drafts_offered": 87283,
+        "drafts_accepted": 75661
+      }
+    },
+    "noise_classification": {
+      "policy": "原始 97 条全部保留；启动探针、短 smoke 和固定 400-token 压测不进入真实生产分布。",
+      "excluded_server_visible_count": 11,
+      "excluded_ids": [
+        "1918df716889",
+        "317956d4f65c",
+        "ecfb76ba689d",
+        "7a08b46c0072",
+        "d6f2d7bb8740",
+        "6c9b07d97535",
+        "8bf76bb214b8",
+        "80b53013790c",
+        "1ac08ff77a73",
+        "cb356819780e",
+        "287c5f76052e"
+      ],
+      "excluded_reasons": {
+        "startup_warmup": [
+          "1918df716889",
+          "317956d4f65c"
+        ],
+        "short_smoke": [
+          "ecfb76ba689d",
+          "7a08b46c0072",
+          "d6f2d7bb8740"
+        ],
+        "fixed_400_token_probe": [
+          "6c9b07d97535",
+          "8bf76bb214b8",
+          "80b53013790c",
+          "1ac08ff77a73",
+          "cb356819780e",
+          "287c5f76052e"
+        ]
+      },
+      "production_count": 86,
+      "engine_log_noise": {
+        "current_boot_prompt_summary_rows": 117,
+        "server_visible_requests": 97,
+        "rows_from_last_production_prompt_inclusive": 17,
+        "note": "engine 日志含直接 verify/batch 记录，不能把 117 行当成 117 个 HTTP 请求。"
+      }
+    },
+    "production_aggregate": {
+      "n": 86,
+      "finish": {
+        "stop": 86
+      },
+      "prompt_tokens_sum": 7246803,
+      "reused_sum": 6721079,
+      "reused_ratio": 0.9275,
+      "prompt_read_sum": 525724,
+      "output_tokens_sum": 149445,
+      "engine_generated_sum": 143009,
+      "output_to_engine_generated_ratio": 1.045,
+      "prompt_ms_sum": 456975,
+      "decode_ms_sum": 1956068.8,
+      "aggregate_read_tokens_per_s": 1150.4,
+      "aggregate_committed_tokens_over_engine_decode_s": 76.4,
+      "aggregate_committed_tokens_over_wall_s": 58,
+      "first_start_utc": "2026-10-30T03:05:54.757Z",
+      "last_start_utc": "2026-10-30T04:00:27.355Z"
+    },
+    "production_distribution": {
+      "prompt_tokens": {
+        "min": 19708,
+        "p10": 42027.5,
+        "p50": 83921,
+        "p90": 135425.5,
+        "p99": 193194.95,
+        "max": 201281
+      },
+      "reused": {
+        "min": 0,
+        "p10": 35172,
+        "p50": 77824,
+        "p90": 128611.5,
+        "p99": 149232.1,
+        "max": 151012
+      },
+      "prompt_read": {
+        "min": 20,
+        "p10": 70,
+        "p50": 810,
+        "p90": 7027,
+        "p99": 98400.4,
+        "max": 201281
+      },
+      "output_tokens": {
+        "min": 21,
+        "p10": 145,
+        "p50": 397,
+        "p90": 2474.5,
+        "p99": 24775.9,
+        "max": 27365
+      },
+      "duration_s": {
+        "min": 2.1,
+        "p10": 4.2,
+        "p50": 9.9,
+        "p90": 69.95,
+        "p99": 371.5,
+        "max": 497.9
+      },
+      "first_engine_token_s": {
+        "min": 0.3,
+        "p10": 0.69,
+        "p50": 2.02,
+        "p90": 7.84,
+        "p99": 60.17,
+        "max": 100.86
+      },
+      "engine_reported_decode_tok_s": {
+        "min": 38.1,
+        "p10": 40.05,
+        "p50": 73.2,
+        "p90": 83.1,
+        "p99": 89.66,
+        "max": 92.8
+      },
+      "committed_tokens_over_engine_decode_tok_s": {
+        "p10": 40,
+        "p50": 73.4,
+        "p90": 83.1
+      },
+      "committed_tokens_over_wall_after_engine_first_token": {
+        "p10": 39,
+        "p50": 73.4,
+        "p90": 84.1
+      },
+      "committed_tokens_over_total_wall": {
+        "p50": 54.6
+      },
+      "expert_cache_hit_rate": {
+        "p10": 0.952,
+        "p50": 0.98,
+        "p90": 0.989
+      },
+      "pcie_offloaded_share": {
+        "p50": 0.002,
+        "p90": 0.0075,
+        "p99": 0.0324,
+        "max": 0.04
+      }
+    },
+    "prefill": {
+      "cold_samples": [
+        {
+          "id": "7200eebbc56b",
+          "prompt_tokens": 19708,
+          "read_tokens": 19708,
+          "prompt_ms": 26446.7,
+          "pure_read_tok_s": 745.2,
+          "output_tokens": 21,
+          "decode_tok_s": 65.4
+        },
+        {
+          "id": "8ec775ff1d6e",
+          "prompt_tokens": 32878,
+          "read_tokens": 32878,
+          "prompt_ms": 27701.9,
+          "pure_read_tok_s": 1186.8,
+          "output_tokens": 75,
+          "decode_tok_s": 57.3
+        },
+        {
+          "id": "106ce6efd71c",
+          "prompt_tokens": 34569,
+          "read_tokens": 34569,
+          "prompt_ms": 24438.7,
+          "pure_read_tok_s": 1414.5,
+          "output_tokens": 197,
+          "decode_tok_s": 74
+        },
+        {
+          "id": "8a651177f3e1",
+          "prompt_tokens": 201281,
+          "read_tokens": 201281,
+          "prompt_ms": 100763.5,
+          "pure_read_tok_s": 1997.6,
+          "first_engine_token_s": 100.86,
+          "output_tokens": 1587,
+          "decode_tok_s": 65.9
+        }
+      ],
+      "cold_summary": {
+        "n": 4,
+        "p10_tok_s": 877.7,
+        "p50_tok_s": 1300.6,
+        "p90_tok_s": 1822.7,
+        "min_tok_s": 745.2,
+        "max_tok_s": 1997.6
+      }
+    },
+    "concurrency": {
+      "zero_draft_requests": {
+        "n": 13,
+        "prompt_tokens_p50": 93611,
+        "prompt_read_p50": 277,
+        "output_tokens_p50": 219,
+        "engine_decode_tok_s": {
+          "p10": 38.8,
+          "p50": 39.9,
+          "p90": 40.6
+        },
+        "duration_s_p50": 7.8,
+        "duration_s_max": 497.9
+      },
+      "positive_draft_requests": {
+        "n": 73,
+        "prompt_tokens_p50": 67655,
+        "prompt_read_p50": 971,
+        "output_tokens_p50": 418,
+        "engine_decode_tok_s": {
+          "p10": 65,
+          "p50": 74.2,
+          "p90": 84
+        },
+        "duration_s_p50": 9.9,
+        "duration_s_max": 349.2
+      },
+      "overlap_shape": {
+        "solo_requests": 71,
+        "two_active_requests": 14,
+        "one_long_request_with_12_neighbors": 1
+      },
+      "finding": "真实生产环里 13 个零草稿请求与唯一的多路重叠窗口重合；另有 8465e3cb04d2 在并发中仍报告 9157 个草稿但邻居 bdbb1d76fb3b 只有 42.1 tok/s，因此草稿关闭是强相关现象，不是已证明的唯一原因。"
+    },
+    "major_samples": [
+      {
+        "id": "8465e3cb04d2",
+        "prompt_tokens": 129227,
+        "prompt_read": 433,
+        "output_tokens": 17347,
+        "engine_generated": 17336,
+        "duration_s": 199.2,
+        "prompt_ms": 12047.6,
+        "decode_ms": 186766.3,
+        "reported_decode_tok_s": 92.8,
+        "committed_tokens_over_engine_decode_tok_s": 92.9,
+        "drafts_accepted": 9070,
+        "drafts_offered": 9157
+      },
+      {
+        "id": "2038b6a7d98f",
+        "prompt_tokens": 191768,
+        "prompt_read": 40756,
+        "output_tokens": 24319,
+        "engine_generated": 17894,
+        "duration_s": 497.9,
+        "first_engine_token_s": 25.36,
+        "prompt_ms": 33402.2,
+        "decode_ms": 311041.1,
+        "reported_decode_tok_s": 57.5,
+        "committed_tokens_over_engine_decode_tok_s": 78.2,
+        "committed_tokens_over_wall_after_engine_first_token": 51.5,
+        "committed_tokens_over_total_wall": 48.8,
+        "drafts_accepted": 0,
+        "drafts_offered": 0,
+        "note": "一次超长 apply_patch 工具调用；同时与 12 个后续请求发生重叠。"
+      },
+      {
+        "id": "fd819f853e26",
+        "prompt_tokens": 76320,
+        "prompt_read": 1528,
+        "output_tokens": 11044,
+        "engine_generated": 11044,
+        "duration_s": 136.9,
+        "prompt_ms": 2477.7,
+        "decode_ms": 134383.9,
+        "reported_decode_tok_s": 82.2,
+        "drafts_accepted": 7660,
+        "drafts_offered": 8688
+      }
+    ],
+    "hardware_evidence_during_requests": {
+      "available": false,
+      "reason": "当前 telemetry 历史只覆盖请求结束后的空闲窗口；未在真实请求期间做 1 Hz NVML 对齐。"
+    }
+  },
+  "logs": {
+    "server_stdout": "/opt/ai/logs/strata-freeze-candidate-long-20261030.log",
+    "engine_stderr": "/home/atm/verify-20261027/strata-verify/strata-verify.log",
+    "server_api_evidence": {
+      "responses_notice_count": 2,
+      "chat_completion_notice_count": 0,
+      "anthropic_message_notice_count": 0,
+      "conclusion": "真实 Codex 路径至少走 /v1/responses；没有逐请求路由账本，无法给出 86 条生产请求的 API 分布。"
+    },
+    "sampling_evidence": {
+      "config_defaults_only": true,
+      "per_request_overrides_available": false
+    },
+    "current_boot_engine_qualitative_counts": {
+      "batch_windows": 9,
+      "batch_captures": 6,
+      "concurrent_read_leadin_skipped": 15,
+      "slot_not_parked_before_overwrite": 7,
+      "slot_missing_batch_mtp": 7,
+      "prefill_replanned": 2,
+      "errors": 0,
+      "usage_note": "这些计数来自 append-only engine 日志，且该日志混有直接 verify 行；只能作为机制存在的证据，不能当 HTTP 请求分布。"
+    }
+  },
+  "metric_semantics": {
+    "request_time": "metrics.time 是请求进入服务端后的起点；duration_s 是该请求的服务端总墙钟。",
+    "reported_decode_tok_s": "当前 /metrics.decode_tok_s = engine_generated / decode_ms；不是 output_tokens/decode_ms，也不是客户端 SSE cadence。",
+    "committed_tokens_over_engine_decode": "由本证据二次计算为 output_tokens/decode_ms，仍不等于客户端可见速度。",
+    "wall_after_engine_first_token": "由 output_tokens/(duration_s-first_engine_token_s) 二次计算，仍混有服务端输出、工具解析和网络前的时间。",
+    "engine_generated_mismatch": "86 条生产请求合计 output_tokens=149445，engine_generated=143009；长并发请求 2038b6a7d98f 为 24319 对 17894，说明单看 decode_tok_s 会隐藏分母差异。"
+  },
+  "telemetry": {
+    "instance_id": "f34be3ec0dc54490b1cdc4dfe750e9df",
+    "quality": {
+      "request_correlation": "reported",
+      "batch_window_rows": "unavailable",
+      "stage_in_flight": "unavailable",
+      "per_device": "measured",
+      "placement": "reported"
+    },
+    "activity_events_returned": 32,
+    "activity_first_seq": 454,
+    "activity_last_seq": 485,
+    "topology": "engine_start_log -> layers 0-23 on GPU0, 24-47 on GPU1",
+    "work_requests_returned": 0
+  },
+  "field_matrix": {
+    "direct": [
+      "模型名、上下文、engine 版本和核心启动参数",
+      "请求 id、开始时间、总墙钟、finish、prompt/reused/read/output token",
+      "first_engine_token_s、prompt_ms、decode_ms、engine_generated、draft offered/accepted",
+      "expert cache hit rate、PCIe offloaded share、RAM/file blob 计数",
+      "实例 id、PP 层级放置、slot/group、最近 32 个生命周期事件",
+      "当前 GPU 显存、温度、功耗、时钟、利用率和 NVLink 错误计数",
+      "engine 日志中的 prompt/prefill/decode、batch rows/s、slot copy 和 cache 统计"
+    ],
+    "inferred": [
+      "生产请求是否与另一个请求重叠：由 time+duration 区间组合推断",
+      "零草稿窗口与并发退化的相关性：由时间重叠和 counters 组合推断",
+      "固定 400-token 压测与 smoke：由请求形状和运行时间块分类",
+      "CPU 资源边界：由线程名与 Cpus_allowed_list 组合推断",
+      "服务端总墙钟与 engine 内部 decode 的差值：由 duration、first token、decode_ms 组合推断"
+    ],
+    "missing": [
+      "86 条生产请求的逐请求 API 名称",
+      "逐请求实际 sampling 参数与客户端覆盖",
+      "客户端 SSE chunk 时间和可见 token 数",
+      "engine 内部 request id、batch window 成员、slot 进入/离开时间",
+      "stage in-flight timeline 和 batch window rows timeline",
+      "真实请求期间的 1 Hz GPU/CPU/NVLink/PCIe 时间序列",
+      "tokenize、tool parser、detokenize、Python 输出链路各自的请求内耗时",
+      "取消、断连、失败、重试的真实样本"
+    ],
+    "not_correlatable": [
+      "97 个 /metrics request id 在 server/engine 文本日志中均未找到",
+      "engine 日志的 batch 行无法绑定到单个 HTTP request",
+      "server/engine/Nsight 没有共同的 request launch id 和可证明的时钟域"
+    ]
+  },
+  "confirmed_findings": [
+    "当前生产实例不是 strata.service 管理的实例；它是 PPID=1、位于 closing login-session scope 的手工/残留实例。",
+    "当前会话若直接重启，现有 owner 链没有 LKG、health/smoke 门禁和已验证回滚，不能把 systemd 重启视为安全替代。",
+    "当前真实生产负载的 engine decode p50 约 73 tok/s，p10 约 40 tok/s；冷预填约 0.75K-2.0K tok/s。",
+    "200K 冷预填约 100.8 秒，200K 冷样本只有 4 个，不能形成稳定分布结论。",
+    "13 个生产请求零草稿，恰好全部落在一次 13 路重叠窗口；但同窗口另有请求报告正草稿且邻居仍降到 42.1 tok/s。",
+    "生产请求没有 file blob 命中；PCIe offloaded share p50 0.2%，p99 3.24%，当前样本不支持把 NVMe 或专家 miss 当主因。",
+    "GPU 显存只剩 819/920 MiB，engine RSS 54.86 GB，RAM available 约 6.53 GiB；起第二实例有显著 OOM 风险。",
+    "系统声称设置 280 W，但两张卡实际 requested/current limit 都是 250 W；当前不能沿用 280 W 基线。",
+    "CPU expert pool 使用 CPU 0-13，28 个逻辑核并未全部作为 expert 并行资源。",
+    "NVLink 为 NV2、P2P/atomics 可用，Replay/Recovery 为 0；04:00-05:00 后 CRC 未继续增长，尚不能判定链路故障。",
+    "现有 /metrics decode 指标分母与可见输出 token 不一致，必须同时保留多套速率口径。"
+  ],
+  "unknowns": [
+    "真实生产请求使用的采样参数分布。",
+    "主 Codex API 在 86 条请求中的准确路由分布。",
+    "零草稿对并发退化的独立贡献大小。",
+    "PP stage bubble、batch row allocation、CPU expert wait 和输出链路各自的时间占比。",
+    "请求期间 GPU SM/Tensor/DRAM/NVLink/PCIe 的真实利用率。",
+    "当前 PP+batch 路线能否与持久 session snapshot 和自动 LKG 回滚同时成立。"
+  ],
+  "risks": [
+    "当前登录 session 处于 closing 状态，尽管进程仍存活，生命周期并不由 strata.service 保证。",
+    "若按旧 strata.service 重启，会切到 0.2.7 源码树和另一份配置，丢失当前候选实例的身份。",
+    "功率上限漂移会使新旧性能数字不可比。",
+    "engine 日志混杂 verify 行，直接按文本计数会把噪声算进生产分布。",
+    "没有逐请求 engine id，不能把 batch rows/s 归因到具体会话或工具调用。",
+    "当前 telemetry 的 batch_window_rows 和 stage_in_flight 均为 unavailable，尚不足以裁决 PP 临界路径。",
+    "G0 Gate 关闭；在观测补齐前做参数实验，会继续产生无法复核的局部数字。"
+  ],
+  "verification": {
+    "health": "20/20 HTTP 200",
+    "version_stamp": {
+      "tool": "tools/server/probe-version-stamp.py",
+      "problems": [],
+      "health_loaded": true
+    },
+    "four_questions": {
+      "residual": [],
+      "result": "pass"
+    },
+    "production_idle_sampling": {
+      "tool": "pidstat 1 3",
+      "server_cpu_percent": 2.66,
+      "engine_cpu_percent": 0,
+      "note": "ps 的生命周期平均 %CPU=220 不能当当前利用率。"
+    },
+    "service_unchanged": true,
+    "no_synthetic_load": true,
+    "no_restart": true
+  }
+}

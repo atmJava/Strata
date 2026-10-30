@@ -1,541 +1,1002 @@
-# 单路解码 200、预填 5000 与可随时重启的架构计划
+# Flash-Next 单模型运行时重构计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Version:** v5，2026-10-30。v4 及更早计划全部由本文件取代。
+**Version:** v7.1，2026-10-30。v6 及更早计划全部由本文件取代。
 
-**Goal:** 在不牺牲正确性、可恢复性和可维护性的前提下，把双 RTX 2080 Ti 的 Strata
-服务推进到单路解码稳定 200 tok/s、32K 冷预填 5000 tok/s 以上，并同时满足多路会话、
-冷会话快速读取和随时可安全重启。
+**Goal:** 只使用 Qwen3.8-Flash-Next，把双 RTX 2080 Ti 上的 Strata 重构为硬件感知、
+机制先行、可观测、可调度的单模型运行时。产品目标是单路解码稳定 200 tok/s、
+冷预填 5000 tok/s 以上、多路会话不互相拖死、冷状态可快速恢复，并且生产重启失败时
+自动回到 last-known-good。
 
-**Architecture:** 一个统一运行时，三条性能预算：解码窗口的 token 预算、预填阶段的专家
-复用预算、启动阶段的关键路径预算。单路、批处理和多路不再各自维护一套互相排斥的参数组合；
-由一个纯策略层根据 slot、上下文、显存和实测状态选择窗口、草稿、流水与停车方式，执行层只保留
-一套可测试的路径。
+**Architecture:** 先冻结真实运行证据，再计算硬件 roofline，随后依次裁决草稿器、
+PP/peer/TP/EP 拓扑、调度与状态缓存、服务端输出链路。任何性能结论必须能落到一段
+关键路径和一份资源账本。统一运行时只保留一套请求状态和一套能力裁决，外部 owner
+runtime 是生产生命周期的唯一控制者。
 
-**Tech Stack:** Ubuntu、CUDA 13、sm_75、双 RTX 2080 Ti（24/24 层切分）、
-Qwen3.8-Flash-Next（`qwen4exp`，IQ3_XXS 71 GB、专家包 42.9 GB）、Strata batch、MTP、
-suffix/lookup drafter、layer-major prefill、expert cache、conversation cache、
-systemd 或等价的进程监督器。
+**Tech Stack:** Ubuntu、CUDA 13、sm_75、双 RTX 2080 Ti 22 GB、NVLink NV2、
+Qwen3.8-Flash-Next IQ3_XXS、DFlash2、Strata、systemd/等价启动器。
 
 ---
 
-## 1. 任务定约
+## 0. 决策摘要
 
-### Objective
+### 0.1 本计划的六条硬约束
 
-- 把“单路解码稳定 200 tok/s”作为硬目标，而不是聚合数字或 stretch goal。
-- 把“6 路多会话不塌陷、不饥饿”作为独立目标，不允许用聚合吞吐掩盖每路退化。
-- 把 32K 冷预填 ≥5000 tok/s、200K 冷读 ≤45 s 作为预填验收。
-- 把冷会话恢复、热重启、故障自动回滚做成产品能力，而不是实验脚本。
-- 删除那些让单路、批处理、预填和停车无法共存的全局参数分支；允许破坏旧配置兼容性。
+1. 当前只使用 Flash-Next；其他主模型、27B 快速档和未经批准的第二模型均不在范围内。
+2. 200 tok/s 是单路产品目标，不用多路聚合、greedy 专项数字或 engine 内部估算替代。
+3. 先证明物理可行和关键路径，再决定实现；不先写一个“统一策略层”再寻找性能来源。
+4. solo、batch、PP、peer 和未来 TP/EP 共用一套请求状态与能力矩阵，不保留互相矛盾的隐藏分叉。
+5. 当前会话经过生产 Strata。没有唯一监督者、自动回滚、health/smoke 和恢复语义，不重启生产。
+6. 允许删除制造路径分叉的旧参数，但每项删除都必须有替代机制、观测和迁移说明。
 
-### Non-goals
+### 0.2 v6 的主要不足
 
-- 不以聚合 200 代替单路 200。
-- 不继续做无边界的参数扫描；参数只能在机制候选实现后用于部署验证。
-- 不为了保留旧配置而长期维护 solo、serial batch、piped batch 三套语义。
-- 不在本轮引入第二个模型、分布式跨机推理或与当前两张卡无关的通用调度框架。
-- 不在没有 parity、压力测试和自愈演练的情况下更换生产主路径。
+- 200 tok/s 尚未绑定 sampling、API、上下文长度和客户端可见口径。
+- 物理 roofline 放在 G2，太晚；可能写完 DFlash2 batch 才发现窗口上限不足。
+- host expert 只被当成“CPU 流量”，没有拆成 GPU 驻留、peer 驻留、CPU 计算和存储读取四层账。
+- 没有把仓库已有的 `--peer-device` 作为正式拓扑候选。
+- 没有规定 `strata runtime`、server 内部 engine restart、systemd 三套控制面谁拥有最终裁决权。
+- 没有覆盖 HTTP、tokenize、structured output、tool parser、detokenize、SSE 和 Python GIL。
+- 没有证明 engine log、server log、`/metrics` 和 Nsight 的时钟及请求 ID 可以对齐。
+- 没有明确缓存失效原因分类、统计样本协议、冷启动 I/O 账和生产/探针噪声边界。
 
-### Scope
-
-- 允许修改解码窗口、草稿策略、批处理分组、预填复用、会话停车、启动流水和运行时监督相关代码。
-- 允许新增一个纯策略模块及其测试，减少 `src/program/generate.cpp` 中分散的运行时判断。
-- 允许删除会制造不可用组合的旧环境变量、CLI 开关和文档说明。
-- 允许改变 prompt 分块和部分数值路径，但必须通过明确的质量门；非位精确必须如实记录。
-
-### Verification
-
-- 每个机制先有失败测试或可复现基线，再有最小实现，再做同配置 A/B/A。
-- 每次性能变更同时记录：端到端 tok/s、窗口 token 数、窗口耗时、stage 时间、草稿深度分布。
-- 每个生产候选必须经过自愈演练、质量门、资源门和真实场景矩阵。
-- 最终验收以第 12 节为准，不以单个峰值或单次成功请求为准。
-
-### Risks / Unknowns
-
-- 单路 200 不是调参问题。当前每窗口只产生 1.74 token，要跨越到约 5.4 token/窗口，
-  或把窗口压到约 17.5 ms；必须先证明至少一条结构路径成立。
-- 16K/32K 预填 super-chunk 可能带来非位精确结果，必须用固定 prompt 的 parity、needle
-  和真实会话回归共同验证。
-- 当前生产是手动启动的 server/engine 进程对；在监督器接管前，任何停服都可能留下
-  不可恢复窗口。
-- 当前会话本身经过目标服务器；真实停服演练会让本会话短暂中断，必须由服务器侧自愈，
-  不能依赖对话客户端保活。
-
-## 2. 验收口径
-
-### 2.1 单路解码
-
-| 指标 | 定义 | 目标 |
-| --- | --- | --- |
-| D1 单路主指标 | 单连接、4K prompt、4096 output，自然语言/代码/工具调用三类各 3 轮 | p50 ≥200 tok/s，逐秒样本 p10 ≥190 |
-| D1 窗口指标 | 每个 verify window 的接受 token 数、窗口 ms、草稿深度 | 平均 ≥5.4 token/window，或窗口 ≤17.5 ms 且 ≥3.5 token/window |
-| D1 无冷启动作弊 | 模型已加载，但每轮使用独立会话；prompt cache 命中不计入 decode | 仍达到 D1 |
-| D1 可中断 | 生成中断流、取消、下一轮恢复 | 不破坏会话，不遗留脏 draft/KV |
-
-“稳定”指同一模型、同一服务进程、同一批参数下的多轮结果，不允许用一次峰值代表达标。
-
-### 2.2 多路与预填
-
-| 指标 | 定义 | 目标 |
-| --- | --- | --- |
-| D2 两路 | 两连接同时生成 400 token | 每路 ≥50 tok/s，`draft_n>0`，无一路被饿死 |
-| D3 六路 | 6×192K 上下文，90 s 混合负载 | 聚合 p50 ≥200 tok/s，每路 p10 ≥30，最大停顿 ≤1 s |
-| P1 冷预填 | 32K 冷 prompt，独立会话，3 轮 | ≥5000 tok/s |
-| P2 长冷读 | 200K 冷 prompt | ≤45 s |
-| C1 冷会话读 | 50K/200K 冷会话；90% 前缀命中 | 分别 ≤15 s / ≤45 s / ≤10 s |
-| R1 重启 | 热重启、冷启动 | 热 ≤60 s；冷 ≤90 s；失败自动回到上一份可服务快照 |
-
-### 2.3 故障恢复
-
-故障恢复的“会话继续”定义为：服务地址不变，客户端重试后恢复到同一模型和同一 conversation
-状态；恢复期间已发出的请求可以返回明确错误，但不能静默丢 token、写入半截状态，或把服务
-留在半启动状态。
-
-- 自动检测故障 ≤10 s。
-- 失败回滚或重新拉起 ≤180 s；W5 完成后热恢复 ≤60 s。
-- 每次恢复必须有 `WINDOW RESTORED ... layer=relaunch` 或等价审计行。
-- 没有恢复记录的停服动作一律视为失败。
-
-## 3. 性能账本
-
-### 3.1 单路解码：先看每窗口 token 数
-
-当前生产实测与并行会话数据：
-
-| 路数 | 聚合 tok/s | 每窗口 token | 窗口 ms | 每路 tok/s |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 64.8 | 1.74 | 26.8 | 64.8 |
-| 2 | 75.8 | 2.00 | 26.4 | 37.9 |
-| 6 | 164.7 | 6.00 | 36.4 | 27.5 |
-
-单路 200 的基本账：
+### 0.3 v7 的裁决顺序
 
 ```text
-200 tok/s = accepted tokens per window / window seconds
+产品口径
+  -> 真实运行证据
+  -> 硬件与请求物理上限
+  -> 草稿与采样机制
+  -> 拓扑和状态放置
+  -> 调度、缓存和 API 输出链路
+  -> 整机可行性裁决
+  -> 代码级实施计划
 ```
 
-- 保持当前 26.8 ms 窗口，需要约 5.36 token/窗口。
-- 若只做到 3.5 token/窗口，需要约 17.5 ms/窗口。
-- 若做到 4.5 token/窗口，需要约 22.5 ms/窗口。
-- `kVerifyMaxT=8` 允许最多 8 行，但 5.36 token/窗口几乎没有留给拒绝和调度浪费的余量。
+任何跳过前一层的“优化”都只能是诊断实验，不能进入生产主路径。
 
-所以单路 200 的主攻方向不是“再开一个参数”，而是提高有效草稿链的接受 token 数，同时降低
-窗口固定成本。必须采集：
+---
 
-- 每个窗口实际提供的 MTP 草稿数，而不是只看平均 `draft_n`。
-- 按草稿深度分桶的接受率，看到第 1、2、...、7 个猜测各剩多少。
-- suffix/lookup 草稿与 MTP 草稿的命中比例。
-- verify、commit、host 同步、跨卡 hand-off、采样各占窗口多少。
-- 两卡是否出现等待空转；单路窗口利用率是否被层切分串行放大。
+## 1. 产品目标与验收口径
 
-### 3.2 多路：每路不能靠聚合掩盖
+### 1.1 目标口径矩阵
 
-6 路当前的 6.00 token/窗口说明，多路已经接近“每 slot 每窗口一个 token”。聚合 200 需要
-把窗口压到约 30 ms 并保持 6 个 slot 都有可验证工作；单路 200 需要完全不同的乘数。
+所有 decode 数字都以“已提交的生成 token”为分子，不使用 accepted draft token。
+engine 指标从第一个生成 token 到最后一个生成 token 计量；客户端指标从收到首个可见
+delta 到最后一个可见 delta 计量。两类数字必须同时保留。
 
-因此 D1 和 D3 必须分开验收：
-
-- D1 失败不能由 D3 通过来抵消。
-- D3 通过也不能把单路 35–50 tok/s 解释成“多路总吞吐很好”。
-- 2 路、6 路、8 路都必须记录每路 p10、最大停顿、slot 等待和上下文长度。
-
-### 3.3 预填：专家复用决定上限
-
-当前 201K 冷预填约 100 s，约 2.0K tok/s。`--prefill-pipe 1` 把提示切成约 7424 token
-的块，并且会关闭 layer-major 的“每层专家只读一次”能力。专家包约 42.9 GB，两卡常驻约
-28 GB，补集约 19.62 GiB。
-
-PCIe 账本：
-
-| chunk | 每 chunk 补集流量上限 | 5K tok/s 所需 PCIe | 判断 |
-| ---: | ---: | ---: | --- |
-| 7424 | ≈19.6 GiB | 13.2 GiB/s | 贴着有效上限，基本不可达 |
-| 16384 | ≈19.6 GiB | 6.0 GiB/s | 可行，需要约 50% 有效利用率 |
-| 32768 | ≈19.6 GiB | 3.0 GiB/s | 有余量，瓶颈转为计算、同步和公平性 |
-
-预填架构必须让同一份专家为更大的 token 区间服务，而不是继续在 7K 小块上反复搬运。
-16K/32K super-chunk 是候选，不是默认事实；必须同时测速度、显存、PCIe、输出质量和
-冷读公平性。
-
-### 3.4 启动：当前是一条串行流水
-
-| 阶段 | 当前耗时 |
-| --- | ---: |
-| dense 权重 831 MiB | 10–11 s 冷、1.3 s 热 |
-| 原生投影 1313 MiB | 0.4–1.5 s |
-| MTP draft 837 MiB | 1.1–3.7 s |
-| 专家槽预填 10065 slots | 15–25 s |
-| 补集 19.62 GiB pin + map | 58–62 s |
-| vision | 0.7–11.4 s |
-| CUDA 初始化、图捕获、元数据 | 约 40–60 s |
-| 合计 | 约 165 s |
-
-热重启 60 s 的关键是跳过重复 pin/map、并行可独立阶段、懒加载 vision，并保留故障回滚
-所需的 last-known-good 快照；不能只优化磁盘读取。
-
-## 4. 当前代码与架构诊断
-
-请求路径目前是：
-
-```text
-准入
-  -> 预填（chunk / prefill-pipe / layer-major / concurrent read / lead-in）
-  -> 批窗口（batch / batch-groups / self-commit / MTP / verify / commit）
-  -> 采样与流式返回
-```
-
-问题不在某一条 `if`，而在同一能力被三种路径重复实现：
-
-| 能力 | solo | serial batch | piped batch |
+| ID | 场景 | 必须固定的条件 | 硬目标 |
 | --- | --- | --- | --- |
-| MTP 草稿 | 有 | 需要 `BATCH_MTP` | 还要 `PIPED_MTP` |
-| 窗口提交 | 普通 commit | 可 self-commit | self-commit 与 piped MTP 互斥 |
-| 每槽 draft K/V / 停车 | 有 | 依赖 batch MTP | 依赖 piped MTP |
-| 并发预填 | 不适用 | 不适用 | 被 staged source 等能力关闭 |
-| layer-major 预填 | 可选 | 可选 | `--prefill-pipe` 会关闭它 |
+| D1-4K | 单路产品路径 | 4K prompt、4096 output、当前生产 sampling、主 Codex API、固定网络路径 | p50 >= 200 tok/s |
+| D1-32K | 单路产品路径 | 32K prompt、4096 output、当前生产 sampling、主 Codex API、固定网络路径 | p50 >= 200 tok/s |
+| D1-200K | 单路产品路径 | 200K prompt、4096 output、当前生产 sampling、主 Codex API、固定网络路径 | p50 >= 200 tok/s |
+| D1-stable | 稳定性 | 覆盖以上长度，warmup 后按 1 秒滑窗统计 | 滑窗 p10 >= 190，最差连续 1 秒 >= 150 |
+| D1-greedy | 机制诊断 | 同长度、greedy、允许 DFlash2 | p50 >= 200，仅用于归因，不能替代产品验收 |
+| P32 | 冷预填 | 32K、无会话缓存、engine prompt 处理时间 | p50 >= 5000 tok/s，p10 >= 4500 |
+| P200 | 长冷预填 | 200K、无会话缓存、engine prompt 处理时间 | p50 >= 5000 tok/s，总时长 <= 45 s |
+| M2 | 两路交互 | 一路长输出、一路短 JSON/代码，两路都活跃 | 每路 p50 >= 120，聚合 p50 >= 240，最大 token gap <= 500 ms |
+| M6 | 六路混合 | 长上下文、短问答、工具调用混合，持续 90 s | 聚合 p50 >= 400，每路 p10 >= 30，最大 gap <= 1 s |
+| C50 | 冷会话恢复 | 50K 会话快照、同模型同运行时 | <= 15 s 到可继续首 token |
+| C200 | 长会话恢复 | 200K 会话快照、同模型同运行时 | <= 45 s 到可继续首 token |
+| C90 | 高复用恢复 | 200K 中 90% 前缀命中 | <= 10 s 到可继续首 token |
+| R-warm | 热重启 | OS page cache 热、配置和模型不变 | <= 60 s 恢复服务 |
+| R-cold | 冷重启 | page cache 冷、模型和运行时不变 | <= 90 s 恢复服务 |
+| R-rollback | 失败回滚 | 候选启动或 smoke 失败 | <= 180 s 回到 last-known-good |
 
-这形成了几类结构性死路：
+以上是产品验收值。G1 若证明当前硬件不存在可行机制，必须提交物理账并请求重新裁决，
+不得静默降低、改分母或拿另一个 workload 的数字补洞。
 
-- `STRATA_BATCH_SELF_COMMIT=1` 会让 `STRATA_PIPED_MTP` 直接失效；现网因此出现两路
-  `draft_n=0`，一路结束后另一路立即恢复。
-- `--prefill-pipe 1` 与 layer-major 复用在当前实现中互相冲突，预填吞吐被 7424-token
-  的专家重复读取限制。
-- `STRATA_PIPED_CONCURRENT` 被 staged/helper/pcie-dma 等源关闭，日志多次出现并发读
-  未生效。
-- 长会话停车依赖 `--batch-mtp`，没有草稿能力时 95K–216K 会话不能被可靠保存和复用。
+### 1.2 API、sampling 与客户端口径
 
-这些不是“再调一个组合”能修好的问题。它们要求把能力选择从全局环境变量移到一次性计算出的
-运行时策略中。
+G0 只冻结了当前配置默认值：`temperature=0.6`、`top_p=0.95`、`top_k=20`、
+`repetition_penalty=1.0`。逐请求实际 sampling 和客户端覆盖仍未记录，不能把配置默认值
+当作真实会话分布，也不能沿用此前未经同一实例复核的 `temperature=1.0` 观察。
 
-## 5. 目标架构
+代码事实：
 
-### 5.1 一个统一的解码执行器
+- DFlash2 在 `temperature > 0`、repetition penalty、`logit_bias` 或部分 checkpoint
+  resume 时回退 MTP。
+- 因此 greedy DFlash2 数字不能代表当前 Codex 会话。
+- 200 tok/s 的产品验收必须覆盖真实 sampling；greedy 只作为隔离机制变量。
 
-不再让 solo、serial batch、piped batch 各自解释一套开关。新增一个纯策略层，例如：
+每个目标样本必须记录：
+
+- 实际 API：Chat Completions、Responses 或 Anthropic-compatible。
+- `temperature`、`top_p`、`top_k`、penalty、`logit_bias`、thinking 和 tool choice。
+- prompt token、reused token、read token、output token 和 finish reason。
+- engine decode、服务端 SSE cadence、客户端可见 decode 三层结果。
+- stream 与 non-stream 分开；结构化输出和 tool call 分开。
+- 客户端到 server 的实际路径：loopback、LAN、Tailscale、Cloudflare 或代理；网络路径变化时
+  不得直接把客户端 tok/s 与另一个路径混比。
+
+G0 确认 Codex 实际使用的主 API。主 API 进入 D1 硬验收；其余兼容 API 至少要证明
+token 正确、事件语义正确且没有数量级额外开销。
+
+### 1.3 测量分母与稳定性
+
+- 原始请求账本保留全部样本；生产性能分布只纳入分类为 `production` 的完成请求。
+- 启动 warmup、短 smoke、固定 400-token 压测、仪器探针和人工合成负载全部从生产分布剔除。
+- 失败、取消、超时、提前 EOS 和断连进入单独的可靠性 cohort，不从账本删除，也不得混入
+  成功请求的 decode 分布。
+- 每次剔除都必须写出 request ID 和原因；报告必须同时给出原始数、剔除数和生产数。
+- engine 日志中的 verify、batch 和 prompt summary 行不是 HTTP 请求，不能直接计入请求分布。
+- p50、p10、p90、p95、p99、最大值、最大 token gap 和样本数必须一起报告。
+- 固定长度实验先做 warmup，再做至少 20 个有效样本；200K 冷样本至少 5 个。
+- 真实流量至少按请求形状累计 100 个样本后才形成分布结论。
+- A/B 实验采用同一 boot、同一模型、同一配置和 A-B-A 交错；顺序随机化，固定 seed
+  只在语义允许时使用。
+- 缓存实验必须明确 cold、page-cache warm、prefix warm、full state warm 四种初态。
+- 吞吐差异必须给出 bootstrap 置信区间；小于已测噪声线或方向不一致时不形成结论。
+
+### 1.4 “会话继续”的定义
+
+重启期间允许 in-flight HTTP 流明确失败，不允许静默丢 token 或半提交状态。恢复后
+服务地址、API key、模型和配置身份必须一致，客户端可安全重试。
+
+只有同时满足组件版本、模型 hash、KV/GDN/QSA/draft 状态和最后已提交 token 一致，
+才允许从会话状态续读。当前文档确认：
+
+- parked snapshot 不跨 restart 保存；session file 可以跨同版本 restart。
+- session file 当前不支持 `--layer-split`、`--peer-device`、`--batch`。
+- session file 也不保证跨 restart 的 exact token replay。
+
+因此，当前生产 PP 路线实际上没有满足多路、PP 和快速恢复三者兼容的会话恢复能力。
+这项矛盾必须在 G4 前解决，不能由 supervisor 单独掩盖。
+
+---
+
+## 2. 已确认事实与待冻结事实
+
+### 2.1 G0 冻结基线（2026-10-30）
+
+证据保存在 `docs/work/evidence/flash-next-runtime-g0-20261030.json`，状态为
+`partial_pass_g0_gate_closed`。本表只使用同一 boot、同一实例、同一配置下取得的只读证据。
+
+| 场景 | G0 结果 |
+| --- | ---: |
+| `/health` | 20/20 成功；p50 0.745 ms，max 1.181 ms |
+| `/metrics?requests=all` | 原始 97 条；剔除 11 条探针；生产 86 条 |
+| 生产完成状态 | `finish=stop` 86/86 |
+| 生产 prompt / reused / read | 7,246,803 / 6,721,079 / 525,724 tokens |
+| reused 比例 | 92.75% |
+| 生产 output / engine generated | 149,445 / 143,009 tokens，比例 1.045 |
+| 聚合 prompt read | 1,150.4 tok/s |
+| 聚合 output / engine decode | 76.4 tok/s |
+| engine decode 分布 | p10/p50/p90 = 40.05 / 73.2 / 83.1 tok/s |
+| 零草稿生产请求 | 13 条；decode p10/p50/p90 = 38.8 / 39.9 / 40.6 tok/s |
+| 正草稿生产请求 | 73 条；decode p10/p50/p90 = 65.0 / 74.2 / 84.0 tok/s |
+| 请求重叠 | 71 条 solo、14 条两路重叠、1 条长请求与 12 个后续请求重叠 |
+| 冷预填 | 4 条；745.2-1,997.6 tok/s；200K 为 100.8 s |
+| 专家缓存命中 | p10/p50/p90 = 95.2% / 98.0% / 98.9% |
+| PCIe offload share | p50/p90/p99/max = 0.2% / 0.75% / 3.24% / 4% |
+| file blob | 生产样本为 0 |
+
+当前 `/metrics.decode_tok_s` 的分子是 `engine_generated`，分母是 engine `decode_ms`，
+既不是 `output_tokens/decode_ms`，也不是客户端 SSE cadence。计划必须同时保留：
+
+- engine generated / engine decode。
+- 已提交 output token / engine decode。
+- 客户端可见 token / 首 delta 后墙钟。
+
+长工具调用 `2038b6a7d98f` 的 output 为 24,319，engine generated 为 17,894，
+总墙钟 497.9 s；只报 engine decode 会隐藏两层 token 口径差异。
+
+此前固定 400-token 和两路压测只保留为机制诊断：单路中位 62.5 tok/s、两路聚合中位
+75.8 tok/s、每路约 36.4 tok/s、一路结束后邻居恢复到约 68.4 tok/s。它们不进入
+86 条真实生产分布。单窗口诊断值 1.74 token / 26.8 ms 也仍需在同一实例上复测。
+
+硬件与运行边界同样进入基线：
+
+- 双 RTX 2080 Ti，各 22,528 MiB；G0 时空闲显存仅 819/920 MiB。
+- NVLink 为 NV2，每卡双链路，单链路报告 25.781 GB/s；P2P 与 P2P atomics 可用。
+- 所有 NVLink Replay/Recovery 为 0；CRC 在 05:00 UTC 后未继续增长，不能据此判故障。
+- Xeon E5-2680 v4 为 14C/28T、单 NUMA；13 个 expert worker 绑定 CPU 1-13，
+  host/stage 线程使用 CPU 0，不能把 28 个逻辑线程都算作 expert 并行资源。
+- RAM 可用约 6.53 GiB，engine RSS 约 54.86 GB，swap 基本未使用；起第二实例有 OOM 风险。
+- 两张卡 requested/current/default limit 均为 250 W，max limit 才是 280 W；
+  旧的 280 W tuning 记录不能作为当前性能基线。
+- 空闲时 `nvidia-smi` 显示 Gen1 x16 是省电状态，不能据此判断请求期间的 PCIe 代数。
+
+保持 26.8 ms 窗口时，200 tok/s 需要约 5.36 accepted token/window。若只有
+3.5 token/window，则窗口必须降到约 17.5 ms。接受长度和窗口耗时必须分开优化。
+
+### 2.2 当前代码与运行路线
+
+- 双卡生产路线是 `--layer-split` pipeline parallel，不是 tensor parallel。
+- 仓库没有现成 TP all-reduce 执行器。
+- DFlash2 已实现，但当前不允许 `multi_gpu`、`--batch`、`--layer_split` 或
+  `--peer-device`。
+- 当前环境启用 `STRATA_BATCH_SELF_COMMIT`，但没有 `STRATA_BATCH_MTP` 和
+  `STRATA_PIPED_MTP`，代码又禁止 self-commit 与 pipelined MTP 组合。
+- 13 条零草稿生产请求全部落在重叠窗口，但 `8465e3cb04d2` 在并发中仍报告 9,157 个草稿，
+  邻居 `bdbb1d76fb3b` 只有 42.1 tok/s。因此草稿关闭是强相关现象，不是已证明的唯一原因。
+- 修掉互斥只恢复 MTP，不会自动带来 3 倍 decode。
+- `batch-groups` 是 PP 流水组，不是连续批处理调度器。
+- `generate.cpp` 同时承担入口、资源预算、执行规划、slot、parking 和能力门，导致同一能力
+  在 solo、batch、PP 中语义不同。
+- 当前 profile 记录 17,248 个专家槽；模型共有 24,576 个 experts，每 token active 10。
+  未驻留专家会进入 CPU 计算、pinned host arena、page cache 和 PCIe 路径。
+
+### 2.3 已有但未进入主计划的路线
+
+`--peer-device` 已实现第二张卡的专家 tier：
+
+- CUDA0 保留 dense、KV、state、draft 和主专家 cache。
+- peer 卡保存另一组专家，并在卡上计算自己的 decode 与 prompt rows。
+- 激活和结果走 NVLink/P2P，失败时回退 host route。
+- 它与 `--layer-split`、`--expert-cache-device1..3` 互斥。
+- 当前不兼容 DFlash2、session file 和 pipeline windows。
+
+`--expert-cache-device1..3` 与 `--remote-expert-opt` 是另一条 helper cache 路线，
+通过 pinned host buffer 汇总结果。它和 peer 路线不是同一机制，不能混写成一个“第二卡优化”。
+
+### 2.4 外部参照可以借鉴什么
+
+| 项目 | 可借鉴 | 不能直接假定 |
+| --- | --- | --- |
+| vLLM 2080Ti fork | DFlash2/7、TP2、async draft 的实测参考 | 27B NVFP4 不是 176B Flash-Next IQ3_XXS；prefill 也只有约 1.3K tok/s |
+| SGLang | waiting/running、chunked prefill、decode 让路、统一 radix cache | 不替换 Strata 引擎；只吸收算法和状态机 |
+| llama.cpp | layer/row/tensor split、专家 offload 语义 | 不替换现有专家 cache 和量化路径 |
+| NCCL/RCCL | TP/EP 的标准集合通信和拓扑感知 | sm_75、双卡 NV2 上必须先微基准，不能假定线性加速 |
+
+[vLLM 2080Ti Definitive](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/93c9013e375b1ecbf2da88179d2a31175a0d5c99)
+的 DFlash2 220.84 tok/s 是重要上限参考，不是 Strata 目标已经可达的证明。
+
+### 2.5 当前控制链与重启边界
+
+- 当前生产实例不是 `strata.service` 管理的实例。server PID 340994 的 PPID 为 1，
+  engine PID 341001，两个进程都在 `session-2144.scope`。
+- `strata.service` 为 enabled 但 inactive/dead，`NRestarts=23`，unit 指向另一棵
+  `strata-0.2.7` 源码树和另一份配置，与当前 freeze 实例不一致。
+- 登录 session 2144 已处于 `closing`，`Linger=no`；当前实例的跨会话生命周期保证未验证。
+- 当前没有已验证的唯一 owner、last-known-good、health/smoke 门禁或自动回滚演练。
+- 直接执行旧 service restart 可能切到不同代码和配置。当前会话经过该 Strata，因此没有
+  LKG 和回滚证据前禁止重启生产。
+
+---
+
+## 3. 目标运行时架构
+
+### 3.1 六个边界
+
+1. **协议与准入层**：HTTP、鉴权、取消、流式写回、容量拒绝和错误语义。
+2. **请求状态与调度层**：waiting/running、token budget、prefill chunk、公平和抢占。
+3. **执行计划层**：每个窗口的 row、draft、verify、commit、sampling 和降级原因。
+4. **拓扑与放置层**：PP、peer、helper、TP、EP、host expert 和 stage handoff。
+5. **内存与状态层**：VRAM 池、host arena、full KV、GDN、QSA、draft/tap 和会话快照。
+6. **观测与生命周期层**：请求账本、硬件采样、实验探针、owner supervisor 和回滚。
+
+边界之间只传显式状态和不可变 capability profile，不再靠散落的全局环境变量互相猜测。
+
+### 3.2 统一请求状态机
 
 ```text
-DecodePlan {
-    window_cap          // 1..8，单路也要能使用完整窗口
-    draft_budget        // 1..7，由接受率和置信度控制
-    group_count         // 由 slot 数、卡数和窗口上限计算
-    overlap_mode        // 无重叠、跨窗口流水、跨阶段流水
-    state_mode          // 普通、停车、恢复
-    self_commit         // 只能是执行器内部优化，不再是用户能力开关
-}
+WAITING
+  -> ADMITTED
+  -> PREFILLING
+  -> DECODING
+  -> PARKED
+  -> RESUMING
+  -> FINISHED
+  -> FAILED
 ```
 
-策略层只回答“本请求本窗口应该怎么跑”，执行层继续复用现有 Verifier、MTP drafter、
-commit 图和 slot 状态。这样：
+每个状态必须声明：
 
-- 单路与多路使用同一个窗口语义。
-- 每个 slot 都拥有自己的 draft/KV/停车状态，不再依赖某个全局 batch 开关。
-- 任何组合不能运行时有明确的降级原因，而不是静默变成另一条旧路径。
-- 参数只决定资源上限，不决定是否存在功能。
+- 已提交 token、位置和稳定的 request/session ID。
+- 持有的 full KV、GDN、QSA、draft/tap 和 host/peer 组件。
+- 是否可抢占、可取消、可恢复。
+- 恢复所需的组件版本、hash 和最小 checkpoint。
+- 失败时客户端可见错误、是否允许重试、从哪里重试。
 
-### 5.2 单路窗口必须同时攻击两个乘数
+### 3.3 运行时不变式
 
-单路 200 按顺序验证两类机制，不能一开始就做 kernel 微优化：
+- solo 与并发使用同一状态机，不维护三套能力语义。
+- 任何降级必须输出一次结构化原因；禁止静默把 DFlash2 换成 MTP、把 P2P 换成 host 或把
+  batch 路径换成 solo 而不留证据。
+- cache 命中必须按组件判断；KV 命中不能证明 GDN/QSA/draft 可复用。
+- 每个窗口先形成物理预算，再选择机制，不允许机制先选完再补预算。
+- 观测热路径不得为每个 token 执行高开销 JSON、进程查询或 GPU 同步。
 
-1. **提高有效 token/窗口**：让 MTP 链、suffix 和 lookup 草稿共享一个 8 行验证预算，
-   按实测接受率动态决定草稿深度；不再把 `--mtp-max-t 4` 当作长期产品边界。
-2. **降低窗口关键路径**：把两卡的 verify/hand-off/commit 做成可重叠的窗口流水；
-   如果单路仍被固定 launch/同步拖住，再进入 W6 的内核与图捕获优化。
+---
 
-两项都必须有独立指标。只提高草稿深度但窗口变慢，不能算成功；只压低窗口但没有足够 token，
-也不能算成功。
+## 4. 六本性能账
 
-### 5.3 预填是“专家复用 + 公平让路”
-
-预填路径收敛为：
+### 4.1 请求时间账
 
 ```text
-PreFillPlan {
-    superchunk_tokens    // 优先 16K/32K，按显存和 parity 选择
-    layer_major          // 主路径启用，不再由 per-request pipe 关闭
-    expert_stream        // 与 attention/router/compute 重叠
-    fairness_quantum     // 长读给解码让路的最小时间片
-}
+T_request =
+  T_accept + T_auth + T_parse + T_tokenize
+  + T_queue + T_admit
+  + sum(T_prefill_chunk)
+  + sum(T_decode_window)
+  + sum(T_resume)
+  + T_structured_parse + T_tool_parse
+  + T_detokenize + T_sse + T_finalize
 ```
 
-目标是每个专家在大 super-chunk 内只读一次，同时让正在输出的会话获得有界停顿。
-`--prefill-pipe` 可以通过兼容层映射，但不再作为主架构的互斥开关。
+每个请求至少输出 queue、prefill、decode、resume、output、finish 六段时间。任何阶段
+超过总时长 10% 或尾延迟 p99 时，必须进入对应账本。
 
-### 5.4 会话状态与停车是一等公民
+### 4.2 Decode 物理 roofline
 
-每个 slot 必须能保存：
+单路延迟和聚合吞吐不是同一个公式：
 
-- 已提交的 token 和位置。
-- live KV、QSA indexer、GDN 状态。
-- MTP draft K/V 和链位置。
-- 可恢复的 checkpoint。
-- 会话是否处于 cold、parked、resuming、serving 的明确状态。
-
-冷会话读取不是“重新跑一遍 prompt”，而是从最近的可信前缀继续；长会话没有 draft K/V 时
-不能停车，必须显式报错并进入修复队列，而不是静默退回普通 slot。
-
-### 5.5 启动由监督器负责，不由操作员记忆负责
-
-生产必须由一个受管 supervisor 持有：
-
-- 启动前校验 engine/server/config/hash 与 GPU 拓扑。
-- 保留 last-known-good 快照。
-- 启动失败自动回滚并重新 health check。
-- 进程异常、日志管道断裂、CUDA 初始化失败都能被观察到。
-- 不再依赖“上一条命令还在不在”或人工记 PID。
-
-“随时可重启”不等于没有停机，而是每次停机都有自动恢复、状态快照和审计。
-
-## 6. 参数与兼容策略
-
-用户已明确允许废弃/移除参数。原则是：删除制造架构分叉的全局开关，保留必要的数值上限和
-单次实验覆盖；不为了旧配置完整复刻旧执行路径。
-
-| 旧参数/变量 | 处理 | 原因 |
-| --- | --- | --- |
-| `STRATA_BATCH_MTP` | 删除为全局门；由 `DecodePlan` 自动选择 | 不应决定“批处理有没有草稿” |
-| `STRATA_PIPED_MTP` | 删除为全局门；合并为 `draft_budget` | 不应要求操作员同时开两个变量 |
-| `STRATA_BATCH_SELF_COMMIT` | 从用户配置移除；若保留只能是窗口内部策略 | 与 piped MTP 互斥，制造死组合 |
-| `--mtp-max-t` | 从产品配置移除；策略按接受率选择 1..7 | 静态上限掩盖真实草稿收益 |
-| `--prefill-pipe` | 兼容一个迁移周期后删除；主路径改为 layer-major super-chunk | 当前实现会关闭主要复用能力 |
-| `STRATA_PIPED_CONCURRENT` | 合并进统一预填调度器 | 不是独立性能产品，应与公平性同一策略 |
-| `--batch-groups` | 保留为诊断/上限，不作为用户必须理解的组合 | 组数应由 slot、stage、窗口预算推导 |
-| `--spec-min-p` | 暂时保留为实验覆盖，主路径由策略自适应 | 仍可用于验证置信度与接受率关系 |
-
-兼容实现只允许存在于一个明确的适配层：读取旧配置，转换成一个 `RuntimeDecision`，
-并打印“已弃用/已忽略”的原因。适配层不得复制旧执行逻辑。完成一次版本迁移和 soak 后
-删除旧变量。
-
-代码可读性要求：
-
-- 一个策略模块只做纯计算，可用单元测试覆盖，不直接操作 GPU 或进程。
-- 执行器不读取散落的环境变量；需要的决策由策略对象传入。
-- 新增逻辑优先拆成小而明确的函数，不继续扩大单个 `generate.cpp` 分支。
-- 删除旧分支比新增兼容分支优先；兼容只保留在输入边界。
-
-## 7. 可行性裁决
-
-| 目标 | 当前 | 缺口 | 结论 | 主要杠杆 |
-| --- | ---: | ---: | --- | --- |
-| D1 单路 200 | 64.8 | 3.1× | **硬目标；W2 必须给出可行机制或明确失败证据** | 5.4 token/window 或 17.5 ms/window |
-| D3 六路聚合 200 | 164.7 | +21% | 可达 | 6 slot 保持活跃、窗口 ≤30 ms、公平调度 |
-| P1 32K 预填 5000 | ≈2.0K | 2.5× | 条件可达，先做 layer-major 16K/32K | 专家复用、流式重叠 |
-| C1 200K 冷读 ≤45 s | ≈100 s | 2.2× | 跟随 P1 | 相同预填架构 |
-| 热重启 ≤60 s | ≈165 s | 2.75× | 可达 | 跳过重复 pin、并行、vision 懒加载 |
-
-单路 200 的数学约束不能绕开。若 W2 实测显示线性 MTP 链的接受率上限不足，下一步必须是
-改变草稿机制（例如 suffix/lookup 组合、受限分支或跨窗口流水），而不是把验收改成聚合数字。
-若所有结构路径都无法达到 200，必须停下来报告证据并请用户裁决；不得静默降低目标。
-
-## 8. 里程碑
-
-### M0：可恢复运行时与正式账本
-
-**目的**：先把“随时可重启”变成基础设施，再测性能。M0 未通过前不启动任何生产候选。
-
-- [ ] **M0-1 运行时盘点**：记录实际 server/engine/config 的可执行路径、argv、cwd、
-  hash、PID、端口和 GPU 拓扑；确认当前手动进程与 `strata.service` 的关系。
-- [ ] **M0-2 部署监督器**：实现或接入 `util-restore.sh`、`util-watchdog.sh`、
-  `dump-runtime.py`，禁止硬编码 sudo 口令；使用受限 sudoers 或受控 askpass。
-- [ ] **M0-3 回滚测试**：先用假进程/非生产端口演练启动失败、健康检查失败、日志管道断裂、
-  引擎崩溃和 supervisor 自身重启。
-- [ ] **M0-4 真实演练**：在可接受的维护窗口让监督器接管生产；要求日志出现
-  `WINDOW RESTORED ... layer=relaunch`，并验证客户端重试后恢复同一 conversation。
-- [ ] **M0-5 正式快照**：冻结 engine、server、config、runtime JSON 和 manifest；
-  记录旧快照恢复命令。
-- [ ] **M0-6 解码账本**：单路、2 路、6 路各 3 轮；记录窗口 T、接受 token、
-  草稿深度分布、stage ms、commit ms、hand-off 和每路 p10。
-- [ ] **M0-7 预填账本**：32K、128K、200K 冷预填各 3 轮；记录 layer-major 是否启用、
-  super-chunk、专家读取量、PCIe、GPU timeline 和 wall。
-- [ ] **M0-8 启动账本**：3 次热重启和 1 次冷启动，拆分权重、slot 预填、pin/map、
-  vision、图捕获和健康检查。
-
-**Gate:** 自愈演练成功；基线与本文件差距 ≤10%；未解释的配置漂移为零。否则停止性能实验，
-先修观测和恢复。
-
-### W1：统一解码策略
-
-**目标**：删除 solo/serial/piped 三套能力门的结构性分叉。
-
-**Files:**
-- Create: `include/strata/program/decode_plan.hpp`
-- Create: `tests/program/decode_plan_test.cpp`
-- Modify: `src/program/generate.cpp`
-- Modify: `docs/BATCHING.md`
-- Test: `tests/program/` 与 `tools/batch_test.py`
-
-- [ ] **W1-1 写失败测试**：覆盖 1/2/6/8 路、不同上下文、8 行上限、显存不足、
-  两卡切分和 unsupported source；断言每种状态都有且只有一个合法 `DecodePlan`。
-- [ ] **W1-2 实现纯策略**：输入 slot 数、stage 数、上下文、可用显存、草稿接受历史和
-  预填状态，输出窗口上限、草稿预算、组数、重叠模式和停车能力。
-- [ ] **W1-3 接入执行器**：让单路、批处理和流水组都消费同一策略；旧变量只在适配层读取。
-- [ ] **W1-4 删除死组合**：去掉 self-commit 一票否决、BATCH_MTP/PIPED_MTP 双重开关
-  和其他会让路径静默退化的分支。
-- [ ] **W1-5 回归门**：单路、2 路、6 路 greedy/sampled token parity；取消、断流、
-  长 prompt、slot 结束、下一轮继续全部通过。
-
-**Gate:** 任意受支持路径都能产生非零草稿和每槽状态；不存在“参数被接受但机制静默关闭”。
-
-### W2：单路 200 的窗口机制
-
-**目标**：用实测数据证明并实现单路 200，不以调参替代结构改动。
-
-- [ ] **W2-1 采集深度分布**：对 4K prompt、4096 output，记录每个 draft 深度的提供/
-  接受数量；自然语言、代码和工具调用各 3 轮。
-- [ ] **W2-2 实现候选 A：深草稿预算**：在 8 行上限内动态提供最多 7 个提案，比较
-  MTP、suffix、lookup 的组合收益；保持窗口耗时不变或下降。
-- [ ] **W2-3 实现候选 B：跨窗口/跨阶段流水**：让 stage 0 的下一窗口与最后一 stage
-  的当前窗口重叠；只有在单路实际缩短关键路径时保留。
-- [ ] **W2-4 实现候选 C：受限分支草稿**：如果线性链的接受率上限不足，评估一个请求内
-  多条候选前缀共享验证预算的方案；必须先证明状态和 commit 可正确隔离。
-- [ ] **W2-5 结果门**：达到 5.4 token/window（≤26.8 ms）或 3.5 token/window
-  （≤17.5 ms），且不破坏 D2/D3；否则停止并向用户报告具体缺口。
-
-**Gate:** 单路 p50 ≥200、逐秒 p10 ≥190；没有用 prompt cache、缩短输出或只测
-数字序列作弊。不达标时不得把目标改成聚合 200。
-
-### W3：预填复用与长冷读
-
-**目标**：32K 冷预填 ≥5000 tok/s；200K 冷读 ≤45 s。
-
-- [ ] **W3-1 主路径切换**：把 layer-major super-chunk 设为标准路径；旧 `prefill-pipe`
-  只经适配层映射，不再关闭 layer-major。
-- [ ] **W3-2 super-chunk 三档**：8K、16K、32K 各做同 prompt A/B/A；记录 PCIe、
-  expert 命中、GPU timeline、VRAM 峰值和输出质量。
-- [ ] **W3-3 专家流与计算重叠**：专家读取、router、attention、expert compute
-  能重叠的放同一流水；不能重叠的必须有计时证据。
-- [ ] **W3-4 公平让路**：长预填按固定 quantum 让解码，记录邻居最大停顿；不能靠
-  无限加长 lead-in 让短请求“看起来快”。
-- [ ] **W3-5 质量门**：greedy parity、needle、64K/128K/200K 真实会话、取消和续读；
-  非位精确路径必须报告 KL/needle/可复现差异，不得写成 bit-identical。
-
-**Gate:** P1、P2 达标；若只达到 3500–4500 tok/s，保留账本并进入 W6 条件内核项，
-不能把中间速度写成最终通过。
-
-### W4：多路、停车与冷会话
-
-**目标**：6×192K 无饥饿；冷会话恢复不重读已完成前缀。
-
-- [ ] **W4-1 每槽状态**：确认每个 slot 的 draft K/V、live KV、GDN、checkpoint
-  能独立保存和恢复；日志不再出现因为缺少 batch MTP 而无法停车。
-- [ ] **W4-2 公平调度**：6 路同跑 + 一路 200K 冷读，记录每路 p10、最大停顿、
-  slot wait、预填 quantum 和取消后的资源回收。
-- [ ] **W4-3 冷读**：50K、200K、90% 前缀命中 200K 各 3 轮；使用同一
-  conversation cache 版本，验证重启后仍能恢复。
-- [ ] **W4-4 容量边界**：6 路满载、第 7 路等待、8 路、长工具调用和客户端断流；
-  区分 queue、admission、prefill、decode 四种等待。
-
-**Gate:** D2/D3/C1 达标；没有 slot 饥饿、无 swap 抖动、无静默降级。
-
-### W5：启动与重启
-
-**目标**：热重启 ≤60 s、冷启动 ≤90 s，失败自动恢复。
-
-- [ ] **W5-1 并行启动**：dense、专家槽、MTP、vision、CUDA 图捕获中可独立的阶段并行。
-- [ ] **W5-2 去掉重复 pin/map**：页缓存热时复用可信映射或延后 pin；失败自动回退
-  当前路径，不允许为了速度猜测状态。
-- [ ] **W5-3 vision 懒加载**：不影响文本首请求和 health；vision 失败不能拖垮文本服务。
-- [ ] **W5-4 恢复演练**：kill engine、kill server、损坏候选配置、GPU 初始化失败
-  各一次；每次检查 `layer=relaunch`、conversation 可续和旧快照不变。
-- [ ] **W5-5 性能门**：3 次热重启、1 次冷启动；记录每阶段时间和总时间。
-
-**Gate:** R1 达标，且任何失败都能回到 last-known-good。
-
-### W6：条件性内核与图优化
-
-只有 W2/W3 已证明瓶颈在某个 kernel、launch 或图捕获，且结构改动后仍差目标时才启动。
-
-- 一次只改一个 kernel 或一个图路径。
-- 必须同时改善目标硬件计数和端到端 wall。
-- 必须重跑单路、2 路、6 路、预填、冷读和 parity。
-- NCU 不能附加现役进程；必须用受控实例和自愈窗口。
-
-## 9. 场景矩阵
-
-| 编号 | 场景 | 必须记录 |
-| --- | --- | --- |
-| S1 | 单路 4K prompt，4096 output，混合自然语言/代码/工具 | p50/p10、窗口 token、窗口 ms、草稿深度 |
-| S2 | 两路并发，每路 400 output | 每路/聚合、draft_n、最大停顿、TTFT |
-| S3 | 一路 200K 冷读 + 一路持续解码 | 邻居 tok/s、最长静默、预填 quantum、总时长 |
-| S4 | 24K 工具调用 + 一路聊天 + 一次取消 | 工具总时长、取消回收、下一轮会话 |
-| S5 | 6 路 ×192K，90 s | 聚合 p10、每路 p10、slot wait、内存/swap |
-| S6 | 第 7 路晚到、8 路过载 | admission 时间、排队上界、拒绝/恢复 |
-| S7 | 热重启、冷启动、故障注入 | 每阶段秒数、health、恢复 audit、会话续读 |
-
-## 10. 测量协议与证据
-
-- 每项至少 3 轮；报告 p50、p10/p90，不只报告最好一次。
-- A/B/A 必须在同一 boot、同一模型、同一 prompt、同一输出上限和同一 cache 状态下完成。
-- A1/A2 漂移 >5% 时加到 5 轮；仍漂移则先查环境，不叠加新改动。
-- 每次实验写独立目录：`/opt/ai/logs/util-v5-$TS/`。
-- 目录至少含：manifest、运行 argv、hash、原始日志、JSONL、质量结果、判决和回滚路径。
-- 性能数据必须附带硬件、驱动、模型、context、cache、并发数和未测项。
-- 每个生产窗口有自愈和硬截止；没有 `layer=relaunch` 时不得开始下一轮。
-
-### 质量门
-
-- greedy token parity：同一输入在旧/新路径逐 token 比较；允许的非位精确必须提前声明。
-- sampled 输出：固定 seed 做统计比较，不能把“能生成”当作质量通过。
-- needle：至少覆盖 50%、90% 深度。
-- 真实会话：长工具调用、代码修改、断流重试、上下文续读。
-- 一小时后段 RSS、可用内存、swap、专家命中率和 GPU 空闲显存保持稳定。
-
-## 11. 停止条件
-
-- 自愈没有 `layer=relaunch`：停止所有停服动作。
-- 基线无法在 ±10% 内复现：停止性能实验，先查环境。
-- OOM、swap 持续增长、slot 静默降级、parity/needle 失败：立即回滚。
-- 单路回退 >3%、6 路回退 >3%、200K 冷读回退 >5%：候选不采纳。
-- 同一候选连续两次没有超过噪声下限：停止该机制，换结构，不重复同形实验。
-- 单窗口 >20 分钟或累计 >8 个窗口：停止复盘，不继续堆实验。
-- W2 无法证明单路 200 的结构路径：停止并向用户报告缺口，不擅自降低验收口径。
-
-## 12. 最终验收
-
-- D1：单路 4K/4096 三类负载 p50 ≥200 tok/s，逐秒 p10 ≥190。
-- D2：两路每路 ≥50 tok/s，双方都有非零草稿，无明显饥饿。
-- D3：6×192K 聚合 p50 ≥200，每路 p10 ≥30，最大停顿 ≤1 s。
-- P1：32K 冷预填 ≥5000 tok/s；P2：200K 冷读 ≤45 s。
-- C1：50K ≤15 s；200K ≤45 s；90% 前缀 200K ≤10 s。
-- R1：热重启 ≤60 s；冷启动 ≤90 s；故障回滚 ≤180 s。
-- 质量：parity、needle、长上下文、取消、续读和一小时 soak 全过。
-- 运维：生产由监督器持有，所有重启可审计、可回滚，不依赖手工 PID。
-- 代码：没有让能力静默消失的全局参数死组合；策略有单元测试，执行路径可读、可删、可重启。
-
-## 13. 命令与实验入口
-
-以下命令只描述当前已知入口；具体路径在 M0 快照时按实际进程 argv 和 hash 核对，
-不从旧目录猜。
-
-```sh
-# 解码：单路/多路账本
-python3 /opt/ai/bin/session_matrix.py --streams 1 --tokens 4096 --rounds 3 \
-  --label v5-s1 --out "/opt/ai/logs/util-v5-$TS/s1.jsonl"
-python3 /opt/ai/bin/session_matrix.py --streams 2 --tokens 400 --rounds 3 \
-  --label v5-s2 --out "/opt/ai/logs/util-v5-$TS/s2.jsonl"
-
-# 窗口、草稿深度、stage 时间
-grep -aE "strata decode timing:|strata decode GPU stages|accepted per round|spec depth" \
-  /home/atm/verify-20261027/strata-verify/strata-verify.log | tail -20
-
-# 冷预填
-python3 /opt/ai/bin/cold-prefill.py v5-32k 32768 3
-python3 /opt/ai/bin/cold-prefill.py v5-200k 200000 3
-
-# 自愈与恢复审计
-rg -a "WINDOW RESTORED|layer=relaunch|health|rollback" \
-  "/opt/ai/logs/util-v5-$TS"
+```text
+单路窗口延迟 >= sum(每个 PP stage 的串行延迟) - 可证明的跨窗口 overlap
+多路聚合吞吐 <= accepted tokens / 最慢 pipeline stage 的服务能力
 ```
 
-实验时只允许：
+G1 在机制实验前必须计算以下每 token 或每 verifier window 的成本：
 
-1. 建快照和 manifest。
-2. 在受限候选端口或监督器窗口启动候选。
-3. 先做 smoke、parity、health。
-4. 再做 A/B/A；失败立即恢复并记录。
-5. 通过门槛后才修改生产 default，并在下一个窗口复测。
+- dense 权重读取字节 / HBM 带宽。
+- active experts 的 GPU/peer 命中、CPU 计算和 host/PCIe 读取。
+- full attention 的 KV 读取量，以及 QSA 索引和查询成本。
+- GDN recurrent state 读写。
+- MTP、DFlash2 selector、draft head 和 drafter KV/ring。
+- 每层 kernel launch、图重放、同步和 sampler 固定成本。
+- PP handoff 的字节、次数和有效 NVLink 延迟。
+- TP all-reduce/all-gather 的字节、延迟和同步。
 
-任何“先改生产再观察”的做法都视为违反本计划。
+最低物理检查：
+
+```text
+required_tokens_per_window = 200 * measured_window_seconds
+```
+
+若已验证的 `T_floor` 和最大可验证 token/window 无法满足该不等式，G1 必须停止该拓扑。
+增加 batch、并发或 CPU 线程不能缩短单路串行关键路径，因此不能作为 D1 的替代答案。
+
+### 4.3 Host expert 四层账
+
+专家路径必须分别记录，不能用“专家命中率”一个百分比概括：
+
+| 层级 | 必须记录 |
+| --- | --- |
+| CUDA0 驻留 | slot 数、命中次数、HBM 读取字节、替换、抖动 |
+| CUDA1 peer/helper | peer 命中、P2P/PCIe 选择、激活和结果字节、等待时间、远端计算时间 |
+| CPU expert | active entries、核数、NUMA、内存通道、量化/反量化、每层 CPU ms |
+| 存储与 page cache | mmap/page fault、readahead、NVMe 字节和延迟、cache hit、重读 |
+
+每个 decode/prefill 窗口都要回答：
+
+- 专家总请求数、GPU0 命中数、peer 命中数、CPU 计算数和 I/O miss 数。
+- host-to-device 与 device-to-host 字节，PCIe 实测带宽和等待时间。
+- CPU 专家是否与 tokenize、detokenize、telemetry 或另一路会话争抢核心。
+- 专家替换是否改变了输出质量或仅改变求和顺序。
+
+### 4.4 多路与公平账
+
+多路不能只看聚合 tok/s。每个活跃请求必须记录：
+
+- admission、slot 或 continuous batch 的身份。
+- 每轮分配到的 row/token budget。
+- 自己的 TTFT、decode p50、最大 token gap 和 finish reason。
+- 邻居开始、结束、取消、长 prefill 或专家 miss 时，本路速度的变化。
+- 是否被 preemption、重新预填、重新计算 recurrent state 或降级到另一路径。
+
+公平性失败的模式包括：固定 slot 被长请求占住、PP group 被整组等待、prefill 长块
+阻塞 decode、CPU expert 池只有一个锁、SSE 写回阻塞推理线程。
+
+### 4.5 缓存与冷状态账
+
+缓存键至少绑定：
+
+- 模型、量化、pack 和 expert profile hash。
+- engine/runtime 版本、CUDA/HIP、kernel 布局。
+- KV/GDN/QSA 精度、布局、RoPE 和 context 配置。
+- draft 类型、tap 层、DFlash2 pack 和 drafter ring。
+- 最后一个已提交 token 和组件完整性。
+
+失效原因必须结构化分类：
+
+| 类别 | 示例 |
+| --- | --- |
+| 身份变化 | 模型、engine、量化、RoPE、context 改变 |
+| token 失配 | 客户端重写历史、context compaction、checkpoint 太浅 |
+| 组件缺失 | full KV 命中但 GDN/QSA 未命中 |
+| draft 失配 | DFlash2 ring 缺行、采样参数触发 MTP 回退 |
+| 资源淘汰 | parked、page、peer cache、host arena 被回收 |
+| 请求形状 | 工具结果增长、schema 改变、多 subagent、取消后重试 |
+| 运行故障 | engine restart、Xid、PCIe/NVLink error、OOM |
+
+### 4.6 冷启动 I/O 账
+
+一次 cold start 至少拆成：
+
+1. 进程和 owner runtime 启动。
+2. 模型文件 open、mmap、readahead 和 hash。
+3. dense、专家、MTP/DFlash2 和 profile 读取。
+4. pinned host arena、page cache 和 NUMA 放置。
+5. CUDA context、kernel module、cuBLAS/cuDNN 首次加载。
+6. graph capture、expert cache 定容和预热。
+7. server ready、health 和 smoke。
+8. 可选 session file 恢复、状态校验和首 token。
+
+当前模型约 71 GB、专家约 43 GB。必须区分 NVMe 顺序读取、page cache 命中、并行加载、
+hash 校验、pin 内存、GPU reset/Xid 和 NVLink replay。冷启动不能只报一个“加载秒数”。
+
+### 4.7 服务端与客户端输出账
+
+engine decode 200 tok/s 不代表 Codex 感受到 200 tok/s。服务端必须记录：
+
+- HTTP accept、body read、auth、JSON parse。
+- tokenize、admission、engine token、detokenize。
+- structured output 和 tool parser 是否缓冲 token。
+- SSE delta 组装、JSON 编码、socket flush 和客户端 ACK/断连。
+- Python GIL、日志锁、metrics 锁和 API monitor 是否进入关键路径。
+- stream idle timeout、取消、retry 和重试幂等语义。
+
+在每个阶段记录时间戳后，才能判断瓶颈是 engine、控制面还是输出封装。
+
+### 4.8 Host OS、PCIe 与运行环境账
+
+CPU expert、P2P 和尾延迟会被系统状态直接改变。G0 必须冻结并在实验前后复核：
+
+- CPU governor、C-state、频率、SMT、isolated/reserved CPUs 和 IRQ affinity。
+- process affinity、priority、`mlock`、open-file/memlock limit 和 swap policy。
+- transparent huge page、显式 huge page、pinned arena 大小、页大小和内存碎片。
+- NUMA policy、内存通道、CPU 到 GPU 的实际 PCIe root complex。
+- IOMMU、ACS、P2P disable、`CUDA_DEVICE_ORDER`、`CUDA_VISIBLE_DEVICES` 和驱动 P2P 状态。
+- NVIDIA persistence mode、GPU clock/power limit、温度、功耗和是否发生降频。
+- NVMe scheduler、readahead、filesystem mount、page cache 初态和可用空间。
+- 是否有容器、cgroup、其他服务或监控器限制 CPU、内存、GPU 或 I/O。
+
+性能实验默认使用真实生产设置。若为归因临时固定 CPU/GPU clock 或隔离核心，必须单独标注，
+那些数字不能直接作为产品验收值。
+
+### 4.9 资源准入与隔离账
+
+VRAM、host RAM、pinned arena、peer cache、session file 和 parked snapshot 必须有独立上限：
+
+- 每池独立预算，禁止共享池隐藏重复预留。
+- admission 前计算最坏新增 KV/GDN/QSA、专家 staging、draft 和输出缓冲。
+- 显存碎片、保留区、CUDA context 和图捕获预留进入预算。
+- long prefill、六路并发、取消恢复和 session save 都不得把整机推入 swap 或 OOM。
+- 当前是单用户专用服务器，不设计多租户隔离；KV/GDN/QSA/draft 缓存仍必须按模型、
+  session 和组件身份隔离，避免不同会话因 hash 碰撞或状态错位而错误复用。
+
+---
+
+## 5. 拓扑与机制候选
+
+### 5.1 候选矩阵
+
+| 候选 | 当前状态 | 主要收益 | 主要风险 |
+| --- | --- | --- | --- |
+| PP + MTP | 生产路线 | 容量扩展，已有实现 | 单路仍串行，并发时 MTP 可能关闭 |
+| PP + DFlash2 | 未开放 | 更长 speculative window | multi-GPU/batch/采样回退尚未解决 |
+| 单卡主模型 + peer experts | 已实现，实验性 | 第二卡计算自己的专家，利用 P2P | 与 PP/helper/DFlash2/session file 互斥 |
+| 主卡 + helper expert caches | 已实现，实验性 | 提高专家驻留 | host 汇总、pipeline windows 关闭、求和顺序变化 |
+| peer experts + DFlash2 | 未开放 | 同时增加专家容量和 draft | 当前能力门直接关闭，需证明关键路径 |
+| TP2 dense + MoE | 未实现 | 单层并行、降低单卡权重读取 | 需要 NCCL/自定义 all-reduce，NV2 通信和量化切分未知 |
+| dense TP2 + expert EP2 | 未实现 | dense 并行、专家分片 | 两套通信和放置同时存在，调试面最大 |
+| 外部运行时承载 Flash-Next | 参考路线 | 可复用成熟 scheduler/TP | 精确模型、sm_75、22 GB 和质量兼容性未证 |
+
+### 5.2 拓扑裁决规则
+
+- PP 不能当成 TP；它不会自动降低单层权重读取时间。
+- peer 和 helper 不是同一路线；P2P、host route、CPU expert 必须分别计量。
+- TP2 必须优先使用成熟集合通信库或经过验证的原语，禁止手写完整 all-reduce 栈。
+- 只有 stage 通信账、显存账、专家账和窗口 roofline 同时成立，拓扑才能进入原型。
+- 拓扑切换必须保留同一模型、量化、上下文和输出质量门。
+
+### 5.3 Drafter 裁决规则
+
+G2 必须分别评估：
+
+- sampling-aware DFlash2，包括 proposal distribution 和 rejection sampling。
+- coupled MTP 或现有 `STRATA_SPEC_PROB` 路线。
+- DFlash2 greedy 专项路线，仅作为机制上限。
+- 多槽共享 drafter 权重、独立 tap/ring 和异步 launch。
+- PP 最后 stage 与第一 stage 放置 drafter 的关键路径差异。
+
+只让 greedy 达到 200、而产品 sampling 仍回退 MTP，不算完成目标。
+
+---
+
+## 6. 观测、探针与瓶颈判决
+
+### 6.1 四层观测
+
+| 层级 | 何时使用 | 工具 | 运行约束 |
+| --- | --- | --- | --- |
+| P0 常驻 | 默认，真实会话 | `/health`、`/metrics`、`/v1/telemetry`、service/engine log、低频 NVML、NVLink CRC | 不改变请求路径；采样成本必须实测 |
+| P1 请求账本 | 每个请求和实验 | 结构化 request/session span、PSTAT/BSTAT、S2 trace | 原样记录 prompt/answer 和统计；保留长度、hash 和关联 ID |
+| P2 系统轻采样 | 受控实验 | `pidstat`、`mpstat`、`vmstat`、`iostat`、smaps、numastat、NVML 1 Hz | 先运行 `probe-instrument-cost.py` 证明低于噪声线 |
+| P3 深探针 | 已定位到短窗口 | Nsight GPU Metrics、Nsight Systems | 只采 5-30 秒目标阶段，不长期附加现役 engine |
+| P4 内核探针 | 已锁定一个内核 | NCU、`ncu-exec.py`、perf | 需要停服或隔离实例；逐内核结果不能冒充端到端 throughput |
+
+现有入口优先复用：
+
+- `probe-version-stamp.py`
+- `four-questions.py`
+- `probe-gpu-utilization.py`
+- `probe-instrument-cost.py`
+- `probe_slot_admission.py`
+- `vram-perf-sample.sh`
+- `nvlink-crc-sample.sh`
+- `metrics-peek.py`
+
+### 6.2 字段矩阵
+
+G0 必须把每个信号标成 `direct`、`infer` 或 `missing`，不能把推断写成观测事实。
+
+| 信号 | 当前来源 | 可信边界 | G0 要确认 |
+| --- | --- | --- | --- |
+| 进程、argv、cwd、hash | `/proc/<pid>`、version stamp | 证明跑的是哪份代码，不证明性能 | owner/server/engine 三层 PID 和父子关系 |
+| 请求 ID、slot、queue、prompt/decode 时间 | service/engine log、metrics | 字段存在不等于可关联 | 同一请求能否在两侧使用同一稳定 ID |
+| request/session/turn span | 应用日志、S2 trace | 可能不完整 | 缺失字段和采样是否改变热路径 |
+| GPU SM Active/Issue/Tensor/warps/DRAM | Nsight Metrics | `nvidia-smi utilization.gpu` 不是 Tensor 利用率 | 计数器可用性和双通道一致性 |
+| VRAM、温度、功耗、时钟 | NVML、telemetry | 显存余量不等于专家命中 | 每池独立 VRAM 和 free budget |
+| NVLink CRC/Replay/Recovery | NVLink query、sample script | 链路健康不等于有效吞吐 | link、P2P copy 和 handoff 微基准 |
+| PCIe copy bytes/ms | engine trace、Nsight | 与 host route 和 helper 路线分开 | root complex、lane 和实际 P2P 选择 |
+| CPU/RSS/NUMA/page fault/swap | `/proc`、pidstat、numastat | RSS 不等于 GPU 驻留 | CPU expert 核心、内存通道和 pinned arena |
+| NVMe/readahead/page cache | iostat、pidstat、smaps | 热 cache 不能解释冷加载 | 冷/热启动定义和实际读取字节 |
+| application draft/cache counters | PSTAT/BSTAT、S2、metrics | 计数器可能只在部分路径更新 | solo、batch、PP、fallback 的字段一致性 |
+| 客户端 SSE cadence | 客户端探针、服务端 span | chunk 数不等于 token 数 | 主 API 的 token/delta 映射 |
+
+G0 的目标不是“日志看起来很全”，而是产出字段矩阵：
+
+```text
+已直接可观测
+只能从组合信号推断
+当前缺失，需要后续加埋点
+字段存在但不能跨进程/时钟对齐
+```
+
+### 6.3 时钟与请求关联契约
+
+实验记录至少包含：
+
+- host boot ID。
+- owner ID、instance ID、server PID、engine PID、engine launch ID。
+- request/session/turn 稳定 ID。
+- monotonic timestamp 和墙钟 timestamp。
+- profile revision、config hash、model hash、draft hash。
+- engine log offset、server log offset 和采集器实例 ID。
+- Nsight capture start、GPU clock domain 和对应 request ID。
+
+G0 必须实际证明这些字段能对上。没有对齐前，不能用“日志里同一时间附近”推断因果。
+
+### 6.4 症状到第一探针
+
+| 症状 | 先看 | 需要区分 | 禁止结论 |
+| --- | --- | --- | --- |
+| TTFT 高、稳态 decode 正常 | queue、admit、tokenize、prefill chunk、首 token | 准入、缓存恢复、专家 staging、输出封装 | “GPU 慢” |
+| 单路 decode 低 | token/window、window ms、`draft_n`、fallback 原因 | DFlash2/MTP、batch rows、stage bubble、sampler | “MTP 没开”是唯一原因 |
+| NVML 显示 100% 但 SM Issue 低 | SM Active、Issue、Tensor、warps、DRAM | 等待、同步、依赖链、低占用 | “算力已经打满” |
+| SM Issue 与 DRAM 同时高 | per-kernel DRAM 与 bytes/token | 权重或 KV 带宽饱和 | “需要更多并发” |
+| SM Issue 与 DRAM 都低 | warp stall、handoff、copy wait、launch | 依赖、锁、host sync、PP bubble | “可以继续融合 kernel” |
+| PCIe copy wait 高 | 专家 miss、staging bytes、P2P 回退 | CPU expert、host arena、PCIe 饱和 | “NVLink 能解决” |
+| 两路后每路骤降 | row budget、group、draft、邻居变化 | 批路径回退、公平性、CPU 争抢 | “聚合没降就正常” |
+| 长会话重复前缀仍慢 | KV/GDN/QSA/draft 组件命中 | 部分命中、recurrent 重算、checkpoint 太浅 | “prefix cache 命中就应近零” |
+| 200K 冷读拖慢 decode | prefill chunk、专家 staging、PCIe/CPU | 抢占、锁、输出 GIL、page cache | “并发本来就会这样” |
+| 取消后邻居仍慢 | cancellation、drain、staged read、copy engine | 工作未停、槽位泄漏、重试 | “客户端断开就立即停止” |
+| engine 快但 Codex 慢 | tokenize、parser、SSE、client cadence | tool parser 缓冲、GIL、timeout、retry | “服务端已经 200” |
+
+### 6.5 瓶颈判决顺序
+
+所有实验遵循：
+
+```text
+环境与身份一致
+  -> workload 和 sampling 可比
+  -> 先拆请求总时间
+  -> 找主导阶段
+  -> 建该阶段物理预算
+  -> 用最低成本探针排除环境
+  -> 用深探针区分计算、带宽、延迟、同步和调度
+  -> 一次只改一个机制
+  -> A-B-A 验证性能、尾延迟、质量和回滚
+```
+
+每一步都必须写“该探针能回答什么、不能回答什么、失败时保留哪些证据”。
+
+### 6.6 证据保留与噪声边界
+
+- 当前服务器没有其他使用者，所有会话只服务本机开发；本计划不设计脱敏流程。
+- prompt、answer、argv、environment、request body、SSE chunk 和原始 trace 可以原样保留，
+  以便复现请求关联、采样和输出链路问题。
+- 原始账本不删除任何请求；性能统计必须经过 cohort 分类，只纳入 `production`。
+- G0 的 97 条原始请求中，剔除 2 条启动 warmup、3 条短 smoke、6 条固定 400-token 压测，
+  生产 cohort 为 86 条；剔除 ID 和原因必须写入证据文件并可由脚本复算。
+- 所有后续实验在请求开始和结束写入 `cohort=production|warmup|smoke|synthetic|probe|cancel|failure`
+  标记；没有标记的请求不得进入性能比较。
+- 失败、取消和超时保留在可靠性账本，与成功请求的 decode 分布分开报告。
+- engine verify、batch window 和 prompt summary 日志行保留作机制证据，但不计作 HTTP 请求。
+
+---
+
+## 7. 生命周期、唯一控制者与重启契约
+
+### 7.1 唯一控制者
+
+生产只能有一个生命周期裁决者：
+
+```text
+systemd/启动器
+  -> strata runtime owner
+  -> server child
+  -> engine child
+```
+
+- systemd 或等价启动器只负责启动 owner，不直接重启 server/engine。
+- `strata runtime` owner 持有 profile、candidate、last-known-good、argv、cwd、hash 和回滚点。
+- server 只拥有同一个 instance 内的 engine 子进程恢复。
+- 任何手工 kill/restart 都视为违反生产控制契约。
+
+三个恢复层必须职责清晰：
+
+| 层级 | 责任 | 允许动作 | 禁止动作 |
+| --- | --- | --- | --- |
+| L0 request | 单请求失败/断流 | 明确错误、客户端安全重试 | 静默重放非幂等工具调用 |
+| L1 engine | 同 instance 内 engine crash/stuck | 有界重启、清理 orphan slot、记录原因 | 配置/版本错误时无限循环重启 |
+| L2 owner | server 或候选失败 | drain、重启、health/smoke、自动回滚 | 与 server 内部 watchdog 同时争夺控制权 |
+| L3 host | 主机或 systemd 故障 | 启动 owner、审计恢复 | 绕过 owner 直接拉起旧 engine |
+
+### 7.2 Session 与 drain 语义
+
+- drain 开始后拒绝新推理准入，现有请求在时限内完成或明确取消。
+- 流式连接可收到明确 terminal error；不得只断开而不写 finish/error 语义。
+- 工具调用重试必须携带幂等边界；服务端不能假定客户端能安全重放副作用。
+- 同版本 session file 可以在明确成功后恢复；parked snapshot 不跨 restart。
+- session file 与 PP/peer/batch 的兼容性解决前，不宣称“当前多路生产会话可随时重启恢复”。
+
+### 7.3 Restart 事务
+
+```text
+restart plan
+  -> identity/config/hash 复核
+  -> 保存可回滚 launch bytes
+  -> drain
+  -> stop old instance
+  -> start candidate
+  -> process ready
+  -> /health
+  -> engine smoke
+  -> API smoke
+  -> optional session restore
+  -> mark ready
+  -> retire rollback snapshot
+```
+
+失败时：
+
+```text
+stop candidate
+  -> restore last-known-good launch bytes
+  -> start LKG
+  -> health + smoke
+  -> keep service address
+  -> emit audit record
+```
+
+候选和 LKG 不同时加载，因此不要求零停机切换。重启窗口内的新连接可以明确失败，
+但恢复后必须回到同一地址并满足 R-rollback。若将来要求零中断，必须另立 front
+listener/socket activation 项目，不能把 owner restart 说成透明续流。
+
+### 7.4 Smoke 最小集合
+
+- `/health` 报告 loaded 且模型身份正确。
+- 固定短 prompt 生成至少一个 token。
+- stream 模式收到合法 delta 和 finish。
+- 主 Codex API 完成一次合法请求。
+- tool call 或 structured output 至少有一条解析路径。
+- 失败时不影响 LKG 启动和会话文件读取。
+
+---
+
+## 8. 架构门禁
+
+### G0：零停机证据冻结
+
+**目的:** 在任何性能实验、深探针或重启前，确认测的是哪台机器、哪个进程、哪份模型、
+哪套配置、哪种真实 sampling，以及当前观测还能回答什么。
+
+**输出:** `docs/work/evidence/flash-next-runtime-g0-20261030.json`
+
+- [x] **G0-0 只读预检**
+
+运行 `four-questions.py` 和 `probe-version-stamp.py`。确认没有残留构建或探针、服务已加载、
+当前 owner/server/engine PID 和进程树可识别。记录当前 slot、活跃请求、日志位置和
+当前会话是否通过生产 Strata。
+
+首轮结果：`four-questions.py` residual 为空，版本戳无问题，health 20/20；当前实例
+server/engine 进程树和 session scope 已记录。
+
+- [x] **G0-1 冻结硬件与内核**
+
+记录 GPU、显存、compute capability、功耗、温度、NVLink、P2P、PCIe、CPU、socket、
+NUMA、逻辑 CPU、RAM、swap、NVMe、文件系统、kernel、driver 和 CUDA。至少保存：
+
+```text
+nvidia-smi -q
+nvidia-smi topo -m
+nvidia-smi nvlink -s
+nvidia-smi nvlink -c
+nvidia-smi nvlink -e
+lscpu
+numactl -H
+cat /proc/meminfo
+lsblk -o NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINTS
+df -h
+uname -a
+cat /proc/cmdline
+lscpu -e
+cpupower frequency-info
+cat /sys/kernel/mm/transparent_hugepage/enabled
+```
+
+文档中 Xeon E5-2680 v4、28 线程、单 NUMA 与 E5-2673 v4、80 逻辑 CPU 的冲突以本次实测为准。
+同时记录 cgroup、process affinity、IRQ affinity、NUMA policy、memlock/swap、IOMMU/ACS、
+NVIDIA persistence、clock/power limit 和当前温度。
+
+首轮结果：双 RTX 2080 Ti、NV2/P2P、250 W 实际限制、E5-2680 v4 单 NUMA、
+CPU expert 绑定 1-13 和 6.53 GiB available RAM 已写入证据。负载态 SM/Tensor/DRAM
+利用率仍未采集。
+
+- [x] **G0-2 冻结运行时与控制链**
+
+记录 server/engine 可执行路径、argv、cwd、PID、端口、profile revision、config hash、
+模型 pack hash、expert profile hash、draft hash、受控 environment、`/health`、
+`/metrics` 和启动日志。确认：
+
+- 当前是 PP、peer、helper 还是其他模式。
+- 可见设备号和物理设备号。
+- systemd、owner runtime、server 内部 restart 各自是否启用。
+- `/proc/<pid>/environ` 的原样内容；当前专用服务器不执行脱敏。
+- 会话缓存按模型、session 和 request 身份的隔离方式，以及前缀复用的组件一致性。
+
+首轮结果：已冻结 server/engine argv、cwd、可执行文件 hash、配置 hash、模型 pack
+组件 hash、draft hash、expert profile hash、受控环境、PP layer split 和 systemd 漂移。
+当前实例没有 LKG、health/smoke gate 或已验证回滚。
+
+- [x] **G0-3 回放真实会话与字段矩阵**
+
+只读分析现有 engine/service 日志、`/metrics` 请求环和客户端可见记录，按请求形状分组：
+
+```text
+短对话
+长上下文首轮
+长上下文续轮
+长输出
+工具调用
+两路邻居
+取消或断连
+失败和重试
+```
+
+每组记录样本数、prompt/read/reused token、TTFT、prompt/decode 时间、`draft_n`、
+expert/cache 命中、finish reason、异常值和无法归属的字段。同时冻结：
+
+- Codex 实际使用的 API。
+- 实际 sampling 分布。
+- DFlash2 可用率和 MTP 回退原因。
+- request ID、slot、queue 和 engine 窗口能否关联。
+- service/engine/Nsight 时钟能否对齐。
+- 当前 session file 与 PP/peer/batch 的实际兼容性。
+
+首轮结果：97 条原始请求已分类为 11 条噪声和 86 条生产请求；请求形状、时间账、
+两路重叠、零草稿相关性、冷预填、专家缓存、PCIe offload 和字段矩阵已冻结。97 个
+`/metrics` request ID 在 server/engine 文本日志中均无法关联；逐请求 API 路由、实际
+sampling、SSE cadence、batch/stage timeline 和请求期间硬件序列仍缺失。
+
+**G0 当前 Gate: CLOSED。** G0-0 至 G0-3 的零停机首轮冻结已完成，但请求关联和关键
+运行时字段仍不满足性能裁决条件。不得因为 checkbox 完成而进入 G0B。
+
+### G0A：观测闭环
+
+**目的:** 在不重启生产、不发送合成生成负载的前提下，把“能否定位瓶颈”补齐到可裁决状态。
+
+- [ ] server、engine 和客户端使用同一稳定 request/launch ID。
+- [ ] 每个请求记录 API 路由、stream 模式、实际 sampling、cohort 和 finish reason。
+- [ ] 记录 queue、admit、tokenize、prefill、decode、resume、parser、detokenize、SSE 时间。
+- [ ] 补齐 batch window 成员、row budget、draft/fallback 原因和 PP stage in-flight timeline。
+- [ ] 在每个请求期间记录 1 Hz GPU、CPU、RAM、NVLink、PCIe 时间序列，并标出采样开销。
+- [ ] 记录客户端首个和最后一个可见 delta，映射服务端 SSE chunk 到 token/delta。
+- [ ] 把噪声分类、剔除 ID、公式和分位数做成可重复运行的校验脚本。
+- [ ] 冻结当前 launch bytes 和进程状态，形成未来 LKG 的只读快照；不据此宣称已有自动回滚。
+
+**Gate:** request ID 不能跨 server/engine/client 对齐，或 batch/stage timeline 仍缺失时，
+继续关闭 G0B。观测补丁先在隔离构建和测试中验证，不直接部署到当前生产实例。
+
+### G0B：受控基线与恢复演练
+
+只有在服务空闲、当前会话有替代访问、owner runtime 具备 last-known-good，并且回滚路径
+已在隔离环境演练后执行。
+
+- [ ] 冻结单路固定 400-token 基线。
+- [ ] 冻结两路并发和互相恢复。
+- [ ] 冻结 32K/200K 冷预填。
+- [ ] 冻结长工具调用、取消和断连。
+- [ ] 记录 P2 探针自身开销。
+- [ ] 验证 health、engine smoke、API smoke 和 LKG rollback。
+- [ ] 建立第一版 critical-path 账本。
+
+**Gate:** 同一形状基线漂移超过 10% 时停止性能实验，先定位环境。没有自动回滚和会话恢复
+证据，不重启生产。
+
+### G1：物理可行性与 Roofline
+
+**目的:** 在改 DFlash2、batch 或 TP 之前，判断 200 tok/s 和 5000 tok/s prefill 在当前
+硬件、模型、量化和上下文下是否存在机制上可达的路径。
+
+- [ ] 建立 dense、expert、KV、QSA、GDN 和 drafter 的每 token/window 字节表。
+- [ ] 建立 HBM、SM/INT8/Tensor、CPU DRAM、PCIe、NVLink、NVMe 实测上限。
+- [ ] 跑 P2P copy、PP handoff、host copy 和 CPU expert 微基准。
+- [ ] 计算 solo latency floor 和多路 aggregate floor。
+- [ ] 对 4K、32K、200K 分别写 required token/window 和 window budget。
+- [ ] 输出“可达、需要何种机制、物理不可达”的结论。
+
+**Gate:** 物理上无法满足 D1 或 P1 的候选不得进入实现。若所有可行候选都不够，停止并要求
+目标或硬件重新裁决。
+
+### G2：Drafter 与采样机制
+
+- [ ] 单卡比较 MTP、DFlash2 greedy 和 sampling-aware drafter。
+- [ ] 用真实采样参数计算 DFlash2 覆盖率与 MTP 回退率。
+- [ ] 验证每槽 drafter 权重共享、tap/ring 隔离和异步 launch。
+- [ ] 验证 PP stage 放置和 handoff。
+- [ ] 验证 batch 路径的 commit 隔离、取消和恢复。
+- [ ] 写出 token parity、sampling 统计和质量门。
+
+**Gate:** 若 DFlash2 在生产 sampling 下无显著收益，停止把它作为 200 tok/s 的唯一依据，
+转向其他 drafter、MTP 或拓扑机制。
+
+### G3：拓扑与专家放置
+
+- [ ] 比较 PP + MTP、PP + DFlash2、peer experts、helper caches 和 peer + DFlash2。
+- [ ] 决定是否需要 TP2、dense TP2 + expert EP2 或外部运行时原型。
+- [ ] 记录每层消息大小、调用次数、有效带宽、延迟和同步点。
+- [ ] 记录每池 VRAM、host arena、peer cache 和重复预留。
+- [ ] 记录 P2P、host route 和 CPU expert 的实际分流。
+- [ ] 裁决 NCCL/RCCL、现有 P2P 原语或外部运行时。
+
+**Gate:** 没有通信、显存、专家和 roofline 账的拓扑不得进入代码。
+
+### G4：调度、缓存与输出链路
+
+- [ ] 设计 waiting/running、token budget、chunked prefill、decode 让路和抢占。
+- [ ] 验证每路 p10、最大 gap、取消和邻居影响。
+- [ ] 建 full KV、GDN、QSA、draft/tap 的组件化缓存和失效分类。
+- [ ] 解决 session file 与 PP/peer/batch 的不兼容。
+- [ ] 测量 tokenize、structured output、tool parser、detokenize 和 SSE。
+- [ ] 检查 Python GIL、日志锁和 metrics lock 是否进入关键路径。
+- [ ] 验证缓存 COW、部分命中、淘汰、写回、恢复和版本 hash。
+
+**Gate:** 聚合吞吐、每路 p10、TTFT、恢复正确性和输出质量必须同时通过。
+
+### G5：整机可行性裁决
+
+必须形成一份决策表，每行至少包含：
+
+```text
+候选拓扑
+真实 sampling 覆盖率
+solo latency floor
+多路 aggregate floor
+prefill floor
+冷会话恢复
+显存/host/PCIe/NVLink 预算
+质量门
+实现风险和工期
+```
+
+只有某候选能在误差范围内解释 D1、P32/P200、M2/M6、C50/C200 和 R-rollback，才进入代码级
+实施计划。若没有候选成立，停止重构并提交硬件或目标裁决。
+
+---
+
+## 9. 复用边界
+
+重构不等于把所有成熟项目重新实现一遍。复用原则如下：
+
+| 能力 | 优先复用 | Strata 只做什么 |
+| --- | --- | --- |
+| Request scheduler | SGLang 的队列、chunked prefill、prefill delayer、radix cache 设计 | 在现有 C++/Python 边界内实现最小状态机和预算 |
+| Speculative decode | 现有 Strata DFlash2/MTP 库和 vLLM 的 async draft 思路 | 补 sampling-aware、每槽状态、PP/batch 接线 |
+| Tensor/expert 通信 | NCCL/RCCL 或经过验证的 P2P 原语 | 量化布局、stage membership、预算和错误回收 |
+| Session/cache | Strata session、parked、SGLang unified radix 对照 | 解决 full KV/GDN/QSA/draft 的组件语义 |
+| Observability | NVML、Nsight、Prometheus、现有 probes | 统一 request ID、预算账本和判决协议 |
+| Lifecycle | 现有 `strata runtime` owner、systemd 启动器 | 补唯一控制契约、health/smoke 和会话恢复门 |
+
+复用前必须回答：
+
+- 是否支持精确模型、量化、sm_75 和 22 GB 显存。
+- 是否保留 sampling 和输出质量。
+- 通信/调度开销是否已经计入 roofline。
+- 失败是否能被 owner 观察和回滚。
+
+---
+
+## 10. 代码边界与参数策略
+
+### 10.1 后续实现边界
+
+G5 通过前只写计划和证据，不写运行时抽象。之后预期按独立切片实施：
+
+| 阶段 | 范围 | 主要验证 |
+| --- | --- | --- |
+| R1 | 请求状态机、capability profile、统一预算 | 状态转换单测、无 silent fallback |
+| R2 | waiting/running、chunked prefill、公平调度 | 两路/六路、取消、邻居最大 gap |
+| R3 | 选定拓扑、per-slot drafter、PP/handoff | solo/batch/PP parity、roofline |
+| R4 | full KV/GDN/QSA/draft 缓存 | cold/warm restore、hash 和 COW |
+| R5 | owner supervisor、smoke、rollback | LKG、drain、恢复和审计 |
+
+每个阶段先写失败测试或基准，再做最小实现，再做局部验证、全局一致性检查和提交。
+
+### 10.2 允许删除的旧分叉
+
+- `STRATA_BATCH_MTP`
+- `STRATA_PIPED_MTP`
+- `STRATA_BATCH_SELF_COMMIT`
+- `STRATA_PIPED_CONCURRENT`
+- 作为用户能力选择的 `--batch-groups`
+- 关闭 DFlash2、peer、layer split 的临时互斥门，前提是替代机制和测试已存在
+
+只保留资源上限、实验覆盖和硬件事实，不保留“是否存在某项能力”的开关。旧参数兼容解析
+只能存在于一个输入适配层，并打印参数名、替代机制和原因。
+
+---
+
+## 11. 质量、安全与生产门
+
+### 11.1 正确性
+
+- greedy token parity。
+- 固定 seed 的 sampling 统计对比。
+- needle 50% 和 90% 深度。
+- 长工具调用、structured output 和断流续读。
+- DFlash2/MTP fallback parity。
+- full KV、GDN、QSA、draft 组件 hash 和版本一致性。
+
+### 11.2 资源
+
+- 每池 VRAM 独立记账。
+- RSS、available memory、swap、page cache 和 IO。
+- 专家命中、CPU expert、PCIe、NVLink、GPU 空闲时间。
+- 一小时后内存、吞吐和尾延迟不漂移。
+
+### 11.3 生产
+
+- 没有唯一 owner runtime，不切生产。
+- 没有 last-known-good，不重启生产。
+- 没有 health、engine smoke、API smoke 和回滚演练，不宣称可随时重启。
+- 没有 session 兼容性证明，不宣称 in-flight 或多路会话透明恢复。
+- 生产性能统计不得包含 warmup、smoke、固定压测、仪器探针或人工合成负载。
+- 原始 prompt、answer、trace 和完整 environment 可以直接保留；它们只作为证据，不计入生产分布。
+
+---
+
+## 12. 停止条件
+
+- 硬件指纹或基线无法复现：停止性能实验。
+- G1 roofline 证明目标物理不可达：停止实现并要求目标或硬件裁决。
+- 真实 sampling 下 drafter 覆盖率不足且 MTP 无剩余空间：停止 DFlash2 单一路线。
+- PP 通信/串行瓶颈无法解释目标，而 TP2/EP2 成本不可接受：停止拓扑重构。
+- 预填 5000 在可行 chunk/专家布局下仍低于物理上限：提交证据。
+- session file 无法与 PP/peer/batch 保证组件一致：禁止开启会话恢复。
+- OOM、swap 持续增长、输出质量失败或静默降级：立即回滚。
+- 单个候选连续两次没有超过测量噪声：停止该机制，换结构，不重复同形实验。
+- 观测字段无法关联或探针成本超过噪声线：先修观测，不做性能裁决。
+
+---
+
+## 13. 立即下一步
+
+G0-0 至 G0-3 的零停机证据冻结已经完成，G0 Gate 继续关闭。下一步只做 G0A 观测闭环：
+
+1. 在代码和测试中定义稳定 request/launch ID，贯穿 server、engine 和客户端。
+2. 补齐逐请求 API、sampling、cohort、stage timeline、batch window 和 fallback 原因。
+3. 设计请求期间 1 Hz 硬件采样，先测自身开销，再接入隔离构建。
+4. 记录客户端 SSE cadence，并与服务端已提交 token 对齐。
+5. 把 97 条原始请求到 86 条生产 cohort 的分类写成可重复运行的校验。
+6. 为当前 launch bytes、进程和配置建立只读 LKG 快照，但不把快照等同于可回滚。
+
+这些工作先在源码和隔离构建中完成，不发送合成请求、不运行 Nsight/NCU、不加载第二个模型、
+不重启当前生产服务。G0A Gate 通过前不进入 G0B/G1，不改生产 default，不删除生产参数，
+不启用 peer/DFlash2 新组合，不新增 TP2。
