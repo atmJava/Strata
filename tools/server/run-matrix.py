@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 
-DEFAULT_HOST = os.environ.get("MP_HOST", "atm@192.168.3.14")
+DEFAULT_HOST = os.environ.get("MP_HOST", "atm@192.168.9.103")
 DEFAULT_SRC = os.environ.get("V1_SRC", "/opt/ai/src/strata-port-v1")
 DEFAULT_PY = os.environ.get("V1_PY", "/opt/ai/tmp/venv-v0/bin/python")
 
@@ -126,7 +126,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--src", default=DEFAULT_SRC)
     parser.add_argument("--build", default=None)
     parser.add_argument("--py", default=DEFAULT_PY)
-    parser.add_argument("--base-url", default=os.environ.get("MP_BASE_URL", "http://192.168.3.14:8080"))
+    parser.add_argument("--base-url", default=os.environ.get("MP_BASE_URL", "http://192.168.9.103:8080"))
     parser.add_argument("--api-key", default=os.environ.get("MP_API_KEY", "111"))
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--only", default=None)

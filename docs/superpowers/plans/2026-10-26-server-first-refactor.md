@@ -27,7 +27,7 @@ Constraints:
 - Terminal + serve 双轨必须保留且功能不回退；
 - 每个切片一个 commit（fork 惯例：单改动、可单独 rebase），提交信息遵循 AGENTS.md 中文多行规范；
 - 默认行为不变：砍掉的后端不得改变 CUDA/sm_75 路径的产物与运行时行为；
-- 生产服务（192.168.2.223:8080）在阶段 A 期间不重启，除非切片需要上机验证，
+- 生产服务（192.168.9.103:8080）在阶段 A 期间不重启，除非切片需要上机验证，
   且必须先确认回滚快照（/opt/ai/tmp/pre-ctx256k-20261026T075110Z/）可用。
 
 Verification:
@@ -48,7 +48,7 @@ Risks / Unknowns:
 
 ## 2. 事实基线（2026-10-26 实测）
 
-- 服务器：`ubuntu-server`，`atm@192.168.2.223`（无线网卡 wlx 当前地址，2026-10-27 SSH 实测可达；另一地址 `192.168.3.14` 仍可 SSH 到达；`docs/SERVER_HW.md` 的地址条目已于 2026-10-27 按此修正）。
+- 服务器：`ubuntu-server`，`atm@192.168.9.103`（当前无线网卡地址，用户于 2026-10-30 确认；旧地址 `192.168.2.223`、`192.168.3.14` 仅作历史记录）。
 - 2× RTX 2080 Ti 22528 MiB，driver 595.71.05，compute_cap 7.5，power.limit 280 W；NVLink NV2 每卡 2 链路 × 25.781 GB/s。
 - Xeon E5-2680 v4（28 线程、单 NUMA），62 GiB RAM，kernel 7.0.0-38，CUDA 13.0（/usr/local/cuda-13.0）。
 - `strata.service` active；`/health`：loaded=true，model=qwen3.8-flash-next-iq3_xxs-abliterated，max_context=262144。

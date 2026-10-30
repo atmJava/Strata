@@ -4,7 +4,7 @@
 
 ## 生产环境
 
-- 主机：`atm@192.168.3.14`，2× RTX 2080 Ti 22.5 GB，Xeon E5-2680 v4，62 GiB RAM。
+- 主机：`atm@192.168.9.103`，2× RTX 2080 Ti 22.5 GB，Xeon E5-2680 v4，62 GiB RAM。
 - 服务：`strata.service`，端口 8080，API key `111`，仅用于当前实验环境。
 - 当前形态（2026-10-25 V2a 后）：引擎 0.1.49.1（`84a0d410`）、server `b6b695a1`、
   launcher `0eeee160`、config `6c362d01`。

@@ -18,7 +18,7 @@ MP_BASE_URL=http://127.0.0.1:8080 MP_API_KEY=111 python3 -m pytest -v \
 From this repository, over the LAN:
 
 ```sh
-MP_BASE_URL=http://192.168.3.14:8080 MP_API_KEY=111 python3 -m pytest tools/server/tests -v
+MP_BASE_URL=http://192.168.9.103:8080 MP_API_KEY=111 python3 -m pytest tools/server/tests -v
 ```
 
 Environment: `MP_BASE_URL` (default `http://127.0.0.1:8080`), `MP_API_KEY` (default `111`, never hardcoded in a

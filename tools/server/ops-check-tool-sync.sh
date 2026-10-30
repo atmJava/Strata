@@ -5,10 +5,10 @@
 # They drift silently - a scp that half happened, an edit made straight on the box - so every session should be
 # able to answer the question in one command instead of comparing md5s by hand.
 #
-# Usage: ops-check-tool-sync.sh [user@host]        default: atm@192.168.3.14
+# Usage: ops-check-tool-sync.sh [user@host]        default: atm@192.168.9.103
 # Exit: 0 every deployed file matches, 1 drift or a missing deployed file, 2 ssh failed.
 set -u
-HOST=${1:-atm@192.168.3.14}
+HOST=${1:-atm@192.168.9.103}
 SRC=$(cd "$(dirname "$0")" && pwd)
 REMOTE=/opt/ai/bin
 

@@ -60,7 +60,7 @@ def fetch(base_url: str, path: str, api_key: str) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default=os.environ.get("MP_BASE_URL", "http://192.168.3.14:8080"))
+    parser.add_argument("--base-url", default=os.environ.get("MP_BASE_URL", "http://192.168.9.103:8080"))
     parser.add_argument("--api-key", default=os.environ.get("MP_API_KEY", "111"))
     parser.add_argument("--state", default="docs/STATE.md")
     parser.add_argument("--queue", default="docs/WORK_QUEUE.md")

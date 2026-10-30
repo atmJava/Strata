@@ -25,7 +25,7 @@
 
 ## 生产
 
-- `strata.service` 在 `192.168.2.223:8080`，`active/running`、`NRestarts=0`、health 200、
+- `strata.service` 在 `192.168.9.103:8080`，`active/running`、`NRestarts=0`、health 200、
   `loaded=true`（2026-10-28 实测）。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、

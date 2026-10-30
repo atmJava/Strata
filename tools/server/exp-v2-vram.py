@@ -12,7 +12,7 @@ import subprocess
 import sys
 import urllib.request
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://192.168.3.14:8080"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "http://192.168.9.103:8080"
 if not BASE.startswith("http"):
     print(__doc__, file=sys.stderr)
     sys.exit(2)

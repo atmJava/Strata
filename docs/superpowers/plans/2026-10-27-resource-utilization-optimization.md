@@ -465,8 +465,8 @@ python -m py_compile tools/server/ncu-exec.py
 Expected: Linux `3 passed`；Windows `2 passed, 1 skipped`；语法检查 exit 0。
 
 ```sh
-scp tools/server/ncu-exec.py atm@192.168.2.223:/opt/ai/bin/ncu-exec.py
-ssh atm@192.168.2.223 'chmod 755 /opt/ai/bin/ncu-exec.py'
+scp tools/server/ncu-exec.py atm@192.168.9.103:/opt/ai/bin/ncu-exec.py
+ssh atm@192.168.9.103 'chmod 755 /opt/ai/bin/ncu-exec.py'
 ```
 
 Expected: 本地和远端 SHA-256 一致。
@@ -896,8 +896,8 @@ Expected: 启动门全部通过；独立树存在；冻结生产二进制未改�
 # 在本地仓库执行；尖括号中的路径由 decision.json 决定。
 git diff --check
 tar -C . -cf /tmp/strata-util-slice.tar "<selected_file>" "<test_file>"
-scp /tmp/strata-util-slice.tar atm@192.168.2.223:/tmp/strata-util-slice.tar
-ssh atm@192.168.2.223 \
+scp /tmp/strata-util-slice.tar atm@192.168.9.103:/tmp/strata-util-slice.tar
+ssh atm@192.168.9.103 \
   'UTIL=$(cat /tmp/strata-util-source-path); tar -C "$UTIL" -xf /tmp/strata-util-slice.tar'
 ```
 

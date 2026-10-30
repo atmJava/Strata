@@ -2,14 +2,14 @@
 
 > **状态：操作手册（现行）。** 只在服务不可用时使用；日常的安装/回滚入口是 `tools/server/use-config.sh`。
 
-**为什么单列一份**：本 DSH 会话生成的 token 来自 `192.168.3.14:8080` 的 Strata 服务。
+**为什么单列一份**：本 DSH 会话生成的 token 来自 `192.168.9.103:8080` 的 Strata 服务。
 证据：服务日志里出现本会话的行——`writing a tool call: bash: 755 tokens in 14 s (82.0 tok/s) ... expert cache 98.0% hit`。
 所以**动服务 = 动我自己**。这份手册的存在意义是：即使我的会话断了，下一个我还能把自己救回来。
 
 ## 1. 30 秒健康检查
 
 ```sh
-ssh atm@192.168.3.14 'systemctl is-active strata; \
+ssh atm@192.168.9.103 'systemctl is-active strata; \
   nvidia-smi --query-gpu=index,memory.free,temperature.gpu --format=csv,noheader; \
   curl -s -m 5 -o /dev/null -w "http=%{http_code} t=%{time_total}s\n" http://127.0.0.1:8080/health; \
   grep -c "MiB of VRAM free" /opt/ai/src/strata-0.2.2/strata-022.log'
@@ -26,7 +26,7 @@ ssh atm@192.168.3.14 'systemctl is-active strata; \
 
 ## 2. 恢复顺序（从轻到重，一步不行再下一步）
 
-1. 重启：`ssh atm@192.168.3.14 'echo <sudo 密码> | sudo -S systemctl restart strata'`。
+1. 重启：`ssh atm@192.168.9.103 'echo <sudo 密码> | sudo -S systemctl restart strata'`。
    普通用户直接 `systemctl restart` 会被 polkit 挡下（`Failed to restart strata.service: Interactive authentication required`）。
    **实测到可用要 165 s**（unit 起 17:02:39 → `/health` 返回 200 约 17:05:24）。journal 里那个"起 15:41:09 → 引擎起 15:41:29"
    只是 unit 起 → 引擎进程起，**不代表能服务**。所以：**重启 ≈ 3 分钟没有推理**，别在自己正需要 token 的时候随手重启。

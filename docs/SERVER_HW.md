@@ -22,7 +22,7 @@ Facts below were checked on the machine, most on 2026-10-13 (NVLink and driver) 
 
 | | |
 |---|---|
-| Host | `ubuntu-server`, `atm@192.168.2.223`, reached over SSH, no display, Wi-Fi only (no wired port). The box has moved LAN address: `192.168.2.223` is the current wireless address (SSH-checked 2026-10-27), the older `192.168.3.14` still answers SSH too |
+| Host | `ubuntu-server`, `atm@192.168.9.103`, reached over SSH, no display, Wi-Fi only (no wired port). `192.168.9.103` is the current LAN address (user-confirmed 2026-10-30); `192.168.2.223` and `192.168.3.14` are historical addresses |
 | Cards | 2 × RTX 2080 Ti **22 GB** (TU102, `sm_75`); 11 GB is the stock size of this card. Both take a layer split |
 | Link between the cards | NVLink `NV2`: two links per card, 25.781 GB/s each. P2P supported and passing, no replay. Measured 47.05 GB/s against a 51.56 GB/s ceiling (91%) |
 | CPU | Xeon E5-2680 v4, 14 cores / 28 threads, one NUMA node |

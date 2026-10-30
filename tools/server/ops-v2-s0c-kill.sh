@@ -14,8 +14,8 @@
 # It is the window's last step because it costs a restart; recovery beats the budget (RULES §9.6).
 set -u
 
-HOST=atm@192.168.3.14
-BASE=http://192.168.3.14:8080
+HOST=atm@192.168.9.103
+BASE=http://192.168.9.103:8080
 KEY=111
 GO=0
 [ "${1:-}" = "--go" ] && GO=1

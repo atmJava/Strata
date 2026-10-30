@@ -42,7 +42,7 @@ print(json.dumps(out, indent=1))
 '''
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--host", default="atm@192.168.3.14")
+ap.add_argument("--host", default="atm@192.168.9.103")
 opts = ap.parse_args()
 done = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", opts.host,
                        "python3", "-"], input=REMOTE, capture_output=True, text=True, timeout=120)

@@ -17,7 +17,7 @@ import sys
 import time
 import urllib.request
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://192.168.3.14:8080"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "http://192.168.9.103:8080"
 RUNS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 CORPUS = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "/tmp/corpus.md"
 TAG = ""
