@@ -721,7 +721,16 @@ class Host:
         self.probe_deadline = 0.0
         self.probe_key: tuple[int, str] | None = None
         self.probe_result: dict | None = None
+        self.probe_lock = threading.Lock()
+        self.launch_generation = 0
         self.rollback_snapshots: set[Path] = set()
+        self.startup_lkg: dict | None = None
+        self.startup_lkg_error: str | None = None
+        self.startup_fallback_attempted = False
+        self.startup_rollback_lkg: dict | None = None
+        self.startup_rollback_succeeded = False
+        self.startup_resolved = False
+        self.startup_supervisor_active = False
 
     def _mark_child(self, phase: str, *, pid: int | None = None, ready: Path | None = None) -> None:
         payload = {"host_token": self.token, "phase": phase}
@@ -829,11 +838,16 @@ class Host:
     def _launch(self, args: list[str], source: Path, source_bytes: bytes,
                 revision: str | None) -> None:
         ready = self.state_path.parent / f"{self.name}-{uuid.uuid4().hex}.ready.json"
-        self.ready_path = ready
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         log = self.state_path.parent / f"{self.name}.server.log"
+        with self.probe_lock:
+            self.launch_generation += 1
+            launch_generation = self.launch_generation
+            self.ready_path = ready
+            self.probe_key = None
+            self.probe_result = None
         self._mark_child("launching")
         descriptor = os.open(log, flags, 0o600)
         try:
@@ -879,30 +893,77 @@ class Host:
             # this instance. Stop this child immediately instead.
             self._abort_launch()
             raise
-        self.args, self.source, self.source_bytes, self.revision = list(args), source, source_bytes, revision
-        self.expected_attestation = expected_attestation
-        self.last_error = None
-        self.probe_deadline = time.monotonic() + self.probe_timeout
-        self.probe_key = None
-        self.probe_result = None
+        with self.probe_lock:
+            if self.launch_generation != launch_generation:
+                raise ProfileError("concurrent launch changed the owned instance", 6)
+            self.args, self.source, self.source_bytes, self.revision = list(args), source, source_bytes, revision
+            self.expected_attestation = expected_attestation
+            self.last_error = None
+            self.probe_deadline = time.monotonic() + self.probe_timeout
 
     def _verify_ready(self, ready: dict, key: tuple[int, str], host: str, source_bytes: bytes,
-                      expected_attestation: str, timeout: float) -> None:
+                      expected_attestation: str, timeout: float,
+                      launch_generation: int) -> None:
         try:
             result = readiness.verify(ready, source_bytes, expected_host=host,
                                       expected_instance=key[1],
                                       expected_attestation=expected_attestation, timeout=timeout)
-            self._persist_lkg(key[1], result["readiness_state"])
+            with self.probe_lock:
+                if self.launch_generation != launch_generation or self.probe_key != key or \
+                        self.child is None or self.child.poll() is not None:
+                    return
+                self._persist_lkg(key[1], result["readiness_state"])
+                recovering_startup = self.startup_fallback_attempted and not self.startup_resolved
+                self.startup_resolved = True
+                self.startup_rollback_succeeded = recovering_startup
         except readiness.ReadinessError as exc:
             result = {"error": str(exc)}
         except ProfileError:
             result = {"error": "lkg_persist_failed"}
         except Exception:
             result = {"error": "probe_internal_error"}
-        if self.probe_key == key:
-            self.probe_result = result
-            if "error" in result:
-                self.last_error = result["error"]
+        with self.probe_lock:
+            if self.probe_key == key and self.launch_generation == launch_generation:
+                self.probe_result = result
+                if "error" in result:
+                    self.last_error = result["error"]
+
+    def _begin_startup_fallback(self, error: str) -> bool:
+        """Relaunch the saved LKG once after the startup candidate fails."""
+        self.startup_fallback_attempted = True
+        if self.startup_lkg_error is not None:
+            self.last_error = self.startup_lkg_error
+            self.startup_resolved = True
+            return False
+        lkg = self.startup_lkg
+        if lkg is None:
+            self.last_error = error
+            self.startup_resolved = True
+            return False
+        rollback_source: Path | None = None
+        try:
+            rollback_source, rollback_bytes = self._rollback_source(lkg)
+            rollback_args = self._config_args(lkg["server_argv"], rollback_source)
+            self.startup_rollback_lkg = lkg
+            self._launch(rollback_args, rollback_source, rollback_bytes,
+                         lkg["profile_revision"])
+            return True
+        except (OSError, ProfileError) as exc:
+            if rollback_source is not None:
+                self._retire_snapshot(rollback_source)
+            self.last_error = str(exc) if isinstance(exc, ProfileError) else "lkg_fallback_launch_failed"
+            self.startup_resolved = True
+            return False
+
+    def _startup_failure(self) -> str | None:
+        """Name an unresolved startup failure so the owner can fall back exactly once."""
+        if self.startup_resolved:
+            return None
+        if self.child is not None and self.child.poll() is not None:
+            return self.last_error or "server_exited"
+        if self.child is not None and self.probe_result is not None and "error" in self.probe_result:
+            return self.probe_result["error"]
+        return None
 
     def _log_tail(self, limit: int = 4096) -> str | None:
         """The last lines the server wrote (a failed start is explained by them), or None. Bounded read, never raises."""
@@ -924,52 +985,77 @@ class Host:
                 "owner_id": self.owner_id,
                 "child_pid": child.pid if child else None, "profile_revision": self.revision,
                 "shutdown_timeout": self.shutdown_timeout}
+        rollback = {}
+        if self.startup_rollback_succeeded and self.startup_rollback_lkg is not None:
+            rollback = {"rolled_back": True,
+                        "rollback_lkg_source_sha256": self.startup_rollback_lkg["source_sha256"]}
+        recovery_phase = "recovering_last_known_good" if self.startup_fallback_attempted else "candidate_failed"
+        defer_startup_failure = self.startup_supervisor_active and not self.startup_resolved
         if child is None:
             if self.last_error is not None:
+                if defer_startup_failure:
+                    return {**base, "state": "starting", "phase": recovery_phase,
+                            "error": self.last_error}
                 return {**base, "ok": False, "state": "failed", "error": self.last_error, "exit_code": 6}
             return {**base, "state": "stopped"}
         if child.poll() is not None:
             # `exit_code` is Control's own; the server's code also travels under `engine_exit_code`.
+            if defer_startup_failure:
+                return {**base, "state": "starting", "phase": recovery_phase,
+                        "error": self.last_error or "server_exited"}
             return {**base, "ok": False, "state": "failed", "exit_code": child.returncode, "engine_exit_code": child.returncode,
                     "error": self.last_error or "server_exited", "log_tail": self._log_tail()}
         if self.ready_path is not None:
+            ready_path = self.ready_path
             try:
-                ready = json.loads(self.ready_path.read_text(encoding="utf-8"))
+                ready = json.loads(ready_path.read_text(encoding="utf-8"))
                 if _ready_pid_is_child(ready.get("pid"), child.pid) and isinstance(ready.get("instance_id"), str):
                     key = (child.pid, ready["instance_id"])
                     if self.probe_key != key:
-                        self.probe_key, self.probe_result = key, None
-                        host = self.args[self.args.index("--host") + 1]
-                        probe = threading.Thread(
-                            target=self._verify_ready,
-                            args=(ready, key, host, self.source_bytes,
-                                  self.expected_attestation,
-                                  max(0.1, self.probe_deadline - time.monotonic())),
-                            name="strata-generation-probe", daemon=True)
-                        try:
-                            probe.start()
-                        except RuntimeError:
-                            # Readiness probing is auxiliary. A temporary
-                            # process thread limit must not tear down the host
-                            # and the serving child; retry on the next status.
-                            self.probe_key = None
-                            self.probe_result = None
+                        with self.probe_lock:
+                            if self.child is not child or self.ready_path != ready_path:
+                                return {**base, "state": "starting", "phase": "loading"}
+                            if self.probe_key != key:
+                                self.probe_key, self.probe_result = key, None
+                                launch_generation = self.launch_generation
+                                host = self.args[self.args.index("--host") + 1]
+                                probe = threading.Thread(
+                                    target=self._verify_ready,
+                                    args=(ready, key, host, self.source_bytes,
+                                          self.expected_attestation,
+                                          max(0.1, self.probe_deadline - time.monotonic()),
+                                          launch_generation),
+                                    name="strata-generation-probe", daemon=True)
+                                try:
+                                    probe.start()
+                                except RuntimeError:
+                                    # Readiness probing is auxiliary. A temporary
+                                    # process thread limit must not tear down the host
+                                    # and the serving child; retry on the next status.
+                                    self.probe_key = None
+                                    self.probe_result = None
                     if self.probe_result is None:
-                        return {**base, "state": "starting", "phase": "verifying_generation",
+                        phase = recovery_phase if self.startup_fallback_attempted else "verifying_generation"
+                        return {**base, "state": "starting", "phase": phase,
                                 "instance_id": ready["instance_id"]}
                     if "error" in self.probe_result:
+                        if defer_startup_failure:
+                            return {**base, "state": "starting", "phase": recovery_phase,
+                                    "error": self.probe_result["error"],
+                                    "instance_id": ready["instance_id"]}
                         return {**base, "ok": False, "state": "failed", "error": self.probe_result["error"],
                                 "exit_code": 6, "instance_id": ready["instance_id"]}
                     return {**base, "state": "ready", "instance_id": ready["instance_id"],
                             "model_state": ready.get("model_state"),
-                            **self.probe_result}
+                            **self.probe_result, **rollback}
                 if isinstance(ready, dict):
                     # the server published its ready file but it is not the process this host started: say so, so a wait that
                     # ends can name it (before #3683 this looked exactly like a model that was still loading)
                     return {**base, "state": "starting", "phase": "ready_file_not_matched"}
             except (OSError, ValueError):
                 pass
-        return {**base, "state": "starting", "phase": "loading"}
+        phase = recovery_phase if self.startup_fallback_attempted else "loading"
+        return {**base, "state": "starting", "phase": phase}
 
     def _wait_ready(self, timeout: float) -> dict:
         deadline = time.monotonic() + timeout
@@ -1292,6 +1378,7 @@ class Host:
     def serve(self) -> int:
         activity_lease = acquire_activity_lease(shared=True)
         listener = owner_transport.Listener(self.socket_path, timeout=1.0)
+        self.startup_supervisor_active = True
         try:
             bound_address = listener.bind()
             def shutdown(signum, frame):
@@ -1309,16 +1396,36 @@ class Host:
                 if (self.expected_source_sha256 is not None and
                         hashlib.sha256(source_bytes).hexdigest() != self.expected_source_sha256):
                     raise ProfileError("source_changed_after_start_plan", 6)
-                self._launch(args, source, source_bytes, plan["profile_revision"])
             except (ProfileError, OSError) as exc:
                 self.last_error = str(exc) if isinstance(exc, ProfileError) else type(exc).__name__
+                self.startup_resolved = True
+            else:
+                try:
+                    self.startup_lkg = _read_lkg(self.name)
+                except ProfileError as exc:
+                    self.startup_lkg_error = str(exc)
+                try:
+                    self._launch(args, source, source_bytes, plan["profile_revision"])
+                except (ProfileError, OSError) as exc:
+                    launch_error = str(exc) if isinstance(exc, ProfileError) else type(exc).__name__
+                    self.last_error = launch_error
+                    self._begin_startup_fallback(launch_error)
             while self.running:
                 if self.die_with is not None and procs.start_token(self.die_with[0]) != self.die_with[1]:
                     self.running = False         # the process this instance lives for is gone: stop (drained) and leave
                     break
-                if self.probe_result is not None and "error" in self.probe_result and \
-                        self.child is not None and self.child.poll() is None:
-                    self._stop_child()
+                failure = self._startup_failure()
+                if failure is not None:
+                    stopped = self._stop_child()
+                    if not stopped["ok"]:
+                        self.last_error = stopped.get("error") or "candidate_stop_failed"
+                        self.startup_resolved = True
+                    elif self.startup_fallback_attempted:
+                        self.last_error = "lkg_fallback_failed"
+                        self.startup_resolved = True
+                    else:
+                        self._begin_startup_fallback(failure)
+                    continue
                 try:
                     connection = listener.accept()
                 except socket.timeout:

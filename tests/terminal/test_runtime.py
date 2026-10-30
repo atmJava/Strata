@@ -240,6 +240,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(host.probe_key)
         self.assertIsNone(host.probe_result)
 
+    def test_stale_generation_probe_cannot_replace_lkg(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock(pid=987654)
+        child.poll.return_value = None
+        host.child = child
+        host.probe_key = (child.pid, "a" * 32)
+        host.launch_generation = 2
+        verified = {"api_identity_verified": True, "launch_attested": True,
+                    "generation_ready": True, "readiness_state": "generation_ready"}
+        with mock.patch.object(runtime.readiness, "verify", return_value=verified), \
+                mock.patch.object(host, "_persist_lkg") as persist:
+            host._verify_ready({}, host.probe_key, "127.0.0.1", self.config.read_bytes(),
+                               "b" * 64, 10, 1)
+        persist.assert_not_called()
+        self.assertIsNone(host.probe_result)
+
     def test_stop_treats_exit_before_sigterm_as_stopped(self):
         host = runtime.Host("local", shutdown_timeout=2)
         child = mock.Mock()
@@ -707,6 +723,110 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(recovered["source_sha256"], original["source_sha256"])
         self.assertEqual(recovered["verified_instance_id"],
                          original["verified_instance_id"])
+
+    def test_owner_restart_uses_persisted_lkg_when_candidate_fails(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
+        self.assertTrue(runtime.stop("local", timeout=12)["ok"])
+
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            profiles.set_values("local", [f"port={occupied.getsockname()[1]}"])
+            restarted = runtime.start("local", wait=20, shutdown_timeout=2)
+
+        self.assertTrue(restarted["ok"], restarted)
+        self.assertTrue(restarted["rolled_back"])
+        self.assertEqual(restarted["rollback_lkg_source_sha256"],
+                         original["source_sha256"])
+        self.assertEqual(restarted["profile_revision"],
+                         original["profile_revision"])
+        self.assertEqual(runtime.status("local")["instance_id"],
+                         restarted["instance_id"])
+        restored = runtime._read_lkg("local")
+        self.assertEqual(restored["verified_instance_id"],
+                         restarted["instance_id"])
+        self.assertEqual(restored["source_sha256"], original["source_sha256"])
+        profiles.set_values("local", ["port=0"])
+        restarted_again = runtime.restart("local", timeout=20, startup_wait=10)
+        self.assertTrue(restarted_again["ok"], restarted_again)
+        self.assertFalse(restarted_again.get("rolled_back", False))
+        self.assertFalse(runtime.status("local").get("rolled_back", False))
+
+    def test_owner_start_without_lkg_keeps_the_candidate_failure(self):
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            profiles.set_values("local", [f"port={occupied.getsockname()[1]}"])
+            result = runtime.start("local", wait=20, shutdown_timeout=2)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "failed")
+        self.assertFalse(result.get("rolled_back", False))
+        self.assertNotEqual(result["error"], "lkg_invalid")
+
+    def test_owner_start_reports_invalid_lkg_when_candidate_fails(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        self.assertTrue(runtime.stop("local", timeout=12)["ok"])
+        runtime._lkg_path("local").write_text("{", encoding="utf-8")
+
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            profiles.set_values("local", [f"port={occupied.getsockname()[1]}"])
+            result = runtime.start("local", wait=20, shutdown_timeout=2)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "lkg_invalid")
+        self.assertFalse(result.get("rolled_back", False))
+
+    def test_wait_zero_owner_completes_lkg_fallback_in_background(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
+        self.assertTrue(runtime.stop("local", timeout=12)["ok"])
+
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            profiles.set_values("local", [f"port={occupied.getsockname()[1]}"])
+            started = runtime.start("local", wait=0, shutdown_timeout=2)
+            self.assertEqual(started["state"], "starting")
+            deadline = time.monotonic() + 20
+            current = started
+            while time.monotonic() < deadline:
+                current = runtime.status("local")
+                if current.get("state") in ("ready", "failed"):
+                    break
+                time.sleep(0.2)
+        self.assertTrue(current.get("ok"), current)
+        self.assertEqual(current["state"], "ready")
+        self.assertTrue(current["rolled_back"])
+        self.assertEqual(current["rollback_lkg_source_sha256"],
+                         original["source_sha256"])
+
+    def test_cli_owner_start_records_lkg_fallback(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
+        self.assertTrue(runtime.stop("local", timeout=12)["ok"])
+
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            profiles.set_values("local", [f"port={occupied.getsockname()[1]}"])
+            code, result = self._cli("start", "--profile", "local", "--wait", "20",
+                                     "--shutdown-timeout", "2")
+
+        self.assertEqual(code, 0, result)
+        self.assertTrue(result["rolled_back"])
+        record = journal.load("local", result["operation_id"])
+        self.assertEqual(record["kind"], "runtime.start")
+        self.assertTrue(record["result"]["rolled_back"])
+        self.assertEqual(record["result"]["rollback_lkg_source_sha256"],
+                         original["source_sha256"])
 
     def test_cli_stop_plan_pins_the_reviewed_owner_and_instance(self):
         started = runtime.start("local", wait=10, shutdown_timeout=2)

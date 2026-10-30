@@ -2,7 +2,7 @@
   "schema_version": 1,
   "captured_at": "2026-10-30",
   "branch": "hw/server-adapt-0.2.3",
-  "base_commit": "87d73dcd2efa3962f2bd914db373028e8b27fcbf",
+  "base_commit": "9b1919a3a432158298f4d7458d56f37afd3994e2",
   "scope": "Isolated POSIX owner runtime with a fake engine; no production restart or synthetic production generation",
   "implementation": {
     "manifest": "owner-private <runtime>/<profile>.lkg.json",
@@ -21,13 +21,18 @@
       "reuse an unchanged regular source file",
       "materialize an owner-private snapshot when the source changed or disappeared",
       "restore the persisted LKG after candidate failure",
+      "capture the prior LKG before a fresh owner launches its candidate",
+      "fall back once when launch fails, the child exits before ready, or the generation probe fails",
+      "complete the same fallback in the owner background when runtime start uses wait=0",
+      "do not use the startup-only fallback after a candidate reaches ready",
+      "prevent an older generation probe from replacing a newer LKG",
       "record the rollback LKG source digest in the operation journal"
     ]
   },
   "verification": {
     "runtime_suite": {
       "result": "PASS",
-      "summary": "58 passed, 11 subtests passed",
+      "summary": "64 passed, 11 subtests passed",
       "command_environment": "Linux, Python 3.12.3, MP_BASE_URL=http://127.0.0.1:9"
     },
     "lkg_slice": {
@@ -42,9 +47,22 @@
         "a fresh owner runtime process reads the same LKG"
       ]
     },
+    "fresh_owner_startup_fallback": {
+      "result": "PASS",
+      "covered": [
+        "a fresh owner restores the persisted LKG after its candidate exceeds a bound port",
+        "the recovered instance becomes the new verified LKG",
+        "a successful restart after recovery does not retain the old rollback marker",
+        "wait=0 returns starting and the owner completes fallback in the background",
+        "the CLI operation journal records rolled_back and rollback_lkg_source_sha256",
+        "a missing LKG preserves the original candidate failure",
+        "a corrupt LKG is reported as lkg_invalid",
+        "a stale generation probe cannot persist or replace the LKG"
+      ]
+    },
     "terminal_suite": {
       "result": "PASS",
-      "summary": "208 passed, 45 skipped, 93 subtests passed",
+      "summary": "214 passed, 45 skipped, 93 subtests passed",
       "regression_found_and_fixed": "Immediate SIGTERM after ready publication previously exited -2 for delays 0, 0, 0.01, and 0.05 seconds; ready publication and the serving wait now share the same clean-stop scope, and ten immediate-signal repetitions exited 0"
     },
     "serve_lifecycle": {
@@ -68,7 +86,8 @@
     "No production generation load was sent",
     "The LKG is not a signed append-only record; it relies on the owner-only runtime directory",
     "Rollback does not preserve an in-flight HTTP or SSE request",
-    "Owner or systemd restart does not yet automatically start the persisted LKG",
+    "Startup fallback covers a fresh owner candidate that never reaches ready; a candidate that reaches ready and later fails stays outside this path",
+    "A real systemd-level restart and real-model startup recovery have not been exercised",
     "Health, engine smoke, stream smoke, tool smoke, and session restore are not yet one G0B gate"
   ]
 }
