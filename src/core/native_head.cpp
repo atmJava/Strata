@@ -2,6 +2,7 @@
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 #include "strata/platform/memory.hpp"
 
 #include <cuda_runtime.h>
