@@ -614,11 +614,17 @@ prompt 的 overlap 中位为 `28.0%`，但 FP16 全选择一致率只有 `70.920
 实现。final-selection union 只能说明 attention 读取有共享机会，不能用于跳过或近似 indexer
 score/top-k。
 
-### 16.4 QSA-UNION-ATTN（下一步）
+### 16.4 QSA-UNION-ATTN（已完成，否决）
 
 最小候选只合并相邻 query 对已选 K/V cell 的读取，保持每个 query 自己的 selection、softmax
 和输出算术。必须同负载 A-B-A，wall 与 `qsa attn` 稳定同向改善 ≥1%，selection/attention parity、
 needle 和资源门通过；否则回滚并转向 UTIL-NCU。
+
+2026-10-31 已完成一次低风险实验：把三个相邻 query 的独立计算放进同一个 384-thread CTA，
+共享同一 SM cache，而不做 union 排序或跳过读取。编译资源仍为 168 registers/thread、无
+stack/local，输出 hash 不变；但普通选择慢 `20.05%`，`QA_SAME=4` 的完全共享上界仍慢
+`20.75%`。该设计已否决，不进入长请求，也不再重试同形 cache co-residency。细节见
+[`QSA_UNION_ATTN_RESULT-20261031.md`](QSA_UNION_ATTN_RESULT-20261031.md)。
 
 ### 16.5 并发和会话快照
 

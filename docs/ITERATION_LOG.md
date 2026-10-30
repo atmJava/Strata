@@ -3,6 +3,38 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-70 · QSA 三 query 同 CTA 共享缓存慢 20%，按预注册门否决
+
+- 目标 / 指标：实现一个 opt-in、输出精确的相邻 query selected K/V 共享路径；先过 kernel
+  预注册门，只有 wall 与 `qsa attn` 在同冷 150K A-B-A 中稳定同向改善 ≥1% 才采纳。
+- 假设与预期：默认 int8 attention 每个 query 一个 128-thread CTA；把三个相邻 query 放进一个
+  384-thread CTA，可让它们的同 chunk K/V 请求进入同一 SM cache，同时保持每 SM 3 份计算状态、
+  12 个 warp 和每 query 原算术。
+- 审计与预注册：基线 kernel 为 168 registers/thread、19,712 B dynamic shared memory，恰好
+  3 CTA/SM。三 query CTA 也编译为 168 registers/thread、无 stack/local，使用 64,512 registers
+  和 59,136 B shared memory，仍在单 CTA 容量内。契约要求 output hash 不变、不得 spill、kernel
+  至少不慢，任何一项失败便不进入长请求。
+- 改动与实验：只在实验构建中把 v2 int8 kernel 模板化为 1/3 query 同 CTA，三组各自保留原
+  `Smem2T`、online softmax 和 p.v；用 `QA_SAME=4` 提供比真实相邻 query 更强的共享上界。
+  运行默认/分组 parity 和一半交替微基准。
+- 结果：六组 parity 输出 hash 全部相同。普通 selection 的 32K int8 由 `9.716` 升到
+  `11.664 ms`（+20.05%）；`QA_SAME=4` 从 `9.815` 升到 `11.852 ms`（+20.75%）。
+- 判决：**QSA-UNION-ATTN 否决**。连“四个 query 完全同选集”的最好情况都慢 20%，CTA 相位
+  对齐和尾组工作损失大于缓存复用；按契约不消耗 150K cold A-B-A 与重启预算。
+- 恢复：实验源码与候选 engine 分离，只有 `pa_bench`/parity 被重建；源码恢复为 sha256
+  `1d1181f...`，运行中 engine 始终为 `105a4171...`。候选 server/engine PID
+  `491072/491135`、health loaded、无实验 env；生产 systemd 仍 inactive/dead。
+- 验证：Python `294 passed, 56 skipped, 93 subtests passed`；远端 7 个 QSA CTest
+  `7/7 passed`；offscreen preflight PASS。
+- 证据：`/opt/ai/logs/qsa-union-attn-20261030T171808Z/`；contract sha256
+  `d09cef6589200a3986e7af05b50f99f54d9071506ee4cd3f593467a5ffb00b5f`，result sha256
+  `c53c49e3a24319b30a111468db7653b69c9569999ec5db068fb7e5b38ea61700`。台账见 L-097。
+- 学到什么：共享机会本身不等于可兑现收益；同 SM 缓存复用必须同时守住 warp 调度自由度，
+  把独立 CTA 锁进一个 block-wide 相位会放大同步成本。最强重叠合成样本必须先过 kernel 门。
+- 下一步与理由：进入 UTIL-NCU，获取长 prompt 热点 kernel 的 occupancy、issue、Tensor、DRAM
+  和 stall reason。QSA 的两条低风险路线（FP16 scorer、cache co-residency）都已用证据关闭，
+  继续猜内核前先补硬件根因。
+
 ## I-20261031-69 · 150K QSA 诊断：overlap 中位 28%，FP16 一致率 70.92%，只保留候选共享方向
 
 - 目标 / 指标：用一个真实约 150K 冷 prompt，读取 16-query selected-cell union、FP16/FP32

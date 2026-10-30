@@ -70,10 +70,10 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 | P5 96K 相位归因 | M12 | 区分 GPU、host 与固定开销，给下一项实验定目标 | 高 | 低 | **完成**：GPU 主导，host staging 0.341 s |
 | P6 Turing prompt-attention v2 | M12 | 直接替换 `qsa attn` 的 v1 路径，尝试减少 96K 冷读 | 中 | 低，env-only 且可回滚 | **采纳（当前默认）**：L-095 read/wall `+1.814%/+1.905%`，parity 与 needle 均过 |
 | QSA-DIAG | 150K selection 诊断 | 读取 16-query overlap、FP16 一致率、差异 cells 和 select 成本 | 高信息量 | 低；优先只读诊断 | **完成**：overlap 中位 28.0%；FP16 一致率 70.92%，否决；候选复用上界 1.996%，进入最小实现 |
-| QSA-UNION-ATTN | 相邻 query 共享选中 K/V | opt-in 且保持每 query 的 selection/attention 输出；长读 A-B-A 的 wall 与 `qsa attn` 同向改善 ≥1%，质量与资源门通过 | 中 | 中；需要新 kernel 路径和双卡验证 | **下一项**：先用真实 16-query overlap 设计 exact union/cache loader，不改变 top-k |
+| QSA-UNION-ATTN | 相邻 query 共享选中 K/V | opt-in 且保持每 query 的 selection/attention 输出；长读 A-B-A 的 wall 与 `qsa attn` 同向改善 ≥1%，质量与资源门通过 | 已证伪 | 低 | **否决**：三 query 同 CTA parity/资源达标，但普通选择 +20.05%、最强共享 `QA_SAME=4` 仍 +20.75% |
 | P7 Turing FP16 tensor-core prompt experts | M12/M13 | 用 tensor-core prompt experts 攻击最大 `gemm gate/up` 5.807 s | 中 | 低中，输出可能变化 | **搁置**：A1 中断；只有 NCU 证明 Tensor 是直接瓶颈时才恢复 |
 | GPU-UTIL | M13 | 用硬件计数器替代单看 NVML；先验证采集口径，再做内核调优 | 高 | 低；只读、不重启服务 | **完成**：两次 Nsight 双卡 GPU Metrics + NVML 交叉核对可复现 |
-| UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **待做**：先快照再停服，不能附加现役进程 |
+| UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **下一项**：先快照再停服，不能附加现役进程 |
 | UTIL-KERNEL | M13 | 按 NCU 证据只改一个瓶颈内核或调度路径，提高 issue/Tensor/warp 占用并缩短 wall | 高 | 中；需要代码级验证 | **下一代码项**：参数 A/B 仅作部署门，不做参数探索 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
@@ -131,9 +131,11 @@ engine read 改善 `1.814%`、wall 改善 `1.905%`，用户 1% 门复验通过�
 22. **QSA-DIAG 已完成**：真实 150K 冷读的 overlap 中位 28.0%，尾部 37,516 active blocks；
     FP16 全选择一致率 70.92%，半精度 scorer 路线否决。clean `qsa select` 占诊断 GPU timeline
     4.0%，与同几何 scorer/top-k `2.020/0.899 ms` 组合得到候选共享 1.996% 的乐观上界。
-23. **下一项 QSA-UNION-ATTN**：只实现一个 opt-in 的 exact attention-side K/V 共享读取路径，
-    不拿 final-selection union 跳过或近似 indexer score/top-k。必须做同负载 A-B-A，wall 与
-    `qsa attn` 同向、稳定改善 ≥1%；否则回滚并转向 UTIL-NCU。
+23. **QSA-UNION-ATTN 已否决**：三 query 同 CTA 保持 parity、168 registers/thread 和无 spill，
+    但普通选择慢 `20.05%`，`QA_SAME=4` 最强共享上界仍慢 `20.75%`。按预注册内核门停止，
+    不消耗 150K A-B-A，也不重复同形 cache co-residency。
+24. **下一项 UTIL-NCU**：用独立受控 engine 和固定热态采集 SM/occupancy/Tensor/DRAM/stall；
+    先快照、后停服，结束后恢复候选 8080 并核对实际运行环境。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

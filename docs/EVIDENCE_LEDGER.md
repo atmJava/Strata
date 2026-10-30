@@ -3827,3 +3827,65 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-097 QSA-UNION-ATTN：三 query 同 CTA 资源达标且 parity 相同，但最强共享仍慢 20%，否决
+
+**判定**：**QSA-UNION-ATTN 否决。** 该实验让三个相邻 query 的选中 K/V 请求进入同一 SM
+cache，但不做 union、跳过读取或近似。连四个 query 完全同选集的最好情况都慢 `20.75%`，
+因此按预注册 kernel 门停止，不消耗 150K 冷读 A-B-A。
+
+**预注册**：contract sha256
+`d09cef6589200a3986e7af05b50f99f54d9071506ee4cd3f593467a5ffb00b5f`。默认 int8 v2 为
+128-thread CTA、168 registers/thread、19,712 B shared memory，三 CTA/SM 恰好提供 12 warps。
+三 query CTA 的目标是 384 threads、每 SM 一个 CTA、保持同样 12 warps，并用同一 SM 的 L1
+复用 28% selected-cell overlap。若 output hash、资源、launch 或 kernel 速度任一失败，不进入
+真实长请求。
+
+**实现**：实验构建把 v2 int8 kernel 模板化为 1/3 query 同 CTA。三个 128-thread 子组各自
+保有原 `Smem2T` 区域、q.k、online softmax 和 p.v 算术；最终 partial tile 用共同 chunk 数保持
+block barrier 对齐。默认单 query 路径和 dispatch 在实验源码中保留。
+
+**资源**：候选分组 kernel 编译为 168 registers/thread、stack/local 0；384 threads 使用
+64,512 registers，三个共享区域使用 59,136 B shared memory，满足单 CTA 与单 SM 容量。没有
+寄存器 spill，说明回退不是 launch 失败或溢出。
+
+**正确性**：`qsa_prompt_attn_parity 32768 2048 1` 在默认与 `STRATA_PA_GROUP3=1` 下六组
+output hash 全部相同：`7ababa539cff2e15`、`5ae7118dd9780bf0`、`6ebeb597828aee67`、
+`5918107a6e4cb65e`、`dc619269aa998d6a`、`dda4b0037582e0b5`。
+
+**性能**：普通 32K int8 selection 为 `9.716 -> 11.664 ms`，慢 `20.05%`。在
+`QA_SAME=4` 中每组四个 query 选择同一集合，超过真实 28% 共享，仍为
+`9.815 -> 11.852 ms`，慢 `20.75%`。block-wide 相位对齐与尾组工作大于 cache 复用。
+
+**恢复**：源码恢复为 sha256
+`1d1181f6901b223468d309cd37e5492f21c5e508f011167956a6fbfac6affa04`。只重建
+`pa_bench`/`qsa_prompt_attn_parity`，运行中 candidate engine 从未替换，仍为 sha256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。候选
+server/engine PID `491072/491135`、health loaded、无实验 env；生产 systemd 仍
+inactive/dead、`MainPID=0`、`NRestarts=23`。
+
+**验证**：Python `294 passed, 56 skipped, 93 subtests passed`；远端 QSA CTest
+`7/7 passed`；offscreen preflight PASS。
+
+**没测什么**：没有真实 150K A-B-A、自然语言/并发/其他 backend。结论只否决这个同 CTA
+cache-co-residency 设计；其他能提高有效 occupancy 或减少指令数而不锁步多个 query 的机制
+仍需独立证据。
+
+**下一步**：UTIL-NCU。在快照后的独立受控 engine 上采集 32K cold prefill 的 SM throughput、
+occupancy、Tensor、DRAM 和 stall reason；结束后恢复候选 8080，再根据唯一根因开
+UTIL-KERNEL。
+
+**原始证据**：
+
+- `/opt/ai/logs/qsa-union-attn-20261030T171808Z/contract.md`
+  （sha256 `d09cef6589200a3986e7af05b50f99f54d9071506ee4cd3f593467a5ffb00b5f`）
+- `/opt/ai/logs/qsa-union-attn-20261030T171808Z/resource.txt`
+  （sha256 `ca9268fdd9a7ff89a128635f2b6abddc73663f5a6fb428972ecd1f16c7f6867d`）
+- `/opt/ai/logs/qsa-union-attn-20261030T171808Z/parity-default.txt`
+  （sha256 `0e8ebb5a5a0871f220e46b94c26c39665cefbff11452ef2c7e262067234b901a`）
+- `/opt/ai/logs/qsa-union-attn-20261030T171808Z/parity-group3.txt`
+  （sha256 `777866142a63f1ee8bdec8443368e98ee4206ac28defbb2f872dba853107335f`）
+- `/opt/ai/logs/qsa-union-attn-20261030T171808Z/same4-default.txt`
+  （sha256 `2353fe726a04dea9beeab4623f2cce4fcd04e08eb4b279bd3708bc3e95623bf3`）
+- `/opt/ai/logs/qsa-union-attn-20261030T171808Z/same4-group3.txt`
+  （sha256 `1f16d9ea7403eb4f5a1c84a7673959d39a3e22cbc0307df0152dd10ac5c4ff94`）

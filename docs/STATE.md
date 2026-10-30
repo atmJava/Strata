@@ -6,25 +6,29 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：QSA-DIAG 已完成。真实 `150,069` token 冷读中，19 个 chunk 的 16-query selected-cell
-  union 中位为 `28.0%`；FP16 全选择一致率只有 `70.9207%`，否决半精度路线。候选复用通过
-  `1.996%` 的预注册乐观上界，进入下一项 QSA-UNION-ATTN 最小实现。
-- 上一项：P6-1PCT 已完成并通过。当前默认 v2 对 v1 的固定 96K A-B-A 中，engine read
+- 当前项：QSA-UNION-ATTN 已完成并否决。三个相邻 query 同 CTA 的实验保持 parity 和
+  `168 registers/thread`、无 spill，但普通选择慢 `20.05%`，`QA_SAME=4` 最强共享上界仍慢
+  `20.75%`；按预注册 kernel 门停止，未消耗 150K A-B-A 或重启预算。
+- 上一项：QSA-DIAG 已完成。真实 `150,069` token 冷读中，19 个 chunk 的 16-query selected-cell
+  union 中位为 `28.0%`；FP16 全选择一致率只有 `70.9207%`，半精度路线否决。
+- 前一项：P6-1PCT 已完成并通过。当前默认 v2 对 v1 的固定 96K A-B-A 中，engine read
   改善 `1.814%`、wall 改善 `1.905%`，A2 漂移约 1.26%，parity/needle 全过。
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
 - 当前迭代：无运行中实验。attention v2 已是当前默认并完成 1% 门复验；不要再次用
-  `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 路线也已否决。
-- 下一动作：实现一个 opt-in、输出精确的 QSA-UNION-ATTN 路径，让相邻 query 共享选中 K/V
-  的读取，不改变 indexer 的 score/top-k 结果；然后做同负载 A-B-A。
-- 当前候选：QSA-UNION-ATTN，其次是 UTIL-NCU / UTIL-KERNEL。P7 只有证据表明 Tensor 管线是
-  直接瓶颈时才恢复，并仍需完整 A-B-A。
+  `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
+  co-residency 两条 QSA 路线都已否决。
+- 下一动作：进入 UTIL-NCU。先在任何停服/重启前保存并校验快照，用独立受控 engine 独占 GPU，
+  对固定 32K 冷 prefill 采集 SM throughput、occupancy、Tensor、DRAM 和 stall reason；结束后
+  恢复候选 8080 默认配置并核对 health/环境。
+- 当前候选：UTIL-NCU → UTIL-KERNEL。P7 只有 NCU 证据表明 Tensor 管线是直接瓶颈时才恢复，
+  并仍需完整 A-B-A。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
   Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
-- 未完成采纳项：20。
+- 未完成采纳项：19。
 - 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
   该测量路线不阻塞主线。
 
