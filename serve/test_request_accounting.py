@@ -9,7 +9,8 @@ import urllib.request
 from pathlib import Path
 
 from serve.frontend import ChatTemplate
-from serve.server import ByteTokenizer, EngineDied, Service, add_carry, carry_leg, request_timings, serve
+from serve.server import (ByteTokenizer, EngineDied, Service, add_carry, carry_leg, request_cohort,
+                          request_timings, sampling_summary, serve)
 from serve.test_server import ThinkingEngine
 
 
@@ -21,11 +22,13 @@ class ClockedThinkingEngine(ThinkingEngine):
         super().__init__(tok)
         self.attempts = 0
         self.done = []
+        self.request_ids = []
         self.fail_continuation = False
         self.cancel_continuation = False
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.attempts += 1
+        self.request_ids.append(getattr(cancel, "_strata_request_id", None))
         if self.fail_continuation and self.attempts == 2:
             raise EngineDied("the continuation ended without a DONE line")
         first = self.attempts == 1
@@ -41,7 +44,7 @@ class ClockedThinkingEngine(ThinkingEngine):
         finally:
             # The continuation reuses the original prompt plus the generated thinking.
             reused = self.REUSED if first else len(self.prompts[0]) + self.done[0]["generated"]
-            self.last = dict(prompt_tokens=len(ids), generated=generated, reused=reused,
+            self.last = dict(prompt_tokens=len(ids), generated=generated, reused=reused, resume=reused,
                              prompt_read=len(ids) - reused, finish="stop" if stopped else "cancel",
                              prompt_ms=40.0 if first else 7.0, decode_ms=200.0 if first else 80.0,
                              drafts_offered=18 if first else 11, drafts_accepted=8 if first else 7,
@@ -63,7 +66,7 @@ class RequestAccounting(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
 
-    def request(self, path, body=None):
+    def request_with_headers(self, path, body=None):
         req = urllib.request.Request(self.base + path, data=json.dumps(body).encode() if body else None,
                                      headers={"Content-Type": "application/json", "anthropic-version": "2023-06-01"})
         try:
@@ -72,7 +75,11 @@ class RequestAccounting(unittest.TestCase):
             response = error
         with response:
             raw = response.read().decode()
-            return response.status, raw
+            return response.status, raw, response.headers
+
+    def request(self, path, body=None):
+        code, raw, _ = self.request_with_headers(path, body)
+        return code, raw
 
     def chat(self, path="/v1/chat/completions", stream=False, budget=20):
         code, raw = self.request(path, {"model": "m", "messages": [{"role": "user", "content": "2+2?"}],
@@ -125,6 +132,146 @@ class RequestAccounting(unittest.TestCase):
         self.assertEqual(response["choices"][0]["finish_reason"], "stop")
         self.assert_original_input(response["usage"])
         self.assert_request_work(response["timings"], response["usage"]["completion_tokens"])
+
+    def test_response_header_reuses_the_request_ledger_id(self):
+        code, raw, headers = self.request_with_headers("/v1/chat/completions", {
+            "model": "m", "messages": [{"role": "user", "content": "2+2?"}], "max_tokens": 400,
+            "reasoning_budget_tokens": 20})
+        self.assertEqual(code, 200, raw)
+        request_id = headers.get("X-Request-ID")
+        self.assertRegex(request_id or "", r"^[0-9a-f]{12}$")
+        code, raw = self.request("/metrics")
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(raw)["requests"][0]["id"], request_id)
+
+    def test_reasoning_budget_continuations_reuse_the_http_request_id(self):
+        code, raw, headers = self.request_with_headers("/v1/chat/completions", {
+            "model": "m", "messages": [{"role": "user", "content": "2+2?"}], "max_tokens": 400,
+            "reasoning_budget_tokens": 20})
+        self.assertEqual(code, 200, raw)
+        request_id = headers.get("X-Request-ID")
+        self.assertRegex(request_id or "", r"^[0-9a-f]{12}$")
+        self.assertEqual(self.engine.attempts, 2)
+        self.assertEqual(self.engine.request_ids, [request_id, request_id])
+
+    def test_request_ledger_records_route_stream_sampling_and_cohort(self):
+        body = {"model": "m", "messages": [{"role": "user", "content": "2+2?"}],
+                "max_tokens": 400, "temperature": 0.7, "top_p": 0.95, "top_k": 12,
+                "reasoning_budget_tokens": 20, "stream": True}
+        code, raw, headers = self.request_with_headers("/v1/chat/completions", body)
+        self.assertEqual(code, 200, raw)
+        request_id = headers.get("X-Request-ID")
+        row = next(row for row in json.loads(self.request("/metrics")[1])["requests"]
+                   if row["id"] == request_id)
+        self.assertEqual((row["api_route"], row["stream"]), ("/v1/chat/completions", True))
+        self.assertEqual((row["sampling"]["temperature"], row["sampling"]["top_p"],
+                          row["sampling"]["top_k"]), (0.7, 0.95, 12))
+        self.assertEqual(row["cohort"], "short")
+        self.assertIn("short", row["cohort_tags"])
+        self.assertEqual(row["finish"], "stop")
+        phases = row["instrumentation"]["phases_ms"]
+        for name in ("render", "tokenize", "queue", "admit", "prefill", "decode",
+                     "parser", "detokenize", "response"):
+            self.assertIn(name, phases)
+        self.assertEqual(row["resume_tokens"], self.engine.REUSED)
+        self.assertNotIn("_clock", row["instrumentation"])
+
+    def test_batch_and_stage_timeline_are_attached_to_the_request(self):
+        self.engine.batch_trace_for = lambda request_id: {
+            "windows_observed": 2,
+            "windows_retained": 2,
+            "timeline": [
+                {"window": 7, "phase": "start", "group": 0, "active": 1, "rows": 3,
+                 "members": [{"slot": 0, "request_id": request_id, "rows": 3,
+                              "drafts": 2, "draft_reason": "ready"}]},
+                {"window": 7, "phase": "stage", "group": 0, "stage": 0,
+                 "stage_phase": "complete", "elapsed_ms": 2.5,
+                 "members": [{"slot": 0, "request_id": request_id}]},
+            ],
+        }
+        code, raw, headers = self.request_with_headers("/v1/chat/completions", {
+            "model": "m", "messages": [{"role": "user", "content": "2+2?"}], "max_tokens": 400})
+        self.assertEqual(code, 200, raw)
+        request_id = headers.get("X-Request-ID")
+        row = next(row for row in json.loads(self.request("/metrics")[1])["requests"]
+                   if row["id"] == request_id)
+        self.assertEqual((row["batch_windows_observed"], row["batch_windows_retained"]), (2, 2))
+        self.assertEqual(row["batch_timeline"][0]["members"][0]["request_id"], request_id)
+        self.assertEqual(row["stage_timeline"][0]["elapsed_ms"], 2.5)
+
+    def test_stream_request_records_hardware_trace_and_sse_cadence(self):
+        self.svc.telemetry.now = {
+            "cpu": 12.5,
+            "ram_used": 8 << 30,
+            "ram_total": 64 << 30,
+            "gpus": [{"index": 0, "util": 44, "mem_used": 20 << 30, "mem_total": 22 << 30}],
+        }
+        body = {"model": "m", "messages": [{"role": "user", "content": "2+2?"}],
+                "max_tokens": 400, "reasoning_budget_tokens": 20, "stream": True}
+        code, raw, headers = self.request_with_headers("/v1/chat/completions", body)
+        self.assertEqual(code, 200, raw)
+        request_id = headers.get("X-Request-ID")
+        row = next(row for row in json.loads(self.request("/metrics")[1])["requests"]
+                   if row["id"] == request_id)
+        observation = row["instrumentation"]
+        self.assertEqual(observation["id"], request_id)
+        self.assertGreater(observation["duration_ms"], 0)
+        hardware = observation["hardware"]
+        self.assertEqual(hardware["target_interval_s"], 1.0)
+        self.assertGreaterEqual(hardware["sample_count"], 1)
+        self.assertEqual(hardware["samples"][0]["source"], "cached")
+        self.assertEqual(hardware["samples"][0]["gpus"][0]["util"], 44)
+        self.assertFalse(hardware["capabilities"]["nvlink_throughput"]["available"])
+        self.assertIn("reason", hardware["capabilities"]["nvlink_throughput"])
+        sse = observation["sse"]
+        self.assertEqual(sse["measurement_side"], "server_socket_flush_not_client_visible")
+        self.assertFalse(sse["client_visible"])
+        self.assertFalse(sse["client_ack"]["available"])
+        self.assertGreater(sse["data_events"], 0)
+        self.assertGreater(sse["visible_delta_events"], 0)
+        self.assertLessEqual(sse["first_visible_delta_ms"], sse["last_visible_delta_ms"])
+        self.assertGreater(sse["wire_bytes"], 0)
+        visible = [event for event in sse["event_timeline"] if event.get("delta_index")]
+        self.assertTrue(visible)
+        self.assertTrue(all("source" in event for event in visible), visible)
+        self.assertTrue(sse["chunk_to_delta"]["exact"])
+        self.assertTrue(sse["chunk_to_token"]["exact"], sse["chunk_to_token"])
+        self.assertNotIn("_strata_source", raw)
+
+    def test_responses_stream_maps_visible_deltas_to_engine_tokens(self):
+        body = {"model": "m", "input": "2+2?", "max_output_tokens": 400,
+                "reasoning_budget_tokens": 20, "stream": True}
+        code, raw, headers = self.request_with_headers("/v1/responses", body)
+        self.assertEqual(code, 200, raw)
+        request_id = headers.get("X-Request-ID")
+        row = next(row for row in json.loads(self.request("/metrics")[1])["requests"]
+                   if row["id"] == request_id)
+        sse = row["instrumentation"]["sse"]
+        visible = [event for event in sse["event_timeline"] if event.get("delta_index")]
+        self.assertTrue(visible)
+        self.assertTrue(all("source" in event for event in visible), visible)
+        self.assertTrue(sse["chunk_to_token"]["exact"], sse["chunk_to_token"])
+        self.assertNotIn("_strata_source", raw)
+
+    def test_request_cohort_is_explicit_and_multilabel(self):
+        self.assertEqual(request_cohort(1024, 400, False, 100, 0, "stop"),
+                         ("short", ["short"], "first"))
+        self.assertEqual(request_cohort(50000, 8000, True, 5000, 1000, "stop"),
+                         ("tool_call", ["tool_call", "long_context", "long_output", "continued"], "continued"))
+        self.assertEqual(request_cohort(1024, 400, False, 0, 0, "disconnect"),
+                         ("cancel_disconnect", ["cancel_disconnect", "short"], "first"))
+
+    def test_sampling_summary_is_bounded_and_keeps_actual_values(self):
+        summary = sampling_summary({
+            "temperature": 0.7, "top_p": 0.95, "top_k": 12, "min_p": 0.05,
+            "repetition_penalty": 1.1, "frequency_penalty": 0.2, "presence_penalty": 0.1,
+            "penalty_last_n": 64, "seed": 42, "logit_bias": {"1": 3, "2": -2},
+            "allowed_token_ids": [1, 2, 3], "not_sampling": {"large": "x" * 1000}})
+        self.assertEqual(summary["temperature"], 0.7)
+        self.assertEqual(summary["seed"], 42)
+        self.assertEqual(summary["logit_bias_entries"], 2)
+        self.assertEqual(summary["allowed_token_ids"], 3)
+        self.assertNotIn("not_sampling", summary)
 
     def test_openai_stream_keeps_original_cache_and_all_segment_work(self):
         events = self.chat(stream=True)

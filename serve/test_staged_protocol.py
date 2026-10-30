@@ -99,9 +99,13 @@ print(f"INFO engine=0.1.49 batch_slots={slots}", flush=True)
 print("READY 4096 stop", flush=True)
 
 active = {}                    # slot -> [tokens left, max_new, produced]
+slot_request = {}              # slot -> request_id echoed on its BDONE
 stopped = set()                # slots the server BSTOPped
-staged = {"on": False, "left": [], "max_new": 0}     # one staged read at a time (as the engine's main session)
+staged = {"on": False, "left": [], "max_new": 0, "request_id": ""}  # one staged read at a time
 LONG = b"LONGREPLY"
+
+def request_id_of(fields):
+    return next((x.partition("=")[2] for x in fields if x.startswith("request_id=")), "")
 
 def reply(ids):
     # a prompt with LONG streams a long reply (a fill request stays in its slot); every other prompt is short
@@ -122,10 +126,14 @@ def token_list(field):
 
 def window():
     for b in sorted(list(active)):
+        rid = slot_request.get(b, "")
+        rid_txt = f" request_id={rid}" if rid else ""
         if b in stopped:
             produced = active[b][2]
-            print(f"BDONE {b} {produced} cancel 1.0", flush=True)
+            note(f"BDONE_RAW BDONE {b} {produced} cancel 1.0{rid_txt}")
+            print(f"BDONE {b} {produced} cancel 1.0{rid_txt}", flush=True)
             del active[b]
+            slot_request.pop(b, None)
             stopped.discard(b)
             continue
         left, max_new, produced = active[b]
@@ -133,8 +141,10 @@ def window():
         produced += 1
         print(f"BT {b} {t}", flush=True)
         if t == 257 or produced >= max_new:
-            print(f"BDONE {b} {produced} {'stop' if t == 257 else 'length'} 1.0", flush=True)
+            note(f"BDONE_RAW BDONE {b} {produced} {'stop' if t == 257 else 'length'} 1.0{rid_txt}")
+            print(f"BDONE {b} {produced} {'stop' if t == 257 else 'length'} 1.0{rid_txt}", flush=True)
             del active[b]
+            slot_request.pop(b, None)
         else:
             active[b] = [left, max_new, produced]
 
@@ -184,7 +194,7 @@ while True:
         toks = reply(ids)
         cont = mn > 1 and len(toks) > 1 and toks[0] != 257
         print(f"T {toks[0]}", flush=True)
-        staged.update(on=True, left=list(toks[1:]), max_new=mn)
+        staged.update(on=True, left=list(toks[1:]), max_new=mn, request_id=request_id_of(f[2:-1]))
         brdy = f"BRDY {len(ids)} {mn} {1 if cont else 0}"
         print(brdy, flush=True)
         note("BRDY_RAW " + brdy)
@@ -214,6 +224,7 @@ while True:
             print("ERR BADOPT: slot busy", flush=True)
             continue
         active[slot] = [list(staged["left"]), staged["max_new"], 1]
+        slot_request[slot] = staged["request_id"]
         staged["on"] = False
         note(f"BADOPT_OK slot={slot}")
         print(f"BADM {slot} 1", flush=True)
@@ -264,6 +275,7 @@ while True:
         toks = reply(ids)
         print(f"T {toks[0]}", flush=True)
         active[slot] = [list(toks[1:]), mn, 1]
+        slot_request[slot] = request_id_of(f[3:-1])
         print(f"BADM {slot} 1", flush=True)
         note(f"BGEN_OK slot={slot} max_new={mn} prompt={len(ids)}")
         continue
@@ -296,7 +308,9 @@ while True:
             if t == 257:
                 break
         fin = "stop" if out and toks[out - 1] == 257 else ("cancel" if stop.is_set() else "length")
-        print(f"DONE {out} 0 0 0 {fin} 0 0 0", flush=True)
+        rid = request_id_of(f[2:-1])
+        rid_txt = f" request_id={rid}" if rid else ""
+        print(f"DONE {out} 0 0 0 {fin} 0 0 0{rid_txt}", flush=True)
         note(f"GEN_DONE out={out} finish={fin}")
         continue
     if line:
@@ -360,9 +374,11 @@ class FakeEngineCase(unittest.TestCase):
             time.sleep(0.02)
         self.fail(msg + (f" (now: {snapshot()!r})" if snapshot is not None else ""))
 
-    def start_run(self, svc: Service, ids, max_new: int = 200, sampling=None):
+    def start_run(self, svc: Service, ids, max_new: int = 200, sampling=None, request_id=None):
         box = {"result": None, "error": None}
         cancel = threading.Event()
+        if request_id is not None:
+            setattr(cancel, "_strata_request_id", request_id)
         done = threading.Event()
 
         def go():
@@ -428,11 +444,11 @@ class FakeEngineCase(unittest.TestCase):
         self.assertTrue(box.get("result"), f"{label} must stream something")
         self.assertEqual(box["result"][-1][0], "done", f"{label} must end with a done event: {box['result'][-1]!r}")
 
-    def start_staged(self, svc: Service, ids, max_new: int = 200, sampling=None):
+    def start_staged(self, svc: Service, ids, max_new: int = 200, sampling=None, request_id=None):
         """Start a request that must take the staged path (BREAD), and leave the low threshold before returning."""
         before = self.log_count("BREAD_RAW")
         with mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ_MIN_TOKENS": "1"}):
-            run = self.start_run(svc, ids, max_new, sampling)
+            run = self.start_run(svc, ids, max_new, sampling, request_id)
             self.wait_until(lambda: self.log_count("BREAD_RAW") > before or run["done"].is_set(),
                             "the request must take the staged path (send BREAD)", 10.0)
         return run
@@ -512,7 +528,7 @@ class StagedProtocol(FakeEngineCase):
         fills = self.fill_slots(svc)
         ids = list(b"staged protocol fields")
         run = self.start_staged(svc, ids, max_new=8,
-                                sampling={"temperature": 0.7, "top_p": 0.95})
+                                sampling={"temperature": 0.7, "top_p": 0.95}, request_id="stage123")
         # BRDY reached the server and was parsed as ("brdy", n, max_new, cont) while the read waits for a slot
         self.wait_until(lambda: self.log_count("BRDY_SENT") == 1, "the engine must answer BRDY", 10.0)
         self.wait_until(lambda: e._ctl_result is not None and e._ctl_result[0] == "brdy",
@@ -541,6 +557,7 @@ class StagedProtocol(FakeEngineCase):
                         f"every field between max_new and the tokens is key=value: {keys!r}")
         self.assertIn("temperature=0.7", keys, f"the request's temperature is sent: {keys!r}")
         self.assertIn("top_p=0.95", keys, f"the request's top_p is sent: {keys!r}")
+        self.assertIn("request_id=stage123", keys, f"the request's correlation ID is sent: {keys!r}")
         # free the slots: the staged read must be adopted with BADOPT <slot>, not read again
         for _, cancel in fills:
             cancel.set()
@@ -549,6 +566,9 @@ class StagedProtocol(FakeEngineCase):
         self.assertTrue(run["done"].wait(15.0), "the adopted request must finish")
         self.assert_request_ok(run["box"], "the staged request")
         self.assert_no_protocol_error()
+        self.assertTrue(any(line.startswith("BDONE_RAW ") and line.endswith("request_id=stage123")
+                            for line in self.log_text().splitlines()),
+                        "the adopted slot's BDONE must echo the staged request's ID")
         badopt = [line for line in self.log_text().splitlines() if line.startswith("BADOPT_RAW ")]
         self.assertEqual(len(badopt), 1, f"exactly one BADOPT expected, got {badopt!r}")
         m = re.fullmatch(r"BADOPT_RAW BADOPT (\d+)", badopt[0])
@@ -704,8 +724,8 @@ class StagedProtocol(FakeEngineCase):
         # the drain's 300 s default would make this case five minutes: shorten only that wait, not the logic
         drain = e._drain_control
 
-        def fast_drain(until, timeout=300.0, born=None):
-            return drain(until, timeout=1.0, born=born)
+        def fast_drain(until, timeout=300.0, born=None, cancel=None):
+            return drain(until, timeout=1.0, born=born, cancel=cancel)
         e._drain_control = fast_drain
         run = self.start_staged(svc, list(b"a read whose cancel is not answered"), max_new=1)
         self.assertTrue(run["done"].wait(10.0), "the request must end although BCANCELLED never came")

@@ -792,17 +792,42 @@ sampling、SSE cadence、batch/stage timeline 和请求期间硬件序列仍缺�
 
 **目的:** 在不重启生产、不发送合成生成负载的前提下，把“能否定位瓶颈”补齐到可裁决状态。
 
-- [ ] server、engine 和客户端使用同一稳定 request/launch ID。
-- [ ] 每个请求记录 API 路由、stream 模式、实际 sampling、cohort 和 finish reason。
-- [ ] 记录 queue、admit、tokenize、prefill、decode、resume、parser、detokenize、SSE 时间。
-- [ ] 补齐 batch window 成员、row budget、draft/fallback 原因和 PP stage in-flight timeline。
-- [ ] 在每个请求期间记录 1 Hz GPU、CPU、RAM、NVLink、PCIe 时间序列，并标出采样开销。
-- [ ] 记录客户端首个和最后一个可见 delta，映射服务端 SSE chunk 到 token/delta。
-- [ ] 把噪声分类、剔除 ID、公式和分位数做成可重复运行的校验脚本。
-- [ ] 冻结当前 launch bytes 和进程状态，形成未来 LKG 的只读快照；不据此宣称已有自动回滚。
+- [x] server、engine 和客户端使用同一稳定 request/launch ID。HTTP exchange、request ledger、
+  engine 的 `DONE`/`BDONE` 和客户端探针共用 `X-Request-ID`；协议 fake 测试与隔离编译通过。
+- [x] 每个请求记录 API 路由、stream 模式、实际 sampling、cohort 和 finish reason。
+- [x] 记录 queue、admit、tokenize、prefill、decode、resume、parser、detokenize、SSE 时间。
+- [x] 补齐 batch window 成员、row budget、draft/fallback 原因和 PP stage in-flight timeline。
+  parser、request ledger 关联和 C++ 输出路径已测试或编译；尚无真实模型的隔离运行样本。
+- [x] 在每个请求期间记录 1 Hz GPU、CPU、RAM、NVLink、PCIe 时间序列，并标出采样开销。
+  NVLink 字节计数在当前 NVML/驱动/卡组合上明确报告 `nvml_not_supported`，缺失值保持 null。
+- [x] 记录客户端首个和最后一个可见 delta，映射服务端 SSE chunk 到 token/delta。
+  `tools/server/probe-client-sse.py` 已通过 OpenAI、Responses、Anthropic 三种真实 HTTP SSE
+  隔离测试；测量边界是客户端 HTTP 读取，不是应用渲染，也没有伪造应用层 ACK。
+- [x] 把噪声分类、剔除 ID、公式和分位数做成可重复运行的校验脚本。
+- [x] 冻结当前 launch bytes 和进程状态，形成未来 LKG 的只读快照；不据此宣称已有自动回滚。
 
 **Gate:** request ID 不能跨 server/engine/client 对齐，或 batch/stage timeline 仍缺失时，
 继续关闭 G0B。观测补丁先在隔离构建和测试中验证，不直接部署到当前生产实例。
+
+**G0A 执行结果（2026-10-30）：** 实现与隔离验证完成，证据见
+`docs/work/evidence/flash-next-runtime-g0-20261030.json`。隔离 C++ 构建、链接和
+`strata --help` 成功；`batch_telemetry_test`、`batch_groups_test`、`batch_rows_test`、
+`message_boundary_test`（21 checks）和 `controller_test` 通过。Python 按真实套件分组验证：
+`serve` 为 `1050 passed, 11 skipped, 10866 subtests passed`；Terminal、server tools 和
+G0 审计为 `304 passed, 55 skipped, 93 subtests passed`，黑盒目标固定为不可达的
+`127.0.0.1:9`；G0A/探针专项为 `26 passed` 和 `15 passed`。`tools/g0_audit.py audit`
+复算 97 条原始请求、11 条噪声和 86 条生产请求，结果 PASS。根目录直接 `pytest -q`
+不是有效全仓套件：它会采集人工脚本及缺少 torch/Windows DLL 的测试并产生 11 个
+collection errors，因此不能写成“全仓 pytest 通过”。
+但新二进制尚未在真实模型上执行一次 request ID/BTRACE 协议演练，也未部署到生产，因此：
+
+- G0A 实现 Gate：PASS（仅限隔离构建和 fake/unit/HTTP 测试）。
+- 生产观测 Gate：CLOSED（生产实例仍运行旧代码，不能把设计能力当作现网实测）。
+- G0B：不启动。当前没有替代访问、已验证 LKG、自动回滚和生产 owner runtime。
+
+下一安全检查点是“隔离原生协议演练”：只有在不挤占当前生产显存、不重启生产且能记录完整
+`X-Request-ID -> DONE/BDONE -> BTRACE` 链时执行。若硬件条件不成立，就保持 Gate 关闭，
+先完成 owner runtime、LKG 和回滚演练，不重复重启生产来换一次不可复核的观测。
 
 ### G0B：受控基线与恢复演练
 

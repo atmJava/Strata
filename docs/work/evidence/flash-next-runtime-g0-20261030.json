@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
   "evidence_id": "flash-next-runtime-g0-20261030",
-  "status": "partial_pass_g0_gate_closed",
+  "status": "partial_pass_g0_gate_closed_g0a_instrumented",
   "collected_at_utc": "2026-10-30T06:39:45Z",
+  "g0a_updated_at_utc": "2026-10-30T08:32:55Z",
   "scope": {
     "objective": "冻结 Qwen3.8-Flash-Next 在双 RTX 2080 Ti 上的当前生产运行身份、硬件环境、真实请求形状、控制链和可观测边界。",
     "non_goals": [
@@ -597,7 +598,7 @@
         "p10": 0.69,
         "p50": 2.02,
         "p90": 7.84,
-        "p99": 60.17,
+        "p99": 60.18,
         "max": 100.86
       },
       "engine_reported_decode_tok_s": {
@@ -846,6 +847,163 @@
       "engine 日志的 batch 行无法绑定到单个 HTTP request",
       "server/engine/Nsight 没有共同的 request launch id 和可证明的时钟域"
     ]
+  },
+  "g0a_observability": {
+    "status": "implemented_and_validated_in_isolation_not_deployed",
+    "repo_head": "9bfa8d7186646ec42d2eaa50c33406aba7f1126e",
+    "production_changed": false,
+    "production_restarted": false,
+    "synthetic_load_on_production": false,
+    "request_correlation": {
+      "client": "client SSE probe reads X-Request-ID from the HTTP response",
+      "server": "the same ID is used by request accounting, terminal events and instrumentation",
+      "engine": "the server sends request_id=<id>; generated DONE/BDONE lines echo the same value",
+      "batch_trace": "BTRACE START/STAGE members carry slot and request_id",
+      "validated_by": [
+        "server request accounting tests",
+        "fake engine DONE/BDONE request-id tests",
+        "real local HTTP SSE client probe for OpenAI, Responses and Anthropic routes",
+        "isolated C++ compile and link"
+      ],
+      "not_yet_validated": [
+        "no request through the newly compiled binary on the real Flash-Next model",
+        "no deployed production request carrying the new request-id and BTRACE fields"
+      ]
+    },
+    "batch_and_stage_trace": {
+      "engine_fields": [
+        "BTRACE START group active rows pipeline draft_mode members",
+        "BTRACE STAGE group stage phase elapsed_ms members",
+        "BDONE request_id"
+      ],
+      "request_ledger_fields": [
+        "batch_windows_observed",
+        "batch_windows_retained",
+        "batch_timeline",
+        "stage_timeline"
+      ],
+      "member_fields": [
+        "slot",
+        "request_id",
+        "rows",
+        "drafts",
+        "draft_reason"
+      ],
+      "native_runtime_sample": false
+    },
+    "hardware_timing": {
+      "target_interval_s": 1.0,
+      "request_trace_max_samples": 600,
+      "decimation_preserves_lifetime": true,
+      "fields": [
+        "GPU utilization",
+        "GPU memory",
+        "GPU temperature",
+        "GPU power",
+        "GPU PCIe receive/transmit throughput",
+        "CPU utilization",
+        "RAM used/total",
+        "NVLink receive/transmit throughput when supported",
+        "disk read/write throughput",
+        "sampling overhead milliseconds"
+      ],
+      "nvlink_throughput": {
+        "gpu0": "unavailable: nvml_not_supported",
+        "gpu1": "unavailable: nvml_not_supported",
+        "api": "nvmlDeviceGetFieldValues with NVLINK_DATA_RX/NVLINK_DATA_TX cumulative KiB counters",
+        "interpretation": "NVML error 3 on this driver/card combination; values are null rather than fabricated zeroes"
+      },
+      "pcie_throughput_source": "NVML PCIe throughput counters"
+    },
+    "client_sse_probe": {
+      "tool": "tools/server/probe-client-sse.py",
+      "measurement_side": "client_http_read_not_render",
+      "client_received": true,
+      "client_rendered": false,
+      "client_ack_available": false,
+      "protocols_tested": [
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/v1/messages"
+      ],
+      "join_basis": "one client SSE data frame and one server API delta share delta_index",
+      "reported_fields": [
+        "client first/last visible delta milliseconds",
+        "server first/last visible delta milliseconds",
+        "client/server visible delta counts",
+        "first/last mapped engine token index and token ID",
+        "missing engine source indexes",
+        "timeline truncation"
+      ],
+      "clock_rule": "elapsed values remain in separate client/server process clocks; counts, order and delta_index are the cross-process join",
+      "result": "3 real local HTTP SSE protocol tests passed with exact retained mapping"
+    },
+    "audit_tooling": {
+      "tool": "tools/g0_audit.py",
+      "modes": [
+        "capture /metrics?requests=all without sending a generation request",
+        "audit noise rules, excluded IDs, aggregates and percentiles"
+      ],
+      "tests": "4 passed"
+    },
+    "validation": {
+      "isolated_source": "/tmp/strata-g0a-20261030151231-v2",
+      "isolated_build_dir": "build75-g0a2",
+      "cmake_cuda": "13.0",
+      "cuda_architecture": "sm_75",
+      "generator": "Ninja",
+      "compile_jobs": 4,
+      "engine_compile_and_link": "pass",
+      "engine_help": "pass",
+      "native_protocol_tests": {
+        "batch_telemetry_test": "pass",
+        "batch_groups_test": "pass",
+        "batch_rows_test": "pass",
+        "message_boundary_test": "pass (21 checks)",
+        "controller_test": "pass"
+      },
+      "serve_regression": {
+        "result": "pass",
+        "tests": "1050 passed, 11 skipped, 10866 subtests passed",
+        "duration_s": 430.46
+      },
+      "terminal_server_tools_g0_regression": {
+        "result": "pass",
+        "tests": "304 passed, 55 skipped, 93 subtests passed",
+        "duration_s": 154.78,
+        "blackbox_base_url": "http://127.0.0.1:9"
+      },
+      "root_pytest_collection": {
+        "result": "not_a_valid_full_suite",
+        "collection_errors": 11,
+        "reason": "the repository root also collects manual scripts and tests that require torch or Windows DLLs"
+      },
+      "g0a_unittest_suite": {
+        "result": "pass",
+        "tests": 26,
+        "duration_s": 12.385
+      },
+      "probe_pytest_suite": {
+        "result": "pass",
+        "tests": 15,
+        "duration_s": 2.9
+      },
+      "g0_audit": {
+        "result": "pass",
+        "raw_requests": 97,
+        "noise_requests": 11,
+        "production_requests": 86
+      },
+      "diff_check": "pass; only existing CRLF conversion notices",
+      "python_compile": "pass"
+    },
+    "gate": {
+      "implementation": "pass_in_isolation",
+      "production_observability": "closed",
+      "reason": "the instrumented engine/server are not deployed and the new binary has not completed a real-model protocol run",
+      "g0b_allowed": false,
+      "next_safe_checkpoint": "run an isolated native X-Request-ID -> DONE/BDONE -> BTRACE drill only when it fits beside production without restarting or evicting it"
+    }
   },
   "confirmed_findings": [
     "当前生产实例不是 strata.service 管理的实例；它是 PPID=1、位于 closing login-session scope 的手工/残留实例。",

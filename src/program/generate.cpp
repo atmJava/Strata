@@ -10829,13 +10829,27 @@ int main(int argc, char** argv) {
                     slots_all += remote_experts[(size_t) r].resident();
                     mib_all += (int64_t) (remote_experts[(size_t) r].gib() * 1024.0);
                 }
+            const char* launch_id = std::getenv("STRATA_ENGINE_LAUNCH_ID");
+            std::string launch_txt;
+            if (launch_id != nullptr) {
+                const size_t launch_len = std::strlen(launch_id);
+                bool launch_ok = launch_len > 0 && launch_len <= 128;
+                for (size_t i = 0; launch_ok && i < launch_len; ++i) {
+                    const unsigned char ch = static_cast<unsigned char>(launch_id[i]);
+                    launch_ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                                (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-';
+                }
+                if (launch_ok)
+                    launch_txt = std::string(" engine_launch_id=") + launch_id;
+            }
             std::printf("INFO logit_bias=1 context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld "
                         "expert_slots_primary=%lld expert_cache_primary_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f conversation_cache_mib=%lld conversation_cache_slots=%d "
                         "conversation_cache_min_free_mib=%lld conversation_cache_min_tokens=%lld "
                         "tail_role_token=%lld vram_elastic=%d "
-                        "prefill_cap=%lld prefill_stages=%d stream_all_min=%lld prefill_pipe=%g%s engine=" STRATA_VERSION "\n",
+                        "prefill_cap=%lld prefill_stages=%d stream_all_min=%lld prefill_pipe=%g%s engine=" STRATA_VERSION
+                        "%s\n",
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1
                                          ? ss.qsa_states[ss.qsa_primary()].n_slots * 4 : 0),
@@ -10855,7 +10869,8 @@ int main(int argc, char** argv) {
                         strata::prefill::Prefill::pipe_setting(),
                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
-                                       " batch_groups=" + std::to_string(o.batch_groups)).c_str() : "");
+                                       " batch_groups=" + std::to_string(o.batch_groups)).c_str() : "",
+                        launch_txt.c_str());
         }
         // issue #29: a request whose heartbeat (tokens, prompt chunks, verify windows) stops for this long is stuck on
         // a flag nobody will raise - end the engine with where it was, so the server starts it again instead of the
@@ -11071,6 +11086,7 @@ int main(int argc, char** argv) {
         // ---- --batch: the slots of the batch windows
         struct BSlot {
             bool active = false, stop = false;
+            std::string request_id;        ///< the server's correlation ID for this admission
             int32_t x = 0;                 ///< the token the next window feeds (not yet in the slot's state)
             std::array<int32_t, strata::kernels::kVerifyMaxT> draft{}; ///< the slot's next MTP proposal
             bool draft_ready = false;
@@ -11103,6 +11119,7 @@ int main(int argc, char** argv) {
         double bt_wait0 = 0, bt_pool0 = 0;
         int64_t bt_miss0 = 0, bt_hits0 = 0, bt_pcie0 = 0;
         int64_t bt_windows = 0, bt_rows = 0, bt_tokens = 0, bt_accepted = 0;   // bt_accepted: --batch-mtp proposals taken
+        int64_t bt_trace_seq = 0;
         int64_t pipe_rows = 0;   // the pipelined groups' rows, never reset (bt_rows restarts when the slots go idle)
         // per stage (0 = CUDA0's verifier): the GPU-reach wait and pool time when the timed windows began; and the routed
         // (token, expert) entries the CPU and the PCIe share had served by then (bt_hits0 holds the VRAM entries)
@@ -11138,6 +11155,7 @@ int main(int argc, char** argv) {
         bool staged_read = false;
         struct StagedAdmit {
             bool pending = false;
+            std::string request_id;
             std::vector<int32_t> live;
             std::vector<ImgKey> imgs;
             strata::kernels::SamplerParams sp;
@@ -11151,6 +11169,9 @@ int main(int argc, char** argv) {
             return staged_v && *staged_v && std::strcmp(staged_v, "0") != 0;   // =0 disables, unlike a bare getenv
         }();
         auto batch_on = [&] { for (const BSlot& b : bs) if (b.active) return true; return false; };
+        auto bdone_request_suffix = [](const BSlot& sl) {
+            return sl.request_id.empty() ? std::string() : " request_id=" + sl.request_id;
+        };
         auto try_next_line = [&](std::string& out) -> bool {
             std::lock_guard<std::mutex> lk(in_mu);
             if (in_lines.empty()) return false;
@@ -11470,7 +11491,8 @@ int main(int argc, char** argv) {
                                          "(BDONE nonfinite) and the next request reads its prompt from token 0\n", b,
                                  (long long) pos[first[t]]);
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                    std::printf("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms);
+                    std::printf("BDONE %d %lld nonfinite %.1f%s\n", b, (long long) sl.produced, ms,
+                                bdone_request_suffix(sl).c_str());
                     sl.active = false;
                     sl.cached = false;
                     sl.checks.clear();
@@ -11487,7 +11509,8 @@ int main(int argc, char** argv) {
                                     : sl.p + 2 > o.max_context ? "length" : nullptr;
                     if (fin != nullptr) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                        std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms);
+                        std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, fin, ms,
+                                    bdone_request_suffix(sl).c_str());
                         sl.active = false;
                         sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
                         break;
@@ -11604,6 +11627,7 @@ int main(int argc, char** argv) {
         }
         struct PGroup {
             bool inflight = false;
+            int group_id = 0;               ///< fixed group index for BTRACE across all of its stages
             int stage = 0;                  ///< the stage it runs on or waits for
             int32_t tok[strata::kernels::kVerifyMaxT] = {};
             int64_t pos[strata::kernels::kVerifyMaxT] = {};
@@ -11611,6 +11635,8 @@ int main(int argc, char** argv) {
             int S = 0;                      ///< slots in its window: up to its last active one (idle ones cost rows)
             int active = 0;                  ///< live slots at launch; S can also include idle padding rows
             Clock::time_point started;       ///< the group window's first stage launch
+            Clock::time_point stage_started[16]; ///< host launch time of each pipelined stage
+            int64_t trace_id = 0;            ///< opt-in BTRACE window identifier
             // STRATA_PIPED_MTP (pmtp): S counts ROWS - each of the group's slots' token, then that slot's proposals - at
             // hand-off rows [hbase, hbase + S)
             int rows[strata::kernels::kVerifyMaxT] = {};
@@ -11623,6 +11649,60 @@ int main(int argc, char** argv) {
         auto group_active = [&](int gi) {
             for (int t = 0; t < GS; ++t) if (bs[(size_t) (gi * GS + t)].active) return true;
             return false;
+        };
+        auto trace_members = [&](const PGroup& G) {
+            std::string members;
+            const int first_slot = G.group_id * GS;
+            const int last_slot = std::min((int) bs.size(), first_slot + GS);
+            for (int b = first_slot; b < last_slot; ++b) {
+                const BSlot& sl = bs[(size_t) b];
+                if (!sl.active) continue;
+                int rows = 0;
+                if (pmtp) {
+                    for (int t = 0; t < G.S; ++t) rows += G.rows[t] == b;
+                } else if (b - first_slot < G.S) {
+                    rows = 1;
+                }
+                if (rows == 0) continue;
+                int drafts = pmtp ? rows - 1 : 0;
+                const char* reason = "draft_disabled";
+                if (pmtp) {
+                    if (sl.stop) {
+                        reason = "cancel_pending";
+                    } else if (!sl.draft_ready) {
+                        reason = "draft_not_ready";
+                    } else {
+                        const int remaining = (int) std::min<int64_t>(
+                            sl.max_new - sl.produced - 1, o.max_context - sl.p - 2);
+                        const int wanted = std::max(0, std::min(sl.n_drafts, remaining));
+                        reason = drafts < wanted ? "budget_cap" : "ready";
+                    }
+                } else if (batch_mtp) {
+                    reason = "pipeline_incompatible";
+                }
+                const char* request_id = sl.request_id.empty() ? "-" : sl.request_id.c_str();
+                members += " member=" + std::to_string(b) + ":" + request_id + ":" +
+                           std::to_string(rows) + ":" + std::to_string(drafts) + ":" + reason;
+            }
+            return members;
+        };
+        auto trace_start = [&](const PGroup& G) {
+            if (!batch_telemetry_enabled) return;
+            const char* draft_mode = pmtp ? "pipelined_mtp" : batch_mtp ? "incompatible_batch_mtp" : "disabled";
+            std::printf("BTRACE %lld START group=%d active=%d rows=%d pipeline=%d draft_mode=%s%s\n",
+                        (long long) G.trace_id, G.group_id, G.active, G.S, piped ? 1 : 0, draft_mode,
+                        trace_members(G).c_str());
+            std::fflush(stdout);
+        };
+        auto trace_stage = [&](const PGroup& G, int stage, const char* phase) {
+            if (!batch_telemetry_enabled || G.trace_id <= 0) return;
+            double elapsed_ms = 0.0;
+            if (std::strcmp(phase, "complete") == 0)
+                elapsed_ms = std::chrono::duration<double, std::milli>(
+                    Clock::now() - G.stage_started[stage]).count();
+            std::printf("BTRACE %lld STAGE group=%d stage=%d phase=%s elapsed_ms=%.3f%s\n",
+                        (long long) G.trace_id, G.group_id, stage, phase, elapsed_ms, trace_members(G).c_str());
+            std::fflush(stdout);
         };
         // STRATA_TRACE: the drain before the line in hand (an admission's first phase), and when the first rows came
         // after a batch admission (the pipeline's refill after BADM) or after a drain for another line (drain + refill)
@@ -11715,7 +11795,8 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata batch: non-finite logits (#879) in slot %d at position %lld: it ends (BDONE "
                                          "nonfinite) and the next request reads its prompt from token 0\n", b, (long long) sl.p);
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                    std::printf("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms);
+                    std::printf("BDONE %d %lld nonfinite %.1f%s\n", b, (long long) sl.produced, ms,
+                                bdone_request_suffix(sl).c_str());
                     sl.active = false;
                     sl.cached = false;
                     sl.draft_ready = false;
@@ -11736,7 +11817,8 @@ int main(int argc, char** argv) {
                     sl.ids.push_back(G.tok[blk.f + j]);
                     if (fin != nullptr) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                        std::printf("BDONE %d %lld %s %.1f\n", blk.b, (long long) sl.produced, fin, ms);
+                        std::printf("BDONE %d %lld %s %.1f%s\n", blk.b, (long long) sl.produced, fin, ms,
+                                    bdone_request_suffix(sl).c_str());
                         sl.active = false;
                         sl.draft_ready = false;
                         // a cache again (#857), as on the pipelined path without drafts: final once its commits have run
@@ -11807,6 +11889,7 @@ int main(int argc, char** argv) {
                 if (batch_telemetry_enabled) stage_in_flight.complete(k, Clock::now());
                 stage_group[(size_t) k] = -1;
                 PGroup& G = pg[(size_t) gi];
+                trace_stage(G, k, "complete");
                 if (k + 1 < n_pipe) { G.stage = k + 1; G.since = pipe_tick; continue; }
                 // the last stage: the group's picks
                 const int32_t* outb = vk.batch_out();
@@ -11819,7 +11902,8 @@ int main(int argc, char** argv) {
                                              "ends (BDONE nonfinite) and the next request reads its prompt from token 0\n",
                                      gi * GS + t, (long long) sl.p);
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                        std::printf("BDONE %d %lld nonfinite %.1f\n", gi * GS + t, (long long) sl.produced, ms);
+                        std::printf("BDONE %d %lld nonfinite %.1f%s\n", gi * GS + t, (long long) sl.produced, ms,
+                                    bdone_request_suffix(sl).c_str());
                         sl.active = false;
                         sl.cached = false;
                         sl.checks.clear();
@@ -11837,7 +11921,8 @@ int main(int argc, char** argv) {
                     sl.ids.push_back(sl.x);
                     if (fin != nullptr) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                        std::printf("BDONE %d %lld %s %.1f\n", gi * GS + t, (long long) sl.produced, fin, ms);
+                        std::printf("BDONE %d %lld %s %.1f%s\n", gi * GS + t, (long long) sl.produced, fin, ms,
+                                    bdone_request_suffix(sl).c_str());
                         sl.active = false;
                         // a pipelined slot is a cache again (#857: a request left alone in its slot goes back to the solo path with its
                         // drafts): its state is final once its last window has left the last stage.  A later group window whose pad
@@ -11926,8 +12011,13 @@ int main(int argc, char** argv) {
                         }
                     }
                     G.inflight = true;
+                    G.group_id = pick;
                     G.stage = 0;
                     if (batch_telemetry_enabled) G.started = Clock::now();
+                    if (batch_telemetry_enabled) {
+                        G.trace_id = ++bt_trace_seq;
+                        trace_start(G);
+                    }
                     // (with the doorbells on their own thread, a failure it set for a window that left this stage is
                     // not cleared unseen)
                     if (conc_serving && drive.d.failed) {
@@ -11940,6 +12030,10 @@ int main(int argc, char** argv) {
                 PGroup& G = pg[(size_t) pick];
                 strata::core::progress().busy.store(true);
                 if (batch_telemetry_enabled) stage_in_flight.launch(k, Clock::now());
+                if (batch_telemetry_enabled) {
+                    G.stage_started[k] = Clock::now();
+                    trace_stage(G, k, "launch");
+                }
                 if (!(pmtp ? stage_verifier(k).batch_launch_rows(G.rows, G.S, G.hbase, G.tok, G.pos, err)
                            : stage_verifier(k).batch_launch(pick * GS, G.S, G.tok, G.pos, err))) {
                     std::printf("ERR %s\n", err.c_str());
@@ -12075,6 +12169,7 @@ int main(int argc, char** argv) {
                         for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
                     sl = BSlot{};
                     sl.active = true;
+                    sl.request_id = staged_admit.request_id;
                     sl.x = (int32_t) staged_admit.x;
                     sl.p = staged_admit.p;
                     sl.produced = 1;
@@ -12431,6 +12526,7 @@ int main(int argc, char** argv) {
             int req_penalty_last_n = 0;
             std::string req_bias_text;
             bool req_bias_present = false;
+            std::string req_request_id;   // request_id=<token>: echoed on DONE/BDONE for cross-process correlation
             int req_cvec = 1;   // cvec=0|1: a loaded control vector for this request (on when absent)
             // logprobs=K (0..20): after each "T id" an "LP logprob id:logprob ..." line.
             // -1 (absent) = no LP lines, so a server that never asks sees today's output.
@@ -12470,6 +12566,7 @@ int main(int argc, char** argv) {
                     const std::string key = tok.substr(0, eq);
                     const float fv = std::strtof(tok.c_str() + eq + 1, nullptr);
                     if (key == "logit_bias") { req_bias_text = tok.substr(eq + 1); req_bias_present = true; }
+                    else if (key == "request_id" && tok.size() - eq - 1 <= 128) req_request_id = tok.substr(eq + 1);
                     else if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
                     else if (key == "ckpt") req_ckpt = std::atoi(tok.c_str() + eq + 1) != 0;
                     else if (key == "pin") req_pin = std::max<long long>(0, std::atoll(tok.c_str() + eq + 1));
@@ -15867,16 +15964,19 @@ int main(int argc, char** argv) {
             if (o.lookup_chain > 0)
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
+            char request_txt[160] = "";
+            if (!req_request_id.empty())
+                std::snprintf(request_txt, sizeof(request_txt), " request_id=%s", req_request_id.c_str());
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s chunk=%lld "
-                        "experts_streamed=%lld\n",
+                        "experts_streamed=%lld%s\n",
                         (long long) produced_n,
                         (long long) n, prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) resume, (long long) req_hits, (long long) req_look,
                         (long long) (src.ram_reads() - ram0), (long long) (src.file_reads() - files0),
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
                         (long long) req_offload, chain_txt, (long long) req_chunk,
-                        (long long) (sp.chain_experts_streamed() - streamed0));
+                        (long long) (sp.chain_experts_streamed() - streamed0), request_txt);
             std::fflush(stdout);
             if (staged_read) {
                 // STRATA_BATCH_STAGED_READ: the read is done and lives in the main session; keep what the slot will
@@ -15884,6 +15984,7 @@ int main(int argc, char** argv) {
                 const bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 &&
                                   std::strcmp(finish, "length") == 0 && (int64_t) live.size() == p;
                 staged_admit.pending = true;
+                staged_admit.request_id = req_request_id;
                 staged_admit.live = live;
                 staged_admit.imgs = live_imgs;
                 staged_admit.sp = req_sp;
@@ -15920,6 +16021,7 @@ int main(int argc, char** argv) {
                     sl = BSlot{};
                     const auto tc2 = Clock::now();   // (the slot's old checkpoints freed)
                     sl.active = true;
+                    sl.request_id = req_request_id;
                     sl.x = x;
                     sl.p = p;
                     sl.produced = 1;

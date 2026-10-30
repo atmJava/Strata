@@ -4,8 +4,12 @@ A fake engine (a Python script speaking the engine's GEN / BGEN / BT / BDONE / B
 real StrataEngine and Service, so the server's side is tested without a GPU: requests up to N run at once, more
 wait for a slot, /metrics shows the slots, each request's history row is its own, and a conversation's next turn
 goes back to the slot that holds it."""
+import contextlib
+import io
 import json
+import os
 import queue
+import re
 import sys
 import tempfile
 import threading
@@ -23,7 +27,7 @@ from strata_cli.client import Endpoint
 # The fake engine: one token every STEP seconds per active slot (a "window" serves every active slot at once);
 # GEN (solo) streams T lines; BGEN reads the prompt (one T line, DONE), answers BADM and continues in the slot.
 # Every reply is the bytes of "ok, done." then <|im_end|> (ByteTokenizer: 257).
-FAKE_BATCH = r'''import queue, sys, threading, time
+FAKE_BATCH = r'''import os, queue, sys, threading, time
 args = sys.argv[1:]
 slots = int(args[args.index("--batch") + 1]) if "--batch" in args else 0
 fit = int(args[args.index("--fit") + 1]) if "--fit" in args else slots
@@ -41,8 +45,10 @@ def reader():
             lines.put(l)
     lines.put(None)
 threading.Thread(target=reader, daemon=True).start()
+launch_id = os.environ.get("STRATA_ENGINE_LAUNCH_ID", "")
 print("INFO engine=0.1.39" + (f" batch_slots={fit}" if fit >= 2 else "") +
-      (" slot_cache=1" if "--slotcache" in args else "") + (f" batch_groups={groups}" if groups > 1 else ""), flush=True)
+      (" slot_cache=1" if "--slotcache" in args else "") + (f" batch_groups={groups}" if groups > 1 else "") +
+      (f" engine_launch_id={launch_id}" if launch_id else ""), flush=True)
 if "--fake-stage-plan" in args:
     print("strata serve: layer split: layers 0-11 (CUDA0), 12-23 (CUDA1), 24-35 (CUDA2), "
           "36-47 (CUDA3), one hand-off per window", file=sys.stderr, flush=True)
@@ -59,6 +65,8 @@ def reply(ids):            # the rest of the reply after what the prompt already
     return R[k:]
 active = {}          # slot -> [tokens left, max_new, produced]
 stopped = set()      # BSTOPped slots: they end "cancel"
+slot_request = {}    # slot -> request_id from BGEN
+wrong_request_id = "--fake-wrong-request-id" in args
 # #879: a prompt with NFSOLO / NFADMIT ends its first GEN / BGEN with DONE ... nonfinite (nothing emitted); one with
 # NFSLOT ends its slot with BDONE ... nonfinite after its second token
 fired, nf_slots = set(), set()
@@ -69,10 +77,14 @@ def window():        # one batch window: every active slot one token
     processed = len(active)
     for b in sorted(active):
         left, max_new, produced = active[b]
+        request_id = slot_request.get(b, "")
+        echoed = "wrong123" if wrong_request_id and request_id else request_id
+        rid = f" request_id={echoed}" if echoed else ""
         if b in nf_slots and produced >= 2:
             nf_slots.discard(b)
-            print(f"BDONE {b} {produced} nonfinite 1.0", flush=True)
+            print(f"BDONE {b} {produced} nonfinite 1.0{rid}", flush=True)
             del active[b]
+            slot_request.pop(b, None)
             continue
         t = left.pop(0) if left else 257
         produced += 1
@@ -80,8 +92,9 @@ def window():        # one batch window: every active slot one token
         if t == 257 or produced >= max_new:
             fin = 'stop' if t == 257 else 'cancel' if b in stopped else 'length'
             stopped.discard(b)
-            print(f"BDONE {b} {produced} {fin} 1.0", flush=True)
+            print(f"BDONE {b} {produced} {fin} 1.0{rid}", flush=True)
             del active[b]
+            slot_request.pop(b, None)
         else:
             active[b] = [left, max_new, produced]
     if "--fake-batch-sample" in args and processed and not active:
@@ -113,7 +126,11 @@ while True:
         f = line.split()
         slot = int(f[1]) if f[0] == "BGEN" else None
         max_new = int(f[2] if f[0] == "BGEN" else f[1])
-        ids = f[-1].split(",")
+        request_id = next((x.partition("=")[2] for x in f if x.startswith("request_id=")), "")
+        echoed = "wrong123" if wrong_request_id and request_id else request_id
+        rid = f" request_id={echoed}" if echoed else ""
+        ids_field = f[-2] if f[-1].startswith("request_id=") else f[-1]
+        ids = ids_field.split(",")
         if bytes(int(x) & 255 for x in ids).find(b"REFUSEME") >= 0:   # #1059: refused up front, then idle (no DONE)
             print("ERR refused: images are not enabled", flush=True)
             continue
@@ -126,12 +143,13 @@ while True:
                 log.write(f"REFUSED {slot}\n"); log.flush()
             continue
         if log:
-            log.write(f"{f[0]} {slot} {len(ids)} {max(len(active), 0)}\n"); log.flush()
+            request_key = next((x for x in f if x.startswith("request_id=")), "request_id=")
+            log.write(f"{f[0]} {slot} {len(ids)} {max(len(active), 0)} {request_key}\n"); log.flush()
         pb = bytes(int(x) & 255 for x in ids)
         mark = b"NFSOLO" if f[0] == "GEN" else b"NFADMIT"
         if mark in pb and mark not in fired:
             fired.add(mark)
-            print(f"DONE 0 {len(ids)} 5.0 0.0 nonfinite 0 0 0", flush=True)
+            print(f"DONE 0 {len(ids)} 5.0 0.0 nonfinite 0 0 0{rid}", flush=True)
             if slot is not None:
                 print(f"BADM {slot} 0", flush=True)
             continue
@@ -172,7 +190,7 @@ while True:
             if log:
                 log.write(f"YIELD {given[0]} {given[1]}\n"); log.flush()
             print(f"YIELDED {given[0]} {given[1]}", flush=True)
-            print(f"DONE 0 {len(ids)} 5.0 0.0 cancel 0 0 {reused(ids)}", flush=True)
+            print(f"DONE 0 {len(ids)} 5.0 0.0 cancel 0 0 {reused(ids)}{rid}", flush=True)
             if slot is not None:
                 print(f"BADM {slot} 0", flush=True)
             continue
@@ -186,11 +204,12 @@ while True:
             time.sleep(STEP)
         fin = "stop" if out and toks[out - 1] == 257 else ("cancel" if stop.is_set() else "length")
         print(f"DONE {out} {len(ids)} 5.0 {out * STEP * 1000:.1f} {fin} 0 0 {reused(ids)}" +
-              (f" 0 0 0 0 0.0 {len(ids) - reused(ids)}" if READF else ""), flush=True)
+              (f" 0 0 0 0 0.0 {len(ids) - reused(ids)} 0" if READF else "") + rid, flush=True)
         if slot is not None:
             cont = fin == "length" and max_new > 1
             if cont:
                 active[slot] = [toks[1:], max_new, 1]
+                slot_request[slot] = request_id
             print(f"BADM {slot} {1 if cont else 0}", flush=True)
         continue
     if line:
@@ -331,6 +350,22 @@ class PickSlot(unittest.TestCase):
         self.assertEqual(e.slot_releasing, set())
         self.assertEqual(e.slot_held, [[1, 2]])
 
+    def test_slot_release_rejects_a_bdone_for_another_request(self):
+        e = self.engine(1)
+        e.slot_q = [queue.Queue()]
+        e.slot_releasing = set()
+        e.slot_cv = threading.Condition()
+        e._send = lambda _line: None
+        e.slot_q[0].put("BDONE 0 1 stop 1.0 request_id=other456")
+        out = io.StringIO()
+        with mock.patch.object(threading.Thread, "start",
+                               side_effect=RuntimeError("thread limit")), contextlib.redirect_stdout(out):
+            e._release_slot_when_done(0, [1, 2, 3], request_id="expected123")
+        self.assertEqual(e.slot_busy, [False])
+        self.assertEqual(e.slot_releasing, set())
+        self.assertEqual(e.slot_held, [[]])
+        self.assertIn("request_id mismatch", out.getvalue())
+
     def test_slot_park_timer_failure_is_recovered_by_orphan_reaper(self):
         e = self.engine(1)
         e.slot_claims = {0}
@@ -384,12 +419,21 @@ class FakeEngineCase(unittest.TestCase):
         if getattr(self, "tmp", None):
             self.tmp.cleanup()
 
-    def chat(self, text, max_tokens=64):
+    def chat_with_headers(self, text, max_tokens=64):
         body = {"messages": [{"role": "user", "content": text}], "max_tokens": max_tokens, "reasoning_effort": "none"}
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read().decode())
+            return json.loads(r.read().decode()), r.headers
+
+    def chat(self, text, max_tokens=64):
+        return self.chat_with_headers(text, max_tokens)[0]
+
+    def stream(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as response:
+            return response.read().decode()
 
     def message(self, text, max_tokens=64):
         body = {"model": "m", "messages": [{"role": "user", "content": text}], "max_tokens": max_tokens}
@@ -402,12 +446,13 @@ class FakeEngineCase(unittest.TestCase):
         with urllib.request.urlopen(self.base + path, timeout=10) as r:
             return json.loads(r.read().decode())
 
-    def _two_at_once(self, text_b):
+    def _two_at_once(self, text_b, with_headers=False):
         """A long request first, then one that has to go to a batch slot (the engine is busy with the first)."""
         out = {}
         def go(k, text):
             try:
-                out[k] = ("ok", self.chat(text, max_tokens=64))
+                response, headers = self.chat_with_headers(text, max_tokens=64)
+                out[k] = ("ok", response, dict(headers)) if with_headers else ("ok", response)
             except urllib.error.HTTPError as e:
                 out[k] = ("http", e.code, e.read().decode(), dict(e.headers))
         ta = threading.Thread(target=go, args=("a", "LONGREPLY please"))
@@ -437,6 +482,92 @@ class FakeEngineCase(unittest.TestCase):
 class ParallelService(FakeEngineCase):
     """The real StrataEngine and Service over HTTP, the fake engine behind them: slots, queues, benchmarks, telemetry.
     The yielding, restart and failure tests are in serve/test_parallel_yield.py (this file alone ran past 100 s)."""
+
+    def test_solo_engine_command_carries_the_response_request_id(self):
+        self.start(1)
+        _, headers = self.chat_with_headers("request id please")
+        request_id = headers.get("X-Request-ID")
+        self.assertRegex(request_id or "", r"^[0-9a-f]{12}$")
+        gen = next(line for line in self.log.read_text().splitlines() if line.startswith("GEN "))
+        self.assertIn(f"request_id={request_id}", gen)
+
+    def test_batch_engine_commands_carry_the_response_request_ids(self):
+        self.start(2)
+        out = self._two_at_once("second request", with_headers=True)
+        ids = {out[name][2].get("X-Request-ID") for name in ("a", "b")}
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{12}", x or "") for x in ids), ids)
+        commands = [line for line in self.log.read_text().splitlines()
+                    if line.startswith(("GEN ", "BGEN "))]
+        self.assertTrue(any(line.startswith("BGEN ") for line in commands), commands)
+        seen = {line.split()[-1].partition("=")[2] for line in commands}
+        self.assertEqual(seen, ids)
+
+    def test_engine_request_id_mismatch_fails_the_request(self):
+        self.start(1, more=["--fake-wrong-request-id"])
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.chat("request id mismatch please")
+        err = raised.exception
+        body = err.read().decode()
+        self.assertEqual(err.code, 500, body)
+        self.assertIn("request_id mismatch", body)
+        self.assertRegex(err.headers.get("X-Request-ID") or "", r"^[0-9a-f]{12}$")
+        row = self.get("/metrics")["requests"][0]
+        self.assertEqual(row["finish"], "error")
+        self.assertEqual(row["id"], err.headers.get("X-Request-ID"))
+
+    def test_streaming_request_id_mismatch_ends_with_a_protocol_event(self):
+        self.start(1, more=["--fake-wrong-request-id"])
+        cases = [
+            ("/v1/chat/completions", {
+                "model": "m", "messages": [{"role": "user", "content": "stream mismatch"}],
+                "max_tokens": 64, "reasoning_effort": "none", "stream": True,
+            }, "data: [DONE]"),
+            ("/v1/responses", {
+                "model": "m", "input": "stream mismatch", "max_output_tokens": 64,
+                "reasoning_effort": "none", "stream": True,
+            }, "response.failed"),
+            ("/v1/messages", {
+                "model": "m", "messages": [{"role": "user", "content": "stream mismatch"}],
+                "max_tokens": 64, "stream": True,
+            }, "event: error"),
+        ]
+        for path, body, ending in cases:
+            with self.subTest(path=path):
+                raw = self.stream(path, body)
+                self.assertIn("request_id mismatch", raw)
+                self.assertIn(ending, raw)
+
+    def test_request_ledger_records_server_engine_and_owner_identity(self):
+        with mock.patch.dict(os.environ, {"STRATA_OWNER_ID": "a" * 32,
+                                          "STRATA_RUNTIME_PROFILE": "local"}):
+            self.start(1)
+            self.chat("record launch identity")
+        row = self.get("/metrics")["requests"][0]
+        self.assertEqual(row["server_instance_id"], self.svc.instance_id)
+        self.assertEqual((row["owner_id"], row["runtime_profile"]), ("a" * 32, "local"))
+        self.assertRegex(row["engine_launch_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(row["engine_pid"], self.engine.proc.pid)
+        self.assertGreater(row["engine_started_at"], 0)
+        self.assertEqual(self.engine.info["engine_launch_id"], self.engine.launch_id)
+
+    def test_engine_restart_gets_a_new_launch_id(self):
+        import serve.lifeline as lifeline
+        import serve.server as server
+
+        self.start(1)
+        first = self.engine.launch_id
+        self.assertRegex(first or "", r"^[0-9a-f]{32}$")
+        script = Path(self.tmp.name) / "fake_strata.py"
+        real = server.subprocess.Popen
+
+        def spawn(cmd, role="engine", **kwargs):
+            kwargs = {k: v for k, v in kwargs.items() if k != "preexec_fn"}
+            return real([sys.executable, str(script), *cmd[1:]], **kwargs)
+
+        with mock.patch.object(lifeline, "popen", side_effect=spawn):
+            self.engine.restart()
+        self.assertRegex(self.engine.launch_id or "", r"^[0-9a-f]{32}$")
+        self.assertNotEqual(self.engine.launch_id, first)
 
     def test_bgen_refused_by_the_engine_is_retried_not_a_400(self):
         """#1994: the engine refuses a BGEN ("no such free slot") although the server saw the slot free: the request

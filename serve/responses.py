@@ -603,6 +603,10 @@ class Assembler:
                 out.append(self.event("response.custom_tool_call_input.delta", item_id=item["id"],
                                       output_index=self.index, delta=item["input"]))
             out += self.close("completed")
+        source = ev.trace_source()
+        if source is not None:
+            for event in out:
+                event["_strata_source"] = source
         return out
 
     def _release(self, text: str) -> list[dict]:

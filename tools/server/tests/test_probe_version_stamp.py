@@ -73,6 +73,21 @@ def test_probe_resolves_relative_process_paths_from_process_cwd():
     assert "engine_binary = resolve_process_path(pid, raw_argv[0].decode" in probe.REMOTE_PROGRAM
 
 
+def test_snapshot_contract_is_explicitly_not_a_rollback_capability():
+    assert probe.SNAPSHOT_CONTRACT["kind"] == "read_only_future_lkg_input"
+    assert probe.SNAPSHOT_CONTRACT["rollback_verified"] is False
+    assert probe.SNAPSHOT_CONTRACT["restart_verified"] is False
+    assert probe.SNAPSHOT_CONTRACT["health_smoke_gate_verified"] is False
+
+
+def test_remote_snapshot_keeps_config_bytes_and_process_identity():
+    assert 'keep_bytes=(name == "config")' in probe.REMOTE_PROGRAM
+    assert '"content_b64"' in probe.REMOTE_PROGRAM
+    assert '"environment_b64"' in probe.REMOTE_PROGRAM
+    assert '"kernel_start_token"' in probe.REMOTE_PROGRAM
+    assert 'out["identity_stable"] = identity_before == identity_after' in probe.REMOTE_PROGRAM
+
+
 def test_default_output_path_uses_the_system_temp_directory(monkeypatch, tmp_path):
     monkeypatch.setattr(probe.tempfile, "gettempdir", lambda: str(tmp_path))
     output = Path(probe.default_output_path())

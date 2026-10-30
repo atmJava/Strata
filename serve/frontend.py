@@ -679,6 +679,14 @@ class Event:
     kind: str                     # "reasoning" | "content" | "tool_call"
     text: str = ""
     call: ToolCall | None = None
+    source_token_index: int | None = field(default=None, repr=False, compare=False)
+    source_token_id: int | None = field(default=None, repr=False, compare=False)
+
+    def trace_source(self) -> dict | None:
+        """The engine token behind this event, when it came from one rather than a synthetic wrapper."""
+        if self.source_token_index is None:
+            return None
+        return {"token_index": self.source_token_index, "token_id": self.source_token_id}
 
 
 THINK_END = "</think>"

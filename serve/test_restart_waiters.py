@@ -26,6 +26,7 @@ REAL_POPEN = subprocess.Popen
 class RestartWaiters(unittest.TestCase):
     # the fake-engine helpers of test_parallel (its module, not its class, is imported: no duplicate tests)
     chat = test_parallel.ParallelService.chat
+    chat_with_headers = test_parallel.ParallelService.chat_with_headers
     _start, tearDown = test_parallel.ParallelService.start, test_parallel.ParallelService.tearDown
 
     def start(self, slots, fit=None):

@@ -731,6 +731,7 @@ class Host:
         child_env["STRATA_OWNER_ATTEST_KEY"] = attestation_key.hex()
         child_env["STRATA_NO_ACQUIRE"] = "1"      # a managed server never installs or downloads (acquisition.py)
         child_env["STRATA_RUNTIME_PROFILE"] = self.name   # the records of its engine say which profile they belong to
+        child_env["STRATA_OWNER_ID"] = self.owner_id
         stream = None
         try:
             stream = atomic.fdopen_owned(descriptor, "ab")

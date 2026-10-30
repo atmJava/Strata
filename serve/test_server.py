@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import queue
 import shutil
 import socket
 import subprocess
@@ -23,11 +24,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
-from serve.server import (ANSWER_RESERVE_MIN, CTX_SLACK, ByteTokenizer, EngineDied, EngineNonFinite, GpuBusy, MockEngine,  # noqa: E402
-                          PP_DONE_TAIL, Service,
+from serve.server import (ANSWER_RESERVE_MIN, CTX_SLACK, ByteTokenizer, EngineDied, EngineNonFinite, EngineProtocolError,  # noqa: E402
+                          GpuBusy, MockEngine, PP_DONE_TAIL, Service,
                           StrataEngine, api_key_of, engine_args, key_matches, layer_split_value, prompt_progress,
                           prompt_tokens_seen,
-                          request_stats, request_timings, serve, start_failure_hint)
+                          parse_batch_trace_line, request_stats, request_timings, serve, start_failure_hint)
 from types import SimpleNamespace  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1627,6 +1628,12 @@ class SamplingKeys(unittest.TestCase):
     def keys(self, **sampling):
         return StrataEngine.sampling_keys(sampling).split()
 
+    def test_request_id_key(self):
+        self.assertEqual(StrataEngine.request_key("abc123"), " request_id=abc123")
+        for bad in (None, "", "abc 123", "abc\n123", "id=1"):
+            with self.subTest(bad=bad):
+                self.assertEqual(StrataEngine.request_key(bad), "")
+
     def test_top_k(self):
         self.assertIn("top_k=10", self.keys(temperature=0.7, top_k=10))
         self.assertIn("top_k=64", self.keys(temperature=0.7, top_k=64))
@@ -2750,6 +2757,39 @@ class CancelledRead(unittest.TestCase):
         StrataEngine._parse_done(e, "DONE 5 12000 900.0 80.0 stop 3 4 0 7 9 0 0 0.0 12000 2 chunk=x other=1")
         self.assertNotIn("chunk", e.last)
         self.assertNotIn("other", e.last)
+
+    def test_parse_done_request_id(self):
+        """The engine echoes the request ID as the last key=value field, after the positional figures."""
+        e = SimpleNamespace()
+        StrataEngine._parse_done(e, "DONE 5 12000 900.0 80.0 stop 3 4 0 7 9 0 0 0.0 12000 2 "
+                                    "chunk=1536 experts_streamed=24576 request_id=abc123")
+        self.assertEqual(e.last["request_id"], "abc123")
+        StrataEngine._parse_done(e, "DONE 0 5 20.0 10.0 stop request_id=short123")
+        self.assertEqual(e.last["request_id"], "short123")
+
+    def test_request_id_mismatch_is_a_protocol_error(self):
+        cancel = SimpleNamespace(_strata_request_id="expected123")
+        StrataEngine._check_request_id(cancel, {"request_id": "expected123"})
+        StrataEngine._check_request_id(cancel, {})                 # an older engine does not echo it
+        with self.assertRaisesRegex(EngineProtocolError, "request_id"):
+            StrataEngine._check_request_id(cancel, {"request_id": "other456"})
+
+    def test_parse_bdone_request_id(self):
+        e = SimpleNamespace(last={"generated": 1})
+        cancel = SimpleNamespace(_strata_request_id="abc123")
+        StrataEngine._apply_bdone(e, "BDONE 0 5 stop 80.0 request_id=abc123".split(), cancel)
+        self.assertEqual((e.last["generated"], e.last["finish"], e.last["request_id"]), (5, "stop", "abc123"))
+        with self.assertRaisesRegex(EngineProtocolError, "request_id"):
+            StrataEngine._apply_bdone(e, "BDONE 0 5 stop 80.0 request_id=other456".split(), cancel)
+
+    def test_drain_control_checks_done_request_id(self):
+        e = StrataEngine.__new__(StrataEngine)
+        e.lines, e.gen = queue.Queue(), 7
+        e.alive = lambda: True
+        e.lines.put("DONE 0 5 20.0 10.0 stop request_id=other456")
+        cancel = SimpleNamespace(_strata_request_id="expected123")
+        with self.assertRaisesRegex(EngineProtocolError, "request_id"):
+            StrataEngine._drain_control(e, "DONE", timeout=0.1, born=7, cancel=cancel)
 
     def test_request_stats_chunk_fields(self):
         """Across a request's continuations the streamed blobs add up; the chunk is the request's own read's."""
@@ -4845,8 +4885,89 @@ class ModelAliases(unittest.TestCase):
             httpd.server_close()
 
 
+class BatchTrace(unittest.TestCase):
+    def test_parser_keeps_members_and_stage_span(self):
+        start = parse_batch_trace_line(
+            "BTRACE 7 START group=0 active=1 rows=3 "
+            "member=0:abc123:3:2:ready\n"
+        )
+        self.assertEqual((start["window"], start["phase"], start["active"], start["rows"]), (7, "start", 1, 3))
+        self.assertEqual(start["members"], [{"slot": 0, "request_id": "abc123", "rows": 3,
+                                             "drafts": 2, "draft_reason": "ready"}])
+        stage = parse_batch_trace_line(
+            "BTRACE 7 STAGE group=0 stage=1 phase=complete elapsed_ms=2.500 "
+            "member=0:abc123\n"
+        )
+        self.assertEqual((stage["stage"], stage["stage_phase"], stage["elapsed_ms"]), (1, "complete", 2.5))
+        self.assertEqual(stage["members"], [{"slot": 0, "request_id": "abc123"}])
+
+    def test_window_count_is_not_the_number_of_stage_events(self):
+        e = StrataEngine.__new__(StrataEngine)
+        e.batch_trace_lock = threading.Lock()
+        e.batch_trace_by_request = {}
+        start = parse_batch_trace_line(
+            "BTRACE 7 START group=0 active=1 rows=1 member=0:abc123:1:0:draft_disabled\n")
+        stage0 = parse_batch_trace_line(
+            "BTRACE 7 STAGE group=0 stage=0 phase=complete elapsed_ms=1.0 member=0:abc123\n")
+        stage1 = parse_batch_trace_line(
+            "BTRACE 7 STAGE group=0 stage=1 phase=complete elapsed_ms=2.0 member=0:abc123\n")
+        for event in (start, stage0, stage1):
+            e._remember_batch_trace(event)
+        trace = e.batch_trace_for("abc123")
+        self.assertEqual((trace["windows_observed"], trace["windows_retained"], trace["events_retained"]),
+                         (1, 1, 3))
+
+
 class NvidiaTelemetry(unittest.TestCase):
     """NVML readings for the two-card production layout, without a GPU."""
+
+    def test_nvlink_field_values_read_the_aggregate_rx_and_tx_counters(self):
+        from serve.telemetry import _Nvml
+
+        class FieldLibrary:
+            def nvmlDeviceGetFieldValues(self, _device, count, fields):
+                self.count = count
+                fields[0].value_type = 3
+                fields[0].return_code = 0
+                fields[0].value.ull = 4096
+                fields[1].value_type = 3
+                fields[1].return_code = 0
+                fields[1].value.ull = 2048
+                return 0
+
+        nvml = _Nvml.__new__(_Nvml)
+        nvml.lib = FieldLibrary()
+        nvml.dev = object()
+        nvml._nvlink_prev = None
+        self.assertEqual(nvml.nvlink_throughput_status(), (True, "nvml_field_values"))
+        self.assertEqual(nvml.nvlink_field_values(), ((4096, 2048), "nvml_field_values"))
+        self.assertEqual(nvml.lib.count.value, 2)
+
+    def test_nvlink_field_values_become_a_byte_rate_after_a_seed_reading(self):
+        from serve import telemetry
+        from serve.telemetry import _Nvml
+
+        class FieldLibrary:
+            calls = 0
+
+            def nvmlDeviceGetFieldValues(self, _device, _count, fields):
+                self.calls += 1
+                fields[0].value_type = fields[1].value_type = 3
+                fields[0].return_code = fields[1].return_code = 0
+                fields[0].value.ull = 1024 * self.calls
+                fields[1].value.ull = 2048 * self.calls
+                return 0
+
+        nvml = _Nvml.__new__(_Nvml)
+        nvml.lib = FieldLibrary()
+        nvml.dev = object()
+        nvml._nvlink_prev = None
+        with mock.patch.object(telemetry.time, "monotonic", side_effect=[10.0, 11.0]):
+            first = nvml.read()
+            second = nvml.read()
+        self.assertIsNone(first["nvlink_rx_mb"])
+        self.assertEqual(second["nvlink_rx_mb"], 1.0)
+        self.assertEqual(second["nvlink_tx_mb"], 2.0)
 
     class Reader:
         values = {
@@ -4865,6 +4986,9 @@ class NvidiaTelemetry(unittest.TestCase):
         def name(self):
             return f"NVIDIA GeForce RTX 2080 Ti {self.index}"
 
+        def nvlink_throughput_status(self):
+            return False, "nvml_not_supported"
+
         def read(self):
             return dict(self.values[self.index])
 
@@ -4877,6 +5001,8 @@ class NvidiaTelemetry(unittest.TestCase):
                 self.assertEqual(t.static["gpu_vram_total_mib"], (20 << 10) + (22 << 10))
                 self.assertEqual(t.static["gpu_name"],
                                  "NVIDIA GeForce RTX 2080 Ti 0 + NVIDIA GeForce RTX 2080 Ti 1")
+                self.assertEqual(t.static["nvlink_throughput"],
+                                 {"available": False, "reason": "nvml_not_supported"})
                 sample = t.sample()
                 self.assertEqual(sample["gpu_util"], 30.0)
                 self.assertEqual(sample["gpu_mem_used"], 10 << 30)
@@ -4900,6 +5026,52 @@ class NvidiaTelemetry(unittest.TestCase):
             self.assertEqual(t.snapshot()["now"], {})
         finally:
             t.close()
+
+    def test_request_trace_keeps_one_hertz_samples_and_its_own_overhead(self):
+        from serve import telemetry
+        with mock.patch.object(telemetry, "gpu_reader", self.Reader), \
+                mock.patch.object(telemetry.threading.Thread, "start", side_effect=RuntimeError("thread limit")):
+            t = telemetry.Telemetry(gpu_indices=[0, 1])
+        try:
+            t.begin_request_trace("trace001")
+            start = time.monotonic()
+            for second in range(3):
+                t.record_request_sample(
+                    {"cpu": 10 + second, "gpu_util": 20 + second,
+                     "gpus": [{"index": 0, "util": 20 + second}]},
+                    at_mono=start + second,
+                    sample_ms=0.25,
+                )
+            trace = t.end_request_trace("trace001")
+            self.assertEqual(trace["sample_count"], 3)
+            self.assertEqual(trace["sampler_sample_count"], 3)
+            self.assertEqual(trace["samples"][1]["cpu"], 11)
+            self.assertEqual(trace["sample_overhead_ms"], {"mean": 0.25, "max": 0.25})
+            self.assertTrue(trace["complete_at_1hz"])
+            self.assertEqual(trace["capabilities"]["nvlink_throughput"],
+                             {"available": False, "reason": "nvml_not_supported"})
+            self.assertFalse(trace["capabilities"]["pcie_throughput"]["available"])
+            self.assertIsNone(trace["samples"][0]["nvlink_rx_mb"])
+        finally:
+            t.close()
+
+    def test_request_trace_decimates_instead_of_growing_unbounded(self):
+        from serve import telemetry
+        with mock.patch.object(telemetry, "gpu_reader", self.Reader), \
+                mock.patch.object(telemetry.threading.Thread, "start", side_effect=RuntimeError("thread limit")), \
+                mock.patch.object(telemetry, "REQUEST_TRACE_MAX_SAMPLES", 2):
+            t = telemetry.Telemetry(gpu_indices=[0, 1])
+            try:
+                t.begin_request_trace("trace002")
+                start = time.monotonic()
+                for second in range(9):
+                    t.record_request_sample({"cpu": second}, at_mono=start + second)
+                trace = t.end_request_trace("trace002")
+                self.assertLessEqual(trace["sample_count"], 2)
+                self.assertGreater(trace["decimation"], 1)
+                self.assertFalse(trace["complete_at_1hz"])
+            finally:
+                t.close()
 
 
 class TelemetryNoDisks(unittest.TestCase):

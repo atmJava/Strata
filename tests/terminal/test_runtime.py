@@ -120,6 +120,26 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(host.ready_path)
         self.assertEqual(list((self.root / "runtime").glob("*.ready.json")), [])
 
+    def test_launch_passes_the_owner_id_to_the_server_environment(self):
+        host = runtime.Host("local", shutdown_timeout=2)
+        child = mock.Mock(pid=987654)
+        seen = {}
+
+        def spawn(_command, **kwargs):
+            seen.update(kwargs["env"])
+            return child
+
+        with mock.patch.object(runtime.subprocess, "Popen", side_effect=spawn), \
+                mock.patch.object(runtime.procs, "write_record"):
+            host._launch([], self.config, self.config.read_bytes(), None)
+        try:
+            self.assertEqual(seen["STRATA_OWNER_ID"], host.owner_id)
+            self.assertEqual(seen["STRATA_RUNTIME_PROFILE"], "local")
+        finally:
+            os.close(host.owner_write_fd)
+            host.owner_write_fd = None
+            host._clear_ready()
+
     def test_popen_failure_closes_launch_descriptors(self):
         host = runtime.Host("local", shutdown_timeout=2)
         descriptors = []

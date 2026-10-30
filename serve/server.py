@@ -421,6 +421,10 @@ class EngineSilent(EngineDied):
     EngineDied, so the request ends with an error and the next one starts the engine again."""
 
 
+class EngineProtocolError(RuntimeError):
+    """The engine broke a server/engine correlation invariant; the client's request itself is valid."""
+
+
 class EngineNonFinite(ValueError):
     """#879: the engine's DONE (or a slot's BDONE) said `nonfinite`: a window's logits held a NaN or an infinity.  The
     engine wrote none of that window's tokens and drops every cached state that may carry the poison, so its next
@@ -915,6 +919,71 @@ def parse_stage_in_flight_sample(line: str) -> dict | None:
     return {"elapsed_us": elapsed_us, "in_flight_us": in_flight_us}
 
 
+BATCH_TRACE_MAX_EVENTS = 1024
+SSE_TRACE_MAX_EVENTS = 512
+
+
+def parse_batch_trace_line(line: str) -> dict | None:
+    """Read one bounded BTRACE line that names the requests in a batch/PP window.
+
+    START rows describe the window's membership, row budget and draft decision.  STAGE rows carry one
+    launch/completion span for a pipeline stage.  A malformed line is ignored rather than exposed as telemetry.
+    """
+    if len(line) > 8192:
+        return None
+    parts = line.strip().split()
+    if len(parts) < 4 or parts[0] != "BTRACE" or not parts[1].isdigit() or parts[2] not in ("START", "STAGE"):
+        return None
+    window = int(parts[1])
+    if window < 1 or window > 9_999_999_999:
+        return None
+    entry: dict = {"window": window, "phase": parts[2].lower(), "members": []}
+    for token in parts[3:]:
+        key, separator, value = token.partition("=")
+        if not separator:
+            return None
+        if key == "member":
+            fields = value.split(":")
+            if len(fields) not in (2, 5) or not fields[0].isdigit():
+                return None
+            slot, request = int(fields[0]), fields[1]
+            if slot > 255 or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", request) is None:
+                return None
+            member = {"slot": slot, "request_id": request}
+            if len(fields) == 5:
+                rows, drafts = int(fields[2]), int(fields[3])
+                reason = fields[4]
+                if rows < 1 or rows > 16 or drafts < 0 or drafts >= rows or \
+                        re.fullmatch(r"[a-z_]{1,32}", reason) is None:
+                    return None
+                member.update(rows=rows, drafts=drafts, draft_reason=reason)
+            entry["members"].append(member)
+        elif key in ("group", "active", "rows", "stage") and value.isdigit():
+            entry[key] = int(value)
+        elif key == "pipeline" and value in ("0", "1"):
+            entry[key] = int(value)
+        elif key == "draft_mode" and re.fullmatch(r"[a-z_]{1,32}", value) is not None:
+            entry[key] = value
+        elif key == "phase" and value in ("launch", "complete"):
+            entry["stage_phase"] = value
+        elif key == "elapsed_ms":
+            try:
+                entry[key] = float(value)
+            except ValueError:
+                return None
+            if not 0.0 <= entry[key] <= 86_400_000.0:
+                return None
+        else:
+            return None
+    if not entry["members"]:
+        return None
+    if entry["phase"] == "start" and not all(key in entry for key in ("group", "active", "rows")):
+        return None
+    if entry["phase"] == "stage" and not all(key in entry for key in ("group", "stage", "stage_phase")):
+        return None
+    return entry
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -960,9 +1029,14 @@ class StrataEngine:
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
         self.last = {}
         self.info = {}                   # INFO key=value facts (engine 0.1.8+): kv, expert slots, ... (Monitor tab)
+        self.launch_id = None            # a new ID for every child process, including restarts
+        self.launch_pid = None
+        self.launch_started_at = None
         self.terminal_stages: list[dict] = []  # final layer ranges from this engine start's bounded stderr log
         self.terminal_batch_sample: dict | None = None
         self.terminal_stage_sample: dict | None = None
+        self.batch_trace_lock = threading.Lock()
+        self.batch_trace_by_request: collections.OrderedDict[str, dict] = collections.OrderedDict()
         self.prefill_tok_s_mean = None
         self.progress = None             # (read, total) prompt tokens while a prompt is read, from PP lines
         self.progress_ms = 0             # PP's own milliseconds since the prompt started (its third field)
@@ -1019,9 +1093,15 @@ class StrataEngine:
                 print(f"[strata] engine priority: nice +{nice} (STRATA_ENGINE_NICE=0 turns it off)", flush=True)
             end_leftover_engines(exe)                    # one an earlier run lost still holds the GPU and the memory
             spawned_at = time.monotonic()
+            launch_id = uuid.uuid4().hex
+            child_environment = dict(os.environ if env is None else env)
+            child_environment["STRATA_ENGINE_LAUNCH_ID"] = launch_id
             self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
-                              stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env,
-                              **pin)
+                              stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1,
+                              env=child_environment, **pin)
+            self.launch_id = launch_id
+            self.launch_pid = self.proc.pid
+            self.launch_started_at = time.time()
         except BaseException:                            # nothing started: no narrator or log handle is retained
             loading.set()
             if narrator is not None and narrator.ident is not None:
@@ -1070,6 +1150,12 @@ class StrataEngine:
             self._abort_start(loading, ready_reader)
             raise
         loading.set()
+        echoed_launch = self.info.get("engine_launch_id")
+        if echoed_launch is not None and echoed_launch != self.launch_id:
+            self._abort_start(loading, ready_reader)
+            raise EngineProtocolError(
+                f"engine launch_id mismatch: expected {self.launch_id}, got {echoed_launch}"
+            )
         if self.max_context <= 0:
             returncode = self._abort_start(loading, ready_reader)
             if not timed_out and _attempt < START_RETRIES and \
@@ -1223,6 +1309,11 @@ class StrataEngine:
                 if sample is not None and self.proc is proc:
                     self.terminal_batch_sample = {**sample, "observed_monotonic": time.monotonic()}
                 continue                        # control telemetry never enters a request's token stream
+            if line.startswith("BTRACE"):
+                sample = parse_batch_trace_line(line)
+                if sample is not None and self.proc is proc:
+                    self._remember_batch_trace(sample)
+                continue
             if line.startswith("PSTAT"):
                 sample = parse_stage_in_flight_sample(line)
                 if sample is not None and self.proc is proc:
@@ -1242,6 +1333,41 @@ class StrataEngine:
         lines.put(None)
         for q in slot_q:
             q.put(None)
+
+    def _remember_batch_trace(self, entry: dict) -> None:
+        """Attach one BTRACE event to every request named in the window."""
+        request_ids = {member["request_id"] for member in entry["members"]}
+        with self.batch_trace_lock:
+            for request_id in request_ids:
+                state = self.batch_trace_by_request.pop(request_id, None)
+                if state is None:
+                    state = {"observed": 0, "events": collections.deque(maxlen=BATCH_TRACE_MAX_EVENTS)}
+                if entry["phase"] == "start":
+                    state["observed"] += 1
+                state["events"].append(entry)
+                self.batch_trace_by_request[request_id] = state
+            while len(self.batch_trace_by_request) > 128:
+                self.batch_trace_by_request.popitem(last=False)
+
+    def batch_trace_for(self, request_id: str | None) -> dict | None:
+        """Take the bounded BTRACE timeline for one finished request."""
+        if not request_id:
+            return None
+        lock = getattr(self, "batch_trace_lock", None)
+        traces = getattr(self, "batch_trace_by_request", None)
+        if lock is None or traces is None:
+            return None
+        with lock:
+            state = traces.pop(request_id, None)
+        if state is None:
+            return None
+        events = list(state["events"])
+        return {
+            "windows_observed": state["observed"],
+            "windows_retained": len({event["window"] for event in events}),
+            "events_retained": len(events),
+            "timeline": events,
+        }
 
     def death_note(self) -> str:
         """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), else RAM."""
@@ -1363,13 +1489,27 @@ class StrataEngine:
             self.last.update(prompt_read=int(f[14]))
         if len(f) >= 16:                                  # #588 (engine 0.1.39+): routed experts read over PCIe
             self.last.update(offloaded=int(f[15]))
-        for tok in f[16:]:                                # key=value fields after the positional ones (the prompt's
-            key, eq, value = tok.partition("=")           # first chunk and its streamed expert blobs)
+        for tok in f[1:]:                                 # key=value fields anywhere after DONE (normally after the
+            key, eq, value = tok.partition("=")           # positional ones: the prompt's first chunk and expert blobs)
             if eq and key in ("chunk", "experts_streamed"):
                 try:
                     self.last[key] = int(value)
                 except ValueError:
                     pass
+            elif eq and key == "request_id" and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value):
+                self.last[key] = value
+
+    @staticmethod
+    def _check_request_id(cancel, figures: dict | None) -> None:
+        expected = getattr(cancel, "_strata_request_id", None)
+        StrataEngine._check_request_id_value(expected, figures)
+
+    @staticmethod
+    def _check_request_id_value(expected: str | None, figures: dict | None) -> None:
+        """Reject a completion that claims a different request; an older engine may omit the echo."""
+        echoed = (figures or {}).get("request_id")
+        if expected and echoed and expected != echoed:
+            raise EngineProtocolError(f"engine request_id mismatch: expected {expected}, got {echoed}")
 
     def vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
         """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
@@ -1401,6 +1541,13 @@ class StrataEngine:
                 return out
             if time.time() > deadline:
                 raise EngineDied("the engine did not answer the VRAM command")
+
+    @staticmethod
+    def request_key(request_id: str | None) -> str:
+        """The engine command's correlation key.  Only a token-safe ID is serialized."""
+        if not isinstance(request_id, str) or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", request_id) is None:
+            return ""
+        return f" request_id={request_id}"
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -1568,6 +1715,7 @@ class StrataEngine:
                 yield None
             elif line.startswith("DONE"):
                 self._parse_done(line)
+                self._check_request_id(cancel, self.last)
                 self._last_done = line
             elif line.startswith("BADM "):
                 f = line.split()
@@ -1596,12 +1744,13 @@ class StrataEngine:
         f = (getattr(self, "_last_done", None) or "").split()
         return f[5] if len(f) > 5 else None
 
-    def _drain_control(self, until: str, timeout: float = 300.0, born: int | None = None):
+    def _drain_control(self, until: str, timeout: float = 300.0, born: int | None = None, cancel=None):
         """After a consumer left early: read the control lines up to the next `until` line (DONE or BADM) so the next
         request does not read this one's leftovers.  Returns that line (None: the engine ended or never answered).
         `born`: the engine process (self.gen) the request started on; once that one is gone there is nothing to
         drain - its end line was read already (by the request's own EngineDied), and waiting for another one held
-        a request that had failed for the whole 300 s (#1012), or read the lines of the engine that replaced it."""
+        a request that had failed for the whole 300 s (#1012), or read the lines of the engine that replaced it.
+        `cancel`: the request whose DONE is being drained; its request ID must match when the engine echoes one."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             if born is not None and (self.gen != born or not self.alive()):
@@ -1614,15 +1763,31 @@ class StrataEngine:
                 return None
             if line.startswith("DONE"):
                 self._parse_done(line)
+                self._check_request_id(cancel, self.last)
             if line.startswith(until) or line.startswith("ERR"):
                 return line
         return None
 
-    def _apply_bdone(self, f: list[str]) -> None:
+    @staticmethod
+    def _bdone_request_id(fields: list[str]) -> str | None:
+        """The valid request ID in a BDONE's key=value tail, if this engine sends one."""
+        for tok in fields[5:]:
+            key, eq, value = tok.partition("=")
+            if eq and key == "request_id" and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value):
+                return value
+        return None
+
+    def _apply_bdone(self, f: list[str], cancel=None) -> None:
         """`BDONE <slot> <produced> <finish> <ms>` into this request's figures."""
         if len(f) >= 5 and isinstance(self.last, dict):
             self.last = {**self.last, "finish": f[3], "decode_ms": float(f[4]),
                          "generated": int(f[2]) if f[2].isdigit() else self.last.get("generated")}
+            request_id = StrataEngine._bdone_request_id(f)
+            if request_id:
+                self.last["request_id"] = request_id
+            else:
+                self.last.pop("request_id", None)
+            StrataEngine._check_request_id(cancel, self.last)
 
     def _bdone_after_eos(self, slot: int, wait_s: float = 2.0):
         """#1869: a request in a slot whose consumer left at the stop token has its BDONE right behind it (the engine prints it
@@ -1643,10 +1808,11 @@ class StrataEngine:
                 return line
         return None
 
-    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None):
+    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None, request_id: str | None = None):
         """A slot whose consumer left (a stop token, a stop string, a disconnect): BSTOP it and free it once the engine
         says BDONE (in the background).  `stream`: the prompt and every token of it so far - with the tokens still to
-        come before BDONE, all but the last are what the slot holds then (the next turn of its conversation)."""
+        come before BDONE, all but the last are what the slot holds then (the next turn of its conversation).
+        `request_id`: the request that owned the slot; a BDONE echoing another one must not seed its conversation."""
         if slot >= len(self.slot_q):                    # the engine restarted with fewer slots: this one is gone
             return
         try:
@@ -1674,7 +1840,14 @@ class StrataEngine:
                     except (IndexError, ValueError):
                         tail = []
                 if line.startswith("BDONE "):
-                    if line.split()[3:4] == ["nonfinite"]:   # #879: the engine dropped the slot's state
+                    fields = line.split()
+                    echoed = self._bdone_request_id(fields)
+                    try:
+                        self._check_request_id_value(request_id, {"request_id": echoed})
+                    except EngineProtocolError as exc:
+                        print(f"[strata] {exc} while releasing batch slot {slot}; clearing that slot", flush=True)
+                        tail = []
+                    if fields[3:4] == ["nonfinite"]:   # #879: the engine dropped the slot's state
                         tail = []
                     break
             held[slot] = tail[:-1] if stream and tail else []
@@ -1844,7 +2017,7 @@ class StrataEngine:
             raise EngineDied("the engine is unavailable; this request was not sent")
         self.progress, self.progress_ms, self.reused = None, 0, 0
         born = self.gen                                 # the engine process this request is sent to
-        keys = self.sampling_keys(sampling or {})
+        keys = self.sampling_keys(sampling or {}) + self.request_key(getattr(cancel, "_strata_request_id", None))
         # logprobs: only an admission's token can have an LP line here (the slot's "BT" lines carry none), so the
         # server refuses these requests unless max_tokens is 1.  The lines go to the request itself, through its
         # cancel Event: several requests read control lines at once, and the engine's lp_lines is one attribute.
@@ -1981,7 +2154,7 @@ class StrataEngine:
                                 else:
                                     # max_new 1 (nothing left to adopt) or a cancelled read: drop the staged state
                                     self._send("BCANCEL")
-                                    self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born)
+                                    self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born, cancel=cancel)
                                     with self.slot_cv:
                                         self.mp_staged = None
                                         self.slot_cv.notify_all()
@@ -2128,7 +2301,7 @@ class StrataEngine:
                                   f"({e}); cancelling it and waiting for another slot", flush=True)
                             try:
                                 self._send("BCANCEL")
-                                self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born)
+                                self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born, cancel=cancel)
                             except EngineDied:
                                 raise
                             refused += 1
@@ -2207,7 +2380,7 @@ class StrataEngine:
                     elif line.startswith("BDONE "):
                         phase = "none"
                         f = line.split()
-                        self._apply_bdone(f)
+                        self._apply_bdone(f, cancel)
                         # what the slot's sessions hold now: the prompt and every token fed (all but the last one)
                         self.slot_held[slot] = list(prompt) + out[gen0:-1] if len(out) > gen0 else []
                         if f[3:4] == ["nonfinite"]:              # #879: the engine dropped the slot's state
@@ -2247,7 +2420,7 @@ class StrataEngine:
                             self.slot_cv.notify_all()
                         if self.gen == born and self.alive():
                             self._send("BCANCEL")
-                            self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born)
+                            self._drain_control("BCANCELLED", timeout=BCANCEL_DRAIN_S, born=born, cancel=cancel)
                         phase = "none"
                         staged_ready = None
                     finally:
@@ -2259,9 +2432,9 @@ class StrataEngine:
                     phase = "none"                      # #1059: it ended on the engine's ERR: no DONE to wait 300 s for
                 if phase == "solo":
                     self._send("STOP")
-                    self._drain_control("DONE", born=born)
+                    self._drain_control("DONE", born=born, cancel=cancel)
                 elif phase == "admit":
-                    line = self._drain_control("BADM", born=born)
+                    line = self._drain_control("BADM", born=born, cancel=cancel)
                     if line and line.startswith("BADM ") and line.split()[2:3] == ["1"]:
                         phase = "slot"
             except EngineDied:
@@ -2270,7 +2443,7 @@ class StrataEngine:
             if phase == "slot" and slot is not None and out and out[-1] in EOS_IDS and self.gen == born:
                 bd = self._bdone_after_eos(slot)            # (#1869) the slot's figures, not the admission's
                 if bd is not None:
-                    self._apply_bdone(bd.split())
+                    self._apply_bdone(bd.split(), cancel)
                     bdone_in = True
             if reused0 is not None and isinstance(self.last, dict):
                 self.last = {**self.last, "reused": reused0}
@@ -2299,7 +2472,9 @@ class StrataEngine:
                 elif phase == "slot":
                     self.slot_held[slot] = []
                     stream = list(prompt) + out[gen0:] if gen0 is not None and len(out) > gen0 else None
-                    self._release_slot_when_done(slot, stream)    # freed at its BDONE
+                    self._release_slot_when_done(
+                        slot, stream, request_id=getattr(cancel, "_strata_request_id", None)
+                    )                                            # freed at its BDONE
                     self.slot_claims.discard(slot)                # (the BDONE wait owns it now)
                 else:
                     with self.slot_cv:
@@ -2390,8 +2565,8 @@ class StrataEngine:
         self.lp_lines = LPLines(cancel)
         carry = NO_LINE                  # a line read for a token's LP line, held until it is used
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
-        head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
-            f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
+        keys = self.sampling_keys(sampling or {}) + self.request_key(getattr(cancel, "_strata_request_id", None))
+        head = f"GENI {int(max_new)}{keys} {embeddings}" if embeddings else f"GEN {int(max_new)}{keys}"
         try:
             self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
@@ -2478,6 +2653,7 @@ class StrataEngine:
                         pass
                 elif line.startswith("DONE"):
                     self._parse_done(line)
+                    self._check_request_id(cancel, self.last)
                     done = True
                     if self.last.get("finish") == "nonfinite":   # #879
                         raise EngineNonFinite("the engine's logits became non-finite (#879)")
@@ -2513,6 +2689,7 @@ class StrataEngine:
                         break
                     if line.startswith("DONE"):
                         self._parse_done(line)
+                        self._check_request_id(cancel, self.last)
                         break
                     if not self.can_stop:
                         heard = time.monotonic()
@@ -2707,6 +2884,7 @@ class StrataEngine:
                     self.log.close()
                 self.proc = None
                 self.ended = True
+                self.launch_id, self.launch_pid, self.launch_started_at = None, None, None
                 self.progress, self.last = None, {}
                 self.progress_ms, self.reused = 0, 0
 
@@ -3892,6 +4070,12 @@ class Service:
         self.last_request_at = None                      # when a request last started or finished
         self.started_at = time.time()
         self.instance_id = uuid.uuid4().hex
+        owner_id = os.environ.get("STRATA_OWNER_ID")
+        self.owner_id = owner_id if isinstance(owner_id, str) and \
+            re.fullmatch(r"[0-9a-f]{32}", owner_id) else None
+        runtime_profile = os.environ.get("STRATA_RUNTIME_PROFILE")
+        self.runtime_profile = runtime_profile if isinstance(runtime_profile, str) and \
+            re.fullmatch(r"[A-Za-z0-9._-]{1,128}", runtime_profile) else None
         self.status_lock = threading.Lock()
         self.admission_changed = threading.Condition(self.status_lock)
         self.mcp = None                                  # serve/mcp.py's McpHub when MCP servers are configured
@@ -4545,23 +4729,118 @@ class Service:
             reading = self.status.get("busy") and self.status.get("first_token") is None
         return getattr(self.engine, "prefill_tok_s_mean", None) if reading else 0.0
 
-    def begin_request(self, path, req):
-        """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then)."""
+    @staticmethod
+    def _engine_launch_identity(engine) -> dict:
+        """The child engine process behind one request, or nulls while it is unloaded."""
+        return {"engine_launch_id": getattr(engine, "launch_id", None),
+                "engine_pid": getattr(engine, "launch_pid", None),
+                "engine_started_at": getattr(engine, "launch_started_at", None)}
+
+    def request_identity(self, engine=None) -> dict:
+        """Stable server/owner fields plus the selected engine launch for request accounting."""
+        return {"server_instance_id": self.instance_id, "owner_id": self.owner_id,
+                "runtime_profile": self.runtime_profile,
+                **self._engine_launch_identity(self.engine if engine is None else engine)}
+
+    def _record_request_engine(self, request_id: str, cancel, engine) -> None:
+        """Remember which engine process actually took this request, including a routed replica."""
+        identity = self.request_identity(engine)
+        setattr(cancel, "_strata_launch_identity", identity)
+        setattr(cancel, "_strata_engine", engine)
+        with self.status_lock:
+            row = self.terminal_requests.get(request_id)
+            if row is not None:
+                row.update(identity)
+
+    def note_request_phase(self, name: str, milliseconds: float) -> None:
+        """Add one measured server-side phase to the current request's thread-local observation."""
+        observation = getattr(self.request_trace, "observation", None)
+        if not isinstance(observation, dict):
+            return
+        phases = observation.setdefault("phases_ms", {})
+        phases[name] = round(float(phases.get(name) or 0.0) + max(0.0, milliseconds), 3)
+
+    def set_request_phase(self, name: str, milliseconds: float) -> None:
+        """Replace one phase with a cumulative measurement from this request."""
+        observation = getattr(self.request_trace, "observation", None)
+        if not isinstance(observation, dict):
+            return
+        observation.setdefault("phases_ms", {})[name] = round(max(0.0, milliseconds), 3)
+
+    def begin_request(self, path, req, request_id=None):
+        """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then).
+
+        `request_id` is the HTTP exchange's correlation ID when the handler has one.  The monitor, response
+        header, request ledger and engine must name the same exchange.
+        """
+        request_id = request_id or uuid.uuid4().hex[:12]
+        started = time.perf_counter()
+        self.request_trace.observation = {
+            "id": request_id,
+            "started_at": time.time(),
+            "_clock": started,
+            "phases_ms": {},
+            "hardware": None,
+            "sse": None,
+        }
+        telemetry = getattr(self, "telemetry", None)
+        if telemetry is not None:
+            telemetry.begin_request_trace(request_id)
         if not self.api_monitor:
+            self.request_trace.record = None
             return None
         raw = json.dumps(req, ensure_ascii=False, indent=2)
-        record = {"id": uuid.uuid4().hex[:12], "path": path, "model": req.get("model") or self.model,
+        record = {"id": request_id, "path": path,
+                  "model": req.get("model") or self.model,
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "response_format": (req.get("response_format") or {}).get("type")
                   if isinstance(req.get("response_format"), dict) else None,
                   "input": raw[:262144], "input_truncated": len(raw) > 262144,
                   "output": "", "reasoning": "", "output_truncated": False, "reasoning_truncated": False,
                   "queue_s": 0.0, "load_s": 0.0, "first_token_s": None,
-                  "_clock": time.perf_counter()}
+                  "_clock": started}
+        record["instrumentation"] = self.request_trace.observation
         with self.status_lock:
             self.api_requests.append(record)
         self.request_trace.record = record
         return record
+
+    def finish_request_observation(self, request_id: str, sse: dict | None = None) -> dict | None:
+        """Freeze the request's hardware and SSE observations after its last response bytes were written."""
+        observation = getattr(self.request_trace, "observation", None)
+        if not isinstance(observation, dict) or observation.get("id") != request_id:
+            return None
+        telemetry = getattr(self, "telemetry", None)
+        hardware = telemetry.end_request_trace(request_id) if telemetry is not None else None
+        now = time.perf_counter()
+        duration_ms = round((now - observation["_clock"]) * 1000.0, 3)
+        if isinstance(sse, dict):
+            visible = int(sse.get("visible_delta_events") or 0)
+            mapped = int(sse.get("mapped_visible_delta_events") or 0)
+            unmapped = max(0, visible - mapped)
+            sse["unmapped_visible_delta_events"] = unmapped
+            sse["chunk_to_delta"] = {
+                "exact": True,
+                "basis": "one SSE data frame per emitted API delta",
+                "retained_events": len(sse.get("event_timeline") or []),
+                "timeline_truncated": bool(sse.get("dynamic_events_truncated")),
+            }
+            sse["chunk_to_token"] = {
+                "exact": visible > 0 and unmapped == 0,
+                "basis": "engine token index and token ID carried beside each emitted delta",
+                "mapped_visible_delta_events": mapped,
+                "unmapped_visible_delta_events": unmapped,
+                "reason": None if visible > 0 and unmapped == 0 else "missing_engine_token_source",
+            }
+        with self.status_lock:
+            observation["finished_at"] = time.time()
+            observation["duration_ms"] = duration_ms
+            observation["phases_ms"]["response"] = duration_ms
+            observation["hardware"] = hardware
+            observation["sse"] = sse
+            observation.pop("_clock", None)
+            self.request_trace.observation = None
+        return observation
 
     def request_records(self, request_id=None):
         with self.status_lock:
@@ -4737,15 +5016,21 @@ class Service:
         A control token's text (<|im_start|>, <|im_end|>, <|endoftext|>, ...) inside a message is text as well: only
         the control tokens the template writes are control tokens.  `store=False` (a token count) reuses the kept
         prompts without adding or replacing one."""
+        render_started = time.perf_counter()
         marked, marked_tools, changed = mark_think_literals(messages, tools, self.literals)
         prompt = self.render_prompt(marked, marked_tools, kwargs)
+        self.note_request_phase("render", (time.perf_counter() - render_started) * 1000.0)
         plain = ()
         if changed:
             prompt, plain = unmark_think_literals(prompt, self.literals)
+        tokenize_started = time.perf_counter()
         if self.prompts is not None:            # #567: only what follows the last special shared with a recent prompt
-            return self.prompts.encode(prompt, plain, store)
-        return self.tok.encode(prompt, parse_special=True, plain=plain) if plain else \
-            self.tok.encode(prompt, parse_special=True)
+            ids = self.prompts.encode(prompt, plain, store)
+        else:
+            ids = self.tok.encode(prompt, parse_special=True, plain=plain) if plain else \
+                self.tok.encode(prompt, parse_special=True)
+        self.note_request_phase("tokenize", (time.perf_counter() - tokenize_started) * 1000.0)
+        return ids
 
     @contextlib.contextmanager
     def _turn(self, cancel=None):
@@ -5068,8 +5353,11 @@ class Service:
         stop_list = stop_strings(sampling)
         stops = StopMatcher(stop_list) if stop_list else None
 
-        def cut(evs):
+        def cut(evs, source_token_index=None, source_token_id=None):
             """The events with the answer's text cut at a stop string (OpenAI stop, Anthropic stop_sequences)."""
+            for ev in evs:
+                ev.source_token_index = source_token_index
+                ev.source_token_id = source_token_id
             if stops is None:
                 return evs
             out = []
@@ -5079,13 +5367,40 @@ class Service:
                 if ev.kind == "content":
                     text = stops.push(ev.text or "")
                     if text:
-                        out.append(Event("content", text))
+                        out.append(Event("content", text, source_token_index=source_token_index,
+                                         source_token_id=source_token_id))
                     continue
                 held = stops.flush()                    # a stop string does not run across a tool call or thinking
                 if held:
-                    out.append(Event("content", held))
+                    out.append(Event("content", held, source_token_index=source_token_index,
+                                     source_token_id=source_token_id))
                 out.append(ev)
             return out
+        parser_ms = detok_ms = 0.0
+        measure_phases = False
+
+        def detokenize(token_id):
+            """Measure the host detokenizer without changing its output."""
+            nonlocal detok_ms
+            if not measure_phases:
+                return detok.push(token_id)
+            started = time.perf_counter()
+            try:
+                return detok.push(token_id)
+            finally:
+                detok_ms += (time.perf_counter() - started) * 1000.0
+
+        def parse_piece(piece):
+            """Measure the output parser without changing its events."""
+            nonlocal parser_ms
+            if not measure_phases:
+                return parser.feed(piece)
+            started = time.perf_counter()
+            try:
+                return parser.feed(piece)
+            finally:
+                parser_ms += (time.perf_counter() - started) * 1000.0
+
         opening = []                                    # without thinking the prompt ends with the forced opening:
         if force and not thinking:                      # the parser reads it as if the model had written it
             opening, force = parser.feed(force), None
@@ -5107,6 +5422,8 @@ class Service:
         segments = []
         timed_out = False
         trace = getattr(self.request_trace, "record", None)
+        observation = getattr(self.request_trace, "observation", None)
+        measure_phases = observation is not None
         waiting = time.perf_counter()
         first_engine_token_s = None  # this request, from entering the engine queue; includes queue/prefill
         # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
@@ -5114,9 +5431,18 @@ class Service:
         par = bool(getattr(self.engine, "batch", 0))
         st = {} if par else self.status
         rate = collections.deque(maxlen=32) if par else self.rate
-        request_id = uuid.uuid4().hex[:12]
+        request_id = getattr(cancel, "_strata_request_id", None) or uuid.uuid4().hex[:12]
         request_started = time.time()                      # S2: this request's own clock, from the queue on
+        request_turn_at = None
         setattr(cancel, "_strata_request_id", request_id)
+        trace = getattr(self.request_trace, "record", None)
+        api_route = getattr(cancel, "_strata_api_route", None) or (trace or {}).get("path")
+        stream = bool(getattr(cancel, "_strata_stream", False) or (trace or {}).get("stream"))
+        setattr(cancel, "_strata_api_route", api_route)
+        setattr(cancel, "_strata_stream", stream)
+        sampling_used = sampling_summary(sampling)
+        initial_identity = self.request_identity()
+        setattr(cancel, "_strata_launch_identity", initial_identity)
         deadline = time.monotonic() + self.queue_timeout_s if self.queue_timeout_s is not None else None
         if deadline is not None:
             setattr(cancel, "_strata_queue_deadline", deadline)
@@ -5128,6 +5454,9 @@ class Service:
                     self._terminal_event_locked(request_id, "reading")
         setattr(cancel, "_strata_queue_started", queue_started)
         def replica_selected(index: int) -> None:
+            engines = getattr(self.engine, "engines", ())
+            selected_engine = engines[index] if 0 <= index < len(engines) else self.engine
+            self._record_request_engine(request_id, cancel, selected_engine)
             with self.status_lock:
                 row = self.terminal_requests.get(request_id)
                 if row is not None:
@@ -5137,7 +5466,9 @@ class Service:
             self.status["queued"] += 1
             self.terminal_requests[request_id] = {"id": request_id, "state": "queued",
                                                     "queued_at": time.time(), "admitted_at": None,
-                                                    "prompt_tokens": len(ids)}
+                                                    "api_route": api_route, "stream": stream,
+                                                    "sampling": sampling_used, "prompt_tokens": len(ids),
+                                                    **initial_identity}
             self._terminal_event_locked(request_id, "queued")
         queued_counted = True
         try:
@@ -5165,6 +5496,7 @@ class Service:
                         if deadline is not None and time.monotonic() >= deadline:
                             self.fifo.release()
                             raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+                        request_turn_at = time.time()
                         turn.callback(self.fifo.release)
                     elif self.admission_policy == "refuse":
                         raise QueueWaitExpired("admission_policy=refuse: no free engine turn; retry later")
@@ -5197,15 +5529,21 @@ class Service:
                             queued_counted = False
                             self.terminal_requests[request_id].update(state="waiting", admitted_at=time.time())
                             self._terminal_event_locked(request_id, "admitted")
+                        parallel_neighbor = bool(self.live_reqs) if par else False
+                        if parallel_neighbor:
+                            for previous, _ in self.live_reqs.values():
+                                previous["parallel_neighbor"] = True
                         request_admitted = time.time()      # S2: when the engine (a slot) took this request
                         st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
                                   generated=0, started=request_admitted, first_token=None, tool=None, tail="",
-                                  max_tokens=max_new, reasoning_recoveries=0, thinking_budget=budget)
+                                  max_tokens=max_new, reasoning_recoveries=0, thinking_budget=budget,
+                                  parallel_neighbor=parallel_neighbor)
                         if par:
                             self.live_reqs[id(st)] = (st, rate)
                             self.status.update(st)
                         self.last_request_at = time.time()
                         rate.clear()                    # the previous request's samples must not leak into this one
+                    self._record_request_engine(request_id, cancel, self.engine)
                     before = getattr(self.engine, "last", None)
                     last_print = time.time()
                     prompt, thought = ids, 0            # thought: the reasoning tokens so far (the budget's count)
@@ -5258,9 +5596,9 @@ class Service:
                                 if self.repeat_stop_tokens and run_len >= self.repeat_stop_tokens:
                                     repeated = True     # #606: a degenerate output, not an answer: end it here
                                     break
-                                piece = detok.push(t)
+                                piece = detokenize(t)
                                 tail = (tail + piece)[-2:]
-                                evs = cut(parser.feed(piece))
+                                evs = cut(parse_piece(piece), n, t)
                                 self._note(n, evs, st, rate)
                                 last_print = self._progress(last_print, st=st)
                                 for ev in evs:
@@ -5312,6 +5650,10 @@ class Service:
                             finish = "error"
                             timed_out = True
                             raise
+                        except EngineProtocolError as e:
+                            finish = "error"
+                            print(f"[strata] engine protocol error: {e}", flush=True)
+                            raise
                         except ValueError as e:             # the engine's ERR line (it may have ended after it)
                             finish = "error"
                             print(f"[strata] the engine reported an error: {e}", flush=True)
@@ -5328,6 +5670,11 @@ class Service:
                                 finish = "error"
                                 self._say_died(e)
                                 if not leaving and not cancel.is_set():
+                                    raise
+                            except EngineProtocolError as e:
+                                finish = "error"
+                                print(f"[strata] engine protocol error while closing the request: {e}", flush=True)
+                                if not leaving:
                                     raise
                             segment_done = getattr(self.engine, "last", None)
                             if segment_done is not None and segment_done is not segment_before:
@@ -5389,7 +5736,7 @@ class Service:
                                     n += 1
                                     raw_ids.append(t)
                                     thinking_n += parser.state in ("reasoning", "rcall")
-                                    evs = cut(parser.feed(detok.push(t)))
+                                    evs = cut(parse_piece(detokenize(t)), n, t)
                                     self._note(n, evs, st, rate)
                                     for ev in evs:
                                         yield "event", ev
@@ -5419,7 +5766,7 @@ class Service:
                             n += 1
                             raw_ids.append(t)
                             thinking_n += parser.state in ("reasoning", "rcall")
-                            evs = cut(parser.feed(detok.push(t)))
+                            evs = cut(parse_piece(detokenize(t)), n, t)
                             self._note(n, evs, st, rate)
                             for ev in evs:
                                 yield "event", ev
@@ -5444,6 +5791,8 @@ class Service:
                 finally:
                     # #266: settle this request's status, history and totals while still holding the fifo: once
                     # it is released the next request sets its own status, which this must not record or clear
+                    launch_identity = dict(getattr(cancel, "_strata_launch_identity", None) or
+                                           self.request_identity())
                     with self.status_lock:
                         if st.get("busy") and not timed_out:
                             last = request_stats(segments)          # only this request's own DONEs count
@@ -5457,8 +5806,37 @@ class Service:
                             pcie_share = round(last["offloaded"] / routed, 3) \
                                 if last.get("offloaded") is not None and routed else None
                             seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
+                            sampling_used = sampling_summary(sampling)
+                            cohort, cohort_tags, cohort_phase = request_cohort(
+                                len(ids), max_new, bool(tools), n, last.get("reused") or 0, finish,
+                                bool(st.get("parallel_neighbor"))
+                            )
+                            if measure_phases:
+                                queue_end = request_turn_at or request_admitted
+                                slot_admitted = getattr(cancel, "_strata_slot_admitted_at", None)
+                                self.note_request_phase(
+                                    "queue", (queue_end - request_started) * 1000.0
+                                )
+                                self.note_request_phase(
+                                    "admit",
+                                    ((slot_admitted or request_admitted) - request_admitted) * 1000.0
+                                )
+                                self.note_request_phase("prefill", float(last.get("prompt_ms") or 0.0))
+                                self.note_request_phase("decode", float(last.get("decode_ms") or 0.0))
+                                self.set_request_phase("parser", parser_ms)
+                                self.set_request_phase("detokenize", detok_ms)
+                            trace_engine = getattr(cancel, "_strata_engine", None) or self.engine
+                            batch_trace = (trace_engine.batch_trace_for(request_id)
+                                           if hasattr(trace_engine, "batch_trace_for") else None)
+                            batch_timeline = (batch_trace or {}).get("timeline") or []
+                            stage_timeline = [event for event in batch_timeline
+                                              if event.get("phase") == "stage"]
                             self.history.append({
-                                "id": request_id,
+                                "id": request_id, **launch_identity,
+                                **({"instrumentation": observation} if isinstance(observation, dict) else {}),
+                                "api_route": api_route, "stream": stream, "sampling": sampling_used,
+                                "cohort": cohort, "cohort_tags": cohort_tags, "cohort_phase": cohort_phase,
+                                "parallel_neighbor": bool(st.get("parallel_neighbor")),
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
                                 "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
@@ -5469,6 +5847,7 @@ class Service:
                                 "reasoning_recoveries": recovery_count,
                                 "reasoning_repeat_coverage": round(repeat_coverage, 3),
                                 "engine_generated": last.get("generated"),
+                                "resume_tokens": segments[0].get("resume") if segments else None,
                                 "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
                                 "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                                 if n and (last.get("generated") or 0) >= 2 and last.get("decode_ms") else None,
@@ -5476,7 +5855,11 @@ class Service:
                                 "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb"),
                                 # #457: the speculative drafts from the DONE line (None: the engine did not say)
                                 "drafts_offered": last.get("drafts_offered"),
-                                "drafts_accepted": last.get("drafts_accepted")})
+                                "drafts_accepted": last.get("drafts_accepted"),
+                                "batch_windows_observed": (batch_trace or {}).get("windows_observed"),
+                                "batch_windows_retained": (batch_trace or {}).get("windows_retained"),
+                                "batch_timeline": batch_timeline,
+                                "stage_timeline": stage_timeline})
                             t = self.totals
                             t["requests"] += 1
                             t["prompt_tokens"] += seen
@@ -5545,7 +5928,13 @@ class Service:
                 self._terminal_event_locked(request_id, event, finish)
             if emb:
                 Path(emb).unlink(missing_ok=True)
-        for ev in cut(parser.finish(finish)):
+        if measure_phases:
+            parser_finish_started = time.perf_counter()
+        finished_events = parser.finish(finish)
+        if measure_phases:
+            parser_ms += (time.perf_counter() - parser_finish_started) * 1000.0
+            self.set_request_phase("parser", parser_ms)
+        for ev in cut(finished_events):
             yield "event", ev
         if parser.rescued or parser.refused:
             self.totals["tool_calls_from_reasoning"] = self.totals.get("tool_calls_from_reasoning", 0) + parser.rescued
@@ -5659,6 +6048,58 @@ def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | No
             # the speculative drafts, as llama.cpp names them (from PR #83, @mikicvi): only when the engine reported them
             **({"draft_n": int(last["drafts_offered"]), "draft_n_accepted": int(last["drafts_accepted"])}
                if last.get("drafts_offered") is not None else {})}
+
+
+SAMPLING_SUMMARY_KEYS = ("temperature", "top_p", "top_k", "min_p", "repetition_penalty",
+                         "frequency_penalty", "presence_penalty", "penalty_last_n", "seed",
+                         "experimental_speed_projection")
+
+
+def sampling_summary(sampling: dict | None) -> dict:
+    """The scalar sampling settings a request actually used, bounded for the request ledger."""
+    if not isinstance(sampling, dict):
+        return {}
+    out = {key: sampling[key] for key in SAMPLING_SUMMARY_KEYS
+           if isinstance(sampling.get(key), (bool, int, float))}
+    tune = sampling.get("strata_tune")
+    if isinstance(tune, dict):
+        for key in ("pcie_frac", "spec_min_p", "prefill_pipe", "aux_cpus"):
+            value = tune.get(key)
+            if isinstance(value, (bool, int, float)):
+                out[f"tune_{key}"] = value
+    bias = sampling.get("logit_bias")
+    if isinstance(bias, dict):
+        out["logit_bias_entries"] = len(bias)
+    allowed = sampling.get("allowed_token_ids")
+    if isinstance(allowed, list):
+        out["allowed_token_ids"] = len(allowed)
+    return out
+
+
+def request_cohort(prompt_tokens: int, max_new: int, has_tools: bool, output_tokens: int,
+                   reused: int, finish: str, parallel_neighbor: bool = False):
+    """Classify one request by its observed shape; tags are multi-label and the primary is deterministic."""
+    tags = []
+    if finish in ("cancel", "disconnect"):
+        tags.append("cancel_disconnect")
+    elif finish in ("error", "timeout"):
+        tags.append("failure")
+    if has_tools:
+        tags.append("tool_call")
+    if prompt_tokens >= 32768:
+        tags.append("long_context")
+    if max_new >= 4096 or output_tokens >= 4096:
+        tags.append("long_output")
+    if parallel_neighbor:
+        tags.append("parallel_neighbor")
+    if prompt_tokens < 8192 and output_tokens < 1024 and not has_tools:
+        tags.append("short")
+    phase = "continued" if reused > 0 else "first"
+    if phase == "continued":
+        tags.append(phase)
+    primary = next((tag for tag in ("failure", "cancel_disconnect", "tool_call", "long_context",
+                                    "long_output", "parallel_neighbor") if tag in tags), "short")
+    return primary, tags or ["short"], phase
 
 
 def request_stats(segments: list[dict]) -> dict:
@@ -5976,6 +6417,13 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
         if got:
             c["choices"][0]["logprobs"] = {key: got}
         return c
+
+    def traced(c, ev):
+        source = ev.trace_source()
+        if source is not None:
+            c["_strata_source"] = source
+        return c
+
     calls = 0
     streamed = {}                                  # tool call id -> index, for calls sent piece by piece
     finished = set()                               # ... and the ones whose final tool_call came (#211)
@@ -5992,22 +6440,25 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
         elif kind == "event":
             ev: Event = x
             if ev.kind == "reasoning" and ev.text:
-                yield with_lp(chunk({"reasoning_content": ev.text}), "reasoning_content")
+                yield traced(with_lp(chunk({"reasoning_content": ev.text}), "reasoning_content"), ev)
             elif ev.kind == "content" and ev.text:
-                yield with_lp(chunk({"content": ev.text}), "content")
+                yield traced(with_lp(chunk({"content": ev.text}), "content"), ev)
             elif ev.kind == "tool_start":
                 streamed[ev.call.id] = calls
                 calls += 1
-                yield chunk({"tool_calls": [{"index": streamed[ev.call.id], "id": ev.call.id, "type": "function",
-                                             "function": {"name": ev.call.name, "arguments": ""}}]})
+                yield traced(chunk({"tool_calls": [{"index": streamed[ev.call.id], "id": ev.call.id,
+                                                    "type": "function",
+                                                    "function": {"name": ev.call.name, "arguments": ""}}]}), ev)
             elif ev.kind == "tool_args":
-                yield chunk({"tool_calls": [{"index": streamed[ev.call.id], "function": {"arguments": ev.text}}]})
+                yield traced(chunk({"tool_calls": [{"index": streamed[ev.call.id],
+                                                    "function": {"arguments": ev.text}}]}), ev)
             elif ev.kind == "tool_call" and ev.call.id in streamed:
                 finished.add(ev.call.id)
             elif ev.kind == "tool_call":
-                yield chunk({"tool_calls": [{"index": calls, "id": ev.call.id, "type": "function",
-                                             "function": {"name": ev.call.name,
-                                                          "arguments": json.dumps(ev.call.arguments, ensure_ascii=False)}}]})
+                yield traced(chunk({"tool_calls": [{
+                    "index": calls, "id": ev.call.id, "type": "function",
+                    "function": {"name": ev.call.name,
+                                 "arguments": json.dumps(ev.call.arguments, ensure_ascii=False)}}]}), ev)
                 calls += 1
         else:
             # a streamed call without its final tool_call is one the output ended inside: not "tool_calls" (#211)
@@ -6197,6 +6648,12 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
     def close():
         return ("content_block_stop", {"type": "content_block_stop", "index": index})
 
+    def traced(event, ev):
+        source = ev.trace_source()
+        if source is not None:
+            event["_strata_source"] = source
+        return event
+
     streamed, finished = set(), set()              # calls sent piece by piece; those whose final tool_call came (#211)
     for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel, force=force, declared_only=True):
         if kind == "ping":
@@ -6205,8 +6662,9 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
         if kind == "event":
             ev: Event = x
             if ev.kind == "tool_args":
-                yield "content_block_delta", {"type": "content_block_delta", "index": index,
-                                              "delta": {"type": "input_json_delta", "partial_json": ev.text}}
+                yield "content_block_delta", traced(
+                    {"type": "content_block_delta", "index": index,
+                     "delta": {"type": "input_json_delta", "partial_json": ev.text}}, ev)
                 continue
             if ev.kind == "tool_call" and ev.call.id in streamed:
                 finished.add(ev.call.id)
@@ -6226,19 +6684,24 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
                          "text": {"type": "text", "text": ""},
                          "tool_use": {"type": "tool_use", "id": ev.call.id if ev.call else "", "name":
                                       ev.call.name if ev.call else "", "input": {}}}[want]
-                yield "content_block_start", {"type": "content_block_start", "index": index, "content_block": block}
+                yield "content_block_start", traced(
+                    {"type": "content_block_start", "index": index, "content_block": block}, ev)
             if want == "thinking":
-                yield "content_block_delta", {"type": "content_block_delta", "index": index,
-                                              "delta": {"type": "thinking_delta", "thinking": ev.text}}
+                yield "content_block_delta", traced(
+                    {"type": "content_block_delta", "index": index,
+                     "delta": {"type": "thinking_delta", "thinking": ev.text}}, ev)
             elif want == "text":
-                yield "content_block_delta", {"type": "content_block_delta", "index": index,
-                                              "delta": {"type": "text_delta", "text": ev.text}}
+                yield "content_block_delta", traced(
+                    {"type": "content_block_delta", "index": index,
+                     "delta": {"type": "text_delta", "text": ev.text}}, ev)
             elif ev.kind == "tool_start":
                 pass                                # its input follows as tool_args pieces
             else:
                 used_tool = True
-                yield "content_block_delta", {"type": "content_block_delta", "index": index, "delta": {
-                    "type": "input_json_delta", "partial_json": json.dumps(ev.call.arguments, ensure_ascii=False)}}
+                yield "content_block_delta", traced(
+                    {"type": "content_block_delta", "index": index,
+                     "delta": {"type": "input_json_delta",
+                               "partial_json": json.dumps(ev.call.arguments, ensure_ascii=False)}}, ev)
         else:
             if open_kind is not None:
                 yield close()
@@ -6489,12 +6952,24 @@ def make_handler(svc: Service):
             self.send_header("Connection", "close")
             super().end_headers()
 
-        def _watch_client(self, cancel: threading.Event) -> None:
+        def _request_id(self) -> str:
+            """The HTTP exchange's stable correlation ID, shared with the request ledger and engine."""
+            request_id = getattr(self, "_strata_http_request_id", None)
+            if request_id is None:
+                request_id = uuid.uuid4().hex[:12]
+                self._strata_http_request_id = request_id
+            return request_id
+
+        def _watch_client(self, cancel: threading.Event, stream: bool | None = None) -> None:
             """#430 #431: cancel the request as soon as its client hangs up.  A non-streamed request writes nothing
             until it ends, and a streamed one only a keep-alive per prompt chunk (and the first write after a hang-up
             usually still succeeds), so a dropped request kept the engine busy until its answer or the whole prompt
             was done.  Every 0.5 s: the socket readable with nothing to read (EOF) means the client closed it.  A
             request is HTTP/1.0 and fully read here, so no later bytes are expected - data is not a hang-up."""
+            setattr(cancel, "_strata_request_id", self._request_id())
+            setattr(cancel, "_strata_api_route", urlsplit(self.path).path)
+            if stream is not None:
+                setattr(cancel, "_strata_stream", bool(stream))
             done = self.watch_done = threading.Event()
             self.cancel_event = cancel
             with svc.status_lock:
@@ -6571,6 +7046,7 @@ def make_handler(svc: Service):
             body = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            self.send_header("X-Request-ID", self._request_id())
             for k, v in (headers or {}).items():
                 self.send_header(k, str(v))
             if retry_after is not None:
@@ -6716,6 +7192,7 @@ def make_handler(svc: Service):
                                             if svc.status.get("busy") else 0)
                         output_counter = int(svc.totals.get("output_tokens") or 0) + in_flight_tokens
                     snapshot["instance"]["id"] = svc.instance_id
+                    snapshot["instance"].update(svc.request_identity())
                     snapshot["instance"]["state"] = "draining" if draining else "ready"
                     if getattr(svc, "launch_attestation", None) is not None:
                         snapshot["instance"]["launch_attestation"] = svc.launch_attestation
@@ -7051,7 +7528,7 @@ def make_handler(svc: Service):
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
-                    self.record = svc.begin_request(path, req)
+                    self.record = svc.begin_request(path, req, self._request_id())
                 if path == "/v1/responses":
                     self._responses(req)
                 elif path.startswith("/slots/"):
@@ -7076,6 +7553,10 @@ def make_handler(svc: Service):
             except EngineNonFinite as e:                    # #879, twice: not the request's fault
                 print(f"[strata] 503: {e}", flush=True)
                 self._json(503, responses_error_body(str(e), "server_error") if path == "/v1/responses"
+                           else {"error": {"type": "server_error", "message": str(e)}})
+            except EngineProtocolError as e:
+                print(f"[strata] 500 engine protocol error: {e}", flush=True)
+                self._json(500, responses_error_body(str(e), "server_error") if path == "/v1/responses"
                            else {"error": {"type": "server_error", "message": str(e)}})
             except ValueError as e:
                 print(f"[strata] 400 invalid request: {e}", flush=True)
@@ -7135,6 +7616,7 @@ def make_handler(svc: Service):
                         record["finished_at"] = time.time()
                         record["state"] = "error" if record.get("error") else record.get("outcome", "completed")
                     svc.request_trace.record = None
+                svc.finish_request_observation(self._request_id(), getattr(self, "_strata_sse_state", None))
 
         def _images(self, req):
             """POST /v1/images/generations (serve/images.py): one sd-cli job in the GPU's turn."""
@@ -7147,7 +7629,7 @@ def make_handler(svc: Service):
             job = images_api.parse_request(req, gen.cfg)        # ImageRequestError (a ValueError): 400
             svc.last_request_at = time.time()
             cancel = threading.Event()
-            self._watch_client(cancel)
+            self._watch_client(cancel, stream=False)
             print(f"[strata] image: {job['width']}x{job['height']}, n={job['n']}, {job['steps']} steps, "
                   f"seed {job['seed']}", flush=True)
             try:
@@ -7321,8 +7803,101 @@ def make_handler(svc: Service):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Accel-Buffering", "no")   # nginx and similar proxies pass each event at once
+            self.send_header("X-Request-ID", self._request_id())
             self._cors()
             self.end_headers()
+            observation = getattr(svc.request_trace, "observation", None)
+            started = observation.get("_clock") if isinstance(observation, dict) else time.perf_counter()
+            self._strata_sse_state = {
+                "measurement_side": "server_socket_flush_not_client_visible",
+                "client_visible": False,
+                "client_ack": {
+                    "available": False,
+                    "reason": "sse_has_no_application_ack",
+                },
+                "started_at": time.time(),
+                "stream_started_ms": round((time.perf_counter() - started) * 1000.0, 3),
+                "first_visible_delta_ms": None,
+                "last_visible_delta_ms": None,
+                "data_events": 0,
+                "keepalive_comments": 0,
+                "visible_delta_events": 0,
+                "visible_chars": 0,
+                "wire_bytes": 0,
+                "completion_tokens": None,
+                "mapped_visible_delta_events": 0,
+                "unmapped_visible_delta_events": 0,
+                "dynamic_event_limit": SSE_TRACE_MAX_EVENTS,
+                "dynamic_events_truncated": False,
+                "event_timeline": [],
+            }
+
+        @staticmethod
+        def _sse_visible_chars(kind: str, payload: dict) -> int:
+            """The user-visible delta length in one OpenAI, Responses or Anthropic SSE object."""
+            if kind == "openai":
+                choices = payload.get("choices")
+                if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                    return 0
+                delta = choices[0].get("delta")
+                if not isinstance(delta, dict):
+                    return 0
+                return sum(len(value) for key in ("content", "reasoning_content")
+                           if isinstance((value := delta.get(key)), str) and value)
+            if kind == "responses":
+                if payload.get("type") not in ("response.output_text.delta", "response.reasoning_text.delta"):
+                    return 0
+                delta = payload.get("delta")
+                return len(delta) if isinstance(delta, str) and delta else 0
+            if kind == "anthropic" and payload.get("type") == "content_block_delta":
+                delta = payload.get("delta")
+                if not isinstance(delta, dict):
+                    return 0
+                return sum(len(value) for key in ("text", "thinking", "partial_json")
+                           if isinstance((value := delta.get(key)), str) and value)
+            return 0
+
+        def _sse_sent(self, kind: str, payload: dict | None = None, wire_bytes: int = 0,
+                      completion_tokens: int | None = None, source: dict | None = None):
+            """Record one event after its bytes were flushed to the socket."""
+            state = getattr(self, "_strata_sse_state", None)
+            if state is None:
+                return
+            observation = getattr(svc.request_trace, "observation", None)
+            if not isinstance(observation, dict):
+                return
+            elapsed_ms = round((time.perf_counter() - observation["_clock"]) * 1000.0, 3)
+            state["last_event_ms"] = elapsed_ms
+            state["wire_bytes"] += max(0, int(wire_bytes))
+            if kind == "keepalive":
+                state["keepalive_comments"] += 1
+                return
+            state["data_events"] += 1
+            entry = {"seq": state["data_events"], "kind": kind, "at_ms": elapsed_ms}
+            if payload is not None:
+                visible = self._sse_visible_chars(kind, payload)
+                if visible:
+                    delta_index = state["visible_delta_events"] + 1
+                    if state["first_visible_delta_ms"] is None:
+                        state["first_visible_delta_ms"] = elapsed_ms
+                    state["last_visible_delta_ms"] = elapsed_ms
+                    state["visible_delta_events"] += 1
+                    state["visible_chars"] += visible
+                    entry.update(delta_index=delta_index, visible_chars=visible,
+                                 cumulative_visible_chars=state["visible_chars"])
+                    if source is not None:
+                        state["mapped_visible_delta_events"] += 1
+                    else:
+                        state["unmapped_visible_delta_events"] += 1
+            if source is not None:
+                entry["source"] = source
+            timeline = state["event_timeline"]
+            timeline.append(entry)
+            if len(timeline) > state["dynamic_event_limit"]:
+                del timeline[:state["dynamic_event_limit"] // 2]
+                state["dynamic_events_truncated"] = True
+            if completion_tokens is not None:
+                state["completion_tokens"] = int(completion_tokens)
 
         def _capture(self, items, api):
             """Retain bounded input/output for the monitor without changing the API response (the items as they
@@ -7412,7 +7987,7 @@ def make_handler(svc: Service):
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = threading.Event()
-            self._watch_client(cancel)                       # #430 #431 (#1999: before prepare, which can take long)
+            self._watch_client(cancel, stream=bool(req.get("stream")))
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
@@ -7427,17 +8002,32 @@ def make_handler(svc: Service):
             try:
                 for c in chunks:
                     if c is None:
-                        self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
+                        wire = b": keep-alive\n\n"
+                        self.wfile.write(wire)                     # an SSE comment: clients ignore it
+                        self.wfile.flush()
+                        self._sse_sent("keepalive", wire_bytes=len(wire))
                     else:
-                        self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
-                    self.wfile.flush()
-                self.wfile.write(b"data: [DONE]\n\n")
+                        source = c.pop("_strata_source", None)
+                        wire = b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n"
+                        self.wfile.write(wire)
+                        self.wfile.flush()
+                        usage = c.get("usage") if isinstance(c, dict) else None
+                        tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+                        self._sse_sent("openai", c, len(wire), tokens, source)
+                wire = b"data: [DONE]\n\n"
+                self.wfile.write(wire)
+                self.wfile.flush()
+                self._sse_sent("done", wire_bytes=len(wire))
             except OSError:
                 self._note(outcome="disconnected")
                 svc.note_client_disconnect(cancel)           # client went away: stop the engine
                 chunks.close()
             except EngineDied as e:                          # mid-stream: say so, then end the stream properly
                 err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
+                self._note(error=err["error"])
+                self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
+            except EngineProtocolError as e:
+                err = {"error": {"type": "server_error", "message": str(e)}}
                 self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
             except QueueWaitExpired as e:
@@ -7460,9 +8050,11 @@ def make_handler(svc: Service):
             self._sse()
             try:
                 for e in events:
-                    self.wfile.write(f"event: {e['type']}\n".encode() + b"data: " +
-                                     json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
+                    wire = (f"event: {e['type']}\n".encode() + b"data: " +
+                            json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
+                    self.wfile.write(wire)
                     self.wfile.flush()
+                    self._sse_sent("responses", e, len(wire))
             except OSError:
                 self._note(outcome="disconnected")
 
@@ -7477,7 +8069,7 @@ def make_handler(svc: Service):
             if title is not None:
                 return self._responses_ready(req, title)
             cancel = threading.Event()
-            self._watch_client(cancel)                       # #430 #431 (#1999: before prepare, which can take long)
+            self._watch_client(cancel, stream=bool(req.get("stream")))
             try:
                 ids, thinking, tools, max_new, asm, validator, req = self._responses_prepare(req, cancel)
             except ClientGone:
@@ -7527,8 +8119,11 @@ def make_handler(svc: Service):
             last = time.monotonic()
 
             def send(e):
-                self.wfile.write(f"event: {e['type']}\n".encode() + b"data: " +
-                                 json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
+                source = e.pop("_strata_source", None)
+                wire = (f"event: {e['type']}\n".encode() + b"data: " +
+                        json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
+                self.wfile.write(wire)
+                return len(wire), source
 
             try:
                 for e in items:
@@ -7536,20 +8131,33 @@ def make_handler(svc: Service):
                         # Codex's idle timeout (5 minutes by default) counts events, not SSE comments: while a long
                         # prompt is read, a response.in_progress every 15 s tells it the server is still working
                         if time.monotonic() - last >= 15:
-                            send(asm.in_progress())
+                            item = asm.in_progress()
+                            wire_bytes, source = send(item)
                             last = time.monotonic()
+                            self._sse_sent("responses", item, wire_bytes, source=source)
                         else:
-                            self.wfile.write(b": keep-alive\n\n")
+                            wire = b": keep-alive\n\n"
+                            self.wfile.write(wire)
+                            self._sse_sent("keepalive", wire_bytes=len(wire))
                     else:
-                        send(e)
+                        wire_bytes, source = send(e)
                         last = time.monotonic()
                     self.wfile.flush()
+                    if e is not None:
+                        tokens = None
+                        if e.get("type") == "response.completed":
+                            response = e.get("response")
+                            usage = response.get("usage") if isinstance(response, dict) else None
+                            tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+                        self._sse_sent("responses", e, wire_bytes, tokens, source)
             except OSError:
                 self._note(outcome="disconnected")
                 svc.note_client_disconnect(cancel)           # client went away: stop the engine
                 items.close()
             except EngineDied as e:                          # mid-stream: response.failed, then the stream ends
                 self._responses_failed(asm, f"{e}; the next request restarts it", "server_error", send)
+            except EngineProtocolError as e:
+                self._responses_failed(asm, str(e), "server_error", send)
             except QueueWaitExpired as e:
                 self._responses_failed(asm, str(e), "queue_wait_timeout", send)
             except StructuredOutputError as e:
@@ -7561,8 +8169,9 @@ def make_handler(svc: Service):
             e = asm.failed(message, code)
             self._note(error=e["response"]["error"])
             try:
-                send(e)
+                wire_bytes, source = send(e)
                 self.wfile.flush()
+                self._sse_sent("responses", e, wire_bytes, source=source)
             except OSError:
                 pass
 
@@ -7648,7 +8257,7 @@ def make_handler(svc: Service):
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = threading.Event()
-            self._watch_client(cancel)                       # #430 #431 (#1999: before prepare, which can take long)
+            self._watch_client(cancel, stream=bool(req.get("stream")))
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel, force=force)
@@ -7659,18 +8268,30 @@ def make_handler(svc: Service):
             try:
                 for item in events:
                     if item is None:
-                        self.wfile.write(b": keep-alive\n\n")
+                        wire = b": keep-alive\n\n"
+                        self.wfile.write(wire)
+                        self._sse_sent("keepalive", wire_bytes=len(wire))
                     else:
                         name, e = item
-                        self.wfile.write(f"event: {name}\n".encode() + b"data: " +
-                                         json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
+                        source = e.pop("_strata_source", None)
+                        wire = (f"event: {name}\n".encode() + b"data: " +
+                                json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
+                        self.wfile.write(wire)
                     self.wfile.flush()
+                    if item is not None:
+                        usage = e.get("usage") if isinstance(e, dict) else None
+                        tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+                        self._sse_sent("anthropic", e, len(wire), tokens, source)
             except OSError:
                 self._note(outcome="disconnected")
                 svc.note_client_disconnect(cancel)
                 events.close()
             except EngineDied as e:                          # mid-stream: Anthropic's error event
                 err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
+                self._note(error=err["error"])
+                self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
+            except EngineProtocolError as e:
+                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
                 self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
             except QueueWaitExpired as e:
@@ -8822,7 +9443,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         record = {"schema_version": 1, "instance_id": svc.instance_id, "pid": os.getpid(),
                   "api_url": f"http://{ready_host}:{bound_port}", "bound_host": a.host, "bound_port": bound_port,
                   "model_id": svc.model, "model_state": "unloaded" if lazy else "ready",
-                  "api_state": "ready", "created_at": time.time()}
+                  "api_state": "ready", "created_at": time.time(),
+                  **svc.request_identity()}
     if ready_path is not None:
         try:
             ready_file.publish(ready_path, record)

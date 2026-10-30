@@ -4,12 +4,17 @@
 Read-only: no restart, no config edit, no write on the box.  It records, in one JSON object:
 
   - md5/sha256/size/mtime of the four deployed files (engine binary, serve/server.py, launcher, config);
+  - the exact bytes of the running JSON config and the exact argv/environment of the server and engine;
   - the *running* engine and server processes, and whether the engine path in `/proc/<pid>/cmdline`
     is the binary that was hashed (a hash of the wrong file is worse than no hash);
+  - stable kernel start tokens, parent/child relationships and cgroups for the process tree;
   - the STRATA_* environment of the running engine (the switch actually in force);
   - feature markers in the deployed files: strings in the binary, source lines in server.py.  These
     answer "does this build have the staged read / the 46d12fa9 fixes", not "is it fast";
   - /health and the engine block of /metrics.
+
+The result is an input for a future last-known-good record.  It is explicitly not a rollback mechanism:
+it only observes the running instance and does not prove that a restart, health check or recovery works.
 
 `docs/STATE.md` and `docs/MULTIPATH_RULES.md` disagreed about the production hashes on 2026-10-25 (and
 the R11 server hash turned out to be the staging tree's, not production's), so the numbers below are the
@@ -31,13 +36,21 @@ import time
 
 ENGINE_PROCESS_PATTERN = "[s]trata --serve"
 SERVER_PROCESS_PATTERN = "serve/[s]erver.py --engine"
+SNAPSHOT_CONTRACT = {
+    "kind": "read_only_future_lkg_input",
+    "rollback_verified": False,
+    "restart_verified": False,
+    "health_smoke_gate_verified": False,
+    "warning": "this snapshot is evidence only; it is not an executable rollback target",
+}
 
 REMOTE_PROGRAM = r'''
-import hashlib, json, os, subprocess, sys, time, urllib.request
+import base64, hashlib, json, os, subprocess, sys, time, urllib.request
 
 S = "/opt/ai/src/strata-0.2.2"
 BASE_URL = sys.argv[1]
 API_KEY = sys.argv[2]
+SNAPSHOT_CONTRACT = __SNAPSHOT_CONTRACT__
 DEFAULT_FILES = {
     "engine": S + "/build/strata",
     "server": S + "/serve/server.py",
@@ -56,16 +69,105 @@ SERVER_MARKERS = [
 ENGINE_MARKERS = ["STRATA_BATCH_STAGED_READ", "BREAD", "BRDY", "BADOPT", "BCANCEL"]
 
 
-def digest(path):
+def stable_stat(path):
+    st = os.stat(path, follow_symlinks=True)
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def digest(path, keep_bytes=False):
     md5 = hashlib.md5()
     sha = hashlib.sha256()
+    content = bytearray()
+    before = stable_stat(path)
     with open(path, "rb") as fh:
+        opened = os.fstat(fh.fileno())
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             md5.update(chunk)
             sha.update(chunk)
-    st = os.stat(path)
-    return {"path": path, "md5": md5.hexdigest(), "sha256": sha.hexdigest(),
-            "size": st.st_size, "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime))}
+            if keep_bytes:
+                content.extend(chunk)
+        after = os.fstat(fh.fileno())
+    current = stable_stat(path)
+    opened_identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    finished_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    if before != opened_identity or opened_identity != finished_identity or finished_identity != current:
+        raise RuntimeError("file changed while the snapshot was being read: " + path)
+    result = {"path": path, "md5": md5.hexdigest(), "sha256": sha.hexdigest(),
+              "size": opened.st_size,
+              "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(opened.st_mtime))}
+    if keep_bytes:
+        result["content_b64"] = base64.b64encode(content).decode("ascii")
+        result["encoding"] = "base64"
+    return result
+
+
+def proc_bytes(pid, name):
+    with open("/proc/%s/%s" % (pid, name), "rb") as fh:
+        return fh.read()
+
+
+def split_env(raw):
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def parse_status(raw):
+    out = {}
+    for line in raw.decode("utf-8", "replace").splitlines():
+        key, separator, value = line.partition(":")
+        if separator:
+            out[key] = value.strip()
+    return out
+
+
+def process_identity(pid):
+    stat_raw = proc_bytes(pid, "stat").decode("utf-8", "replace")
+    close = stat_raw.rfind(")")
+    fields = stat_raw[close + 2:].split()
+    cmdline_raw = proc_bytes(pid, "cmdline")
+    environ_raw = proc_bytes(pid, "environ")
+    return {
+        "pid": int(pid),
+        "ppid": int(fields[1]),
+        "state": fields[0],
+        "kernel_start_token": fields[19],
+        "cmdline": [part.decode("utf-8", "replace") for part in cmdline_raw.split(b"\0") if part],
+        "cmdline_b64": base64.b64encode(cmdline_raw).decode("ascii"),
+        "environment": split_env(environ_raw),
+        "environment_b64": base64.b64encode(environ_raw).decode("ascii"),
+        "status": parse_status(proc_bytes(pid, "status")),
+        "cgroup": proc_bytes(pid, "cgroup").decode("utf-8", "replace").strip().splitlines(),
+        "maps_sha256": hashlib.sha256(proc_bytes(pid, "maps")).hexdigest(),
+        "smaps_rollup_sha256": hashlib.sha256(proc_bytes(pid, "smaps_rollup")).hexdigest(),
+    }
+
+
+def all_processes():
+    table = {}
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            stat_raw = proc_bytes(name, "stat").decode("utf-8", "replace")
+            close = stat_raw.rfind(")")
+            fields = stat_raw[close + 2:].split()
+            table[int(name)] = {"pid": int(name), "ppid": int(fields[1]), "state": fields[0],
+                                "kernel_start_token": fields[19]}
+        except OSError:
+            continue
+    return table
+
+
+def descendants(root):
+    table = all_processes()
+    selected = {root}
+    changed = True
+    while changed:
+        changed = False
+        for pid, item in table.items():
+            if item["ppid"] in selected and pid not in selected:
+                selected.add(pid)
+                changed = True
+    return [table[pid] for pid in sorted(selected) if pid in table]
 
 
 def resolve_process_path(pid, path):
@@ -77,7 +179,9 @@ def resolve_process_path(pid, path):
 
 
 out = {"collected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-       "files": {}, "running": {}, "markers": {}, "health": None, "engine": None, "errors": []}
+       "snapshot": SNAPSHOT_CONTRACT,
+       "files": {}, "running": {}, "process_tree": [], "identity_stable": None,
+       "markers": {}, "health": None, "engine": None, "errors": []}
 
 # the engine is a child of the python server; match the binary, not the systemd MainPID
 engine_pid = subprocess.run(["pgrep", "-f", "__ENGINE_PROCESS_PATTERN__"],
@@ -105,6 +209,7 @@ if server_pid:
             "config": agent_config,
             "started": subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True, text=True).stdout.strip(),
         }
+        out["running"]["server"].update(process_identity(pid))
     except OSError as exc:
         out["errors"].append("server pid %s: %s" % (pid, exc))
 engine_binary = None
@@ -122,8 +227,20 @@ if engine_pid:
             "started": subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True, text=True).stdout.strip(),
             "env": sorted(line for line in env.splitlines() if line.startswith("STRATA_")),
         }
+        out["running"]["engine"].update(process_identity(pid))
     except OSError as exc:
         out["errors"].append("engine pid %s: %s" % (pid, exc))
+
+identity_before = {}
+for role in ("server", "engine"):
+    item = out["running"].get(role) or {}
+    if isinstance(item.get("pid"), int) and item.get("kernel_start_token"):
+        identity_before[item["pid"]] = item["kernel_start_token"]
+if server_pid:
+    try:
+        out["process_tree"] = descendants(int(server_pid[0]))
+    except OSError as exc:
+        out["errors"].append("process tree: %s" % exc)
 
 # Hash the files the processes actually run.  The production directory has kept stale copies while the
 # launcher ran serve/server.py from an experiment tree; hashing that directory's path reports the wrong code.
@@ -137,7 +254,7 @@ if agent_config:
 out["default_paths"] = dict(DEFAULT_FILES)
 for name, path in FILES.items():
     try:
-        out["files"][name] = digest(path)
+        out["files"][name] = digest(path, keep_bytes=(name == "config"))
     except OSError as exc:
         out["errors"].append("cannot read %s: %s" % (path, exc))
 
@@ -170,10 +287,20 @@ try:
 except Exception as exc:                                    # noqa: BLE001
     out["errors"].append("metrics: %s" % exc)
 
+identity_after = {}
+for pid in identity_before:
+    try:
+        identity_after[pid] = process_identity(pid)["kernel_start_token"]
+    except OSError:
+        identity_after[pid] = None
+out["identity_stable"] = identity_before == identity_after
+if not out["identity_stable"]:
+    out["errors"].append("a recorded process changed or exited during the snapshot")
+
 print(json.dumps(out))
 '''.replace("__ENGINE_PROCESS_PATTERN__", ENGINE_PROCESS_PATTERN).replace(
     "__SERVER_PROCESS_PATTERN__", SERVER_PROCESS_PATTERN
-)
+).replace("__SNAPSHOT_CONTRACT__", repr(SNAPSHOT_CONTRACT))
 
 
 def run_remote(host: str, base_url: str, api_key: str) -> dict:
@@ -316,6 +443,8 @@ def main(argv: list[str]) -> int:
         print("server markers:", json.dumps(stamp.get("markers", {}).get("server", {}), ensure_ascii=False))
         print("engine markers:", json.dumps(stamp.get("markers", {}).get("engine", {}), ensure_ascii=False))
         print("engine version:", json.dumps(stamp.get("engine"), ensure_ascii=False))
+        print("snapshot:", json.dumps(stamp.get("snapshot"), ensure_ascii=False))
+        print("identity stable:", stamp.get("identity_stable"))
         print(f"json: {out}")
         for problem in problems:
             print(f"PROBLEM: {problem}", file=sys.stderr)
