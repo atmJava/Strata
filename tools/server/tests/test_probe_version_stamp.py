@@ -67,6 +67,20 @@ def test_probe_discovers_engine_independent_of_build_directory():
     assert "[s]trata --serve" in probe.REMOTE_PROGRAM
 
 
+def test_probe_resolves_relative_process_paths_from_process_cwd():
+    assert 'os.readlink("/proc/%s/cwd" % pid)' in probe.REMOTE_PROGRAM
+    assert "agent_script = resolve_process_path(pid, text)" in probe.REMOTE_PROGRAM
+    assert "engine_binary = resolve_process_path(pid, raw_argv[0].decode" in probe.REMOTE_PROGRAM
+
+
+def test_default_output_path_uses_the_system_temp_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(probe.tempfile, "gettempdir", lambda: str(tmp_path))
+    output = Path(probe.default_output_path())
+    assert output.parent == tmp_path
+    assert output.name.startswith("version-stamp-")
+    assert output.suffix == ".json"
+
+
 def test_expected_env_accepts_exact_running_switches():
     stamp = _stamp("/run/strata", "/run/serve/server.py")
     stamp["running"]["engine"]["env"] = ["STRATA_HC_Q8=1", "STRATA_EXP_MODE=8"]

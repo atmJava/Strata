@@ -15,7 +15,7 @@ Read-only: no restart, no config edit, no write on the box.  It records, in one 
 the R11 server hash turned out to be the staging tree's, not production's), so the numbers below are the
 ones to cite: this script reads the files the processes were started from.
 
-Usage: probe-version-stamp.py [--host atm@192.168.3.14 | --local] [--base-url http://127.0.0.1:8080]
+Usage: probe-version-stamp.py [--host atm@192.168.9.103 | --local] [--base-url http://127.0.0.1:8080]
                               [--out FILE] [--quiet]
 Exit: 0 every item found and health 200; 1 a check failed; 2 ssh or read failed.
 """
@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 ENGINE_PROCESS_PATTERN = "[s]trata --serve"
@@ -67,6 +68,14 @@ def digest(path):
             "size": st.st_size, "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime))}
 
 
+def resolve_process_path(pid, path):
+    """Resolve a relative argv path against the process working directory."""
+    if not path or os.path.isabs(path):
+        return path
+    cwd = os.readlink("/proc/%s/cwd" % pid)
+    return os.path.normpath(os.path.join(cwd, path))
+
+
 out = {"collected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
        "files": {}, "running": {}, "markers": {}, "health": None, "engine": None, "errors": []}
 
@@ -84,11 +93,11 @@ if server_pid:
         text_argv = [part.decode("utf-8", "replace") for part in argv]
         for index, text in enumerate(text_argv):
             if text.endswith("/serve/server.py") or text.endswith("serve/server.py"):
-                agent_script = text
+                agent_script = resolve_process_path(pid, text)
             elif text == "--config" and index + 1 < len(text_argv):
-                agent_config = text_argv[index + 1]
+                agent_config = resolve_process_path(pid, text_argv[index + 1])
             elif text.startswith("--config="):
-                agent_config = text.partition("=")[2]
+                agent_config = resolve_process_path(pid, text.partition("=")[2])
         out["running"]["server"] = {
             "pid": int(pid),
             "cmdline": b" ".join(argv).decode("utf-8", "replace").strip(),
@@ -104,7 +113,7 @@ if engine_pid:
     try:
         raw_argv = [part for part in open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0") if part]
         argv = b" ".join(raw_argv).decode("utf-8", "replace").strip()
-        engine_binary = raw_argv[0].decode("utf-8", "replace") if raw_argv else None
+        engine_binary = resolve_process_path(pid, raw_argv[0].decode("utf-8", "replace")) if raw_argv else None
         env = open("/proc/%s/environ" % pid, "rb").read().replace(b"\0", b"\n").decode("utf-8", "replace")
         out["running"]["engine"] = {
             "pid": int(pid),
@@ -176,6 +185,12 @@ def run_remote(host: str, base_url: str, api_key: str) -> dict:
     return json.loads(done.stdout)
 
 
+def default_output_path() -> str:
+    """Return a cross-platform timestamped output path in the system temp directory."""
+    name = time.strftime("version-stamp-%Y%m%dT%H%M%SZ.json", time.gmtime())
+    return os.path.join(tempfile.gettempdir(), name)
+
+
 def check(stamp: dict) -> list[str]:
     problems = []
     for name in ("engine", "server", "launcher", "config"):
@@ -238,7 +253,7 @@ def check_expected_env(stamp: dict, expected: dict[str, str]) -> list[str]:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default=os.environ.get("MP_HOST", "atm@192.168.3.14"))
+    parser.add_argument("--host", default=os.environ.get("MP_HOST", "atm@192.168.9.103"))
     parser.add_argument("--local", action="store_true", help="run on this machine (the box itself)")
     parser.add_argument("--base-url", default=os.environ.get("MP_BASE_URL", "http://127.0.0.1:8080"))
     parser.add_argument("--api-key", default=os.environ.get("MP_API_KEY", "111"))
@@ -283,7 +298,7 @@ def main(argv: list[str]) -> int:
         if got != options.expect_engine_md5:
             problems.append(f"engine md5 {got} != expected {options.expect_engine_md5}")
     stamp["problems"] = problems
-    out = options.out or time.strftime("/tmp/version-stamp-%Y%m%dT%H%M%SZ.json", time.gmtime())
+    out = options.out or default_output_path()
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(stamp, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
