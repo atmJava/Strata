@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """受控 NCU 启动器：把先前抓下来的 server argv/env 原样重启在一个 profiler 之下。
 
-定位：`docs/superpowers/plans/2026-10-27-resource-utilization-optimization.md` 的 Task 4。
+定位：`docs/superpowers/plans/2026-10-27-resource-utilization-optimization.md` 附录 B 的受控 NCU 部分。
 NCU 不能附加到现役生产进程，所以先在生产还跑着时把 `/proc/<pid>/cmdline` 与
 `/proc/<pid>/environ` 存成 JSON，停服后用本脚本 `execvpe` 出同一个进程形状，
 让 profiler 从进程起点就开始采集。调用方是 `ncu` 或 `nsys profile`，它们把自己的

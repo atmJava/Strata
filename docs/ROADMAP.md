@@ -68,14 +68,15 @@ P7 已搁置，只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢�
 | P7 Turing FP16 tensor-core prompt experts | M12/M13 | 用 tensor-core prompt experts 攻击最大 `gemm gate/up` 5.807 s | 中 | 低中，输出可能变化 | **搁置**：A1 中断；只有 NCU 证明 Tensor 是直接瓶颈时才恢复 |
 | GPU-UTIL | M13 | 用硬件计数器替代单看 NVML；先验证采集口径，再做内核调优 | 高 | 低；只读、不重启服务 | **完成**：两次 Nsight 双卡 GPU Metrics + NVML 交叉核对可复现 |
 | UTIL-NCU | M13 | 在独立受控 engine 上取得 SM throughput、occupancy、Tensor、DRAM 和 stall reason | 高 | 中；需短暂停生产、独占 GPU，完成后恢复 | **待做**：先快照再停服，不能附加现役进程 |
-| UTIL-KERNEL | M13 | 按 NCU 证据只改一个瓶颈内核或调度路径，提高 issue/Tensor/warp 占用并缩短 wall | 高 | 中；需要代码级验证 | **下一代码项**：参数 A/B 仅作部署门，不做参数探索 |
+| UTIL-KERNEL | M13 | 按 NCU 证据只改一个瓶颈内核或调度路径，提高 issue/Tensor/warp 占用并缩短 wall | 高 | 中；需要代码级验证 | **条件项**：结构性修复仍不达标时才启动 |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
 | S8/S1/S7 回归测试 | 稳定性 | 主要防止已有能力回归 | 高 | 低中 | 作为同批低风险补充 |
 | V3-2/V3-3 DFlash2 | 吞吐 | 未知 | 低 | 需要外部权重 | 阻塞，不空等 |
 
 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)。
-先完成 Task 1–6 的 NCU 根因与门限预注册；Task 7–9 必须等唯一根因产出后再进入。
+先完成阶段 0–1 的自愈演练与基线复核，再按阶段 2–4 验证并发 MTP、预填让路与能力矩阵防护；
+内核 NCU 见附录 B。
 
 ## 当前路线决定
 
