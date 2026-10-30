@@ -676,6 +676,23 @@ bank。下一候选固定四副本并使用 stride 257，让 `index+replica (mod
 详见 [`UTIL_WEIGHT_RESULT-20261031.md`](UTIL_WEIGHT_RESULT-20261031.md) 和
 [`UTIL_GRID_PAD_CONTRACT-20261031.md`](UTIL_GRID_PAD_CONTRACT-20261031.md)。
 
+### 16.5.4 UTIL-GRID-PAD（已完成，否决）
+
+四副本 codebook 改为 `replica * 257 + index` 后，每个 replica 覆盖全部 32 个 shared banks，
+输出 hash 仍为 `9a055a5a94e15c87`；但七组交替进程的 gate/up 中位为 baseline `475.7 us`、
+candidate `489.3 us`（−2.86%），candidate 仅 3/7 胜。剔除第一组冷时钟离群后仍慢约 1.2%。
+因此时间门之后没有运行 NCU 或 engine A/B。
+
+源码和测试二进制已从快照恢复，parity 均 0 failure。候选停机 12 秒、恢复 loaded health
+161 秒，总中断约 `2:53`。结果表明“每个 copy 覆盖 32 banks”并不能抵消每访问选择 copy、
+复制四份 codebook 和地址运算的成本；不再扫描副本数或邻近 stride。结果见
+[`UTIL_GRID_PAD_RESULT-20261031.md`](UTIL_GRID_PAD_RESULT-20261031.md)。
+
+下一项 `UTIL-WEIGHT-RO` 改用独立的 long-scoreboard 证据：当前 SASS 中 weight 块读取为
+`LD.E.U16.SYS`，只读参数为 `LDG.E.CONSTANT.SYS`。候选只把 fused IQ3 gate/up 的 weight
+`qs`、aux/sign word 和 scale 改走显式只读路径，先检查机器码，再过 1% 时间与 counter 门。
+契约见 [`UTIL_WEIGHT_RO_CONTRACT-20261031.md`](UTIL_WEIGHT_RO_CONTRACT-20261031.md)。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

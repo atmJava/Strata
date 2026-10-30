@@ -3,6 +3,38 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-75 · 32-bank padded codebook still regressed; rotate to read-only weight loads
+
+- 目标 / 指标：四副本 IQ3_XXS codebook 使用 stride 257，使每个 replica 的物理 bank 为
+  `index + replica (mod 32)`；要求 7 组 kernel 中位至少快 1%、5/7 胜、p75 低于 baseline
+  中位，并由 NCU 门确认 MIO/wavefronts 改善后才允许 engine A/B。
+- 假设与预期：首版 `4*index+replica` 每副本只覆盖八个 bank；真正覆盖 32 banks 后，随机
+  codebook 访问的 bank conflict 应下降，足以抵消三份额外 staging 和地址运算。
+- 为什么选这条路线：它只修正预注册候选的已知地址缺陷，不改变任何索引、符号、dp4a、
+  scale、row sum、SwiGLU 或 q8_1 算术，是当时最低风险的 MIO 实验。
+- 改动与实验：默认关闭 `STRATA_IQ3_GRID_PAD`；固定 `4 * 257` shared words，地址
+  `257 * replica + index`，replica 为 `lane & 3`。先修 shared 数组最大索引 1026 的越界，
+  重建 bench/parity，确认两个 hash 后跑 7 组双顺序交替进程。
+- 结果：所有 14 个 hash 均为 `9a055a5a94e15c87`，0 differing；baseline/candidate 中位
+  `475.7/489.3 us`（−2.86%），candidate 仅胜 3/7，p75 `489.5 us` 高于 baseline 中位。
+  剔除第一组冷时钟离群后仍约慢 1.2%，不是单个 outlier。
+- 判决：**UTIL-GRID-PAD 否决。** 时间门在 NCU 前失败，不运行 counter 或 engine A/B；
+  不扫描副本数或邻近 stride。
+- 预期被推翻：即使每副本覆盖全部 32 banks，逐次选择 replica 的地址成本和复制工作仍超过
+  随机 bank conflict 的减少；此前“覆盖 32 banks 就会改善”的静态推断不成立。
+- 生产状态与回滚：源码、bench/parity 从
+  `/opt/ai/tmp/pre-util-grid-pad-20261031T2032Z/` 恢复；source 回到 `47009da533...`，
+  engine 保持 `105a4171...`，两组 parity 0 failure。停机 12 秒，恢复 loaded health 161 秒，
+  总中断约 `2:53`；最终 server/engine PID `511649/511741`，production systemd 不变。
+- 证据：结果见 `docs/work/UTIL_GRID_PAD_RESULT-20261031.md`，台账 L-102；原始恢复日志
+  `/opt/ai/logs/qsa-diag-20261031T1653Z/restore-util-grid-pad.out`。
+- 学到什么：共享访问的物理 bank 覆盖只是必要条件；每访问增加的 replica 选择、复制和寄存器/
+  指令成本必须同时计算。连续四次 shared-memory 重组没有跨过 1%，这条局部路线应关闭。
+- 下一步与理由：改用 NCU 中 `17.50%` long-scoreboard 这一独立证据，检查 fused IQ3 weight
+  的 SASS。当前静态读取显示 weight 16-bit loads 为 `LD.E.U16.SYS`，只读参数为
+  `LDG.E.CONSTANT.SYS`；预注册 `UTIL-WEIGHT-RO`，只改变 weight `qs`/aux/scale 的读取路径，
+  先要求机器码确实变化，再跑同一 1% 时间门。
+
 ## I-20261031-74 · weight decode 复用只有 0.546%，编译器已消除源码重复，按 1% 门否决
 
 - 目标 / 指标：每个 k 只解码一次 IQ3_XXS weight grid/aux/scale，供 NTC chunk 内多个 token

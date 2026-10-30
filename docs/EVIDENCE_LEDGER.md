@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（102 条：L-000…L-101，按编号）
+## 台账索引（103 条：L-000…L-102，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -116,6 +116,7 @@
 | L-099 | 10-31 19:2xZ | 四路 rotated codebook 副本 hash 相同，但 gate/up `474.5` 对 `474.1 us`（−0.084%）、仅 2/7 胜；bank conflicts 反升 2.5%，寄存器 73→80 | **UTIL-KERNEL 否决；转 UTIL-ACT** |
 | L-100 | 10-31 19:5xZ | 显式 activation reload hash 相同但 `475.2` 对 `475.1 us`（−0.021%）、3/7 胜；shared-load 指令与寄存器完全不变，编译器已复用 | **UTIL-ACT 否决；转 UTIL-WEIGHT** |
 | L-101 | 10-31 20:1xZ | weight decode 复用 `473.2` 对 `475.8 us`（+0.546%）、6/7 胜，但 shared/global load 指令完全相同；寄存器 73→80，未达 1% | **UTIL-WEIGHT 否决；转 UTIL-GRID-PAD** |
+| L-102 | 10-31 21:0x | padded four-copy IQ3 codebook 使用 stride 257，hash 不变但 `489.3` 对 `475.7 us`（−2.86%）、仅 3/7 胜；剔除首组后仍慢约 1.2% | **UTIL-GRID-PAD 否决；转 UTIL-WEIGHT-RO** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3832,6 +3833,52 @@ query attention 数值；wall 与 `qsa attn` 稳定同向改善 ≥1%，再过 p
   （sha256 `401653992bcd5fd360b9e703409c491dbb67590de521027d67b50e8ab19c35ac`）
 - `/opt/ai/logs/qsa-diag-20261031T1653Z/qsa-select-bench.txt`
   （sha256 `d8bdd81e3c493a36c2b236fb91d109a735009a8cf3f8e8985fcdf474d0ae122c`）
+
+## L-102 UTIL-GRID-PAD：32-bank padded codebook 仍慢 2.86%，shared 地址路线关闭
+
+**判定**：**UTIL-GRID-PAD 否决。** 四副本 IQ3_XXS codebook 使用
+`replica * 257 + index`，每个 replica 覆盖全部 32 个 bank；输出 hash 全部保持
+`9a055a5a94e15c87`。七组交替进程 baseline/candidate gate/up 中位为
+`475.7/489.3 us`，改善 `-2.86%`，candidate 仅胜 `3/7`，p75 `489.5 us` 高于 baseline 中位。
+
+**七组交替进程**：baseline
+`663.6/471.0/471.2/490.9/557.1/475.3/475.7 us`；candidate
+`485.4/485.6/496.5/488.4/489.3/489.4/489.5 us`。首组 baseline 是冷时钟离群；剔除首组后
+两臂中位约 `483.1/488.85 us`，候选仍慢约 `1.2%`，因此不是单个 outlier 造成的否决。
+
+**路径核实**：实验源
+`a5ccc574a7c60c4f79e8b961c18b1dbb381d10113a242f0a9510180e1cf00355`，shared words
+`4 * 257`，lane replica `lane & 3`；其它索引、符号、dp4a、scale、row sums、SwiGLU、
+q8_1 和 store 不变。时间门先失败，因此未运行 NCU 或 engine A/B。
+
+**恢复**：从 `/opt/ai/tmp/pre-util-grid-pad-20261031T2032Z/` 恢复源码和测试二进制；
+source 回到 `47009da533393ff4bcb62e6831427204237da3a1f9679ad4a691d4ddc897971b`，
+engine 仍为 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。
+`native_expert_parity --synthetic iq3_xxs/q2_0` 和 `iq_multi_parity` 均 0 failure。
+候选停机 12 秒，恢复 loaded health 161 秒，总中断约 `2:53`；最终 server/engine PID
+`511649/511741`，health loaded，production systemd 仍 inactive/dead、`MainPID=0`、
+`NRestarts=23`。
+
+**新发现**：共享地址覆盖 32 banks 是必要但不充分条件；每访问选择 replica、复制四份
+codebook 和额外地址运算的成本超过冲突收益。连续四个 shared-memory MIO 重组都未达到 1%，
+这条局部路线关闭。
+
+**下一步**：`UTIL-WEIGHT-RO`。当前 SASS 静态读取显示 fused IQ3 weight 块使用
+`LD.E.U16.SYS`，只读参数使用 `LDG.E.CONSTANT.SYS`。候选只改 `DotG<18>` weight `qs`、
+aux/sign word 和 scale 的读取路径，先证明机器码变化，再过 7 组 1% 时间门和
+long-scoreboard≤16.5%、global loads≤296,960、寄存器≤85、active warps≥69%。
+
+**证据**：
+
+- `docs/work/UTIL_GRID_PAD_RESULT-20261031.md`
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/restore-util-grid-pad.out`
+  （sha256 `108509f3fab8d0c44b29ad64298cef042a3872431920e5bf4af8e776faf6f1dd`）
+- `/opt/ai/logs/qsa-diag-20261031T1653Z/restore-util-grid-pad.ready`
+  （sha256 `ea1860c4de8c47778dab35331883e69317ae0d7a588fb1e131d740690f00855d`）
+- `/opt/ai/tmp/pre-util-grid-pad-20261031T2032Z/`
+
+**没测什么**：只有一个真实层和 mode-8 `G=64, T=6` 几何；没有 NCU、engine A/B、并发或
+其它格式。结论只否决 padded four-copy 机制，不外推到其他 shared 优化。
 
 ## L-101 UTIL-WEIGHT：源码级 weight decode 复用未减少机器指令，0.546% 未达 1%
 

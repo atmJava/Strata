@@ -6,9 +6,11 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-WEIGHT 已完成并否决。weight-decode working set 保持 hash
-  `9a055a5a94e15c87`，gate/up 中位 `473.2` 对 `475.8 us`（+0.546%），6/7 胜，但两臂
-  shared/global load 指令完全相同且寄存器 73→80；未达 1%。下一项是 UTIL-GRID-PAD。
+- 当前项：UTIL-GRID-PAD 已完成并否决。四副本 stride 257 保持 hash
+  `9a055a5a94e15c87`，但 gate/up 中位 `489.3` 对 `475.7 us`（−2.86%），仅 3/7 胜；
+  剔除冷时钟离群后仍慢约 1.2%。下一项是 UTIL-WEIGHT-RO。
+- 上一项：UTIL-WEIGHT 已完成并否决。weight-decode working set 达到 `+0.546%`、6/7 胜，
+  但两臂 shared/global load 指令完全相同且寄存器 73→80；未达 1%。
 - 上一项：UTIL-ACT 已完成并否决。显式 activation reload 中位 `475.2` 对 `475.1 us`
   （−0.021%），仅胜 3/7；编译器已复用。
 - 上一项：UTIL-KERNEL 已完成并否决。四副本 rotated IQ3_XXS codebook 中位
@@ -27,18 +29,19 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前迭代：UTIL-WEIGHT 已否决，UTIL-GRID-PAD contract 已预注册。attention v2 已是当前默认并完成 1% 门复验；不要再次用
+- 当前迭代：UTIL-GRID-PAD 已否决，UTIL-WEIGHT-RO contract 已预注册。attention v2 已是当前默认并完成 1% 门复验；不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：实现 `STRATA_IQ3_GRID_PAD`，固定四副本、stride 257，使每个 replica 覆盖
-  全部 32 banks；要求 kernel 中位至少快 1%、MIO≤28.75%、shared wavefronts 下降、
-  寄存器≤85、active warps≥69%、hash 不变。通过后再做一次 engine A/B。
-- 当前候选：UTIL-GRID-PAD。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
+- 下一动作：实现默认关闭的 `STRATA_IQ3_WEIGHT_RO`，只把 fused IQ3 gate/up weight 的
+  `qs`、aux/sign word 和 scale 改走显式只读加载；先证明 SASS 从 `LD.E.U16.SYS` 变为
+  `LDG...CONSTANT`，再要求 kernel 中位至少快 1%、5/7 胜、long scoreboard≤16.5%、
+  寄存器≤85、active warps≥69%、hash 不变。通过后才做一次 engine A/B。
+- 当前候选：UTIL-WEIGHT-RO。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
   Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
-- 未完成采纳项：19。
+- 未完成采纳项：18。
 - 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
   该测量路线不阻塞主线。
 
@@ -46,8 +49,9 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；UTIL-WEIGHT 恢复后的 server/engine PID 为 `510062/510127`，engine 为
-  `105a4171...`，profiler、QSA 和 kernel 实验 env 不存在。本次冷启动实测 `2:50`。
+  `loaded=true`；UTIL-GRID-PAD 恢复后的 server/engine PID 为 `511649/511741`，engine 为
+  `105a4171...`，profiler、QSA 和 kernel 实验 env 不存在。本次停机 12 秒，恢复至 loaded
+  health 161 秒，总中断约 `2:53`。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
@@ -70,6 +74,10 @@
   `475.2` 对 `475.1 us`、3/7 胜；编译器已经复用。
 - UTIL-WEIGHT 已否决：方向性改善 `0.546%`、6/7 胜，但 shared/global load 指令完全不变
   且寄存器 73→80；未达 1%。首版四副本只覆盖八个 bank，下一项改用 padded stride 257。
+- UTIL-GRID-PAD 已否决：四副本 stride 257 保持 hash，但 gate/up 中位 `489.3` 对
+  `475.7 us`（−2.86%），仅 3/7 胜；剔除首组后仍慢约 1.2%。不扫描副本数或 stride。
+- 当前 SASS 静态阅读，未测：fused IQ3 weight 块使用 `LD.E.U16.SYS`，而 read-only 参数使用
+  `LDG.E.CONSTANT.SYS`。下一项只测试显式只读加载，不改变 shared codebook。
 - V3-1 容量预设已收口：4 路中位 `6×192K` 聚合 120.6、`8×128K` 133.9、`8×192K` 122.8；
   默认保持 `6×192K`。8×128K 的 +11% 以 192K→128K 上下文为代价。
 - 256K 生产切换已完成：config 仅把 `max_context` 从 `192000` 改为 `262144`，同时保留
@@ -203,4 +211,4 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-28T13:35+08:00（上游 37 提交已部署；吞吐和并发凹点已复测，测试缺口保留）
+- 最后更新：2026-10-31T21:10+08:00（UTIL-GRID-PAD 否决；UTIL-WEIGHT-RO 已预注册）
