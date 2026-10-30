@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from strata_cli.cli import main
-from strata_control import artifacts, journal, management, owner_transport, procs, profiles, runtime
+from strata_control import artifacts, journal, management, owner_transport, procs, profiles, releases, runtime
 
 
 @unittest.skipUnless(os.name == "posix", "the managed runtime is Linux/POSIX")
@@ -84,6 +84,23 @@ class RuntimeTests(unittest.TestCase):
         with redirect_stdout(output):
             code = main(["runtime", *args, "--output", "json"])
         return code, json.loads(output.getvalue())
+
+    def _release_fixture(self, name="release-source"):
+        root = self.root / name
+        (root / "serve" / "web").mkdir(parents=True)
+        (root / "strata_control").mkdir()
+        (root / "tools").mkdir()
+        (root / "serve" / "server.py").write_text("SERVICE = 1\n", encoding="utf-8")
+        (root / "serve" / "chat_template.jinja").write_text("TEMPLATE = 1\n", encoding="utf-8")
+        (root / "serve" / "web" / "app.js").write_text("ASSET = 1\n", encoding="utf-8")
+        (root / "strata_control" / "runtime.py").write_text("HOST = 1\n", encoding="utf-8")
+        (root / "tools" / "strata_tokenizer.py").write_text("TOKENIZER = 1\n", encoding="utf-8")
+        engine = root / "engine.py"
+        engine.write_text("ENGINE = 1\n", encoding="utf-8")
+        engine.chmod(0o700)
+        source = json.dumps({"exe": str(engine), "cwd": str(root)}).encode("utf-8")
+        artifact = artifacts.capture(source, root=root)
+        return root, source, artifact, self.root / "runtime" / "releases"
 
     def test_launch_pipe_failure_closes_private_log_descriptor(self):
         host = runtime.Host("local", shutdown_timeout=2)
@@ -632,7 +649,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(path.parent, self.root / "runtime")
         self.assertEqual(path.stat().st_mode & 0o077, 0)
         manifest = runtime._read_lkg("local")
-        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["schema_version"], 3)
         self.assertEqual(manifest["profile"], "local")
         self.assertEqual(manifest["verified_instance_id"], started["instance_id"])
         self.assertEqual(manifest["profile_revision"], started["profile_revision"])
@@ -646,25 +663,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(artifact["engine_sha256"],
                          hashlib.sha256(engine.read_bytes()).hexdigest())
         self.assertEqual(artifact["engine_size"], len(engine.read_bytes()))
-        self.assertEqual(len(artifact["runtime_code_sha256"]), 64)
-        self.assertGreater(artifact["runtime_code_files"], 0)
+        self.assertEqual(len(artifact["runtime_sha256"]), 64)
+        self.assertGreater(artifact["runtime_file_count"], 0)
         self.assertEqual(started["artifact_id"], artifact["artifact_id"])
         self.assertEqual(journal.compact_direct_result("runtime.start", started)["artifact_id"],
                          artifact["artifact_id"])
+        self.assertNotEqual(manifest["release_id"], artifact["artifact_id"])
+        release = releases.load(self.root / "runtime" / "releases", manifest["release_id"])
+        self.assertEqual(release["artifact_id"], artifact["artifact_id"])
+        manifest_path = self.root / "runtime" / "releases" / manifest["release_id"] / "release.json"
+        self.assertTrue(manifest_path.is_file())
         self.assertNotIn("source_bytes_b64", json.dumps(runtime.status("local")))
 
-    def test_artifact_identity_ignores_non_runtime_python_files(self):
+    def test_artifact_identity_tracks_runtime_files_and_ignores_tests(self):
         root = self.root / "artifact-tree"
         (root / "serve" / "fixtures").mkdir(parents=True)
+        (root / "serve" / "web").mkdir()
         (root / "strata_control").mkdir()
         (root / "strata_cli").mkdir()
         (root / "tools").mkdir()
         engine = root / "engine.py"
         engine.write_text("#!engine\n", encoding="utf-8")
+        (root / "serve" / "chat_template.jinja").write_text("TEMPLATE = 1\n", encoding="utf-8")
         runtime_file = root / "serve" / "runtime.py"
         host_file = root / "strata_control" / "runtime.py"
+        tokenizer_file = root / "tools" / "strata_tokenizer.py"
+        asset_file = root / "serve" / "web" / "app.js"
         runtime_file.write_text("RUNTIME = 1\n", encoding="utf-8")
         host_file.write_text("HOST = 1\n", encoding="utf-8")
+        tokenizer_file.write_text("TOKENIZER = 1\n", encoding="utf-8")
+        asset_file.write_text("ASSET = 1\n", encoding="utf-8")
         ignored = [
             root / "serve" / "test_runtime.py",
             root / "serve" / "fixtures" / "fake.py",
@@ -683,9 +711,117 @@ class RuntimeTests(unittest.TestCase):
             path.write_text(path.read_text(encoding="utf-8") + "VALUE = 2\n", encoding="utf-8")
         self.assertEqual(artifacts.capture(source, root=root), before)
 
+        asset_file.write_text(asset_file.read_text(encoding="utf-8") + "ASSET = 2\n",
+                              encoding="utf-8")
+        with_asset_change = artifacts.capture(source, root=root)
+        self.assertNotEqual(with_asset_change["artifact_id"], before["artifact_id"])
+
+        tokenizer_file.write_text(tokenizer_file.read_text(encoding="utf-8") + "TOKENIZER = 2\n",
+                                  encoding="utf-8")
+        with_tokenizer_change = artifacts.capture(source, root=root)
+        self.assertNotEqual(with_tokenizer_change["artifact_id"], with_asset_change["artifact_id"])
+
         runtime_file.write_text(runtime_file.read_text(encoding="utf-8") + "RUNTIME = 2\n",
                                 encoding="utf-8")
-        self.assertNotEqual(artifacts.capture(source, root=root)["artifact_id"], before["artifact_id"])
+        self.assertNotEqual(artifacts.capture(source, root=root)["artifact_id"],
+                            with_tokenizer_change["artifact_id"])
+
+    def test_artifact_id_depends_on_content_not_engine_location(self):
+        trees = [self.root / "artifact-a", self.root / "artifact-b"]
+        sources = []
+        for index, root in enumerate(trees):
+            (root / "serve" / "web").mkdir(parents=True)
+            (root / "strata_control").mkdir()
+            (root / "tools").mkdir()
+            (root / "serve" / "server.py").write_text("SERVICE = 1\n", encoding="utf-8")
+            (root / "serve" / "chat_template.jinja").write_text("TEMPLATE = 1\n", encoding="utf-8")
+            (root / "serve" / "web" / "app.js").write_text("ASSET = 1\n", encoding="utf-8")
+            (root / "strata_control" / "runtime.py").write_text("HOST = 1\n", encoding="utf-8")
+            (root / "tools" / "strata_tokenizer.py").write_text("TOKENIZER = 1\n", encoding="utf-8")
+            engine = root / "engine.py"
+            engine.write_text("ENGINE = 1\n", encoding="utf-8")
+            sources.append(json.dumps({"exe": str(engine), "cwd": str(root)}).encode("utf-8"))
+
+        first = artifacts.capture(sources[0], root=trees[0])
+        second = artifacts.capture(sources[1], root=trees[1])
+
+        self.assertNotEqual(first["engine_path"], second["engine_path"])
+        self.assertEqual(first["artifact_id"], second["artifact_id"])
+
+    def test_release_store_materializes_content_addressed_launch(self):
+        root, source, artifact, releases_dir = self._release_fixture()
+
+        release = releases.create(source, artifact, root=root, releases_dir=releases_dir)
+
+        self.assertNotEqual(release["release_id"], artifact["artifact_id"])
+        self.assertEqual(release["artifact_id"], artifact["artifact_id"])
+        self.assertEqual(release["root"], str(releases_dir / release["release_id"]))
+        self.assertEqual(Path(release["root"]).stat().st_mode & 0o077, 0)
+        self.assertEqual(Path(release["manifest_path"]).stat().st_mode & 0o077, 0)
+        self.assertEqual(Path(release["engine_path"]).read_bytes(),
+                         (root / "engine.py").read_bytes())
+        self.assertEqual(Path(release["engine_path"]).stat().st_mode & 0o700, 0o700)
+        self.assertTrue((Path(release["root"]) / "serve" / "server.py").is_file())
+        self.assertTrue((Path(release["root"]) / "serve" / "chat_template.jinja").is_file())
+        self.assertTrue((Path(release["root"]) / "serve" / "web" / "app.js").is_file())
+        self.assertTrue((Path(release["root"]) / "strata_control" / "runtime.py").is_file())
+        self.assertTrue((Path(release["root"]) / "tools" / "strata_tokenizer.py").is_file())
+        released_config = json.loads(Path(release["config_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(released_config["exe"], release["engine_path"])
+        self.assertEqual(release["config_bytes"], Path(release["config_path"]).read_bytes())
+        manifest = json.loads(Path(release["manifest_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["release_id"], release["release_id"])
+        self.assertEqual(manifest["artifact_id"], artifact["artifact_id"])
+        self.assertEqual(manifest["source_sha256"], hashlib.sha256(source).hexdigest())
+        self.assertEqual(releases.load(releases_dir, release["release_id"]), release)
+        self.assertEqual(releases.create(source, artifact, root=root, releases_dir=releases_dir),
+                         release)
+
+    def test_release_store_separates_same_artifact_by_launch_config(self):
+        root, source, artifact, releases_dir = self._release_fixture()
+        first = releases.create(source, artifact, root=root, releases_dir=releases_dir)
+        changed = json.loads(source)
+        changed["parallel"] = 2
+        changed_source = json.dumps(changed).encode("utf-8")
+        changed_artifact = artifacts.capture(changed_source, root=root)
+
+        self.assertEqual(changed_artifact["artifact_id"], artifact["artifact_id"])
+        second = releases.create(changed_source, changed_artifact, root=root, releases_dir=releases_dir)
+
+        self.assertNotEqual(second["release_id"], first["release_id"])
+        self.assertNotEqual(second["root"], first["root"])
+        self.assertEqual(json.loads(Path(second["config_path"]).read_text(encoding="utf-8"))["parallel"], 2)
+        self.assertEqual(releases.load(releases_dir, first["release_id"]), first)
+        self.assertEqual(releases.load(releases_dir, second["release_id"]), second)
+        self.assertEqual(releases.create(changed_source, changed_artifact, root=root, releases_dir=releases_dir),
+                         second)
+
+    def test_release_store_rejects_tampered_engine(self):
+        root, source, artifact, releases_dir = self._release_fixture()
+        release = releases.create(source, artifact, root=root, releases_dir=releases_dir)
+        Path(release["engine_path"]).write_text("ENGINE = 2\n", encoding="utf-8")
+
+        with self.assertRaises(releases.ReleaseError):
+            releases.load(releases_dir, release["release_id"])
+
+    def test_release_store_rejects_tampered_runtime_asset(self):
+        root, source, artifact, releases_dir = self._release_fixture()
+        release = releases.create(source, artifact, root=root, releases_dir=releases_dir)
+        asset = Path(release["root"]) / "serve" / "web" / "app.js"
+        asset.write_text("ASSET = 2\n", encoding="utf-8")
+
+        with self.assertRaises(releases.ReleaseError):
+            releases.load(releases_dir, release["release_id"])
+
+    def test_release_store_rejects_tampered_config(self):
+        root, source, artifact, releases_dir = self._release_fixture()
+        release = releases.create(source, artifact, root=root, releases_dir=releases_dir)
+        config = json.loads(Path(release["config_path"]).read_text(encoding="utf-8"))
+        config["parallel"] = 2
+        Path(release["config_path"]).write_text(json.dumps(config), encoding="utf-8")
+
+        with self.assertRaises(releases.ReleaseError):
+            releases.load(releases_dir, release["release_id"])
 
     def test_restart_plan_reports_changed_engine_artifact_without_stopping(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
@@ -702,23 +838,28 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotEqual(plan["candidate_artifact_id"], plan["current_artifact_id"])
         self.assertEqual(runtime.status("local")["instance_id"], first["instance_id"])
 
-    def test_restart_refuses_changed_engine_artifact_before_drain(self):
+    def test_restart_allows_changed_engine_when_previous_release_is_available(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
         engine = self.root / "engine.py"
         engine.write_text(engine.read_text() + "\n# changed build\n", encoding="utf-8")
 
         result = runtime.restart("local", timeout=10, startup_wait=10)
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "lkg_artifact_mismatch")
+        self.assertTrue(result["ok"], result)
+        self.assertNotEqual(result["artifact_id"], original["artifact"]["artifact_id"])
         current = runtime.status("local")
         self.assertEqual(current["state"], "ready")
-        self.assertEqual(current["instance_id"], first["instance_id"])
+        self.assertNotEqual(current["instance_id"], first["instance_id"])
+        old_release = releases.load(self.root / "runtime" / "releases",
+                                    original["release_id"])
+        self.assertEqual(old_release["artifact_id"], original["artifact"]["artifact_id"])
 
-    def test_owner_start_refuses_unverifiable_lkg_artifact(self):
+    def test_owner_start_falls_back_from_release_after_engine_overwrite(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(first["ok"])
+        original = runtime._read_lkg("local")
         self.assertTrue(runtime.stop("local", timeout=12)["ok"])
         engine = self.root / "engine.py"
         engine.write_text(engine.read_text() + "\n# changed build\n", encoding="utf-8")
@@ -729,24 +870,54 @@ class RuntimeTests(unittest.TestCase):
             profiles.set_values("local", [f"port={occupied.getsockname()[1]}"])
             result = runtime.start("local", wait=20, shutdown_timeout=2)
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["state"], "failed")
-        self.assertEqual(result["error"], "lkg_artifact_mismatch")
-        self.assertFalse(result.get("rolled_back", False))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["state"], "ready")
+        self.assertTrue(result["rolled_back"])
+        self.assertEqual(result["artifact_id"], original["artifact"]["artifact_id"])
+        self.assertNotEqual(result["instance_id"], first["instance_id"])
 
     def test_successful_restart_replaces_lkg_after_generation_probe(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
         self.assertTrue(first["ok"])
         original = runtime._read_lkg("local")
-
-        profiles.set_values("local", ["parallel=2"])
-        restarted = runtime.restart("local", timeout=20, startup_wait=10)
+        edited = json.loads(self.config.read_text())
+        edited["model_name"] = "edited-fake"
+        self.config.write_text(json.dumps(edited), encoding="utf-8")
+        edited_digest = hashlib.sha256(self.config.read_bytes()).hexdigest()
+        restarted = runtime.restart("local", timeout=20, startup_wait=10,
+                                    allow_source_migration=True,
+                                    expected_source_sha256=edited_digest)
         self.assertTrue(restarted["ok"])
         current = runtime._read_lkg("local")
         self.assertEqual(current["verified_instance_id"], restarted["instance_id"])
         self.assertNotEqual(current["verified_instance_id"],
                             original["verified_instance_id"])
-        self.assertNotEqual(current["profile_revision"], original["profile_revision"])
+        self.assertNotEqual(current["source_sha256"], original["source_sha256"])
+        self.assertEqual(current["source_sha256"], edited_digest)
+        self.assertEqual(current["artifact"]["artifact_id"],
+                         original["artifact"]["artifact_id"])
+        self.assertNotEqual(current["release_id"], original["release_id"])
+        current_release = releases.load(self.root / "runtime" / "releases",
+                                        current["release_id"])
+        self.assertEqual(json.loads(current_release["config_bytes"])["model_name"], "edited-fake")
+
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            failed_edit = json.loads(self.config.read_text())
+            failed_edit["port"] = occupied.getsockname()[1]
+            self.config.write_text(json.dumps(failed_edit), encoding="utf-8")
+            failed_digest = hashlib.sha256(self.config.read_bytes()).hexdigest()
+            failed = runtime.restart("local", timeout=30, startup_wait=10,
+                                     allow_source_migration=True,
+                                     expected_source_sha256=failed_digest)
+
+        self.assertFalse(failed["ok"])
+        self.assertTrue(failed["rolled_back"])
+        self.assertEqual(failed["rollback_lkg_source_sha256"], current["source_sha256"])
+        restored = runtime._read_lkg("local")
+        self.assertEqual(restored["release_id"], current["release_id"])
+        self.assertEqual(restored["source_sha256"], current["source_sha256"])
         self.assertEqual(list((self.root / "runtime").glob(".local.lkg-*.tmp")), [])
 
     def test_failed_restart_rolls_back_from_persisted_lkg(self):
@@ -1035,26 +1206,29 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["state"], "ready")
         self.assertNotEqual(result["instance_id"], first["instance_id"])
         self.assertEqual(json.loads(self.config.read_text())["port"], edited["port"])
-        snapshot = Path(result["rollback_source_config"])
-        self.assertEqual(snapshot.parent, self.root / "runtime")
-        self.assertEqual(snapshot.stat().st_mode & 0o077, 0)
-        self.assertEqual(json.loads(snapshot.read_text())["port"], 0)
-        self.assertEqual(json.loads(snapshot.read_text())["api_key"], secret)
+        rollback_config = Path(result["rollback_source_config"])
+        rollback_release = releases.load(self.root / "runtime" / "releases",
+                                         original_lkg["release_id"])
+        self.assertEqual(rollback_config, Path(rollback_release["config_path"]))
+        self.assertEqual(rollback_config.stat().st_mode & 0o077, 0)
+        self.assertEqual(json.loads(rollback_config.read_text())["port"], 0)
+        self.assertEqual(json.loads(rollback_config.read_text())["api_key"], secret)
         self.assertNotIn(secret, json.dumps(result))
         record_result = journal.load("local", result["operation_id"])["result"]
-        self.assertEqual(record_result["rollback_source_config"], str(snapshot))
+        self.assertEqual(record_result["rollback_source_config"], str(rollback_config))
         self.assertEqual(record_result["rollback_lkg_source_sha256"],
                          original_lkg["source_sha256"])
         self.assertNotIn(secret, json.dumps(record_result))
         self.assertTrue(runtime.status("local")["generation_ready"])
-        # The edited file can be retried as a distinct source after freeing its port.
-        plan = runtime.plan_restart("local", allow_source_switch=True)
-        self.assertTrue(plan["source_switch"])
+        # The edited file can be retried after freeing its port; the old release stays immutable.
+        plan = runtime.plan_restart("local", allow_source_migration=True)
+        self.assertTrue(plan["source_migration"])
+        self.assertFalse(plan["source_switch"])
         retried = runtime.restart("local", timeout=20, startup_wait=10,
-                                  allow_source_switch=True,
+                                  allow_source_migration=True,
                                   expected_source_sha256=plan["candidate_source_sha256"])
         self.assertTrue(retried["ok"], retried)
-        self.assertFalse(snapshot.exists())
+        self.assertTrue(rollback_config.is_file())
 
     def test_explicit_source_switch_previews_and_restarts_new_config(self):
         first = runtime.start("local", wait=10, shutdown_timeout=2)
@@ -1264,6 +1438,53 @@ class RuntimeTests(unittest.TestCase):
         restored = runtime.status("local")
         self.assertTrue(restored["generation_ready"])
         self.assertEqual(restored["instance_id"], result["instance_id"])
+
+    def test_failed_restart_uses_release_after_engine_overwrite(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["generation_ready"])
+        original = runtime._read_lkg("local")
+        engine = self.root / "engine.py"
+        engine.write_text(
+            "#!" + sys.executable + "\n"
+            "import sys\n"
+            "print('READY 4096 stop', flush=True)\n"
+            "for line in sys.stdin:\n"
+            "    if line.strip() == 'QUIT': break\n"
+            "    if line.startswith(('GEN ', 'BGEN ')):\n"
+            "        print('ERR candidate-engine-failed', flush=True)\n",
+            encoding="utf-8",
+        )
+        engine.chmod(0o700)
+        profiles.set_values("local", ["parallel=2"])
+
+        result = runtime.restart("local", timeout=30, startup_wait=10)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("rolled_back"), result)
+        current = runtime.status("local")
+        self.assertEqual(current["state"], "ready")
+        self.assertEqual(current["artifact_id"], original["artifact"]["artifact_id"])
+        self.assertNotEqual(current["instance_id"], first["instance_id"])
+
+    def test_failed_restart_uses_release_after_runtime_asset_overwrite(self):
+        first = runtime.start("local", wait=10, shutdown_timeout=2)
+        self.assertTrue(first["generation_ready"])
+        original = runtime._read_lkg("local")
+        template = runtime.ROOT / "serve" / "chat_template.jinja"
+        template_bytes = template.read_bytes()
+        try:
+            template.write_text("{% broken", encoding="utf-8")
+            profiles.set_values("local", ["parallel=2"])
+            result = runtime.restart("local", timeout=30, startup_wait=10)
+        finally:
+            template.write_bytes(template_bytes)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("rolled_back"), result)
+        current = runtime.status("local")
+        self.assertEqual(current["state"], "ready")
+        self.assertEqual(current["artifact_id"], original["artifact"]["artifact_id"])
+        self.assertNotEqual(current["instance_id"], first["instance_id"])
 
     def test_start_plan_is_read_only(self):
         code, result = self._cli("start", "--profile", "local", "--plan")

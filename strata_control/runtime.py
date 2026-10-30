@@ -28,7 +28,7 @@ import time
 import uuid
 from pathlib import Path
 
-from strata_control import artifacts, atomic, owner_transport, paths, posix_owner, procs, profiles, readiness
+from strata_control import artifacts, atomic, owner_transport, paths, posix_owner, procs, profiles, readiness, releases
 from strata_control.private_files import private_mkdir
 from serve import launch_identity
 from strata_control.profiles import ProfileError
@@ -138,6 +138,11 @@ def _lkg_path(name: str) -> Path:
     return runtime_dir() / f"{_name(name)}.lkg.json"
 
 
+def _releases_dir() -> Path:
+    """Return the owner-private store for immutable launch artifacts."""
+    return runtime_dir() / "releases"
+
+
 def _lkg_source_bytes(record: dict) -> bytes:
     """Decode a validated manifest's exact launch-config bytes."""
     try:
@@ -163,10 +168,10 @@ def _read_lkg(name: str) -> dict | None:
     expected = {
         "schema_version", "profile", "verified_instance_id", "profile_revision",
         "readiness_state", "source_config", "source_sha256", "source_size",
-        "source_bytes_b64", "server_argv", "artifact",
+        "source_bytes_b64", "launch_config", "server_argv", "artifact", "release_id",
     }
     if not isinstance(record, dict) or set(record) != expected or \
-            record.get("schema_version") != 2 or record.get("profile") != name:
+            record.get("schema_version") != 3 or record.get("profile") != name:
         raise ProfileError("lkg_invalid", 5)
     if not isinstance(record.get("verified_instance_id"), str) or \
             not re.fullmatch(r"[0-9a-f]{32}", record["verified_instance_id"]):
@@ -179,6 +184,10 @@ def _read_lkg(name: str) -> dict | None:
     source_config = record.get("source_config")
     if not isinstance(source_config, str) or "\0" in source_config or \
             not Path(source_config).is_absolute():
+        raise ProfileError("lkg_invalid", 5)
+    launch_config = record.get("launch_config")
+    if not isinstance(launch_config, str) or "\0" in launch_config or \
+            not Path(launch_config).is_absolute():
         raise ProfileError("lkg_invalid", 5)
     source_size = record.get("source_size")
     if type(source_size) is not int or not 0 <= source_size <= MAX_LKG_SOURCE:
@@ -197,13 +206,22 @@ def _read_lkg(name: str) -> dict | None:
         raise ProfileError("lkg_invalid", 5)
     try:
         config_index = server_argv.index("--config")
-        if config_index + 1 >= len(server_argv) or server_argv[config_index + 1] != source_config:
+        if config_index + 1 >= len(server_argv) or server_argv[config_index + 1] != launch_config:
             raise ValueError
     except ValueError:
         raise ProfileError("lkg_invalid", 5) from None
     try:
-        artifacts.validate(record.get("artifact"))
-    except artifacts.ArtifactError:
+        artifact = artifacts.validate(record.get("artifact"))
+        release_id = record.get("release_id")
+        if not isinstance(release_id, str):
+            raise ValueError
+        release = releases.load(_releases_dir(), release_id)
+        if release["artifact_id"] != artifact["artifact_id"] or \
+                release["source_sha256"] != source_digest:
+            raise ValueError
+        if launch_config not in (source_config, release["config_path"]):
+            raise ValueError
+    except (artifacts.ArtifactError, releases.ReleaseError, ValueError):
         raise ProfileError("lkg_invalid", 5) from None
     return record
 
@@ -715,7 +733,10 @@ class Host:
         self.args: list[str] | None = None
         self.source: Path | None = None
         self.source_bytes: bytes | None = None
+        self.launch_source: Path | None = None
+        self.launch_bytes: bytes | None = None
         self.artifact: dict | None = None
+        self.release: dict | None = None
         self.expected_attestation: str | None = None
         self.revision: str | None = None
         self.last_error: str | None = None
@@ -728,7 +749,6 @@ class Host:
         self.probe_result: dict | None = None
         self.probe_lock = threading.Lock()
         self.launch_generation = 0
-        self.rollback_snapshots: set[Path] = set()
         self.startup_lkg: dict | None = None
         self.startup_lkg_error: str | None = None
         self.startup_fallback_attempted = False
@@ -752,7 +772,7 @@ class Host:
     def _source_change_check(self, source: Path, source_bytes: bytes,
                              allow_source_switch: bool,
                              allow_source_migration: bool) -> tuple[bool, bool, str | None]:
-        """Identify when rollback needs an owner-private copy of the running config."""
+        """Identify source changes that need explicit migration or switch approval."""
         if source == self.source:
             migrated = source_bytes != self.source_bytes
             return False, migrated, ("source_config_changed_restart_requires_migration"
@@ -769,30 +789,10 @@ class Host:
             return True, False, "rollback_source_unavailable"
         return True, migrated, ("rollback_source_changed" if migrated and not allow_source_migration else None)
 
-    def _materialize_lkg(self, record: dict) -> tuple[Path, bytes]:
-        """Create the exact private config file used to relaunch a persisted LKG."""
-        source_bytes = _lkg_source_bytes(record)
-        path = self.state_path.parent / f"{self.name}-{self.token}-{uuid.uuid4().hex}.rollback.json"
-        descriptor = _write_new(path, source_bytes)
-        os.close(descriptor)
-        self.rollback_snapshots.add(path)
-        return path, source_bytes
-
-    def _rollback_source(self, record: dict) -> tuple[Path, bytes]:
-        """Reuse the unchanged source file, or materialize private LKG bytes if it moved."""
-        source_bytes = _lkg_source_bytes(record)
-        if self.source is not None:
-            try:
-                if stat.S_ISREG(self.source.lstat().st_mode) and \
-                        self.source.read_bytes() == source_bytes:
-                    return self.source, source_bytes
-            except OSError:
-                pass
-        return self._materialize_lkg(record)
-
     def _persist_lkg(self, instance_id: str, readiness_state: str) -> dict:
         """Atomically commit this exact, generation-verified launch as the LKG."""
         if self.args is None or self.source is None or self.source_bytes is None or \
+                self.launch_source is None or self.launch_bytes is None or \
                 not isinstance(self.revision, str) or not re.fullmatch(r"[0-9a-f]{16}", self.revision):
             raise ProfileError("lkg_source_unavailable", 6)
         if not re.fullmatch(r"[0-9a-f]{32}", instance_id):
@@ -800,13 +800,26 @@ class Host:
         if len(self.source_bytes) > MAX_LKG_SOURCE:
             raise ProfileError("lkg_source_too_large", 6)
         try:
-            current_artifact = artifacts.capture(self.source_bytes, root=ROOT)
+            artifact_root = Path(self.release["root"]) if self.release is not None else ROOT
+            current_artifact = artifacts.capture(self.launch_bytes, root=artifact_root)
         except (OSError, artifacts.ArtifactError):
             raise ProfileError("lkg_artifact_unavailable", 6) from None
-        if self.artifact is None or current_artifact != self.artifact:
+        if self.artifact is None or current_artifact["artifact_id"] != self.artifact["artifact_id"]:
             raise ProfileError("lkg_artifact_changed", 6)
+        try:
+            if self.release is None:
+                self.release = releases.create(
+                    self.launch_bytes,
+                    current_artifact,
+                    root=ROOT,
+                    releases_dir=_releases_dir(),
+                )
+            else:
+                self.release = releases.load(_releases_dir(), self.release["release_id"])
+        except (OSError, releases.ReleaseError):
+            raise ProfileError("lkg_release_unavailable", 6) from None
         record = {
-            "schema_version": 2,
+            "schema_version": 3,
             "profile": self.name,
             "verified_instance_id": instance_id,
             "profile_revision": self.revision,
@@ -815,8 +828,10 @@ class Host:
             "source_sha256": hashlib.sha256(self.source_bytes).hexdigest(),
             "source_size": len(self.source_bytes),
             "source_bytes_b64": base64.b64encode(self.source_bytes).decode("ascii"),
+            "launch_config": str(self.launch_source),
             "server_argv": list(self.args),
             "artifact": current_artifact,
+            "release_id": self.release["release_id"],
         }
         data = (
             json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
@@ -827,15 +842,6 @@ class Host:
         if _read_lkg(self.name) != record:
             raise ProfileError("lkg_readback_mismatch", 6)
         return record
-
-    def _retire_snapshot(self, path: Path) -> bool:
-        if path in self.rollback_snapshots:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                return False
-            self.rollback_snapshots.discard(path)
-        return True
 
     @staticmethod
     def _config_args(args: list[str], source: Path) -> list[str]:
@@ -848,12 +854,19 @@ class Host:
         return result
 
     def _launch(self, args: list[str], source: Path, source_bytes: bytes,
-                revision: str | None, expected_artifact: dict | None = None) -> None:
+                revision: str | None, expected_artifact: dict | None = None,
+                *, release: dict | None = None,
+                operator_source: Path | None = None,
+                operator_bytes: bytes | None = None) -> None:
+        if (operator_source is None) != (operator_bytes is None):
+            raise ProfileError("launch operator source metadata is incomplete", 5)
         try:
-            artifact = artifacts.capture(source_bytes, root=ROOT)
+            artifact_root = Path(release["root"]) if release is not None else ROOT
+            artifact = artifacts.capture(source_bytes, root=artifact_root)
         except (OSError, artifacts.ArtifactError):
             raise ProfileError("artifact_unavailable", 5) from None
-        if expected_artifact is not None and artifact != expected_artifact:
+        if expected_artifact is not None and \
+                artifact["artifact_id"] != expected_artifact["artifact_id"]:
             raise ProfileError("lkg_artifact_mismatch", 6)
         ready = self.state_path.parent / f"{self.name}-{uuid.uuid4().hex}.ready.json"
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
@@ -887,7 +900,9 @@ class Host:
         try:
             stream = atomic.fdopen_owned(descriptor, "ab")
             with stream:
-                self.child = subprocess.Popen([sys.executable, "-m", "serve.server", *server_args],
+                command = ([sys.executable, release["launcher_path"]] if release is not None
+                           else [sys.executable, "-m", "serve.server"])
+                self.child = subprocess.Popen([*command, *server_args],
                                               cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stream,
                                               stderr=subprocess.STDOUT, close_fds=True,
                                               pass_fds=(reader,), start_new_session=True, env=child_env)
@@ -915,7 +930,11 @@ class Host:
             if self.launch_generation != launch_generation:
                 raise ProfileError("concurrent launch changed the owned instance", 6)
             self.args, self.source, self.source_bytes, self.revision = list(args), source, source_bytes, revision
+            if operator_source is not None:
+                self.source, self.source_bytes = operator_source, operator_bytes
+            self.launch_source, self.launch_bytes = source, source_bytes
             self.artifact = artifact
+            self.release = release
             self.expected_attestation = expected_attestation
             self.last_error = None
             self.probe_deadline = time.monotonic() + self.probe_timeout
@@ -939,7 +958,8 @@ class Host:
             result = {"error": str(exc)}
         except ProfileError as exc:
             result = {"error": str(exc) if str(exc) in (
-                "lkg_artifact_changed", "lkg_artifact_unavailable") else "lkg_persist_failed"}
+                "lkg_artifact_changed", "lkg_artifact_unavailable",
+                "lkg_release_unavailable") else "lkg_persist_failed"}
         except Exception:
             result = {"error": "probe_internal_error"}
         with self.probe_lock:
@@ -960,17 +980,19 @@ class Host:
             self.last_error = error
             self.startup_resolved = True
             return False
-        rollback_source: Path | None = None
         try:
-            rollback_source, rollback_bytes = self._rollback_source(lkg)
+            release = releases.load(_releases_dir(), lkg["release_id"])
+            rollback_source = Path(release["config_path"])
+            rollback_bytes = release["config_bytes"]
             rollback_args = self._config_args(lkg["server_argv"], rollback_source)
             self.startup_rollback_lkg = lkg
             self._launch(rollback_args, rollback_source, rollback_bytes,
-                         lkg["profile_revision"], expected_artifact=lkg["artifact"])
+                         lkg["profile_revision"], expected_artifact=lkg["artifact"],
+                         release=release,
+                         operator_source=Path(lkg["source_config"]),
+                         operator_bytes=_lkg_source_bytes(lkg))
             return True
-        except (OSError, ProfileError) as exc:
-            if rollback_source is not None:
-                self._retire_snapshot(rollback_source)
+        except (OSError, ProfileError, releases.ReleaseError) as exc:
             self.last_error = str(exc) if isinstance(exc, ProfileError) else "lkg_fallback_launch_failed"
             self.startup_resolved = True
             return False
@@ -1207,20 +1229,33 @@ class Host:
                 lkg["profile_revision"] != self.revision or lkg["server_argv"] != self.args:
             return {"ok": False, "state": "ready", "error": "lkg_running_instance_mismatch", "exit_code": 6}
         try:
-            current_artifact = artifacts.capture(self.source_bytes, root=ROOT)
-        except (OSError, artifacts.ArtifactError):
+            lkg_release = releases.load(_releases_dir(), lkg["release_id"])
+        except releases.ReleaseError:
+            return {"ok": False, "state": "ready", "error": "lkg_release_unavailable", "exit_code": 6}
+        if lkg_release["artifact_id"] != lkg["artifact"]["artifact_id"]:
             return {"ok": False, "state": "ready", "error": "lkg_artifact_mismatch", "exit_code": 6}
-        if self.artifact is None or current_artifact != self.artifact or current_artifact != lkg["artifact"]:
+        try:
+            if self.release is not None:
+                current_release = releases.load(_releases_dir(), self.release["release_id"])
+                current_root = Path(current_release["root"])
+                current_bytes = current_release["config_bytes"]
+            else:
+                current_root = ROOT
+                current_bytes = self.launch_bytes
+            current_artifact = artifacts.capture(current_bytes, root=current_root)
+        except (OSError, artifacts.ArtifactError, releases.ReleaseError):
+            return {"ok": False, "state": "ready", "error": "lkg_artifact_mismatch", "exit_code": 6}
+        if self.artifact is None or \
+                current_artifact["artifact_id"] != self.artifact["artifact_id"] or \
+                current_artifact["artifact_id"] != lkg["artifact"]["artifact_id"]:
             return {"ok": False, "state": "ready", "error": "lkg_artifact_mismatch", "exit_code": 6}
         old_args, old_source, old_bytes, old_revision = self.args, self.source, self.source_bytes, self.revision
-        rollback_source: Path | None = None
         try:
-            rollback_source, rollback_bytes = self._rollback_source(lkg)
+            rollback_source = Path(lkg_release["config_path"])
+            rollback_bytes = lkg_release["config_bytes"]
             rollback_args = self._config_args(old_args, rollback_source)
-        except (OSError, ProfileError):
-            if rollback_source is not None:
-                self._retire_snapshot(rollback_source)
-            return {"ok": False, "state": "ready", "error": "rollback_snapshot_failed", "exit_code": 6}
+        except ProfileError:
+            return {"ok": False, "state": "ready", "error": "rollback_release_unavailable", "exit_code": 6}
         self.probe_timeout = startup_wait
         stopped = self._stop_child()
         if not stopped["ok"]:
@@ -1231,38 +1266,30 @@ class Host:
             self._launch(new_args, source, source_bytes, plan["profile_revision"])
             result = self._wait_ready(startup_wait)
             if result.get("ok") and result["state"] == "ready":
-                cleanup_ok = True
-                if rollback_source != source:
-                    cleanup_ok = self._retire_snapshot(rollback_source) and cleanup_ok
-                if old_source != source:
-                    cleanup_ok = self._retire_snapshot(old_source) and cleanup_ok
                 return {**result, "previous_instance_id": old.get("instance_id"), "restarted": True,
                         "source_switched": switched, "source_migrated": migrated,
-                        "rollback_snapshot_cleanup_pending": not cleanup_ok}
+                        "rollback_snapshot_cleanup_pending": False}
             if self.child is not None and self.child.poll() is None:
                 self._stop_child()
         except (ProfileError, OSError):
             result = {"state": "failed", "error": "new_instance_launch_failed", "exit_code": 6}
-        # The old launch needs its original bytes, even if the operator edited
-        # the same file. The private snapshot comes from the durable LKG record.
+        # The old launch comes from its immutable release, not the edited source path.
         try:
-            old_source_unchanged = rollback_source.read_bytes() == rollback_bytes == old_bytes
+            rollback_source_unchanged = rollback_source.read_bytes() == rollback_bytes
         except OSError:
-            old_source_unchanged = False
-        if old_source_unchanged:
+            rollback_source_unchanged = False
+        if rollback_source_unchanged:
             try:
-                self._launch(rollback_args, rollback_source, old_bytes, old_revision,
-                             expected_artifact=lkg["artifact"])
+                self._launch(rollback_args, rollback_source, rollback_bytes, old_revision,
+                             expected_artifact=lkg["artifact"], release=lkg_release,
+                             operator_source=old_source, operator_bytes=old_bytes)
                 rollback = self._wait_ready(startup_wait)
             except (OSError, ProfileError):
                 rollback = {"state": "failed"}
             if rollback.get("ok") and rollback.get("state") == "ready":
-                cleanup_ok = True
-                if old_source != rollback_source:
-                    cleanup_ok = self._retire_snapshot(old_source)
                 return {"ok": False, "state": "ready", "error": result.get("error", "new_instance_failed"),
                         "exit_code": 6, "rolled_back": True,
-                        "rollback_snapshot_cleanup_pending": not cleanup_ok,
+                        "rollback_snapshot_cleanup_pending": False,
                         "rollback_source_config": str(rollback_source),
                         "rollback_lkg_source_sha256": lkg["source_sha256"],
                         "instance_id": rollback.get("instance_id"),
@@ -1507,8 +1534,6 @@ class Host:
             if self.ready_path is not None:
                 self.ready_path.unlink(missing_ok=True)
             _child_marker(self.name, self.token).unlink(missing_ok=True)
-            for snapshot in tuple(self.rollback_snapshots):
-                self._retire_snapshot(snapshot)
             if self.state_fd is not None:
                 os.close(self.state_fd)
             _unlock_file(activity_lease)

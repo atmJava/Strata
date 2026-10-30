@@ -2,8 +2,8 @@
   "schema_version": 1,
   "captured_at": "2026-10-30",
   "branch": "hw/server-adapt-0.2.3",
-  "base_commit": "a9b679a031511a977e7c28adf8076297a80afb42",
-  "scope": "Isolated POSIX owner runtime with a fake engine and artifact identity gate; no production restart or synthetic production generation",
+  "base_commit": "8e51da3c9e0c3c82266339cf7816065a04e89135",
+  "scope": "Isolated POSIX owner runtime with a fake engine, immutable release rollback and artifact identity gate; no production restart or synthetic production generation",
   "implementation": {
     "manifest": "owner-private <runtime>/<profile>.lkg.json",
     "commit_point": "after model state, /health, and generation readiness verification",
@@ -16,7 +16,32 @@
       "readiness state",
       "engine executable path, size, and SHA-256",
       "SHA-256 over serve/ and strata_control/ Python runtime files",
-      "derived artifact ID"
+      "derived artifact ID",
+      "derived release ID over artifact ID, source-config SHA-256 and launcher SHA-256"
+    ],
+    "release_store": {
+      "layout": "owner-private runtime/releases/<release_id>/",
+      "contents": [
+        "engine executable",
+        "serve/ and strata_control/ Python runtime files",
+        "chat template, tokenizer module and serve/web assets",
+        "exact run config rewritten to the release engine path",
+        "fixed launcher",
+        "verified release manifest"
+      ],
+      "identity_policy": [
+        "artifact_id identifies engine and service-code content",
+        "release_id additionally binds the exact source-config digest and launcher digest",
+        "identical code with different launch config creates a different release",
+        "identical code and config reuse only a fully validated release",
+        "staging is fsynced and published with atomic rename"
+      ]
+    },
+    "release_policy": [
+      "verify private ownership, manifest shape, safe relative paths and every digest",
+      "refuse tampered engine, service code, assets, config or launcher",
+      "restart and startup fallback load the release named by the LKG release_id",
+      "the running release and LKG artifact IDs must still match before drain or fallback"
     ],
     "restart_policy": [
       "validate LKG before drain",
@@ -31,31 +56,44 @@
       "prevent an older generation probe from replacing a newer LKG",
       "record the rollback LKG source digest in the operation journal",
       "report running and candidate artifact IDs in restart plans",
-      "refuse drain when the running artifact, disk candidate, and LKG artifact differ",
-      "refuse startup fallback when the LKG artifact cannot be reproduced exactly",
+      "refuse drain when the LKG release or running artifact cannot be reproduced exactly",
+      "refuse startup fallback when the LKG release or artifact cannot be reproduced exactly",
       "exclude tests, fixtures, CLI files, and tools from the service-code digest"
     ]
   },
   "verification": {
     "runtime_suite": {
       "result": "PASS",
-      "summary": "68 passed, 11 subtests passed",
+      "summary": "76 passed, 11 subtests passed",
       "command_environment": "Linux, Python 3.12.3, MP_BASE_URL=http://127.0.0.1:9"
     },
     "artifact_identity_gate": {
       "result": "PASS",
-      "summary": "4 passed, 64 deselected",
+      "summary": "covered by the full runtime suite",
       "covered": [
         "verified launch records engine and Python runtime identity",
         "restart plan reports the running and disk candidate artifacts without stopping",
-        "changed engine identity is rejected before drain",
-        "a fresh owner cannot roll back to an unverifiable artifact",
-        "test, fixture, CLI, and tools changes do not alter the service artifact"
+        "changed code can start only while its prior release remains available for rollback",
+        "a fresh owner restores the prior release after the engine is overwritten",
+        "a fresh owner cannot roll back to an unverifiable release",
+        "test, fixture, CLI, and tools changes do not alter the service artifact",
+        "artifact identity is independent of the engine location"
+      ]
+    },
+    "release_identity_gate": {
+      "result": "PASS",
+      "summary": "covered by the full runtime suite",
+      "covered": [
+        "same code with a different config creates a different release",
+        "identical code and config reuse the same release",
+        "release manifests bind release ID, artifact ID, source digest and config",
+        "tampered engine and runtime assets are rejected",
+        "the latest LKG release and config are used after a failed restart"
       ]
     },
     "lkg_slice": {
       "result": "PASS",
-      "summary": "6 passed",
+      "summary": "covered by the full runtime suite",
       "covered": [
         "first verified launch persists a private LKG",
         "successful restart replaces the LKG",
@@ -91,7 +129,7 @@
     },
     "terminal_suite": {
       "result": "PASS",
-      "summary": "219 passed, 45 skipped, 97 subtests passed",
+      "summary": "271 passed, 1 skipped, 189 subtests passed",
       "regression_found_and_fixed": "Immediate SIGTERM after ready publication previously exited -2 for delays 0, 0, 0.01, and 0.05 seconds; ready publication and the serving wait now share the same clean-stop scope, and ten immediate-signal repetitions exited 0"
     },
     "serve_lifecycle": {
@@ -108,6 +146,7 @@
     "isolated_persistent_lkg": "PASS",
     "isolated_health_gate": "PASS",
     "isolated_artifact_identity_gate": "PASS",
+    "isolated_immutable_release": "PASS",
     "production_automatic_rollback": "CLOSED",
     "g0b": "NOT_STARTED"
   },
@@ -116,9 +155,11 @@
     "No production configuration was changed",
     "No production generation load was sent",
     "The LKG is not a signed append-only record; it relies on the owner-only runtime directory",
-    "The LKG pins the engine executable and service Python files, but does not retain old artifacts",
+    "The release pins the engine, service Python files, assets, exact run config and launcher",
+    "The release store has no retention or garbage collection yet",
     "The LKG does not pin the Python interpreter, installed site-packages, model pack, or shared-library digests",
-    "A changed or overwritten artifact is rejected; it is not restored automatically",
+    "A changed or overwritten release is rejected; it is never silently repaired or replaced",
+    "LKG schema 2 is rejected rather than migrated; the first schema 3 launch needs a controlled verified transition",
     "Rollback does not preserve an in-flight HTTP or SSE request",
     "Startup fallback covers a fresh owner candidate that never reaches ready; a candidate that reaches ready and later fails stays outside this path",
     "A real systemd-level restart and real-model startup recovery have not been exercised",

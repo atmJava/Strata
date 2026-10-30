@@ -855,34 +855,43 @@ collection errors，因此不能写成“全仓 pytest 通过”。
   `status=ok`、`service=strata`、模型身份和 loaded 状态；结果以 `health_verified`
   写入 runtime 和 operation journal。
 - [x] LKG 记录 engine 可执行文件路径、大小和 SHA-256，以及 `serve/`、`strata_control/`
-  服务代码集合摘要；测试、fixtures、CLI 和 tools 不进入摘要，避免无关变更制造假故障。
-  restart plan 同时报告运行中与磁盘候选的 `artifact_id`，restart/startup fallback 在
-  drain 或启动前拒绝无法与 LKG 精确匹配的制品。
-- [ ] 当前能力是制品身份门禁，不是完整制品回滚。LKG 仍不保存旧 engine、Python 服务
-  代码、模型包和动态库，也没有原子 `current` 指针；其中任一路径被覆盖后，系统只能
-  明确拒绝回滚，不能自行恢复旧制品。进入代码级自动回滚前必须补不可变 release。
+  服务代码、tokenizer 模块、chat template 和 `serve/web/` 资产摘要；测试、fixtures、
+  CLI 和无关 tools 不进入摘要，避免无关变更制造假故障。restart plan 同时报告运行中
+  与磁盘候选的 `artifact_id`。
+- [x] 新增 owner-private、不可变的 release：固化 engine、Python 服务代码、server 资产、
+  精确 launch config 和启动包装器；目录用 fsync 与原子 rename 发布，LKG schema 升至 3
+  并以 `release_id` 原子引用。`artifact_id` 只表示代码制品，`release_id` 另行覆盖
+  artifact、source config 摘要和 launcher 摘要；相同代码配不同配置不会复用旧 release。
+  restart/startup fallback 从 release 重启旧 engine、旧 Python 代码和旧资产，不再依赖
+  可能被覆盖的构建路径。
+- [ ] release 尚未固化模型分片、动态库、Python 解释器和 site-packages，也没有自动
+  retention/GC；模型或宿主库变化仍可能改变同一 release 的外部输入。
+- [ ] 生产侧从 LKG schema 2 迁移到 schema 3 尚未演练；首次切换必须受控，并在一次
+  完整 health/generation 验证后生成新 LKG，不能把旧记录自动迁移成未经证明的 release。
 - [ ] 真实模型启动、真实 GPU drain、真实 owner/systemd 重启恢复仍未演练。
 - [ ] engine smoke、stream smoke、tool smoke 和 session restore 尚未组合成 G0B 的
   完整验收门。
 
 **隔离结果（2026-10-30）：** fake-runtime 新增覆盖新 owner 候选失败后的持久 LKG 恢复、
 无 LKG 时保留原始失败、损坏 LKG 明确拒绝、`wait=0` 后台恢复、CLI journal 记录、
-回滚成功后的正常 restart 清除旧标记、旧 generation probe 不得替换 LKG，以及 engine
-或 Python 服务代码变化时在 drain 前拒绝假回滚。新增制品用例为
-`4 passed, 64 deselected`，完整 `tests/terminal/test_runtime.py` 为
-`68 passed, 11 subtests passed`，完整 `tests/terminal` 为
-`219 passed, 45 skipped, 97 subtests passed`。此前的 serve lifecycle、lifeline 和
-ready-timeout 隔离结果为 `20 passed, 6 subtests passed`。运行过程中还定位并修复了
-mock server 的既有 SIGTERM 启动窗口竞态：ready 发布与 serving wait 现在处于同一个
-clean-stop 作用域，ready 后立即发送 SIGTERM 不再以 `-2` 退出。
+回滚成功后的正常 restart 清除旧标记、旧 generation probe 不得替换 LKG，以及 engine、
+Python 服务代码或 server 资产变化后仍能从不可变 release 恢复。新增覆盖包括精确
+release 复用、同代码不同配置隔离、私有目录/文件、engine 与资产篡改拒绝、engine
+覆盖后的 restart fallback、chat template 覆盖后的 fallback，以及最新 LKG 回滚使用
+最新配置。隔离结果为 `tests/terminal/test_runtime.py` 的
+`76 passed, 11 subtests passed`、完整 `tests/terminal` 的
+`271 passed, 1 skipped, 189 subtests passed`，以及 serve lifecycle、lifeline 和
+ready-timeout 的 `20 passed, 6 subtests passed`。运行过程中还定位并修复了 mock server
+的既有 SIGTERM 启动窗口竞态：ready 发布与 serving wait 现在处于同一个 clean-stop
+作用域，ready 后立即发送 SIGTERM 不再以 `-2` 退出。
 
 证据见 `docs/work/evidence/flash-next-runtime-lkg-20261030.json`。
 
 **Gate:** 隔离持久 LKG 与 startup fallback：PASS。生产自动回滚：CLOSED。当前实现证明
-候选 activation 失败后，新 owner 可以在 fake runtime 中从磁盘 LKG 恢复；这不等价于
-零中断切换，也没有证明真实模型、生产 systemd 重启或会话恢复。`/health` 隔离门禁为
-PASS，engine 与 Python 服务代码身份门禁也为 PASS，但 LKG 尚不能保存和恢复旧制品，
-因此生产自动回滚继续 CLOSED。
+候选 activation 失败后，新 owner 可以在 fake runtime 中从不可变 release 恢复旧
+engine、Python 代码和资产；这不等价于零中断切换，也没有证明真实模型、生产 systemd、
+模型/动态库身份或会话恢复。`/health` 与隔离 release 回滚为 PASS，但生产自动回滚
+继续 CLOSED。
 
 ### G0B：受控基线与恢复演练
 
