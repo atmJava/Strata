@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T22:40+08:00。
+> 最后更新：2026-10-31T23:55+08:00。
 
 ## 用户目标
 
@@ -54,7 +54,8 @@
 | M39 | 真实 Codex 编辑—测试循环 | 36 文件、170 root、34 thread、22,749 工具、2,318 编辑、576 测试；19 root 同时含编辑/测试 | 拆首工具、首修改、首测试、无编辑重复测试、失败纠错和阶段模型/工具秒数；形成真实触发支持的下一候选 | **已完成**：首修改前模型/工具 `3,235.782/6,365.546 s`，修改到首测试 `4,072.900/8,241.516 s`；178 次签名重复中 173 次之间有编辑，无编辑重复 5 次，成功/失败后立即重复 0；重复测试方向否决 |
 | M40 | 双卡 MTP prompt draft K/V | 当前双卡 layer split、MTP、native pack、末级 drafter；94K A2 prompt/wall `1271.5 ms/1.433790 s` | 启动日志证明 batched 路径命中；普通代表尺寸 prompt/wall 改善 >=1%、绝对 wall >=0.05 s，其他 1/2 路不退 >1%，4 路不退，6/8 安全 | **否决**：路径真实命中；B prompt `1241.5 ms`（`-2.359%`），wall `1.434450 s`（`+0.046%`），未过 `0.05 s` 门；未跑 189K/全矩阵 |
 | M41 | 官方 `0.1.55` 引擎版本级收益 | 当前 `0.1.51` 派生 engine `105a4171...`；官方 CUDA13 engine `e4406b47...`、build `99866a47a2b8+cuda13.0` | 同一生产 config 只替换 executable；启动/路径/health/greedy/smoke 通过；596 或 94K wall 改善 >=1% 且绝对 >=0.05 s，另一尺寸不同向相反，A 漂移 <=3% | **否决**：移除版本不支持的 128K-only `--prompt-cache-long` 后启动/parity/smoke 全过，但 596/94K wall 慢 `5.853%/4.259%`，A 漂移 `<3%` |
-| M42 | prompt GDN conv + Q/K norm 融合 | 当前 `--prefill auto` 8192-token chunk；`gdn_conv()` 在 `T>64` 且 `STRATA_GDN_CONVL2` 非零时融合 conv 与 Q/K L2；A1 hot-long 596/94K wall 为 `1.486586/1.381990 s` | B 只增加 `STRATA_GDN_CONVL2=2`；启动、实际 env、6/2、greedy/smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两个尺寸不反向，A 漂移 <=3% | **当前**：`GDN-CONVL2`；先 parity，94K 无 wall 方向收益即停止 |
+| M42 | prompt GDN conv + Q/K norm 融合 | A1 596/94K hot-long prompt/wall `1409.4 ms/1.514727 s`、`1259.4 ms/1.413078 s`；B 为 `1394.2 ms/1.502251 s`、`1258.6 ms/1.410180 s` | B 只增加 `STRATA_GDN_CONVL2=2`；启动、实际 env、6/2、greedy/smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两个尺寸不反向，A 漂移 <=3% | **否决**：质量全过；wall 只改善 `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`；A2 漂移 `<0.4%`；生产已恢复 |
+| M43 | 普通热续轮 prefill 主相位 | 596/94K prompt 仍占 wall 约 93%；连续 short-read、MTP batch、官方版本与 GDN conv 候选均未穿透到 1% wall | 一次 `STRATA_PREFILL_TIMING=1` profile 取得 21 相、host staging 与双卡数值；找到单相绝对 >=0.05 s、真实可移除且 wall 保守上界 >=1% 的机制 | **当前**：`AGENT-HOT-TURN-PHASE-MAP`；profiler wall 不作收益；无主相位则关闭 kernel 邻域微调 |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 
@@ -67,9 +68,11 @@
 之间有新编辑，成功或失败后立即无编辑重复均为 0。双卡 MTP prompt draft K/V batching
 也已否决：94K prompt 虽然改善 `2.359%`，wall 反而慢 `0.046%`，没有转换成用户等待。
 官方 `0.1.55` 版本级验证也已否决：正确性全过，但 596/94K wall 慢
-`5.853%/4.259%`，所以不混入它的 GDN env。当前转回同一旧引擎，只验证已有
-`STRATA_GDN_CONVL2=2` 对 prompt GDN conv + Q/K norm 的融合；它若不能在 94K wall 上
-转化出 `>=1%` 和 `0.05 s`，也立即关闭，不扫邻近参数。
+`5.853%/4.259%`，所以不混入它的 GDN env。随后同一旧引擎的
+`STRATA_GDN_CONVL2=2` 也通过质量门，但 596/94K wall 只改善
+`0.8245%/0.2051%`，绝对仅 `0.012476/0.002898 s`，已按门关闭。当前不再猜邻近
+kernel，而是用一个 profiling boot 拆 596/94K 的 21 个 prefill 相位；只有单相位
+绝对 `>=0.05 s` 且保守 wall 上界 `>=1%`，才实现下一候选。
 
 隔天旧会话仍是 p99 尾部：223,114 prompt token、cached `0`、TTFT `113.014 s`。但 34 个
 有效会话只有 1 个超过 24h，现有 session file 又不支持 layer split 和 batch。该方向保留
@@ -416,7 +419,7 @@ P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须�
     2,318 编辑、576 测试。只有 19/170 root 同时含编辑和测试；首修改前模型/工具为
     `3,235.782/6,365.546 s`，修改到首测试为 `4,072.900/8,241.516 s`。178 次相同命令
     中 173 次之间有新编辑，无编辑重复只有 5 次且状态不可判定，成功/失败后立即重复
-    均为 0。因此不实现测试去重或缓存。全局目标第十八次修订；双卡 MTP prompt draft
+    均为 0。因此不实现测试去重或缓存。全局目标第十九次修订；双卡 MTP prompt draft
     K/V batching 已真实命中，94K prompt 改善 `2.359%`，但 wall 反向 `0.046%`，未过
     `0.05 s` 绝对门，已否决并停止 189K/全矩阵。
 57. **验证官方引擎版本级收益**：官方 `0.1.55` CUDA13 包的 archive/engine/KQ SHA、

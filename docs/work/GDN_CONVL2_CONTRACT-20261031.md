@@ -2,7 +2,10 @@
 
 日期：2026-10-31
 
-状态：预注册；先做源码/路径、启动和 greedy 门，再跑 A1/B/A2。
+状态：已否决（2026-10-31）。路径、实际 env、greedy、smoke 和请求质量均通过，但
+596/94K wall 只改善 `0.8245%/0.2051%`，绝对节省 `0.012476/0.002898 s`，未达
+`>=1%` 且 `>=0.05 s` 的门。完整结果见
+[`GDN_CONVL2_RESULT-20261031.md`](GDN_CONVL2_RESULT-20261031.md)。
 
 ## 问题
 
@@ -32,7 +35,7 @@ default/fused 运行的 phase/对时差共同组成；不把“env 存在”单�
 
 ## Arms
 
-- A1：当前生产 engine/config，进程 `162903/162905/162910`；
+- A1：实验时生产 engine/config，进程 `162903/162905/162910`；
 - B：深拷贝 A1 config，只在 `env` 增加 `"STRATA_GDN_CONVL2": "2"`；
 - A2：恢复与 A1 字节相同的 config，检查 A 漂移与运行路径。
 
@@ -62,3 +65,10 @@ B 启动后必须：
 
 B 和 A2 各约 2–3 分钟加载，总成本约 4–6 分钟。只有启动、路径和 greedy 门全过才支付
 性能测量；若 94K 无 wall 收益，不做邻近阈值、chunk 或 GDN 参数扫描。
+
+## 判决
+
+B 通过全部正确性与安全门，A2 漂移为 596 prompt/wall
+`-0.2483%/-0.3875%`、94K `+0.2461%/+0.0359%`。候选 wall 收益低于双门，因此否决；
+生产已恢复 A2，进程环境无 `STRATA_GDN_CONVL2`。下一项为
+[`AGENT-HOT-TURN-PHASE-MAP`](AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md)。

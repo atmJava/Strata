@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T22:40+08:00。
+> 整理时间：2026-10-31T22:00+08:00（GDN 判决后）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,19 +12,20 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-153。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-154。
 
 ## 2. 当前断点
 
-- **全局目标已第十八次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
+- **全局目标已第十九次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
   等待，再处理首工具/首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
   触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
   可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。尝试创建新目标时接口以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第十八版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第十九版完成后再次尝试创建新目标，
+  接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第十九版计划
   为权威，不要回到平台旧目标的状态快照。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
@@ -38,7 +39,7 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `162903/162905/162910`。server cwd 为
+- **当前运行**：server/vision/engine `164043/164045/164050`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
   `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`
@@ -132,10 +133,18 @@
   596/94K hot-long wall 相对 A 参考中位慢 `5.853%/4.259%`，绝对慢
   `0.087835/0.059525 s`，A 漂移低于 3%。不跑官方 GDN env、189K 或并发矩阵。见
   [ENGINE_0155_EVAL_RESULT](work/ENGINE_0155_EVAL_RESULT-20261031.md)。
-- **当前状态与下一动作**：`GDN-CONVL2`。当前旧引擎在 `T>64` 且
-  `STRATA_GDN_CONVL2` 非零时，用同一算术在一个 block 中融合 GDN conv 与 Q/K L2。
-  B 只给 A config 增加该 env；先核对实际进程 env、6/2、health、三组 greedy 和 smoke，
-  再跑 596/94K A1/B/A2。94K 无 wall 方向收益即停止，不扫邻近参数。
+- **上一项判决**：`GDN-CONVL2` 否决。B 通过实际 env、6/2、health、greedy、smoke 和
+  全部请求质量门；A2 漂移 596 prompt/wall `-0.2483%/-0.3875%`、94K
+  `+0.2461%/+0.0359%`，但 B 相对 A1 的 596/94K wall 只改善
+  `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`，未过 `1%` 和 `0.05 s` 双门。
+  生产已恢复 A2，运行 env 无 `STRATA_GDN_CONVL2`；不跑 189K、并发矩阵或邻近参数。
+  见 [GDN_CONVL2_RESULT](work/GDN_CONVL2_RESULT-20261031.md)。
+- **当前状态与下一动作**：`AGENT-HOT-TURN-PHASE-MAP`。用一个受控 profiling boot，
+  只给 A config 增加 `STRATA_PREFILL_TIMING=1`，对同口径 596/94K 热长轮记录 21 个
+  prefill phase、host staging 与双卡数值。profiler wall 不作收益；只有单相位绝对
+  `>=0.05 s` 且保守 wall 上界 `>=1%` 才进入实现。否则关闭 kernel 邻域微调，转向
+  server admission/cache 或客户端请求结构。完成后恢复无 profiler A2。见
+  [契约](work/AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md)。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说

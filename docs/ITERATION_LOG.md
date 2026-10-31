@@ -3,6 +3,39 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-125 · GDN conv/L2 局部收益未穿透 wall；改为先拆热续轮主相位
+
+- 目标 / 指标：验证当前旧 engine 的 `STRATA_GDN_CONVL2=2` 能否把 596 fresh 与 94K
+  普通热续轮的 conv launch/中间写回收益转化成至少 `1%` 且 `0.05 s` 的用户 wall。
+- 假设与预期：目标分支在 `T>64` 的 8192-token prefill chunk 中真实可达；少一次 launch
+  和 `h` 写回后，至少一个代表形状应过 wall 双门。
+- 改动与实验：B 只给 A1 config 增加 `STRATA_GDN_CONVL2=2`。启动后核对实际 env、
+  engine/config hash、六 slots / 两 groups、health、三组 fixed greedy 与 smoke；
+  随后 A1/B/A2 测同口径 596 与 94K，每臂三波。
+- 结果：B 全部质量门通过。A1/B 的 596 prompt/wall 为 `1409.4 ms/1.514727 s` 对
+  `1394.2 ms/1.502251 s`；94K 为 `1259.4 ms/1.413078 s` 对
+  `1258.6 ms/1.410180 s`。wall 仅改善 `0.8245%/0.2051%`，绝对
+  `0.012476/0.002898 s`。A2 prompt/wall 漂移最大 `0.388%`。
+- 质量：18 个性能请求零 HTTP/engine 错误、零外来请求、finish `stop`、回复符合；
+  greedy、smoke、6/2、health 全过。
+- 判决：**GDN-CONVL2 否决。** 两个代表形状都未达到预注册性能门；不跑 189K、
+  4/6/8 或邻近 GDN 参数。A2 已恢复，进程环境不含该 env。
+- 预期被推翻：局部 launch 与写回确实被删除，但它们占完整热续轮 wall 的比例太小。
+  继续围绕 GDN kernel 微调不能解决用户感受到的慢。
+- 生产状态与回滚：server/vision/engine `164043/164045/164050`，engine
+  `105a4171...`、config `6ece1a13...`，health loaded、262144、六 slots / 两 groups，
+  systemd inactive、`NRestarts=8`。
+- 证据：L-154、
+  [`GDN_CONVL2_RESULT`](work/GDN_CONVL2_RESULT-20261031.md)、
+  `/opt/ai/logs/engine-0155-eval-20261031T1320Z/`。
+- 复盘：最近四个候选分别在 short-read、MTP draft K/V、官方版本和 GDN conv 上工作，
+  只有局部指标改善或不改善，说明缺少对普通热续轮 prompt 内部的统一 phase 图。
+  下一步应先定位大头，而不是继续猜相邻 kernel。
+- 下一步与理由：`AGENT-HOT-TURN-PHASE-MAP`。用一个 profiling boot 对同口径
+  596/94K 记录 21 个有序 prefill phase、host staging 和双卡数值；只有单相绝对
+  `>=0.05 s`、源码证明真实可移除且 wall 保守上界 `>=1%` 才实现。找不到主相位则关闭
+  kernel 邻域微调，转向 server admission/cache 或客户端请求结构。
+
 ## I-20261031-124 · 官方 0.1.55 正确但两个热续尺寸均变慢；转向现有 GDN 融合
 
 - 目标 / 指标：验证官方 CUDA13 `0.1.55` 是否能在相同真实 596 fresh 与 94K 热续形状上

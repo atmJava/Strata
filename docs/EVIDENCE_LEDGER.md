@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-153，按编号）
+## 台账索引（L-000…L-154，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -167,9 +167,50 @@
 | L-151 | 10-31 21:1x | 36 文件、170 root、34 thread、22,749 工具、2,318 编辑、576 测试；19 root 同时含编辑/测试（11.176%）；首修改前模型/工具 `3,235.782/6,365.546 s`，修改到首测试 `4,072.900/8,241.516 s`；178 次签名重复中 173 次之间有新编辑，无编辑重复 5 次，成功/失败后立即重复 0 | **AGENT-EDIT-TEST-LOOP-TRACE 完成**；重复测试/缓存/自动跳过否决；11 tests OK；无重启；下一项 `AGENT-SPLIT-MTP-BATCH` |
 | L-152 | 10-31 21:5x | 双卡 MTP batched draft K/V 真实命中；94K B/A2 prompt `1241.5/1271.5 ms`（B 改善 `2.359%`）、wall `1.434450/1.433790 s`（B 慢 `0.046%`）；18 个 94K 请求零错误、finish `stop`、零外来请求 | **AGENT-SPLIT-MTP-BATCH 否决**；未过 `0.05 s` 绝对 wall 门，停止 189K/全矩阵；A2 已恢复且无该 env；下一项 `ENGINE-0.1.55-EVAL` |
 | L-153 | 10-31 22:3x | 官方 `0.1.55` CLI 不支持 `--prompt-cache-long`；移除 128K-only 扩展后成功启动，三组 greedy/smoke 全过；596/94K hot-long A 参考 wall `1.500656/1.397534 s`，B 为 `1.588491/1.457059 s`，慢 `5.853%/4.259%`；A 漂移 `1.893%/2.250%` | **ENGINE-0.1.55-EVAL 否决**；不进入其 GDN env、189K 或并发矩阵；A2 已恢复旧 engine；下一项 `GDN-CONVL2` |
+| L-154 | 10-31 23:4x | GDN conv/L2 融合实际命中且质量全过；A1/B 的 596/94K prompt `1409.4→1394.2/1259.4→1258.6 ms`，wall `1.514727→1.502251/1.413078→1.410180 s`；wall 仅改善 `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`；A2 prompt/wall 漂移最大 `0.388%` | **GDN-CONVL2 否决**；不扫邻近参数；A2 已恢复；下一项 `AGENT-HOT-TURN-PHASE-MAP` |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-154 · GDN conv/L2 融合正确但没有穿透热续轮 wall
+
+**判定：`GDN-CONVL2` 否决；下一项为 `AGENT-HOT-TURN-PHASE-MAP`。**
+
+B 只给 A1 config 增加 `STRATA_GDN_CONVL2=2`。实际进程满足 `T>64` 的 8192-token
+prefill chunk、无 `STRATA_GDN_CONV_SERIAL`，engine/config/health/六 slots / 两 groups
+均正确。三组 fixed greedy 在 B 内逐字重复并与 A 相同，64-token smoke 正常；596/94K
+各 9 个请求零 HTTP/engine 错误、零外来请求、回复与 finish 全对。
+
+hot-long 三波中位：
+
+| shape | A1 prompt/wall | B prompt/wall | wall gain | absolute |
+|---|---:|---:|---:|---:|
+| 596 | `1409.4 ms / 1.514727 s` | `1394.2 ms / 1.502251 s` | `0.8245%` | `0.012476 s` |
+| 94K | `1259.4 ms / 1.413078 s` | `1258.6 ms / 1.410180 s` | `0.2051%` | `0.002898 s` |
+
+A2 prompt/wall 为 596 `1405.9 ms / 1.508857 s`、94K
+`1262.5 ms / 1.413586 s`；相对 A1 的最大漂移为 `0.388%`。候选通过了路径和稳定性门，
+但两个 wall 收益都低于 `1%` 与 `0.05 s`，因此按预注册停止门否决。不跑 189K、
+2/4/6/8 或邻近 GDN 参数。
+
+最终生产 server/vision/engine `164043/164045/164050`，engine
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`，config
+`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`，运行环境无
+`STRATA_GDN_CONVL2`；health loaded、六 slots / 两 groups，systemd inactive。
+
+证据目录 `/opt/ai/logs/engine-0155-eval-20261031T1320Z/`。A2 文件 SHA-256：
+
+```text
+GDN-A2-596.json    ce91ba39a4cb95a45ecb26f2e9217fe2efa300c9d73dfeca4cae17e7da5a50b9
+GDN-A2-94K.json    8c2d60e8c202a438c0f5d081f831ffb04722251e3110355d306e79bf868257a1
+GDN-A2-parity.json fcd5e83a86998169e5b299ef05b7bcef99d87a186a7acf5d7e79533a2d0b3e50
+GDN-A2-server.log  370f7f4b3080d6d64e0a5cd9da96d29d4f2e0cd5bec4c7370a93ae81c99795b4
+```
+
+完整记录见
+[`GDN_CONVL2_RESULT-20261031.md`](work/GDN_CONVL2_RESULT-20261031.md)。下一步先用
+现有 `STRATA_PREFILL_TIMING=1` 对同一 596/94K 形状做一次 phase map，避免继续在局部
+kernel 上消耗重启和测量预算。
 
 ## L-153 · 官方 0.1.55 通过正确性但在两个代表热续尺寸都变慢
 

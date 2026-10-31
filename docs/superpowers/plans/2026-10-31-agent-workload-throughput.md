@@ -2,12 +2,14 @@
 
 日期：2026-10-31
 
-状态：第十八次评审后修订，可以继续执行。
+状态：第十九次评审后修订，可以继续执行。
 
 ## 全局目标
 
 除非用户明确停止，持续缩短真实 AI vibe coding 任务从提交到产生可用代码、测试结果或
-明确阻塞的时间，并减少完成同一任务所需的重复模型工作。
+明确阻塞的时间，并减少完成同一任务所需的重复模型工作。当前执行主轴是通常 1 个主代理、
+偶尔 2 个的编辑—测试循环；优先消除每一轮都会发生的 prompt/read 与 decode 等待。
+每轮必须先用真实触发率和绝对秒数证明收益，不能把局部 kernel 改善或 token/s 当作结果。
 
 优先级按用户实际感受到的结果排列：
 
@@ -56,7 +58,7 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 - engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
 - engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
 - config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
-- 当前 PID：server / vision / engine `162903 / 162905 / 162910`
+- 当前 PID：server / vision / engine `164043 / 164045 / 164050`
 - 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
 
 生产启动与恢复约需 2–3 分钟。每次重启必须说明预期节省能否覆盖加载、缓存丢失和不可用
@@ -222,7 +224,7 @@ health、三组固定 greedy 和 64-token smoke，再跑 A1/B0/A2 的 596 fresh 
 不进入官方引擎的 GDN env、189K 或并发矩阵。见
 [`ENGINE_0155_EVAL_RESULT-20261031.md`](../../work/ENGINE_0155_EVAL_RESULT-20261031.md)。
 
-### P2d：`GDN-CONVL2`（当前）
+### P2d：`GDN-CONVL2`（已否决）
 
 当前旧 engine 已包含 `STRATA_GDN_CONVL2`。在超过 64-token 的 GDN prompt chunk 中，
 它把 conv 与 Q/K L2 norm 融进一个 block，省一次 launch 和 `h` 中间写回；V 通道、
@@ -234,6 +236,27 @@ B 只在 A1 env 中增加 `"STRATA_GDN_CONVL2": "2"`。先过启动、实际 env
 改善 `>=1%` 且绝对 `>=0.05 s`、两个尺寸不同向相反、A 漂移 `<=3%` 才继续；94K 无
 wall 方向收益立即停止。契约：
 [`GDN_CONVL2_CONTRACT-20261031.md`](../../work/GDN_CONVL2_CONTRACT-20261031.md)。
+
+判决：B 通过启动、真实 env、六 slots / 两 groups、health、三组 fixed greedy、smoke 和
+全部请求质量门；A2 prompt/wall 漂移为 596 `-0.2483%/-0.3875%`、94K
+`+0.2461%/+0.0359%`。但 B 相对 A1 的 596/94K wall 只改善
+`0.8245%/0.2051%`，绝对仅 `0.012476/0.002898 s`，没有达到任一性能门。候选否决，
+不跑 189K、并发矩阵或邻近 GDN 参数；生产已恢复原 engine/config。见
+[`GDN_CONVL2_RESULT-20261031.md`](../../work/GDN_CONVL2_RESULT-20261031.md)。
+
+### P2e：`AGENT-HOT-TURN-PHASE-MAP`（当前）
+
+普通 596 fresh-token 与 94K 热续轮的 prompt 仍占 wall 约 `93%`，但连续四个局部候选
+只得到 prompt 改善或很小的 wall 变化。下一项不再猜 kernel，直接用当前生产 engine
+已有的 `STRATA_PREFILL_TIMING=1` 做一次 profiling boot，取得同口径 596/94K 的 21 个
+有序 prefill phase、host staging 与主/对端 GPU 数值。
+
+profiler 只用于定位，不计入性能收益。至少一个 phase 在代表请求中绝对成本
+`>=0.05 s`、且源码能证明一个不改变每行算术、token 选择、finish 与工具语义的可移除部分，
+并据其实测占比得到 wall `>=1%` 保守上界后，才预注册实现候选。若找不到这样的主相位，
+停止 kernel 邻域微调，转向 server admission/cache 或客户端请求结构的下一个证据支持项。
+契约：
+[`AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md)。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -302,5 +325,10 @@ wall 方向收益立即停止。契约：
 没有可产品化的重复测试浪费，主要模型等待来自正常编辑—测试轮次。
 `AGENT-SPLIT-MTP-BATCH` 也已完成：路径真实命中，94K prompt 改善 `2.359%`，但 wall
 反向 `0.046%`，因此否决并恢复生产。`ENGINE-0.1.55-EVAL` 随后通过启动和正确性门，但
-596/94K wall 慢 `5.853%/4.259%`，版本级候选否决并恢复旧引擎。当前执行
-`GDN-CONVL2`：只增加现有融合 conv+L2 env，先过 greedy，再测 596/94K wall。
+596/94K wall 慢 `5.853%/4.259%`，版本级候选否决并恢复旧引擎。`GDN-CONVL2` 随后
+以真实 env、greedy 和质量门通过，但 596/94K wall 只改善 `0.8245%/0.2051%`，
+绝对节省 `0.012476/0.002898 s`，因此也已否决并恢复 A2。当前执行
+`AGENT-HOT-TURN-PHASE-MAP`：用一个 profiling boot 拆 596/94K 的真实主相位，再按
+至少 `0.05 s` 和 wall `1%` 上界选择下一机制。当前生产为
+server/vision/engine `164043/164045/164050`，health loaded、六 slots / 两 groups，
+`strata.service` inactive。
