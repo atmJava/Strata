@@ -6,11 +6,15 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-POLL-TURNOVER（源码与现有 telemetry 门）
-- 当前工作：`pump()` 每 tick 先按 stage 顺序 `batch_poll`，再按 `k=n_pipe-1..0` 启动空闲
-  stage。只读审计一次完成到下一次 launch 之间的 host/driver polling、group hand-off 和
-  doorbell 周转，先证明真实触发率与 ≥1% 临界路径依据；现有 BSTAT/stage stamps 能回答时
-  不写代码、不重启。候选必须改变周转机制，不能重做已否决的 launch 聚合。
+- 当前项：UTIL-B6-ROWS（本机 kernel 门）
+- 当前工作：验证现有、精确的 `STRATA_B6_MMVQ_ROWS=1` 路径在 2080 Ti 上是否能让
+  Q4_K/Q5_K/IQ4_XS 多列 MMVQ 复用 activation fragment。先跑
+  `b6_mmvq_bench`/`mmvf_rows_parity` 和真实单元估计，保守临界路径达到 ≥1% 才允许一次
+  A-B-A；不扫描 2/4/8 rows 参数，不重做已否决的多行 launch 聚合。
+- 上一项：UTIL-POLL-TURNOVER 已完成并在端到端非回退门否决。首个 B1 漏掉 A 的 MMQ/Q6K
+  编译开关，已作废；同选项 B2 通过启动、路径和多轮 greedy parity。相邻 A2/B2/A3 的
+  2/4/6/8 路相对 A2/A3 合并中位为 `+9.129%/+7.885%/-3.241%/-6.122%`，胜场
+  `4/6, 5/6, 1/6, 0/6`；没有一级同时过 1% 与 5/6，6/8 回退超过 1%。源码已移除，A3 已恢复。
 - 上一项：UTIL-HEAD-Q8-FUSE 在独立 GPU/正确性门否决。5 个交替进程、每进程 200 iters、
   5 rounds；每个 `T=1..8` 的 direct 与 captured-graph 共 16 个逐字比较全部失败，五进程共
   80 个失败。最大单次节省仅 `1.315 µs`，远低于最快 stage-2 窗口 1% 的 `182.7 µs`；
@@ -80,18 +84,17 @@
   候选 8080 已恢复带 pipe 的 A 配置。
 - 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
   调度、EXPDEC、checkpoint move、GDN recurrence 合并、跨 group head 延迟合并、
-  vocabulary-row head split 和 Q8 head write/mixer fusion 均已否决；window profile 已完成。
+  vocabulary-row head split、Q8 head write/mixer fusion 和 batch poll 快返回均已否决；
+  window profile 已完成。
   attention v2 已是当前默认并完成 1% 门复验；
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：执行 `UTIL-POLL-TURNOVER` 只读门。审计 `pump()` 的
-  `batch_poll -> verdict -> stage hand-off -> batch_launch` 临界路径、`batch_poll` 的 query
-  语义和 `conc_serving` 的 doorbell 等待；用既有 BSTAT/stage stamp 判断周转间隙是否真实、
-  多大且是否在 2/4/6/8 路不同。只有命中率与保守临界路径收益达到 1% 才预注册实现。
-  不得重跑 head split、Q8 fusion、window profile、batch-head、GDN groups、checkpoint move、
-  固定 groups、QSA slots 或 piped MTP。
-- 当前候选：无运行中 server 候选。A2 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
+- 下一动作：执行 `UTIL-B6-ROWS` kernel 门。`STRATA_B6_MMVQ_ROWS=1` 只对已有精确
+  Q4_K/Q5_K/IQ4_XS 多列 MMVQ 改 row layout，复用每列 activation fragment。先在独立 GPU
+  上验证输出逐字相等，并测生产 6-column 形状相对默认的 kernel 时间和保守窗口占比；
+  未过 1% 就不构建 server candidate。过门后才跑一次 A-B-A。
+- 当前候选：无运行中 server 候选。A3 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
   仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
@@ -105,12 +108,12 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；head-split 判决后恢复的 server/engine/vision PID 为
-  `573407/573418/573413`，engine 为 `105a4171...`，6 slots / 2 groups，没有
+  `loaded=true`；poll-turnover 判决后恢复的 server/engine/vision PID 为
+  `593069/593112/593073`，engine 为 `105a4171...`，6 slots / 2 groups，没有
   `STRATA_VERIFY_PROFILE`、`STRATA_BATCH_TELEMETRY`、`STRATA_BATCH_GDN_GROUPS`、
   `STRATA_SLOT_CKPT_MOVE`、`STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、
-  `STRATA_FUSE_HEAD_GR`、`--expert-cache-cpu-order` 或其它实验 profiler/QSA/kernel env。
-  A→P 停机约 9 秒、加载 130 秒；P→A2 停机约 9 秒、加载 148 秒。
+  `STRATA_FUSE_HEAD_GR`、`STRATA_POLL_FAST`、`--expert-cache-cpu-order` 或其它实验
+  profiler/QSA/kernel env。A2→B2 加载约 155 秒，B2→A3 加载约 130 秒。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
@@ -144,6 +147,9 @@
 - UTIL-HEAD-Q8-FUSE 已否决：5 个交替进程的 `T=1..8` direct/captured graph 共 80 个逐字
   比较全部失败；最大节省 `1.315 µs`，远低于 `182.7 µs` 的 1% 窗口门槛。graph 在 `T=4..8`
   慢约 `1–3 µs`，未构建、未重启。
+- UTIL-POLL-TURNOVER 已否决：同编译选项 B2 通过启动、路径和 greedy parity，但相邻
+  A2/A3 合并中位下 6/8 路回退 `3.241%/6.122%`，8 路对两个 A 臂分别回退
+  `8.195%/4.080%`；2/4 路的 `+9.129%/+7.885%` 不能抵消其他级硬回退。
 - UTIL-PIPED-MTP 已否决：A1/A2 合并中位 `78.3/108.55/125.7 tok/s`，B 为
   `93.9/104.4/113.4`；2 路 `+19.92%`、5/6 胜，但 4/6 路 `-3.82%/-9.79%`。固定 greedy
   文本 B 两次不同；B 的 CUDA1 cache 比 A 少 169 slots，下一项先做 cache-neutral 隔离。

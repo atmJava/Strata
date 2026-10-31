@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T07:50+08:00。
+> 整理时间：2026-10-31T09:10+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -37,7 +37,10 @@
   `UTIL-HEAD-Q8-FUSE` 随后也在独立 GPU/正确性门否决：5 个交替进程覆盖 `T=1..8`，
   direct 与 captured graph 的 80 个逐字比较全部失败；最大节省仅 `1.315 µs`，远低于
   `182.7 µs` 的 1% 门槛，graph 在 `T=4..8` 还慢约 `1–3 µs`。没有构建服务器候选、
-  没有重启。当前断点转为 `UTIL-POLL-TURNOVER` 的源码与现有 telemetry 门。
+  没有重启。`UTIL-POLL-TURNOVER` 随后完成：首个 B1 因漏掉 A 的 MMQ/Q6K 编译开关而作废；
+  同选项 B2 通过启动、路径和 greedy parity，但相邻 A2/B2/A3 的 2/4/6/8 路相对合并中位为
+  `+9.129%/+7.885%/-3.241%/-6.122%`，胜场 `4/6, 5/6, 1/6, 0/6`。没有一级同时过 1% 与
+  5/6，6/8 回退超过 1%，因此否决，源码已移除。当前断点转为 `UTIL-B6-ROWS` kernel 门。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -66,9 +69,8 @@
   最新 A1/A2 合并中位 8 路 `107.214 tok/s` 仍比 6 路 `122.703` 低；固定单组不能通过质量门；
   EXPDEC 因 mode 8 控制流短路而不可达；checkpoint move 与 GDN recurrence 合并都没有越过
   多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；跨 group 延迟合并、
-  vocabulary-row head split 和 Q8 write/mixer fusion 都已否决。下一步只审计 `pump()` 的
-  `batch_poll -> verdict -> hand-off -> batch_launch` 周转，先用现有 BSTAT/stage stamp 找到
-  真实且可归因的 1% 固定成本；不足即否决，不重启。
+  vocabulary-row head split、Q8 write/mixer fusion 与 batch poll 快返回都已否决。下一步先
+  验证现有精确 `STRATA_B6_MMVQ_ROWS=1` 的本机 kernel 收益；不足 1% 即否决，不重启。
 
 ## 3. 当前生产
 
@@ -78,9 +80,9 @@
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
-| 候选 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 候选 PID | server `573407`、engine `573418`；vision `573413` |
-| candidate config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
+| 当前 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
+| 当前 PID | server `593069`、engine `593112`；vision `593073` |
+| current config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
 关键生产开关：
@@ -104,7 +106,7 @@ STRATA_SM75_PERF=1
 `STRATA_IQ3_GRID_REPL`、`STRATA_IQ3_ACT_RELOAD`、`STRATA_IQ3_WEIGHT_REUSE`、
 `STRATA_IQ3_GRID_PAD`、`STRATA_IQ3_WEIGHT_RO`、`STRATA_BATCH_MTP`、
 `STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、`STRATA_FUSE_HEAD_GR`、`STRATA_PROFILE_*` 或
-`STRATA_NCU_*`。
+`STRATA_NCU_*`；`STRATA_POLL_FAST` 已随否决移除。
 `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
 引擎子进程，不能替代 service drop-in。
 
@@ -353,11 +355,12 @@ query 的 score、top-k、softmax 或输出算术。
 4. UTIL-NCU 已使用快照和独立候选完成；不要把 full-section NCU replay 重新压到完整双卡
    请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
 5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
-6. `UTIL-EXPDEC-GU`、`UTIL-SLOT-CKPT-MOVE`、`UTIL-GDN-GROUPS`、`UTIL-HEAD-SPLIT` 和
-   `UTIL-HEAD-Q8-FUSE` 均已否决，不再启动。当前只允许 `UTIL-POLL-TURNOVER` 的源码与
-   telemetry 审计；新实现必须用不同机制，先证明不会改变事件顺序、token 选择和数值路径，
-   再预注册冻结 greedy parity 与 2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、并发回退和
-   资源 hard gate 不放宽。只有代码路径明确需要实测且预计收益高于约 3-7 分钟重启成本时才重启。
+6. `UTIL-EXPDEC-GU`、`UTIL-SLOT-CKPT-MOVE`、`UTIL-GDN-GROUPS`、`UTIL-HEAD-SPLIT`、
+   `UTIL-HEAD-Q8-FUSE` 和 `UTIL-POLL-TURNOVER` 均已否决，不再启动。当前只允许
+   `UTIL-B6-ROWS` 的现有精确 opt-in 先过本机 kernel parity/1% 门；未过门不构建服务器
+   候选。新实现必须用不同机制，先证明不会改变事件顺序、token 选择和数值路径，再预注册
+   冻结 greedy parity 与 2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、并发回退和资源
+   hard gate 不放宽。只有代码路径明确需要实测且预计收益高于约 3-7 分钟重启成本时才重启。
 
 不要把已否决项原样重跑：
 

@@ -903,16 +903,42 @@ server。契约见 [`UTIL_HEAD_SPLIT_CONTRACT-20261031.md`](UTIL_HEAD_SPLIT_CONT
 `STRATA_FUSE_HEAD_GR`。完整结果见
 [`UTIL_HEAD_Q8_FUSE_RESULT-20261031.md`](UTIL_HEAD_Q8_FUSE_RESULT-20261031.md)。
 
-### 16.5.18 UTIL-POLL-TURNOVER：下一道只读门
+### 16.5.18 UTIL-POLL-TURNOVER：2/4 路变快，6/8 路回退否决
 
 `pump()` 每个 tick 先按 `k=0..n_pipe-1` 对在飞 stage 调用 `batch_poll`，完成后推进 group；
 随后按 `k=n_pipe-1..0` 启动空闲 stage。这条单线程周转链包含 host polling、group ownership
-hand-off 与下一次 launch，可能对低占用窗口支付固定成本，但当前没有证据证明它达到 1%。
+hand-off 与下一次 launch。源码显示 `service()` 已在 no-ring 时提前返回，而 `batch_poll()`
+仍先进入 `OnDevice`；候选 `STRATA_POLL_FAST=1` 只在 mapped ring 不存在时快速返回，最多
+每 2 ms 仍走原 liveness、stream query、20 秒 timeout 和正常 doorbell。
 
-下一项不改循环顺序，也不做 launch 聚合。先审计 `batch_poll` 的 query/event 语义、
-`conc_serving` 的 doorbell 交接和 stage stamp 的空隙；必须证明真实触发率、临界路径至少
-`1%`、事件顺序不变和明确回滚，才允许实现。若现有 telemetry 已把空隙解释为非优化项，
-直接否决并转下一机制。
+首个 B1 漏掉 A 的 MMQ/Q6K/external-ggml/tests 编译开关而作废。同选项 B2 通过启动、两个
+stage 路径标记、6 slots / 2 groups、资源与三组两轮冻结 greedy parity。相邻 A2/B2/A3
+同 boot 各 12 waves 的结果为：
+
+| streams | A2/A3 median tok/s | B2 tok/s | B2 delta | paired wins |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 70.481 | 76.915 | **+9.129%** | 4/6 |
+| 4 | 101.674 | 109.692 | **+7.885%** | 5/6 |
+| 6 | 122.356 | 118.391 | **-3.241%** | 1/6 |
+| 8 | 112.617 | 105.722 | **-6.122%** | 0/6 |
+
+没有一级同时达到 1% 与 5/6 胜，6/8 路超过 1% 非回退上限；8 路对两个相邻 A 臂也分别低
+`8.195%/4.080%`。因此 poll fast 路径否决并移除，A3 已恢复。四臂无脚本/请求错误、无外来
+请求；完整证据见 [`UTIL_POLL_TURNOVER_RESULT-20261031.md`](UTIL_POLL_TURNOVER_RESULT-20261031.md)
+和台账 L-116。
+
+### 16.5.19 UTIL-B6-ROWS：现有多列 MMVQ row reuse 的本机 kernel 门
+
+`STRATA_B6_MMVQ_ROWS=1` 已存在于实验源码。它只改变 Q4_K、Q5_K 与 IQ4_XS 的多列 MMVQ：
+每个 block 让两 rows 复用每列已经装入的 activation fragment，权重解码、乘积与归约次序
+不变。上游 sm_86/A4000 记录为 `+0.5%..+2%`；本机 RTX 2080 Ti 和 production 六列窗口尚未
+测，因此不能把上游数字当作收益。
+
+下一步先检查 `b6_mmvq_bench` 与 `mmvf_rows_parity` 的实际选项，固定 environment 值 `1`
+（两 rows/block），不扫描 2/4/8 rows 或 kernel 几何。所有 parity cases 必须 bitwise 相等；
+真实六列 production formats/kernels 的交替 kernel 中位至少快 1%、至少 5/7 配对胜，并且按
+真实窗口占比保守投影仍至少 1%。未过 kernel 门直接否决，不构建 server candidate；过门后
+才做一次 A1-B-A2 的 2/4/6/8 端到端矩阵。
 
 ### 16.6 并发和会话快照
 

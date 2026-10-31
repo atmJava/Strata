@@ -3,6 +3,41 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-89 · Poll fast path helps two and four streams but loses six and eight
+
+- 目标 / 指标：在真实六槽、两组服务窗口中减少 `batch_poll` 的 no-ring device 查询固定成本；
+  要求至少一级达到 1% 且 5/6 配对胜，其他 2/4/6/8 并发级不回退超过 1%。
+- 假设与预期：空闲但尚未映射 ring 的 stage 仍支付 `cudaGetDevice`/最多两次 `cudaSetDevice`；
+  去掉这段设备查询可给低占用窗口及下一 stage 启动腾出固定时间，同时保持事件顺序与算术。
+- 为什么选这条路线：源码确认 `service()` 已有 no-ring 快返回，而 `batch_poll()` 先进入
+  `OnDevice`；它是现有 launch 聚合、head、group 和 checkpoint 路线之外的不同机制。
+- 改动与实验：新增 default-off `STRATA_POLL_FAST=1`，只在 mapped ring 不存在时提前返回，
+  最多每 2 ms 仍走原 liveness、stream query、20 秒 timeout 和正常 doorbell。首个 B1
+  因漏掉 A 的 MMQ/Q6K/external-ggml/tests 编译开关而作废；B2 用相同选项重建，二进制只比
+  A 大 4,096 B。按 A2-B2-A3 同 boot 各 12 waves 测 2/4/6/8 路。
+- 结果：B2 通过启动、两 stage 路径标记、6 slots / 2 groups、资源与三组两轮冻结 greedy
+  parity，finish 均为 `stop`。2/4/6/8 路相对相邻 A2/A3 合并中位为
+  `+9.129%/+7.885%/-3.241%/-6.122%`，胜场 `4/6, 5/6, 1/6, 0/6`；8 路对两个 A 臂还分别
+  低 `8.195%/4.080%`。四臂零脚本/请求错误、零外来请求。
+- 判决：**UTIL-POLL-TURNOVER 吞吐与非回退门否决。** 2/4 路超过 1%，但 6/8 路回退超过
+  1%，且没有任何一级同时达到 1% 与 5/6 胜；不能按平均收益采纳。A2→A3 漂移也超过 3%，
+  但 8 路对两个相邻 A 臂方向一致。
+- 预期部分推翻：no-ring 设备查询确实影响低并发周转，却未保住高并发窗口；不同活跃 rows
+  和 group hand-off 条件使同一快返回从收益转为损失。
+- 生产状态与回滚：补丁源码已移除。A3 为 server/engine/vision
+  `593069/593112/593073`，engine sha256 `105a4171...`、config `88de996a...`、health
+  loaded、6 slots / 2 groups；systemd inactive/dead，运行环境无 `STRATA_POLL_FAST`。
+- 证据：台账 L-116、`UTIL_POLL_TURNOVER_RESULT-20261031.md`、远端
+  `/opt/ai/logs/util-poll-turnover-20261031T0753CST/`；summary sha256
+  `2f9485dd0432f79a75d0677d91168f784d330be440d72042179d73e5cb714b9f`，清单 sha256
+  `4fdb4ad3b5b0c8fd950c74e9dbeba55ca4422dfd12daad0778760f498c3bc85d`。
+- 学到什么：低并发固定成本优化必须同时测 6/8 路；平均或最佳并发级收益不能覆盖一个以上
+  并发级超过 1% 的回退。构建控制也必须冻结 A 的全部性能编译开关。
+- 下一步与理由：预注册并执行 `UTIL-B6-ROWS` kernel 门。现有
+  `STRATA_B6_MMVQ_ROWS=1` 只在 Q4_K/Q5_K/IQ4_XS 多列 MMVQ 中跨 rows 复用 activation
+  fragment，算术与输出路径可要求 bitwise；上游 sm_86/A4000 为 `+0.5%..+2%`，本机六列
+  窗口值得先测，未过 1% 不重启。
+
 ## I-20261031-88 · Q8 head fusion fails both exactness and the 1% window floor
 
 - 目标 / 指标：把 `STRATA_HC_Q8=1` 末层的独立 `gr_write_multi` 与最终 Q8 mixer 合并；
@@ -30,7 +65,7 @@
   harness binary sha256 `3474ea97...`，清单 sha256 `5ccba05c...`。
 - 学到什么：生产已有 `apply=true` 不代表融合必然更快；必须按单窗口绝对门槛衡量，不能被
   几十微秒的方向性变化误导。
-- 下一步与理由：预注册 `UTIL-POLL-TURNOVER` 只读门。`pump()` 在单线程中先串行问每个在飞
+- 下一步与理由（已完成，见 I-20261031-89）：预注册 `UTIL-POLL-TURNOVER` 只读门。`pump()` 在单线程中先串行问每个在飞
   stage，再按逆 stage 顺序启动可用 group；先量化完成检测、hand-off 与 launch 之间是否
   有真实 ≥1% 空隙，并冻结事件顺序要求。数据不足就否决，不把普通 pulse 优化写成收益。
 

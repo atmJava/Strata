@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（113 条：L-000…L-112，按编号）
+## 台账索引（117 条：L-000…L-116，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -130,6 +130,7 @@
 | L-113 | 10-31 22:2xZ | HEAD-SPLIT GPU harness 七进程全过：`T=1..8` 半区/合并 logits、greedy、固定种子、counter、graph 改变输入全 bitwise；并发投影中位 `1.813–9.936%`，split peak `453,189,152 B` < 上界 `461,577,760 B` | **GPU harness 通过；进入 opt-in server integration；未重启** |
 | L-114 | 10-31 23:4xZ | HEAD-SPLIT server 正确性全过：`1..8` 行 peer graph 全命中、三组 greedy 两轮等于期望、6/2 与资源正常；A1-B-A2 2/4/6/8 路 `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 回退超 1% | **UTIL-HEAD-SPLIT 吞吐门否决；A2 已恢复；转 UTIL-HEAD-Q8-FUSE 源码/GPU 门** |
 | L-115 | 10-31 23:4xZ | Q8 head fusion 五交替进程各 `T=1..8` direct/graph：80 个逐字比较全失败；最大节省 `1.315 µs`，1% 窗口门槛 `182.7 µs`，graph `T=4..8` 慢约 `1–3 µs` | **UTIL-HEAD-Q8-FUSE GPU/正确性门否决；未构建、未重启；转 UTIL-POLL-TURNOVER 只读门** |
+| L-116 | 10-31 08:5xZ | poll fast B1 漏掉 A 编译开关而作废；同选项 B2 parity 全过，但相邻 A2/B2/A3 的 2/4/6/8 路为 `+9.129%/+7.885%/-3.241%/-6.122%`，胜场 `4/6, 5/6, 1/6, 0/6` | **UTIL-POLL-TURNOVER 吞吐/漂移门否决；源码已移除、A3 已恢复；转 UTIL-B6-ROWS kernel 门** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3907,10 +3908,78 @@ graph 路径没有提供可复现收益，部分行反而回退。
 - 证据目录 `all-sha256.txt` sha256
   `5ccba05c4f060ef85f3a845ec7e377cccec16eec0bea484e13f6c1ff338af9a4`
 
-**下一步**：`UTIL-POLL-TURNOVER`。只读审计 `pump()` 每 tick 的
+**下一步（已完成，见 L-116）**：`UTIL-POLL-TURNOVER`。只读审计 `pump()` 每 tick 的
 `batch_poll -> verdict -> stage hand-off -> batch_launch`，以及 `conc_serving` 的 doorbell
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
+
+## L-116 UTIL-POLL-TURNOVER：2/4 路变快，但 6/8 路回退超过 1%
+
+**判定**：**端到端吞吐与非回退门否决。** 同编译选项的 B2 通过启动、路径、资源与冻结
+greedy parity，但 6/8 路相对相邻 A2/A3 合并中位分别回退 `3.241%/6.122%`，违反“其他
+并发级不回退 >1%”。2/4 路虽然达到 `+9.129%/+7.885%`，分别只有 `4/6`、`5/6` 胜，且不能
+抵消高并发硬回退。源码补丁已移除，A3 已恢复。
+
+**构建控制**：首个 B1 构建漏掉 A 的 `STRATA_MMQ_KQUANTS`、`STRATA_MMQ_TQ_OVERLAY`、
+`STRATA_Q6K_EXPERTS`、external ggml 和 `STRATA_BUILD_TESTS`。B1 为 `65,273,288 B`，比 A
+大 `3,602,328 B`，其吞吐不用于判断候选。B2 重新使用与 A 相同的 Release、CUDA 75、Ninja、
+ggml source、MMQ、TQ overlay、Q6_K experts、non-portable 与 tests 选项；二进制
+`61,666,944 B`，只比 A 大 `4,096 B`。
+
+| item | engine sha256 |
+| --- | --- |
+| A | `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` |
+| invalid B1 | `e5430bd44663c90d831363f1edb154f42792ccafadaaffe27faa706eb8e674dc` |
+| comparable B2 | `80c0fb1cf7719021a13d5ea8efe12ed30828517cde75e34e4d50e81eefb9a844` |
+
+**路径与正确性**：`Verifier::batch_poll` 在无 mapped ring 时原本仍先进入 `OnDevice`，支付
+`cudaGetDevice` 和最多两次 `cudaSetDevice`；`STRATA_POLL_FAST=1` 只在同一 no-ring 条件做
+快速返回，且最多每 2 ms 仍走原 liveness、stream query、20 秒超时与正常 doorbell 路径。
+两个 stage verifier 都打印命中标记。B2 为 6 slots、groups `0,1`、health loaded；三组
+固定 greedy 各跑两次，候选内逐字重复、等于 A1/A3，finish 均为 `stop`。
+
+**同 boot A2-B2-A3**：每臂 12 waves，2/4/6/8 路各三次 400-token burst。
+
+| streams | A2 tok/s | B2 tok/s | A3 tok/s | A2/A3 median | B2 delta | paired wins |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 71.007 | 76.915 | 69.954 | 70.481 | **+9.129%** | 4/6 |
+| 4 | 96.482 | 109.692 | 110.097 | 101.674 | **+7.885%** | 5/6 |
+| 6 | 123.697 | 118.391 | 119.453 | 122.356 | **-3.241%** | 1/6 |
+| 8 | 115.147 | 105.722 | 110.220 | 112.617 | **-6.122%** | 0/6 |
+
+没有任何一级同时满足 `>=1%` 和 `5/6` 胜；6/8 路超过 1% 非回退上限。8 路还分别比两个
+相邻 A 臂低 `8.195%/4.080%`。A2→A3 诊断漂移为
+`-1.483%/+14.111%/-3.431%/-4.279%`，三个并发级超过 3% 漂移门；但 8 路对两个 A 臂的
+方向一致，不能归因于漂移。四臂均无脚本错误、请求错误或外来请求，finish 只有 `length/stop`；
+B2 engine/server 日志无执行、CUDA、never-rang 或 timeout 错误。
+
+**失败控制**：无效 B1 为 `78.298/105.774/118.397/116.017 tok/s`，表面上 8 路变快；保留
+此记录是为了防止后续错误地把 B1 当作 poll-fast 证据。
+
+**重启成本与恢复**：A1→B1→A2→B2→A3 每次加载约 130–168 秒，另加 8–10 秒停机，未重启
+服务器。最终 A3 的 server/engine/vision 为 `593069/593112/593073`，engine/config sha256
+为 `105a4171.../88de996a...`，health loaded、6 slots / groups `0,1`；systemd 仍
+inactive/dead、`MainPID=0`、`NRestarts=23`；RAM 可用约 13 GiB、swap 12 MiB、两卡空闲显存
+约 `803/908 MiB`。
+
+**证据**：
+
+- `/opt/ai/logs/util-poll-turnover-20261031T0753CST/UTIL-POLL-TURNOVER-summary.json`
+  sha256 `2f9485dd0432f79a75d0677d91168f784d330be440d72042179d73e5cb714b9f`
+- 同目录 `all-sha256.txt`
+  sha256 `4fdb4ad3b5b0c8fd950c74e9dbeba55ca4422dfd12daad0778760f498c3bc85d`
+- `a2-sweep.json` sha256 `c1b47c56ed09a1e132ad2a29da89f202776b9748163c13edfa1cef2fb8cb3e77`
+- `b2-sweep.json` sha256 `1e633e789fbc1f33f6670e295e8755a18454359d3402ce1ef3ef5faf55a0a8a5`
+- `a3-sweep.json` sha256 `a1c6d43bfea3970aad595f160fc751a3c2f11d7b2b0c847df0632547c5bf51d9`
+- `b2-parity.json` sha256 `4d8baea8aca7e1840aa527de800e7506bd08273d86ff33a81367e1b4859c3837`
+- `build-comparison.txt` sha256 `dab531cb3061f0b6839881a1bdf49f8be2c7522ff8948b8ce1df098726006053`
+
+**没测什么**：没有长上下文、混合提示、一小时 soak、采样解码、其他模型或 backend。结论
+覆盖固定短提示与 400-token greedy burst 的双 RTX 2080 Ti 实例。
+
+**下一步**：`UTIL-B6-ROWS`。先验证现有精确 opt-in
+`STRATA_B6_MMVQ_ROWS=1` 的 Q4_K/Q5_K/IQ4_XS 多列 MMVQ 在本机 production 6-column
+形状上的 parity 与保守窗口收益；未达 1% 不构建 server candidate。
 
 ## L-114 UTIL-HEAD-SPLIT：服务端正确性通过，4/6 路端到端回退导致否决
 
