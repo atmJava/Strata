@@ -3,6 +3,208 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-116 · 223K profile 定位 PLE I/O，1,024 在途读经三组冷配对采纳
+
+- 目标 / 指标：在真实 49 天旧会话上定位至少 `1.13 s` 的可移除 prefill 成本，并保持
+  完整历史、采样、输出、finish 和资源语义。
+- 假设与预期：默认 256 在途 direct reader 的 host PLE wait 是可移除成本首位；
+  提高队列深度应提高 SSD 并发利用率，而不改变行内容或 GPU 算术。
+- 为什么选这条路线：223K profile 测得 host PLE wait `50,362 ms`、主 PLE phase
+  `39,291 ms`，高于 `gemm gate/up` 的 `16,157 ms`；`mmap` 已把 wall 拉到
+  `182.157 s`，必须回到 direct reader。
+- 改动与实验：profile A1/A2 保持默认 256；独立微基准比较 256/512/1,024；随后只把
+  `--ple-inflight` 改为 1,024。非剖析阶段做了三组相邻 direct-256/1,024 冷重放。
+- 结果：profile 的 1,024 prompt 为 `128,303.5 ms`，host PLE `43,453 ms`，主 PLE
+  `18,525 ms`。非剖析 prompt 为 `123,571.7→120,024.4`、
+  `130,616.7→129,175.0`、`123,543.4→116,645.9 ms`，改善
+  `2.87%/1.10%/5.58%`；wall 为 `130.198→130.127`、`137.576→136.071`、
+  `130.352→123.564 s`，改善 `0.05%/1.09%/5.21%`。配对中位为 prompt `2.87%`、
+  wall `1.09%`。
+- 判决：**AGENT-PLE-INFLIGHT 采纳为显式配置参数。** 源码默认仍为 256，直接 slab
+  从约 2 MiB 增至 8 MiB；rollback 为移除一个参数。
+- 预期被推翻：第一组客户端 wall 被约 3.5 秒的启动/收尾离群吞掉，不能只看一对；三组
+  配对才给出稳定结论。服务端 prompt 的三组方向都为正。
+- 生产状态与回滚：当前 server/vision/engine `89451/89453/89458`，config
+  `6ece1a13...`、engine `105a4171...`、health loaded、6 slots / 2 groups、swap 0；
+  `strata.service` inactive。回滚 config 为 `4b396f44...`。
+- 证据：L-145、[`AGENT_PLE_INFLIGHT_RESULT`](work/AGENT_PLE_INFLIGHT_RESULT-20261031.md)。
+- 学到什么：真实冷 prefill 的 I/O 和 GPU phase 必须在同一请求上拆；服务器每个 boot
+  的冷读波动可大于 1%，单对 A/B 不足以支持小收益结论。
+- 下一步与理由：进入 `AGENT-PLE-ROW-CACHE`。剩余 PLE 成本仍为 `43,453 ms` host wait，
+  而默认 1M 行缓存只有约 95 MB；只测一次有界的 4M 行容量，不扫描邻近值，也不与其他
+  PLE 参数组合。
+
+## I-20261031-115 · 关闭 draft 微调，真实旧会话把下一项定位到 223K 冷 prefill
+
+- 目标 / 指标：结束低上界的 MTP draft 微调，并用真实隔天旧会话决定下一块用户可感知的
+  p99 工作，而不是继续在局部窗口里消耗重启。
+- 假设与预期：draft host 路径若有可移除固定成本，416/1490/4483 的 round/launch/gap
+  拆分应能给出至少 1% root 上界；旧会话 reopen 应首先验证是否真是冷 prefill，而非
+  recovery、decode 或特殊恢复缺陷。
+- 为什么选这条路线：前一轮 draft profile 已接近完成，且本地 35 个 session 中没有任何
+  超过 24 小时的请求间隔；只有真实旧 session 才能区分“180K 很大”和“隔天恢复很慢”。
+- 改动与实验：B2 只增加 `STRATA_DRAFT_TIMING=1` 与 `STRATA_MTP_PROFILE=1`，对
+  416/1490/4483 单路采样；恢复 B2 后，重放 2026-09-12 的真实存储会话。旧会话经现成
+  tunnel 以只读、无工具方式 resume，只请求 sentinel，原始正文保存在私密 artifact。
+- 结果：draft round 收敛到 `2.463 ms`，其中 round graph `0.978 ms`、step GPU
+  `1.451 ms`、host graph gap `0.017 ms`；staging、launch、PLE 和 tail 都远小于
+  0.1 ms。即使完全删除 draft-head GEMV，乐观 root 上界也只有约 `0.8%`。真实旧会话
+  年龄 49 天，prompt/input `223,114` token、cached `0`、prompt/首 token 约
+  `112.863/113.014 s`、wall `113.3 s`、decode `292.8 ms`，21 output token、
+  finish `stop`、零工具。
+- 异常与修正：4483 的 finish 仍会随 MTP/cache 状态在 `length` 与 `3892/stop` 间变化，
+  继续作为独立质量风险，不吞入性能结论。同进程第二次打开旧会话会命中刚填充的 cache，
+  不能冒充第二个冷样本；因此当前 profile 只允许一次真实冷重放。
+- 判决：**AGENT-DRAFT-BREAKDOWN 完成并否决实现方向；AGENT-OLD-SESSION-RESUME
+  诊断完成。** 当前项改为 `AGENT-OLD-SESSION-PREFILL-PROFILE`，全局计划第十一次修订。
+- 预期被推翻：模型 decode 不是隔天旧会话的主等待；“180K 冷 turn”与真实 223K 旧会话
+  也不能互换。约 99.7% 的用户等待发生在首 token 前，继续优化 draft 或 decode 不能解决
+  这个 p99 尾部。
+- 生产状态与回滚：profile 臂加载 151 秒，恢复 B2 加载 142 秒；最终
+  server/vision/engine `78965/78968/78973`，health loaded、6 slots / 2 groups，
+  engine env 无 draft/decode/verify profiler。下一 phase profile 前的回滚点仍是
+  `b-config.json`。
+- 证据：L-143/L-144、[`AGENT_DRAFT_BREAKDOWN_RESULT-20261031.md`](work/AGENT_DRAFT_BREAKDOWN_RESULT-20261031.md)、
+  [`AGENT_OLD_SESSION_RESUME_RESULT-20261031.md`](work/AGENT_OLD_SESSION_RESUME_RESULT-20261031.md)、
+  `/opt/ai/logs/agent-profile-hygiene-20261031T082551Z/`、
+  `/tmp/agent-old-session-resume-20261031.jsonl`。
+- 学到什么：一个小时级的局部优化即使技术上有方向，也要先乘真实任务占比；真实 p99
+  样本比更多同形 kernel 扫描更能改变路线。223K prefill 的下一步必须先测相图，不能直接
+  投入 session persistence 或另一个 kernel。
+- 下一步与理由：执行 `AGENT-OLD-SESSION-PREFILL-PROFILE`。只增加
+  `STRATA_PREFILL_TIMING=1`，一次冷重放取得 21 相与 host/对端 GPU 成本；单相可保守
+  节省至少 `1.13 s` 才实现，否则比较持久化、跨进程 residency、预取/预热和客户端历史
+  处理。
+
+## I-20261031-114 · 移除生产剖析器过 1% 门，转入 MTP draft 拆分
+
+- 目标 / 指标：确认现役 `STRATA_DECODE_TIMING=1` 与 `STRATA_VERIFY_PROFILE=1` 是否
+  造成用户可见时间，并在正确性与健康不变时移除；不改变引擎、模型、采样或调度。
+- 假设与预期：历史 L-035 同机成本为单路 6.4%、四路 10.7%；当前版本应在 416/1490
+  稳定尺寸至少复现 1%。
+- 为什么选这条路线：replay 期间发现生产仍开着探查器；这不只是测量噪声，也可能是
+  无需代码重写即可兑现的最大低风险收益，应先于任一新内核。
+- 改动与实验：保存 A1 当前进程结果，B 只删除两个 env；A2 恢复两者；B2 再删除并留产。
+  每臂 416/1490/4483 token 单路各 3 波，记录 wall、prompt、decode、TTFT、finish、hash。
+- 结果：B 中位 `3.911/13.620/37.230 s`，A1/A2 相邻中位 `4.188/14.395/42.322 s`；
+  416/1490 改善 `6.61%/5.38%`，A2 漂移 `2.45%/0.66%`。B2 health loaded、
+  engine `0.1.51`、6 slots / 2 groups、context 262144，64-token smoke `0.850 s`。
+- 异常与修正：4483 的 A1 全 `length`，B 与 A2 各有两条 `3892/stop`；B 相对中位仍快
+  12.03%，但 A1/A2 漂移 13.77%，不能用它强化加速结论。异常在有无剖析器两臂都存在，
+  因此不归因于本次变更，但长输出稳定性仍未解决。416/1490 的 hash/finish 完全一致。
+- 判决：**AGENT-PROFILE-HYGIENE 通过 1% 门并采纳。** B2 留在生产；两个 profiling env
+  移除，原 config 与哈希保留，可精确回滚。
+- 预期被推翻：仪器不是零成本只读观测；它会让当前 B4 单路 stable-size 任务多等
+  5–7%。在解释任何 decode 相图前必须先确认测量工具不在生产路径。
+- 生产状态与回滚：B2 server/vision/engine `75997/75999/76004`；rollback 为停止 B2，
+  用同源码和 `a-config.json` 启动。3 次重启加载分别为 154/145/199 秒。
+- 证据：L-142、[`AGENT_PROFILE_HYGIENE_RESULT-20261031.md`](work/AGENT_PROFILE_HYGIENE_RESULT-20261031.md)、
+  `/opt/ai/logs/agent-profile-hygiene-20261031T082551Z/`。
+- 学到什么：先做便宜的配置卫生，常常比继续做局部代码优化更接近用户收益；但 A-B-A
+  漂移和 finish 异常必须与性能结论分开报告。
+- 下一步与理由：进入 `AGENT-DRAFT-BREAKDOWN`。draft `2.36 ms/window` 占 decode
+  5.2–5.5%，模型仅占 root wall 37.5%，全消除上界约 2.1%；一次 round/step/host-gap
+  拆分足以判断是否有至少一半可移除，否则关闭 MTP 微调。
+
+## I-20261031-113 · 单路 decode 是主体，生产剖析器污染成为下一项
+
+- 目标 / 指标：用真实 output/reasoning 形状拆出单路与两路 decode 成本，并选出有整任务
+  1%+ 保守上界的下一机制。
+- 假设与预期：最新 trace 中 p90/p99 长输出应占显著模型时间；恰好两路调度可能仍值得
+  继续优化。
+- 为什么选这条路线：上一个上下文饮食项已过 1% 门；42/6/8 槽调度、MTP 和多数内核路线
+  已有否决证据，必须先从真实任务时间账本重新定位。
+- 改动与实验：扫描 35 个本地 Codex rollout；在现役 B4 上用同一 warm prompt 跑
+  416/1490/4483 token 的 1/2 路 replay；再逐项核对进程环境与引擎 profile。
+- 结果：14,768 请求、`10,343,967` output、`3,347,547` reasoning；单路模型 union
+  `69,064.894 s`，恰好两路仅 `171.303 s`。output `512-2047` 占 49.225% 模型时间，
+  `2048+` 占 22.828%，reasoning `512+` 占 31.910%。416/1490/4483 token 单路完成跨度
+  `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s`；两路第二请求 TTFT 接近
+  第一请求整代。27 请求无 HTTP/执行错误，但 4483 两路有两条在 `3892/stop` 提前结束，
+  严格 finish 门未全过。
+- 异常与修正：真实 trace 从 v4 更新到 v5，请求数 `14,721→14,768`、模型 union
+  `68,957.043→69,236.197 s`，旧数字不再作为当前快照。现役 engine 实际同时带
+  `STRATA_DECODE_TIMING=1` 与 `STRATA_VERIFY_PROFILE=1`，此前 replay 全部是仪器
+  开启臂；这不是可以忽略的版本书写错误，而是下一块可实测的用户时间。
+- 判决：**AGENT-REAL-DECODE-SHAPE 诊断完成；两路角色调度降级，现役 profile 移除成为
+  当前项。** 不据当前 instrumented 相图直接写内核。
+- 预期被推翻：两路 aggregate decode tok/s 看似翻倍，但完成跨度同样接近翻倍；计时器
+  重叠不等于用户收益。temperature 0 也不能保证跨 MTP/cache 状态逐字一致。
+- 生产状态与回滚：诊断未改生产源码或配置；B4 server/vision/engine
+  `50648/50651/50656` 未重启。下一步只修改两个 env 的候选配置，可精确恢复。
+- 证据：L-141、[`AGENT_REAL_DECODE_SHAPE_RESULT-20261031.md`](work/AGENT_REAL_DECODE_SHAPE_RESULT-20261031.md)、
+  `/tmp/agent-task-trace-all-20261031-v5.json`、
+  `/opt/ai/logs/agent-real-decode-shape-20261031T0840Z/`。
+- 学到什么：先确认测量工具是否仍在生产路径，再解释它测到的相图；单路 decode 是当前
+  用户时间主体，下一步应按干净相图选一个最大单相，而不是继续调并发调度。
+- 下一步与理由：执行 `AGENT-PROFILE-HYGIENE`。历史同机剖析器成本单路 6.4%、四路
+  10.7%，当前 A1-B-A2-B2 只需三次重启即可确认；移除后既减少生产噪声，也留下可信的
+  decode 相图。
+
+## I-20261031-112 · 上下文饮食改为首次出现即折叠，三组配对均过 1%，转入真实 decode
+
+- 目标 / 指标：把大工具输出从模型上下文移到完整可重读文件，要求真实 coding task 的
+  代码修改、测试、错误定位和 finish 不变，整任务墙钟至少改善 1%。
+- 假设与预期：旧日志多为一次性证据，不必逐行留在历史；确定性引用应降低 uncached prompt
+  和上下文增长，但不能破坏前缀缓存。
+- 为什么选这条路线：全量工具输出中 `>=2K` 占 `92.294%`，是 compaction 之外最大的可复核
+  上下文入口；模型 decode 尚未拆清，先完成这个已有足够上界的项。
+- 改动与实验：给隐私安全 Responses 代理新增 opt-in context diet。初始策略保留最新六条、
+  折叠更早输出；真实请求显示它逐轮改写早期历史，立即否决。改为每个合格成功输出首次出现
+  即保存完整 mode-0600 文件、替换为含字节数、SHA-256、路径和精确 `sed`/`rg` 命令的稳定
+  引用，错误/失败/小输出保留。用同一八命令形状跑三组 control/diet。
+- 结果：延迟折叠使 cached input 跌到 `4,546` token，前九请求总和 `116.177 s`。首次
+  出现即折叠的三组配对墙钟为 `38.106→32.914 s`、`58.307→30.727 s`、
+  `41.002→32.686 s`，改善 `13.63%/47.30%/20.28%`；cached input 保持
+  `9,400–13,513` token，模型可见历史减少 `60,694` 字符。模型通过引用的精确 `rg`
+  找回 `NEEDLE=lyra-8153`，独立编辑/测试任务返回 `2 passed` 和 `PASS`。
+- 异常与修正：第一次 live 变换因重复 `Content-Length` 头等待 6,761 字节；改为大小写
+  不敏感替换并补回归测试。一次编辑尝试生成错误格式的 `apply_patch`，改用显式
+  `exec_command` 后成功，不属于数据丢失。
+- 判决：**AGENT-TOOL-CONTEXT-DIET 完成。** 首次出现即折叠通过 1% 门，保持 opt-in；
+  延迟折叠否决。默认服务请求仍字节不变，生产未重启。
+- 预期被推翻：单纯减少模型可见字符不等于变快；若折叠改变旧消息位置，缓存失效的成本
+  可远大于省下的 prompt。后续上下文策略必须把“前缀在首次出现后不变”作为硬约束。
+- 生产状态与回滚：B4 server/vision/engine `50648/50651/50656` 未变、未重启，生产文件
+  和配置不变。代理目录可通过停用本地代理和临时 artifact 目录回滚，不涉及服务。
+- 证据：L-140、[`AGENT_TOOL_CONTEXT_DIET_RESULT-20261031.md`](work/AGENT_TOOL_CONTEXT_DIET_RESULT-20261031.md)、
+  `/tmp/agent-control-waves-shape-20261031.jsonl`、`/tmp/agent-diet-eager-waves-shape-20261031.jsonl`。
+- 下一步与理由：进入 `AGENT-REAL-DECODE-SHAPE`。最新 35 文件、152 root trace 有
+  `10,294,789` output 和 `3,337,375` reasoning token，模型 union `68,957.043 s`；
+  先按 output/reasoning 尺寸、请求类型和 1/2 路并发拆解，避免把短工具回复的单次探针
+  当成总体 decode 成本。任何机制必须先给出整任务 `>=1%` 保守上界。
+
+## I-20261031-111 · 真实 compaction 在 B4 正常，工具输出成为下一上下文大头
+
+- 目标 / 指标：区分客户端直连 provider 与 Strata，并用真实 Codex compaction 验证当前
+  kept-tool + prefix cache；没有缺陷就停止局部路线并重排总体目标。
+- 假设与预期：冻结 rollout 的 43/44 次低命中可能来自 Strata 布局失配；若如此，应在同一条
+  compaction prompt 上找到可复用前缀。
+- 为什么选这条路线：上一版 trace 把 compaction 列为 uncached input `54.32%` 的最大可解释
+  项，但日志没有 server timing，也没有证明请求进入 B4。
+- 改动与实验：先核对会话 provider，再用新增 `agent-shape-proxy.py` 原样转发 Codex 0.164
+  Responses 流量到 B4，仅记录结构哈希、usage、finish 和时延；强制三次真实自动 compaction。
+  同时扫描全部 26 个本地 rollout，复算并发和工具输出分布。
+- 结果：冻结快照的 provider 是 DeepSeek 直连，不是 Strata。三次 B4 compaction 原始
+  `tools=[]`，保留工具路径分别复用 `11124/11225`、`11349/11452`、`11627/11729`，
+  prompt `451.5–529.4 ms`，全部 completed。全量 rollout 有 14,531 请求、工具输出
+  `79,745,864` 字符；`>=10K` 输出占 `63.985%`，`2K-10K` 占 `28.309%`；恰好两路模型
+  并发只有 `143.727 s`，两路转三路仅 1 次。
+- 判决：**AGENT-COMPACTION-REAL-SHAPE 完成，无需服务候选或重启。** 当前缓存路径真实有效；
+  冻结直连 provider 的低命中从 Strata 问题中剔除。第七版主项改为
+  `AGENT-TOOL-CONTEXT-DIET`。
+- 预期被推翻：不能因为客户端 token 记录显示 compression 重读，就把它归因给 Strata；必须
+  先证明 provider、endpoint 和 server cache 字段来自同一条路径。
+- 生产状态与回滚：B4 server/vision/engine `50648/50651/50656` 未重启，生产文件不变；
+  shape proxy 是独立工具，可删除，不影响服务。
+- 证据：L-139、[`AGENT_COMPACTION_REAL_SHAPE_RESULT-20261031.md`](work/AGENT_COMPACTION_REAL_SHAPE_RESULT-20261031.md)、
+  `/tmp/agent-shape-b4-20261031.jsonl`，SHA-256
+  `d368e4cbb1bdbd42da927106bea6d9f16e41e21559d7e5142b954378ccaf73dc`。
+- 学到什么：先对齐请求所属的 provider 和服务器，再做缓存归因；单文件 trace 不能代表
+  全量并发，大输出比“是否 compaction”更有持续上下文价值。
+- 下一步与理由：只读计算 `>=2K` 工具输出的可折叠 token 上界、重复次数和错误内容要求。
+  如果完整输出可作为确定性文件重读，再实现 opt-in 引用替换；否则转 decode/recovery。
+
 ## I-20261031-110 · 整任务账本完成：下一大头是真实 compaction 形状，不是 kernel
 
 - 目标 / 指标：把真实 vibe coding root task 拆成模型、工具、compaction、取消和空档，

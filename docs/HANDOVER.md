@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T15:00+08:00。
+> 整理时间：2026-10-31T18:15+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,54 +12,91 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-138。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-145。
 
 ## 2. 当前断点
 
-- **全局目标已第六次修订并继续执行**：优化真实 AI vibe coding 的任务完成时间、首个可
+- **全局目标已第十二次修订并继续执行**：优化真实 AI vibe coding 的任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
   触发率后的整任务 1% 上界；低频旧会话恢复可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused，当前目标接口不能改写文本或恢复它；接手时
+  以本仓库第十二版计划为权威，不要回到平台旧目标的状态快照。
 - **当前已采纳**：title 为 `1.8–2.1 ms`、零引擎/token；线程级 compaction LRU 在其
-  测试形状上使 1 主 3 子代理各复用约 99.5%；真实客户端失配正在诊断。共享 system 放在
+  测试形状上使 1 主 3 子代理各复用约 99.5%；B4 的三次真实 Codex compaction 复用约
+  `99.1%`。共享 system 放在
   tools 前使共同前缀由 `320` 增至 `54,366`
   字节；自动 boundary pin 使后续兄弟复用 `97.34%`，相对 B3a 后三墙钟
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `50648/50651/50656`，源码
+- **当前运行**：server/vision/engine `89451/89453/89458`，源码
   `/opt/ai/src/strata-two-stream-serial-20261031`，`127.0.0.1:8080`、health loaded、
-  262144、6 slots / 2 groups；engine `105a4171...` 未重建，config `7c901092...`、
+  262144、6 slots / 2 groups；engine `105a4171...` 未重建，config `6ece1a13...`、
   server `10bd8318...`，server 进程含 `STRATA_BATCH_SERIAL_TWO=1`。`strata.service`
-  仍 inactive/dead。
+  仍 inactive/dead。engine env 不含 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`。
+  当前显式引擎参数含 `--ple-inflight 1024`；源码默认仍为 256，rollback 为同一源码目录
+  + `4b396f44...` direct config。
 - **真实 trace 完成**：冻结快照有 14 root、4,180 请求、6,297 工具、7.54 亿 input、
   97.09% cached；output 中位/p90/p99 `483/1,714/5,069`。最长 root `44,783 s`，其中
   推断模型 union `14,855 s`、工具 union `31,088 s`、未归因空档 `15.843 s`。工具等待
   p90/p99 `30.0/30.2 s`；2,645 万工具字符中 `68.57%` 来自 914 个 `>=10K` 输出。这些是
   客户端事件，不是 Strata server timing。
-- **compaction 真实失配**：冻结快照的 44 次 compaction 只有 1 次缓存率 >=50%；其余 43
-  次中位 input/cached/uncached 为 `283,884/7,424/277,803`。合计占全部 uncached input
-  `54.32%`，推断模型跨度约 `1,186 s`，为 root 墙钟的 `2.18%`。180K 合成请求的
-  `99.984%` 复用仍成立，但不能代表真实客户端形状。
-- **全量本地 rollout 校正**：共扫描 14,183 请求和 109 次 compaction；compaction
-  uncached input `29,351,478`，占全部 uncached `57,278,644` 的 `51.24%`。109 次
-  compaction 后第一次请求均未立即回到压缩前历史，input 中位只有压缩前的 `5.2%`。
+- **compaction 归因已校正**：冻结快照的 44 次 compaction 只有 1 次缓存率 >=50%，但其
+  provider 是 DeepSeek 直连，不是 Strata。通过 shape proxy 让 Codex 0.164 经 B4 发起
+  三次真实 compaction，分别复用 `11124/11225`、`11349/11452`、`11627/11729`，prompt
+  `451.5–529.4 ms`，全部 completed。当前 kept-tool + prefix cache 无需新候选。
+- **较早全量 rollout 校正**：26 个文件、143 root、14,531 请求、29.93 亿 input、
+  98.0% cached；工具输出 7,974 万字符。`>=10K` 输出占 `63.985%`，`2K-10K` 再占
+  `28.309%`。恰好两路模型区间只有 `143.727 s`，两路转三路仅 1 次。加入本轮真实
+  探针后的最新 35 文件快照为 152 root、14,768 请求，不能与 26 文件计数混用。
 - **长 compaction 已验证**：现役 B4 的 180K live HTTP probe（人工合成会话）中，
   cold turn 为
   `65.555 s`，随后 compaction input `180,301`、cached `180,272`（`99.984%`）、wall
   `2.385 s`，只重读 29 token。该路线不再重做同形实验；cold turn 是新合成会话，不能
   等同于隔天旧会话恢复。
-- **trace 工具已固化**：`tools/server/probe-codex-sessions.py` 与
-  `trace-agent-tasks.py` 只读汇总 totals、root、模型/工具区间和 compaction，不输出正文；
-  当前联合 `10 passed`。
+- **trace 工具已固化**：`tools/server/probe-codex-sessions.py`、
+  `trace-agent-tasks.py` 和 `agent-shape-proxy.py` 只读/转发汇总 totals、root、模型/工具
+  区间、compaction 和请求结构哈希，不输出正文；shape proxy 测试 `13 passed`。
 - **同服务 breakdown 已完成**：1 路冷/续轮 wall `7.382/1.610 s`，2 路
   `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅
   `50–73 ms`。2 路冷首轮 TTFT `10.993 s`，其中 slot wait `7.307 s`。
-- **当前状态与下一动作**：当前项是只读 `AGENT-COMPACTION-REAL-SHAPE`。先以隐私安全
-  fingerprint 找出真实 compaction 与上一轮 prompt 的第一个结构分歧，解释为什么 180K
-  合成请求复用 `99.984%`、真实 43/44 次却低于 50%。只有证明内容相同前缀被布局路径
-  漏掉才实现 opt-in 候选；不重启服务。`AGENT-OLD-SESSION-RESUME` 保留为 p99 必测项。
+- **上下文饮食已收口**：延迟折叠旧输出会逐轮改写前缀，缓存从 `25K+` 跌到 `4,546`
+  token，前九请求 `116.177 s`，已否决。改为大型成功输出首次出现即落为完整文件并发送
+  稳定引用；三组配对墙钟 `38.106→32.914 s`、`58.307→30.727 s`、
+  `41.002→32.686 s`，分别提速 `13.63%/47.30%/20.28%`。早期 needle 可精确找回，
+  真实编辑/测试 `2 passed`。候选保持 opt-in，不静默改 prompt，不重启服务。见
+  [AGENT_TOOL_CONTEXT_DIET_RESULT](work/AGENT_TOOL_CONTEXT_DIET_RESULT-20261031.md)。
+- **decode 形状已完成**：最新只读 trace 为 35 文件、152 root、14,768 请求、
+  output/reasoning `10,343,967/3,347,547` token；单路模型 union `69,064.894 s`，
+  恰好两路仅 `171.303 s`。416/1490/4483 token 单路完成跨度
+  `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s`；两路第二 TTFT 约等于
+  第一代结束。27 请求无 HTTP/执行错误，但 4483 两路各有一条 `3892/stop`，长输出
+  完全稳定尚未证明。见 [AGENT_REAL_DECODE_SHAPE_RESULT](work/AGENT_REAL_DECODE_SHAPE_RESULT-20261031.md)。
+- **profiling 已移除并采纳**：A1-B-A2-B2 只改两个 env。416/1490/4483 的 B 中位为
+  `3.911/13.620/37.230 s`；416/1490 相对 A1/A2 相邻中位改善 `6.61%/5.38%`，
+  A2 漂移 `2.45%/0.66%`。4483 改善 12.03% 但 A1/A2 漂移 13.77%，不用于加速归因；
+  B/A2 都有两条 `3892/stop`，是独立质量风险。B2 在产、health loaded、6 slots，
+  64-token smoke 成功。见
+  [AGENT_PROFILE_HYGIENE_RESULT](work/AGENT_PROFILE_HYGIENE_RESULT-20261031.md)。
+- **draft 方向已关闭**：round `2.463 ms`，host graph gap `0.017 ms`；draft-head
+  GEMV 全消除的乐观 root 上界也只有约 `0.8%`。不实现 head-only 改动，不扫
+  depth、`spec-min-p`、group、cache 或同形 tree 变体。见
+  [result](work/AGENT_DRAFT_BREAKDOWN_RESULT-20261031.md)。
+- **旧会话 profile 已完成**：默认 256 在途的 prompt 为 `135,073.4/132,645.8 ms`
+  （A1/A2，漂移 1.80%），host PLE wait `50,362 ms`、主 PLE phase `39,291 ms`。
+  `mmap` wall `182.157 s` 已否决。
+- **PLE inflight 已采纳**：三组非剖析冷配对的 server prompt 改善
+  `2.87%/1.10%/5.58%`，client wall 改善 `0.05%/1.09%/5.21%`；配对中位为
+  `2.87%/1.09%`。全部 cached `0`、sentinel/finish 正确、零工具、零错误。当前只增加
+  `--ple-inflight 1024`，默认 256 不变。见
+  [result](work/AGENT_PLE_INFLIGHT_RESULT-20261031.md)。
+- **当前状态与下一动作**：执行 `AGENT-PLE-ROW-CACHE`。基线是 1,024 在途配置和默认
+  1,048,576 行缓存（约 95 MB）；候选只改为 `--ple-row-cache 4194304`（约 360 MB，
+  增量约 270 MiB）。先做相邻 profile，要求 prompt、host PLE 和 phase 同向且 prompt
+  至少改善 1%；再做至少两组非剖析配对。失败恢复 1,024 配置并关闭容量路线，不扫邻近值。
+  见 [contract](work/AGENT_PLE_ROW_CACHE_CONTRACT-20261031.md)。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说
@@ -70,7 +107,9 @@
   普通离线套件不运行该负载。
 ### 已关闭路线（只用于防重复；细节见队列和台账）
 
-- 整任务 trace 已完成，当前转入真实 compaction 形状诊断。UTIL-NCU 已完成，UTIL-KERNEL、
+- 整任务 trace、真实 compaction 形状诊断、上下文饮食和真实 decode 形状已完成；当前
+  先移除生产 profiling 仪器，再进入干净 decode 相图。
+  UTIL-NCU 已完成，UTIL-KERNEL、
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的
   `UTIL-PIPED-MTP-ORDER` 又在 parity 门否决；`UTIL-BATCH-GROUP-FIT` 也已过启动门，
@@ -163,19 +202,19 @@
   B6 kernel/reach 门也已否决；batch side mixer 虽然过了 production-shaped GPU 门和真实
   T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决；Q5 head grid 也在
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
-  因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线，
-  当前目标暂停，恢复后从隔天旧会话测量开始。
+  因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线。
+  这些历史细节只用于防重复；第十一版当前入口是真实 223K 旧会话的冷 prefill 相图。
 
 ## 3. 当前生产
 
 生产 `strata.service` 保持 inactive；B4 以手动实例运行，health loaded。以下 PID、hash
-和参数于 2026-10-31T15:00+08:00 通过 relay 重新核对。
+和参数于 2026-10-31T17:00+08:00 通过 relay 重新核对。
 
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=0` |
-| server/engine/vision | `50648/50656/50651`，health loaded，监听 `:8080` |
-| B4 running | engine `105a4171...`，config `7c901092...`，server `10bd8318...` |
+| server/engine/vision | `78965/78973/78968`，health loaded，监听 `:8080` |
+| B4 running | engine `105a4171...`，config `4b396f44...`，server `10bd8318...` |
 | latest accepted candidates | title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
 | GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；`vram_free_mib=1005` |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |

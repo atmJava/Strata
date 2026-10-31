@@ -193,6 +193,52 @@ def test_custom_and_tool_search_calls_are_counted(tmp_path):
         assert secret not in rendered
 
 
+def test_model_shape_breakdowns_are_aggregate_and_privacy_safe(tmp_path):
+    rows = [
+        {
+            "timestamp": stamp(0),
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-a", "root_turn_id": "root-a",
+                        "started_at": datetime(2026, 10, 31, tzinfo=timezone.utc).timestamp()},
+        },
+        token(2, "turn-a", thread="thread-a", response="a1", output=100, reasoning=0),
+        response(2.1, "function_call", turn="turn-a", call_id="exec", name="exec_command",
+                 arguments='{"cmd":"SECRET EXEC"}'),
+        response(3, "function_call_output", turn="turn-a", call_id="exec", output="SECRET OUTPUT"),
+        token(2.5, "turn-b", thread="thread-b", response="b1", output=20, reasoning=20),
+        response(2.6, "custom_tool_call", turn="turn-b", call_id="patch", name="apply_patch",
+                 input="SECRET PATCH"),
+        response(2.8, "custom_tool_call_output", turn="turn-b", call_id="patch",
+                 output="SECRET PATCH OUTPUT"),
+        token(4, "turn-a", thread="thread-a", response="a2", output=600, reasoning=200),
+        token(3.5, "turn-b", thread="thread-b", response="b2", output=20, reasoning=20),
+        {
+            "timestamp": stamp(5),
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": "turn-a", "root_turn_id": "root-a",
+                        "started_at": datetime(2026, 10, 31, tzinfo=timezone.utc).timestamp(),
+                        "completed_at": datetime.fromtimestamp(
+                            datetime(2026, 10, 31, tzinfo=timezone.utc).timestamp() + 5,
+                            timezone.utc,
+                        ).timestamp()},
+        },
+    ]
+    path = write_jsonl(tmp_path / "shapes.jsonl", rows)
+    result = trace.summarize(trace.parse([path]))
+    shapes = result["model_shapes"]
+    assert shapes["by_output_tokens"]["0-127"]["requests"] == 3
+    assert shapes["by_output_tokens"]["512-2047"]["requests"] == 1
+    assert shapes["by_output_tokens"]["512-2047"]["share_pct"] == 25
+    assert shapes["by_following_action"]["exec"]["requests"] == 1
+    assert shapes["by_following_action"]["edit"]["requests"] == 1
+    assert shapes["by_following_action"]["no_tool"]["requests"] == 2
+    assert shapes["model_seconds_by_concurrency"]["1"] > 0
+    assert shapes["model_seconds_by_concurrency"]["2"] > 0
+    rendered = json.dumps(result, ensure_ascii=False)
+    for secret in ("SECRET EXEC", "SECRET OUTPUT", "SECRET PATCH"):
+        assert secret not in rendered
+
+
 def test_compaction_and_abort_are_counted_without_text(tmp_path):
     rows = [
         {

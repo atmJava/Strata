@@ -303,6 +303,139 @@ def percentile(values: list[int]) -> dict:
     return {"median": int(statistics.median(rows)), "p90": at(.90), "p99": at(.99), "max": rows[-1]}
 
 
+def duration_by_concurrency(spans: list[dict]) -> dict[str, float]:
+    """Seconds of the union of model spans at each overlapping-request level."""
+    events: list[tuple[dt.datetime, int]] = []
+    for row in spans:
+        if row["end"] > row["start"]:
+            # Ends sort before starts at the same instant, so adjacent calls are not
+            # reported as concurrent.
+            events.append((row["start"], 1))
+            events.append((row["end"], -1))
+    events.sort(key=lambda item: (item[0], item[1]))
+    active = 0
+    previous = None
+    seconds: dict[str, float] = {}
+    for when, delta in events:
+        if previous is not None and when > previous and active:
+            key = str(active) if active < 4 else "4+"
+            seconds[key] = seconds.get(key, 0.0) + (when - previous).total_seconds()
+        active += delta
+        previous = when
+    return {key: round(value, 3) for key, value in sorted(seconds.items())}
+
+
+def _shape_group(rows: list[dict], total_requests: int, total_seconds: float) -> dict:
+    requests = len(rows)
+    span_sum = sum(row["seconds"] for row in rows)
+    return {
+        "requests": requests,
+        "share_pct": round(100 * requests / total_requests, 3) if total_requests else 0.0,
+        "input": sum(row["input"] for row in rows),
+        "cached": sum(row["cached"] for row in rows),
+        "uncached": sum(row["input"] - row["cached"] - row["cache_write"] for row in rows),
+        "output": sum(row["output"] for row in rows),
+        "reasoning": sum(row["reasoning"] for row in rows),
+        "model_span_s": round(span_sum, 3),
+        "model_span_share_pct": round(100 * span_sum / total_seconds, 3)
+        if total_seconds else 0.0,
+    }
+
+
+def _size_bucket(value: int, cuts: tuple[int, int, int]) -> str:
+    low, middle, high = cuts
+    if value < low:
+        return f"0-{low - 1}"
+    if value < middle:
+        return f"{low}-{middle - 1}"
+    if value < high:
+        return f"{middle}-{high - 1}"
+    return f"{high}+"
+
+
+def _action_group(names: list[str]) -> str:
+    if not names:
+        return "no_tool"
+    groups = set()
+    for name in names:
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf in {"apply_patch", "custom_tool_call"}:
+            groups.add("edit")
+        elif leaf == "write_stdin":
+            groups.add("poll")
+        elif leaf == "exec_command":
+            groups.add("exec")
+        elif leaf == "view_image":
+            groups.add("image")
+        elif leaf == "tool_search":
+            groups.add("search")
+        else:
+            groups.add("other")
+    return next(iter(groups)) if len(groups) == 1 else "mixed"
+
+
+def model_shape_breakdowns(model_rows: list[dict], calls: dict[str, dict],
+                           roots: dict[str, dict]) -> dict:
+    """Privacy-safe request-shape aggregates without prompt or response text."""
+    total_seconds = sum(row["seconds"] for row in model_rows)
+    by_thread: dict[str | None, list[dict]] = collections.defaultdict(list)
+    for row in model_rows:
+        by_thread[row.get("thread")].append(row)
+    for rows in by_thread.values():
+        rows.sort(key=lambda row: row["end"])
+
+    calls_by_thread: dict[str | None, list[dict]] = collections.defaultdict(list)
+    for call in calls.values():
+        if call.get("at"):
+            calls_by_thread[call.get("thread")].append(call)
+    for rows in calls_by_thread.values():
+        rows.sort(key=lambda row: row["at"])
+
+    output_groups: dict[str, list[dict]] = collections.defaultdict(list)
+    reasoning_groups: dict[str, list[dict]] = collections.defaultdict(list)
+    action_groups: dict[str, list[dict]] = collections.defaultdict(list)
+    output_cuts = (128, 512, 2048)
+    reasoning_cuts = (1, 128, 512)
+    for row in model_rows:
+        if row.get("compaction"):
+            action = "compaction"
+            reasoning = "compaction"
+        else:
+            thread_rows = by_thread.get(row.get("thread"), [])
+            index = thread_rows.index(row)
+            next_end = (
+                thread_rows[index + 1]["end"]
+                if index + 1 < len(thread_rows)
+                else (roots.get(row.get("root")) or {}).get("end")
+            )
+            names = [
+                str(call.get("name") or "(unknown)")
+                for call in calls_by_thread.get(row.get("thread"), [])
+                if row["end"] <= call["at"] and (next_end is None or call["at"] <= next_end)
+            ]
+            action = _action_group(names)
+            reasoning = _size_bucket(row["reasoning"], reasoning_cuts)
+        output_groups[_size_bucket(row["output"], output_cuts)].append(row)
+        reasoning_groups[reasoning].append(row)
+        action_groups[action].append(row)
+
+    return {
+        "by_output_tokens": {
+            key: _shape_group(rows, len(model_rows), total_seconds)
+            for key, rows in sorted(output_groups.items())
+        },
+        "by_reasoning_tokens": {
+            key: _shape_group(rows, len(model_rows), total_seconds)
+            for key, rows in sorted(reasoning_groups.items())
+        },
+        "by_following_action": {
+            key: _shape_group(rows, len(model_rows), total_seconds)
+            for key, rows in sorted(action_groups.items())
+        },
+        "model_seconds_by_concurrency": duration_by_concurrency(model_rows),
+    }
+
+
 def tool_spans(data: dict) -> tuple[list[dict], dict[str, int]]:
     outputs_by_call: dict[str, list[dict]] = collections.defaultdict(list)
     for row in data["outputs"]:
@@ -583,6 +716,7 @@ def summarize(parsed: dict, server_metrics: dict | None = None,
 
     all_wall = union_seconds([(dt.datetime.fromisoformat(row["start"]), dt.datetime.fromisoformat(row["end"]))
                               for row in roots])
+    shapes = model_shape_breakdowns(model_rows, data["calls"], data["roots"])
     return {
         "schema": 1,
         "scope": "Codex client events; model spans are inferred and not Strata server timing",
@@ -609,6 +743,7 @@ def summarize(parsed: dict, server_metrics: dict | None = None,
             "ordinary": model_kind(False),
             "compaction": model_kind(True),
         },
+        "model_shapes": shapes,
         "server_matched": sum(1 for row in model_rows if row.get("server")),
         "server_unmatched": server_unmatched if server_metrics is not None else None,
         "server_timing": server_timing,

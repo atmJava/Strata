@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T15:29+08:00。
+> 最后更新：2026-10-31T18:15+08:00。
 
 ## 用户目标
 
@@ -36,19 +36,36 @@
 | M21 | 真实 Codex session 成本结构 | 29 小时、3,614 请求；cached `97.22%`，uncached `17.82M`，output `2.77M` | 用真实请求形状筛掉低于 1% 整任务上界的局部候选，并定位下一大头 | 工具化完成：`probe-codex-sessions.py`，4 tests OK，不输出 prompt 正文 |
 | M22 | 1/2 路热续轮成本 | 12K Agent prompt 续轮 cached 约 95%，wall `1.61/2.29 s`，prompt `1.52/1.41 s`，短输出 decode 仅 `73/51 ms` | 先把真实尺寸、频率和秒数合成成本地图，再选整任务 ≥1% 的下一机制 | 94K/189K 热续轮 `2.09/2.43 s`；精确 pin 合成分支验证成功但真实立即触发 0/109；先由整任务 trace 重排 |
 | M23 | 恰好两路的总完成时间 | 512-token 完成跨度 `11.776 s`；64-token `1.692 s` | 两路至少改善 1%，1/4 路不退，3 路恢复 batch | **已采纳**：512-token `10.004 s`（`-15.05%`），64-token `1.554 s`（`-8.18%`）；6 路安全 |
-| M24 | 隔天约 180K 旧会话恢复 | 180K 新合成冷 turn `65.555 s`；尚未覆盖超过一天未使用后的旧会话 | 记录真实旧会话的 input/cached、prompt、TTFT、wall、slot wait、并发和资源；形成 p99 冷恢复成本地图 | p99 必测；先由整任务 trace 判断优先级，不与 compaction 或合成冷读混算 |
+| M24 | 隔天约 180K 旧会话恢复（分类基线） | 180K 新合成冷 turn `65.555 s`；仅作尺寸代理 | 必须由真实 aged session 覆盖，不能把合成 cold turn 当结论 | 已由 M32 的真实 49 天会话取代 |
 | M25 | 真实 vibe coding 整任务时间账本 | 冻结快照 14 root、4,180 请求、6,297 工具、97.09% cached；output p50/p90/p99 `483/1,714/5,069`；最长 root `44,783 s` | 关联 root、模型、工具、compaction、recovery、取消和空档；明确 Strata 可优化上界 | **已完成**：`AGENT-END-TO-END-TRACE`；最长 root 模型 `14,855 s`、工具 `31,088 s`、空档 `15.843 s` |
-| M26 | 真实 output/reasoning 形状 | 480-token 1 路 `4.682 s`；1708-token `16.385 s`；两路串行第二请求 TTFT `4.7/16.384 s` | 用真实分布重放 1/2/4 路，禁止只用 64-token 短输出判定 decode | 基础测量完成；角色感知两路调度待 M27 后评估 |
-| M27 | 真实 compaction 形状对齐 | 44 次真实 compaction 仅 1 次缓存率 >=50%；其余中位 input/cached/uncached `283,884/7,424/277,803`；占全部 uncached `54.32%` | 找出真实请求与 180K 合成 `99.984%` 命中的第一个结构分歧；只有内容相同前缀才实现候选 | **当前**：`AGENT-COMPACTION-REAL-SHAPE`，只读诊断且不重启 |
+| M26 | 真实 output/reasoning 形状 | 480-token 1 路 `4.682 s`；1708-token `16.385 s`；两路串行第二请求 TTFT `4.7/16.384 s` | 用真实分布重放 1/2/4 路，禁止只用 64-token 短输出判定 decode | 基础测量完成；完整 rollout 中恰好两路模型并发仅 `171.303 s`，角色调度降为后续 |
+| M27 | 真实 compaction 形状对齐 | 冻结 29 小时快照 44 次 compaction、provider 为 DeepSeek 直连；B4 上 3 次真实 Codex compaction prompt `451.5–529.4 ms`、cached `99.1002–99.1304%` | 区分客户端 provider 与 Strata，并在 B4 上以真实 Codex 请求验证 kept-tool 路径 | **已完成**：当前缓存路径无需改动，不重启；见 `AGENT_COMPACTION_REAL_SHAPE_RESULT` |
+| M28 | 大工具输出的上下文成本 | 26 个 rollout、14,531 请求；工具输出 7,974 万字符，`>=10K` 占 `63.985%`，`2K-10K` 占 `28.309%` | opt-in、保留错误/小输出和完整可重读文件；在真实 coding task 上缩短墙钟，同时保持代码/测试质量 | **已完成**：首次出现即折叠的三组配对墙钟改善 `13.63%/47.30%/20.28%`；延迟折叠因缓存前缀失效被否决；不重启 |
+| M29 | 真实 decode 成本形状 | 35 文件、152 root、14,768 请求；output/reasoning `10,343,967/3,347,547` token；单路模型 union `69,064.894 s`、两路 `171.303 s`；416/1490/4483 单路 `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s` | 按请求类型、输入/输出尺寸和 1/2 路并发拆 decode；只有真实触发率后的整任务 `>=1%` 上界才实现一个可回滚机制 | **已完成**：`AGENT-REAL-DECODE-SHAPE`；4483 两路出现两条提前 `stop`，长输出稳定未全过门 |
+| M30 | 生产 decode 剖析器成本 | A1-B-A2-B2；416/1490/4483 A 相邻中位 `4.188/14.395/42.322 s`，B `3.911/13.620/37.230 s` | 至少一个主要尺寸中位改善 >=1%，A2 漂移 <=3%，finish/hash/health/6 slots 全过 | **已采纳**：416/1490 改善 `6.61%/5.38%`，A2 漂移 `2.45%/0.66%`；4483 漂移 13.77% 不用于归因；B2 无仪器在产 |
+| M31 | MTP draft 内部成本 | draft round `2.463 ms`；round graph `0.978 ms`、step GPU `1.451 ms`、host graph gap `0.017 ms`；draft-head 全消除的乐观 root 上界约 `0.8%` | 只有可移除组件能在真实触发后保守改善整任务 >=1% 且不改 draft/verify/sampling/finish 才实现 | **已完成并关闭**：host 可移除成本可忽略，head 全消除也不到 1%；不扫 depth、阈值、group、cache |
+| M32 | 隔天旧会话恢复 | 真实 49 天会话，223,114 prompt token，cached `0`，TTFT `113.014 s`，wall `113.3 s`，decode `292.8 ms` | 记录真实年龄、input/cache、prompt/TTFT/wall、finish 和资源；不用合成 180K 或 compaction 代替 | **诊断完成**：等待时间约 99.7% 在首个 token 之前，p99 主成本是冷 prefill |
+| M33 | 223K 冷 prefill 相位 | 256 在途的 prompt `135,073.4/132,645.8 ms`，A 漂移 1.80%；host PLE `50,362 ms`、主 PLE `39,291 ms` | 取得 21 相与 host 时间线，选一个单相保守节省 >=`1.13 s` 的机制 | **完成**：`mmap` 慢到 `182.157 s` 被否决；direct inflight 进入 M34 |
+| M34 | PLE direct 在途读深度 | 20K token 生产表微基准 256/512/1,024 为 `786.9/768.3/695.9 us/token`；1,024 快 11.56% | 只改 256→1,024；profile 的 prompt/PLE 同向；三组非剖析 prompt 全同向，配对中位至少 1%；默认保持 256 | **已采纳为显式配置**：prompt 改善 `2.87%/1.10%/5.58%`，wall `0.05%/1.09%/5.21%`，配对中位 `2.87%/1.09%` |
+| M35 | PLE row-cache 容量 | 默认 1,048,576 行约 95 MB；冻结语料同一长 prompt 内 20–34% 行重复 | 从 1,024 在途基线只改 `--ple-row-cache 4194304`；profile 三项同向，至少两组非剖析配对同向且中位 >=1%；失败不扫邻近容量 | **当前**：`AGENT-PLE-ROW-CACHE` |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 
 ## 当前主要矛盾
 
-真实任务账本已显示：普通续轮缓存约 97%，但 44 次 compaction 只有 1 次达到 50% 缓存，
-它们占全部 uncached input `54.32%`，推断模型跨度占 root 墙钟 `2.18%`。因此当前首要
-矛盾是解释“180K 合成 compaction 复用 99.984%、真实请求却大量重读”的结构差异，而不是
-继续找亚毫秒 kernel，也不能继续把合成成功当成真实用户已解决。
+真实任务账本和上下文饮食已把两个入口收口：B4 上真实 compaction 复用约 99.1%；
+延迟折叠会破坏缓存前缀，而首次出现即折叠的 opt-in 引用在三组真实命令形状上把墙钟
+缩短 `13.63%/47.30%/20.28%` 并保持编辑/测试正确。下一块可复核主体是模型 decode：
+35 文件、152 root 快照有 `10,343,967` output 和 `3,347,547` reasoning token；
+单路模型区间 union `69,064.894 s`，恰好两路仅 `171.303 s`。真实尺寸 replay 说明
+两路 aggregate decode 的计时重叠不是用户收益，第二请求仍在等待第一代完成。当前首要
+麻烦已经从生产 profiling 污染和 MTP draft 微调收口到真实长上下文尾部：416/1490 token
+在生产仪器移除后改善 `6.61%/5.38%`，B2 已留产；draft 拆分表明即使完全删除 draft-head，
+root 上界也只有约 `0.8%`，因此实现方向关闭。真实 49 天旧会话随后给出 223,114 prompt
+token、cached `0`、TTFT `113.014 s`、wall `113.3 s`，约 99.7% 的等待发生在首个 token
+之前。223K profile 将直接 PLE I/O 定位为可移除主体；`mmap` 已否决，1,024 在途读在三组
+非剖析冷配对中把 prompt 中位缩短 `2.87%`、wall 中位缩短 `1.09%`。当前只扩大已有行缓存，
+验证真实 aged session 的重复行命中是否仍能把剩余 PLE 时间降过 1%。
 
 以下 GPU 与并发结果继续作为已建立的底层基线和防重复记录：
 
@@ -311,7 +328,8 @@ P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须�
 44. **全局目标第五次重排并恢复执行**：整任务 trace 表明开发会话的真实 output 远超
     64-token 探针，工具轮转和大型输出也占据大量事件跨度。先执行只读
     `AGENT-END-TO-END-TRACE`，区分模型、工具、compaction、recovery、取消和空档；
-    `AGENT-OLD-SESSION-RESUME` 保留为 p99 必测项，不再预判为总体 ROI 第一名。
+    当时把 `AGENT-OLD-SESSION-RESUME` 保留为 p99 必测项，不预判为总体 ROI 第一名；
+    后续真实 49 天会话已由 M32 收口。
     本项不重启服务。
 
 45. **整任务 trace 完成并转真实 compaction 形状**：冻结快照为 14 root、4,180 请求、
@@ -320,6 +338,50 @@ P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须�
     50%，合计占全部 uncached input `54.32%`，约 `1,186 s` 推断模型跨度，为总墙钟的
     `2.18%`；消除一半即可过 1%。下一项 `AGENT-COMPACTION-REAL-SHAPE` 先找回合成请求与
     真实请求的第一个结构分歧，不重启服务。
+
+46. **真实 compaction 已在 B4 收口，转向大工具输出**：冻结 29 小时快照的 provider 是
+    DeepSeek 直连，不是 Strata。新增隐私安全 shape proxy，让 Codex 0.164 经 B4 发起三次
+    真实 compaction：原始 `tools=[]`，保留工具路径分别复用
+    `11,124/11,225`、`11,349/11,452`、`11,627/11,729`，prompt `451.5–529.4 ms`，
+    全部 completed。当前 compaction cache 不实现新候选、不重启。全量 26 个 rollout 显示
+    工具输出 `>=2K` 占 `92.294%`，恰好两路模型并发仅 `143.727 s`，因此下一主项改为
+    `AGENT-TOOL-CONTEXT-DIET`，角色感知两路降到后续。
+
+47. **上下文饮食完成，全局目标第八次修订**：延迟折叠会在每轮移动早期边界，使缓存从
+    `25K+` 跌到 `4,546` token，前九请求 `116.177 s`，已否决。大型成功输出在首次出现时
+    保存完整文件并替换为稳定引用；三组配对墙钟 `38.106→32.914 s`、
+    `58.307→30.727 s`、`41.002→32.686 s`，早期 needle 可通过精确 `rg` 找回，真实
+    编辑/测试 `2 passed`。能力保持 opt-in，服务与配置未改、未重启。当前转到
+    `AGENT-REAL-DECODE-SHAPE`，先从 35 文件/152 root 快照拆真实 output/reasoning、
+    请求类型和 1/2 路成本；只有整任务 `>=1%` 保守上界才实现代码。
+48. **decode 形状完成，全局目标第九次修订**：最新 35 文件、152 root、14,768 请求中，
+    单路模型 union `69,064.894 s`，恰好两路仅 `171.303 s`；416/1490/4483 token 的
+    单路跨度为 `4.240/14.347/45.451 s`，两路为 `8.199/28.919/85.701 s`。两路
+    aggregate decode 的计时重叠不是用户收益，4483 还出现两条提前 `stop`。进一步核对
+    发现现役 engine 实际带着 `STRATA_DECODE_TIMING=1` 和 `STRATA_VERIFY_PROFILE=1`；
+    历史同机剖析器成本为单路 6.4%、四路 10.7%。当前项改为 `AGENT-PROFILE-HYGIENE`：
+    用 A1-B-A2-B2 只移除两个 env，在 416/1490/4483 上复核 1% 门、hash/finish、健康
+    和 6 slots；通过后以无仪器配置留在生产，再按干净相图选择单相机制。
+49. **profiling 移除采纳**：416/1490/4483 的 B 中位为
+    `3.911/13.620/37.230 s`；416/1490 相对 A1/A2 相邻中位改善 `6.61%/5.38%`，
+    A2 漂移 `2.45%/0.66%`。4483 漂移 13.77%，不用于加速归因；B/A2 都有提前 `stop`，
+    作为独立质量风险保留。B2 已留在生产，health loaded、6 slots、smoke 通过。当前项
+    `AGENT-DRAFT-BREAKDOWN`：只拆约 5.2–5.5% 的 draft，找到至少消掉一半且整任务
+    `>=1%` 的组件；否则关闭 MTP 微调。
+50. **draft 关闭，旧会话实测重排为 p99 主项，全局目标第十一次修订**：draft round
+    收敛到 `2.463 ms`，host graph gap 只有 `0.017 ms`；draft-head 全消除的乐观 root
+    上界仍约 `0.8%`，关闭 depth、阈值、group、cache 和 tree 变体。真实 2026-09-12
+    会话在 49 天后经 B4 resume：223,114 prompt token、cached `0`、TTFT `113.014 s`、
+    wall `113.3 s`、decode `292.8 ms`，输出 sentinel、`stop`、零工具。当前项改为
+    `AGENT-OLD-SESSION-PREFILL-PROFILE`：B2 只增加 `STRATA_PREFILL_TIMING=1`，一次
+    冷请求取得 21 相；单相保守节省 >=`1.13 s` 才允许实现，否则比较 state persistence、
+    cache residency、prefetch 和客户端历史处理。
+51. **223K PLE 路线已验证，1,024 在途采纳，目标第十二次修订**：默认 direct 256 的
+    prompt 为 `135,073.4/132,645.8 ms`，host PLE `50,362 ms`、主 PLE `39,291 ms`；
+    mmap wall `182.157 s` 否决。只把在途读提高到 1,024 后，profile prompt 为
+    `128,303.5 ms`，三组非剖析冷配对 prompt 改善 `2.87%/1.10%/5.58%`、wall
+    `0.05%/1.09%/5.21%`，配对中位 `2.87%/1.09%`。参数已显式保留，源码默认仍为 256。
+    当前只测默认 1M 行缓存到 4M 行，先过 profile 三指标同向门，再做至少两组非剖析配对。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

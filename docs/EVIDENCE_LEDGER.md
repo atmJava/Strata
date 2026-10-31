@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-138，按编号）
+## 台账索引（L-000…L-145，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -151,12 +151,112 @@
 | L-135 | 10-31 15:1x | `spec_min_p 0/0.5/0.7/0.9` wall `4.51–4.54 s`；aux CPU `4.5489/4.5561 s`；`pcie_frac 0/0.15/0.31/0.45` `4.597–4.611 s`；checkpoint 开关 `0.4461/0.4465 s` | **固定负载无可测差异；这些参数轴停止扫描** |
 | L-136 | 10-31 14:2x | 210K cold `75.295 s`；208K 长前缀分支复用 `196,608`、重读 `11,924`，prompt `9.314–9.486 s`、wall `9.605–9.784 s`；compaction cached `208,527/208,554=99.987%`，两次正常 prompt `248–283 ms`，recovery 运行 `prompt_ms=75.474 s`，三臂 wall `5.853/8.845/85.017 s` | **compaction 前缀缓存通过；长前缀边界回落与 recovery 尾部待拆；后续 L-137 已校正场景口径** |
 | L-137 | 10-31 14:5x | 全量本地 rollout 14,183 请求/109 次 compaction，compaction 占 uncached input `51.24%`；压缩后立即回读旧历史 0/109。精确 pin `208528` 把合成分支从 `9.016–9.523 s` 降到 `0.274 s`。用户澄清 180K“重读历史”是放置超过一天后重新打开旧会话 | **三类场景已拆分；exact pin/`cap=9` 降为低频诊断；下一项为 AGENT-OLD-SESSION-RESUME；全局循环暂停** |
-| L-138 | 10-31 15:x | 冻结 29h Codex 快照：14 root、4,180 请求、6,297 工具，root 墙钟 `54,324 s`；最长 root 模型/工具 union `14,855/31,088 s`、空档 `15.843 s`。44 次真实 compaction 仅 1 次缓存 >=50%，占 uncached input `54.32%`、推断模型跨度 `2.18%` 墙钟；480/1708-token 两路串行第二请求 TTFT `4.7/16.384 s` | **AGENT-END-TO-END-TRACE 完成；下一项 AGENT-COMPACTION-REAL-SHAPE；客户端形状不等于 server timing** |
+| L-138 | 10-31 15:x | 冻结 29h Codex 快照：14 root、4,180 请求、6,297 工具，root 墙钟 `54,324 s`；最长 root 模型/工具 union `14,855/31,088 s`、空档 `15.843 s`。DeepSeek 直连的 44 次 compaction 仅 1 次缓存 >=50%，占 uncached input `54.32%`、推断模型跨度 `2.18%` 墙钟；480/1708-token 两路串行第二请求 TTFT `4.7/16.384 s` | **AGENT-END-TO-END-TRACE 完成；客户端形状不等于 server timing；L-139 已校正 compaction 归因** |
+| L-139 | 10-31 15:4x | 冻结 rollout provider 为 DeepSeek 直连；B4 + Codex 0.164 三次真实 compaction cached `11124/11225`、`11349/11452`、`11627/11729`，prompt `451.5–529.4 ms`，均 completed。全量 26 rollout：14,531 请求、工具输出 7,974 万字符，`>=10K/2K-10K` 占 `63.985%/28.309%`，恰好两路模型区间 `143.727 s` | **compaction 已收口；下一项 AGENT-TOOL-CONTEXT-DIET；不重启** |
+| L-140 | 10-31 16:3x | 延迟折叠旧工具输出把 cached input 压到 `4,546` token、前九请求升到 `116.177 s`，否决；首次出现即折叠为稳定完整文件引用，三组八命令配对墙钟 `38.106→32.914 s`、`58.307→30.727 s`、`41.002→32.686 s`，改善 `13.63%/47.30%/20.28%`；needle 找回，编辑/测试 `2 passed`/`PASS` | **AGENT-TOOL-CONTEXT-DIET 完成；保持 opt-in；下一项 AGENT-REAL-DECODE-SHAPE；不重启** |
+| L-141 | 10-31 17:0x | 35 文件、152 root、14,768 请求；单路模型 union `69,064.894 s`、恰好两路 `171.303 s`；416/1490/4483 单路 `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s`；27 请求无 HTTP/执行错误，4483 两路有两条 `3892/stop`；现役 engine 同时开着 `STRATA_DECODE_TIMING=1`/`STRATA_VERIFY_PROFILE=1` | **AGENT-REAL-DECODE-SHAPE 诊断完成；长输出稳定未全过门；下一项 AGENT-PROFILE-HYGIENE；未重启** |
+| L-142 | 10-31 17:2x | A1-B-A2-B2 只移除 `STRATA_DECODE_TIMING`/`STRATA_VERIFY_PROFILE`；416/1490/4483 A adjacent median `4.188/14.395/42.322 s`，B `3.911/13.620/37.230 s`；416/1490 改善 `6.61%/5.38%`、A2 漂移 `2.45%/0.66%`；4483 A2 漂移 13.77%，B/A2 都有 `3892/stop`；B2 health/6 slots/smoke 过 | **AGENT-PROFILE-HYGIENE 采纳；B2 无仪器留产；4483 长输出质量风险独立保留；下一项 AGENT-DRAFT-BREAKDOWN** |
+| L-143 | 10-31 17:x | draft round 收敛到 `2.463 ms`；round graph `0.978 ms`、step GPU `1.451 ms`、host graph gap `0.017 ms`；draft-head GEMV 全消除的乐观 root 上界约 `0.8%` | **AGENT-DRAFT-BREAKDOWN 完成，否决实现方向**；不扫 depth/spec-min-p/group/cache；B2 已恢复 |
+| L-144 | 10-31 17:x | 2026-09-12 真实会话 49 天后经 B4 resume：223,114 prompt、cached `0`、prompt/首 token `112.863/113.014 s`、wall `113.3 s`、decode `292.8 ms`、21 output/`stop`、零工具 | **AGENT-OLD-SESSION-RESUME 诊断完成**；p99 主体是冷 prefill；下一项 AGENT-OLD-SESSION-PREFILL-PROFILE |
+| L-145 | 10-31 18:x | 223K profile：256 direct prompt `135,073.4/132,645.8 ms`，A 漂移 1.80%，host PLE `50,362 ms`、主 PLE `39,291 ms`；mmap wall `182.157 s`。1,024 profile prompt `128,303.5 ms`、host PLE `43,453 ms`、主 PLE `18,525 ms`。三组非剖析 prompt 改善 `2.87%/1.10%/5.58%`，wall `0.05%/1.09%/5.21%` | **AGENT-PLE-INFLIGHT 采纳为显式参数**；prompt/wall 配对中位 `2.87%/1.09%`，默认仍 256；下一项 AGENT-PLE-ROW-CACHE |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
 
-## L-138 · 整任务 trace：工具/模型覆盖墙钟，真实 compaction 只有 1/44 高命中
+## L-140 · 上下文饮食：首次出现即折叠过三组 1% 门，延迟折叠破坏缓存
+
+**判定：AGENT-TOOL-CONTEXT-DIET 完成并保持 opt-in；下一项 AGENT-REAL-DECODE-SHAPE。**
+
+初始策略保留最新六条工具输出、折叠更早的大型成功输出。该策略每次请求都会移动早期
+历史边界。首轮 live 实验的 cached input 只有 `4,546` token，前九请求总和
+`116.177 s`，相对 control 的 `38.106 s` 明显退化，因此否决。
+
+替代策略在合格成功输出首次出现时立即写入完整 mode-0600 artifact，目录为 mode-0700；
+模型只看到稳定引用，包含原始字节数、SHA-256、绝对路径和精确 `sed`/`rg` 读取命令。
+错误、失败、panic、traceback、拒绝、超时和小输出保持原文；不调用额外模型摘要。
+旧引用在后续轮次不再移动，因此缓存后缀保持稳定。
+
+三组同形状 control/eager 配对，每组八条命令：
+
+| pair | control wall | eager wall | reduction |
+|---:|---:|---:|---:|
+| 1 | 38.106 s | 32.914 s | 13.63% |
+| 2 | 58.307 s | 30.727 s | 47.30% |
+| 3 | 41.002 s | 32.686 s | 20.28% |
+
+全部运行正常完成。eager 运行中 cached input 保持 `9,400–13,513` token，模型可见历史
+减少 `60,694` 字符。模型使用引用的精确 `rg` 命令找回早期
+`NEEDLE=lyra-8153` 并返回 `READY`。独立任务把 `calc.py` 的减法改为加法，执行
+`python -m pytest -q` 得到 `2 passed`，最终返回 `PASS`。
+
+首次 live 变换暴露出重复 `Content-Length` 头：原长度 `115,059`、变换后 `108,298`，
+客户端等待剩余 6,761 字节。代理已改为大小写不敏感替换并添加回归测试。代理测试当前
+`13 passed`。
+
+原始捕获：
+
+- `/tmp/agent-control-shape-20261031.jsonl`
+  SHA-256 `074b7140605ec47c466170cce15f6c7e7bbf2e729b468551d654cd516922a96f`
+- `/tmp/agent-diet-eager-shape-20261031.jsonl`
+  SHA-256 `c8517cd63d425d3c1d881d8acf76d01eeaa8cc4630c1a8f806928a15338f53ab`
+- `/tmp/agent-diet-fixed-shape-20261031.jsonl`
+  SHA-256 `1cad80f66e378c61e40838f295fdccfd9ea2a9b71bba218547f9a5c60490f576`
+- `/tmp/agent-control-waves-shape-20261031.jsonl`
+  SHA-256 `01be4a95e1e8392ff013f734d292055225e14dcc271c10d0bcd52d79bb5ab940`
+- `/tmp/agent-diet-eager-waves-shape-20261031.jsonl`
+  SHA-256 `3ed6341a24c1b95facdd44ae29c62f386c9bbde62b3a639b8160f0d118094e63`
+
+这是单模型、单命令形状的三组配对，不是跨模型生产流量。能力因此保持 opt-in；默认
+服务请求字节不变。B4 server/vision/engine `50648/50651/50656` 未改、未重启。
+
+最新只读 trace `/tmp/agent-task-trace-all-20261031-v5.json` 包含 35 文件、152 root、
+14,768 请求、`10,343,967` output 和 `3,347,547` reasoning token；input/cached 为
+`3,022,464,764/2,961,597,534`，模型 union `69,236.197 s`，工具 union
+`123,693.012 s`，root wall union `184,604 s`。下一项只用它拆 decode 形状，先不改服务。
+
+**证据**：
+[`AGENT_TOOL_CONTEXT_DIET_RESULT-20261031.md`](work/AGENT_TOOL_CONTEXT_DIET_RESULT-20261031.md)、
+[`AGENT_TOOL_CONTEXT_DIET_CONTRACT-20261031.md`](work/AGENT_TOOL_CONTEXT_DIET_CONTRACT-20261031.md)、
+`tools/server/agent-shape-proxy.py`、`tools/server/tests/test_agent_shape_proxy.py`。
+
+## L-139 · 真实 compaction 在 B4 复用约 99.1%；大工具输出占上下文主体
+
+**判定：AGENT-COMPACTION-REAL-SHAPE 完成，下一项 AGENT-TOOL-CONTEXT-DIET。**
+
+原冻结 29 小时快照的 `model_provider` 是 `deepseek`，本地配置把该 provider 指向
+`https://api.deepseek.com/v1`。因此其中 43/44 次低 compaction 命中不能归因 Strata。
+
+新增 `tools/server/agent-shape-proxy.py`，原样转发 Responses 流量，仅记录 metadata、
+instructions/tools/item 的规范化哈希、内容类型、usage、finish 和时延。真实 Codex 0.164
+经现有 SSH 隧道访问 B4，强制触发三次自动 compaction：
+
+| request | input | cached | uncached | prompt ms | decode ms |
+|---|---:|---:|---:|---:|---:|
+| 1 | 11,225 | 11,124 | 101 | 518.5 | 13,914.9 |
+| 2 | 11,452 | 11,349 | 103 | 529.4 | 14,948.3 |
+| 3 | 11,729 | 11,627 | 102 | 451.5 | 13,135.4 |
+
+复用率为 `99.1002%/99.1006%/99.1304%`；三次 HTTP 200、`completed`、Codex 最终输出均为
+`OK`。原始 compaction 请求 `tools=0`，服务用上一轮九工具前缀渲染，证明当前 kept-tool
+路径命中。捕获文件 `/tmp/agent-shape-b4-20261031.jsonl`，SHA-256
+`d368e4cbb1bdbd42da927106bea6d9f16e41e21559d7e5142b954378ccaf73dc`；探针 prompt 在
+日志中不存在。
+
+全量 26 个本地 rollout（333 MiB）：
+
+- 143 root、14,531 模型请求、21,141 工具调用；
+- 推断模型 union `68,006.565 s`，工具 union `122,894.799 s`；
+- input `2,992,567,554`、cached `2,933,197,312`、output `10,206,569`、reasoning
+  `3,307,087`；
+- 工具输出 `79,745,864` 字符；2,600 个 `>=10K` 输出占 `63.985%`，4,387 个
+  `2K-10K` 输出占 `28.309%`；
+- 恰好两个模型请求同时在途的区间仅 `143.727 s`，两路转三路 1 次；角色感知两路
+  不是当前总体第一大头。
+
+**证据**：[`AGENT_COMPACTION_REAL_SHAPE_RESULT-20261031.md`](work/AGENT_COMPACTION_REAL_SHAPE_RESULT-20261031.md)、
+`/tmp/agent-shape-b4-20261031.jsonl`、`/tmp/agent-trace-01a18a33-frozen.json`。
+
+## L-138 · 整任务 trace：工具/模型覆盖墙钟，DeepSeek 直连 compaction 只有 1/44 高命中
 
 **判定：AGENT-END-TO-END-TRACE 完成；下一项真实 compaction 形状对齐。**
 
@@ -5528,3 +5628,242 @@ prompt、TTFT、wall、slot wait 和资源。
 
 recovery 仍有独立风险：server 日志只有 3 条 `repeated reasoning detected`，没有可靠请求
 分母，不能把 synthetic 1/3 当成生产触发率。
+
+## L-141 · AGENT-REAL-DECODE-SHAPE：单路占主体，生产剖析器污染下一项
+
+**判定：诊断完成；两路角色调度降级；长输出稳定性未完全过门；下一项
+`AGENT-PROFILE-HYGIENE`。**
+
+最新 35 文件、152 root trace 覆盖 14,768 请求、`3,022,464,764` input、
+`2,961,597,534` cached、`10,343,967` output 和 `3,347,547` reasoning token。
+模型 union `69,236.197 s`，其中 `69,064.894 s` 是恰好单路，`171.303 s` 是恰好
+两路；工具 union `123,693.012 s`，root wall union `184,604 s`。
+
+| output tokens | 请求占比 | 模型时间占比 |
+|---|---:|---:|
+| 0-127 | 19.698% | 7.336% |
+| 128-511 | 36.809% | 20.611% |
+| 512-2047 | 38.231% | 49.225% |
+| 2048+ | 5.261% | 22.828% |
+
+reasoning `512+` 占请求 12.006%、模型时间 31.910%。按后续动作，exec 63.541%、edit
+15.735%、poll 12.298%、compaction 4.580%。
+
+同 warm prompt、temperature 0、reasoning effort none 的 replay：
+
+| tokens | 单路完成跨度 | 两路完成跨度 | 两路第二 TTFT |
+|---:|---:|---:|---:|
+| 416 | 4.240 s | 8.199 s | 约 4.18 s |
+| 1490 | 14.347 s | 28.919 s | 约 14.5 s |
+| 4483 | 45.451 s | 85.701 s | 39.6–46.0 s |
+
+27 个请求无 HTTP/执行错误。416 和 1490 全部 `length`；4483 的两路第一波和第二波各有
+一条在 `3892/stop` 提前结束，hash
+`79bc59829a4cef5ea815124895c671edee73ec59a36ade154972b1bcb8847ab4`，其余 4483
+`length` hash 为
+`21bb8246022e929cac6edb2f7db7724280a3e95c913b2c4d2e9fffc465fafbac`。两路完成跨度
+约等于单路翻倍，aggregate decode tok/s 的计时重叠不能写成用户收益。
+
+现役 engine 环境实际包含 `STRATA_DECODE_TIMING=1` 和
+`STRATA_VERIFY_PROFILE=1`。这次 replay 的 profile 约为 1,055 windows、4.25 token/window、
+42.94–43.69 ms/window，stage 0/1 合计各约 20 ms/window。历史 L-035 同机测量显示
+`STRATA_VERIFY_PROFILE=1` 让单路从 `73.2` 降到 `68.5 tok/s`（−6.4%）、四路从
+`120.2` 降到 `107.3`（−10.7%）。历史版本不能直接充当当前结果，因此下一步仅移除两个
+env，按 A1-B-A2-B2 测 416/1490/4483 各三波。
+
+证据：
+
+- `/tmp/agent-task-trace-all-20261031-v5.json`
+  （SHA-256 `78ab01daf8d68eeb8f24a52e6b170f82638fbfe377d8a5534d7d26317056d054`）
+- `/opt/ai/logs/agent-real-decode-shape-20261031T0840Z/decode-416.json`
+  （SHA-256 `1e1d21e1a5e2ffe5e7854c23e2b1f6e02473dae6d5210f9d0ff7727593831c32`）
+- `/opt/ai/logs/agent-real-decode-shape-20261031T0840Z/decode-1490.json`
+  （SHA-256 `586409f3ddd8254ea63ebaeaf84ef4dda1f8917512282711e11cd2e36a0ddc9a`）
+- `/opt/ai/logs/agent-real-decode-shape-20261031T0840Z/decode-4483.json`
+  （SHA-256 `3df7488ddbaf41035a5fd4925513dff1aabe2ca3fd0daf12cde547b85dfd50c6`）
+
+没有测 4 路 decode、采样、第二模型、AMD 后端或自动 GPU 回归；短 warm prompt 的相图
+不能推广到所有 vibe coding 请求。
+
+## L-142 · AGENT-PROFILE-HYGIENE：移除生产仪器，416/1490 改善 6.61%/5.38%
+
+**判定：采纳。** B2 已从生产引擎移除 `STRATA_DECODE_TIMING` 和
+`STRATA_VERIFY_PROFILE`，health loaded、6 slots / 2 groups、engine `0.1.51`，
+64-token smoke `0.850 s`。
+
+| max tokens | A1 | A2 | A adjacent median | B | B reduction | A2 drift |
+|---:|---:|---:|---:|---:|---:|---:|
+| 416 | 4.240 s | 4.136 s | 4.188 s | 3.911 s | 6.61% | -2.45% |
+| 1490 | 14.347 s | 14.442 s | 14.395 s | 13.620 s | 5.38% | +0.66% |
+| 4483 | 45.451 s | 39.192 s | 42.322 s | 37.230 s | 12.03% | -13.77% |
+
+416/1490 全部返回准确 token 数和 `length`，输出 hash 在 A1/B/A2 完全相同。4483 的
+A1 三波全部 `length`；B 和 A2 各有两波在 `3892/stop`，hash 为
+`79bc59829a4cef5ea815124895c671edee73ec59a36ade154972b1bcb8847ab4`。异常在
+有无剖析器两臂都存在，故不归因于本变更；但 A1/A2 的 4483 漂移 13.77%，该尺寸只保留
+方向性结果，不进入采纳计算。
+
+三次重启加载时间为 154/145/199 秒。最终进程 server/vision/engine
+`75997/75999/76004`；B2 config SHA-256
+`4b396f441ef30f62ab5398cf7b18b3ed902175fd70db7a789ff9a9c14f7e0a5e`。
+原始 config SHA-256
+`7c90109272f6e2afb7c85d86224b886668259f81f739c737c9b7ad5b944d72dc`，可精确回滚。
+
+证据目录 `/opt/ai/logs/agent-profile-hygiene-20261031T082551Z/`。完整记录见
+[`AGENT_PROFILE_HYGIENE_RESULT-20261031.md`](work/AGENT_PROFILE_HYGIENE_RESULT-20261031.md)；
+下一项为 `AGENT-DRAFT-BREAKDOWN`。
+
+## L-143 · MTP draft 拆分：host 隙缝可忽略，head 全消除仍低于 1%
+
+**判定：AGENT-DRAFT-BREAKDOWN 完成并关闭实现方向。** B2 只增加
+`STRATA_DRAFT_TIMING=1` 与 `STRATA_MTP_PROFILE=1`，模型、源码、六槽、两组、MTP、
+prompt 和采样不变。profile 臂 engine PID `76816`，加载 151 秒；恢复 B2 后
+server/vision/engine `78965/78968/78973`，加载 142 秒。
+
+最后四份重复报告收敛到 `2.463–2.470 ms/round`：
+
+| item | cost |
+|---|---:|
+| round graph | `0.978 ms` |
+| step GPU | `1.451 ms` |
+| host graph gap | `0.017 ms` |
+| staging | about `0.001 ms` |
+| graph-launch calls | `0.086–0.087 ms` |
+| PLE prefetch | `0.013 ms` |
+| tail | `0.006 ms` |
+
+step 中 draft-head GEMV 为 `0.362 ms`，round 中为 `0.363 ms`。这一请求形状平均
+`1.67` step/round，因此完全删除 head 的约 `0.968 ms/window` 也只占约 43 ms decode
+窗口的 2.2%；乘最新 trace 的 37.5% 模型占比后，root 上界只有约 0.8%。host gap、
+launch 和 PLE 的绝对时间更不可能跨过 1%。
+
+不实现 head-only Q4 改动：其理论上限已经低于门，并会改变 draft 接受或输出质量。
+不再扫描 MTP depth、`spec-min-p`、group、cache 或 tree 变体。416 的 completion span
+从 `3.911` 到 `3.906 s`、1490 从 `13.620` 到 `13.605 s`，说明这批 profile 本身没有
+引入足以解释结论的开销；4483 的 finish 状态敏感性继续独立保留。
+
+证据目录 `/opt/ai/logs/agent-profile-hygiene-20261031T082551Z/`：
+
+- `p-draft-config.json` SHA-256
+  `3e64408704b161e84aeca24ed231e0b36c878be2e34df50cc2e6b969ffb7a5c2`
+- `p-draft/decode-416.json` SHA-256
+  `30ec9c9dc45e4481367a9457a3052b71da933cc78267b31f83bb5aa3ad6f999c`
+- `p-draft/decode-1490.json` SHA-256
+  `2fffd0d1ad9baebea2400df518828682637ba81f941abeede50ac4c1fdec84ec`
+- `p-draft/decode-4483.json` SHA-256
+  `e9ef1eccd991e8afe9b75dfa0671c2a319ad5667c052fbc74e641064badc2f4f`
+- `p-draft/profile-lines.txt` SHA-256
+  `5397685d7f947280d5655008b866c108cec207c8da50ca6fe081698e85c29776`
+
+下一项为 `AGENT-OLD-SESSION-RESUME`。
+
+## L-144 · 真实 49 天旧会话：223K cache 为零，113.3 秒几乎全在首个 token 前
+
+**判定：诊断完成；下一项改为 `AGENT-OLD-SESSION-PREFILL-PROFILE`。**
+
+本地 35 个 Codex 会话没有任何超过 24 小时的本地请求间隔，因此旧 trace 不能证明真实
+aged resume。隐私安全地选择一个 2026-09-12 的存储会话，于 2026-10-31 通过
+`127.0.0.1:18080` 隧道 resume：
+
+```text
+session 01a09434-68ad-78f0-bb2f-a9b4663038e8
+origin 2026-09-12T06:00:57.774Z
+original cwd /home/kali/项目/st
+original client 0.153.4
+age about 49 days
+```
+
+请求为只读、无工具，只要求 sentinel `RESUMED`。原始客户端输出保存在私密 artifact，
+没有输出或提交 prompt、assistant、reasoning、tool 正文。
+
+| field | result |
+|---|---:|
+| request id | `4ec7f4d8c2f8` |
+| prompt/input | 223,114 |
+| cached | 0 |
+| prompt / first token | about `112.863 / 113.014 s` |
+| wall | `113.3 s` |
+| decode | `292.8 ms` |
+| output | 21 tokens |
+| finish | `stop` |
+| tools | 0 |
+
+旧历史完整保留，sentinel 正确返回，没有附带的 recovery 停滞。用户等待的约 99.7% 在首
+token 前，属于冷 prefill 本身。CLI 的 cumulative usage 不能当作单请求 token 数；
+223,114/0 来自服务端请求账本。
+
+这改变了优先级：隔天旧会话不再是“待测的 p99 猜测”，而是已有真实 113.3 秒样本；
+decode、MTP draft 和两路调度都不能解释该尾部。下一步只增加
+`STRATA_PREFILL_TIMING=1` 测同一请求的 21 相。单相必须能保守节省至少 `1.13 s`，才允许
+实现持久化、预取或内核；否则关闭 prefill 内核分支，转向 state persistence、跨进程
+cache residency、预热和客户端历史处理的结构比较。
+
+同进程第二次 resume 会命中首次请求填充的 cache，不能当作第二个冷样本。此次重放没有
+改变服务、配置或默认路径。
+
+原始证据：
+
+- `/tmp/agent-old-session-resume-20261031.jsonl`
+  SHA-256 `43c10d42b38244a9669a54f7275d5fd3bec6c74bf965f06efc804d181b96b9c4`
+- `/tmp/agent-old-session-resume-20261031.err`
+  SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+- [`AGENT_OLD_SESSION_RESUME_RESULT-20261031.md`](work/AGENT_OLD_SESSION_RESUME_RESULT-20261031.md)
+
+## L-145 · 223K profile 指向 PLE I/O，1,024 在途读经三组冷配对采纳
+
+**判定：AGENT-OLD-SESSION-PREFILL-PROFILE 完成；AGENT-PLE-INFLIGHT 作为显式配置
+采纳；下一项为 AGENT-PLE-ROW-CACHE。**
+
+真实 49 天旧会话在唯一 profiling delta `STRATA_PREFILL_TIMING=1` 下的默认 direct
+reader 为 256 在途。A1 prompt `135,073.4 ms`，A2 `132,645.8 ms`，跨 boot 漂移
+`1.80%`。host PLE wait `50,362 ms`，主 PLE phase `39,291 ms`：
+
+| phase | ms |
+|---|---:|
+| PLE | 39,291 |
+| gemm gate/up | 16,157 |
+| gemm down | 8,321 |
+| qsa select | 6,784 |
+| hc read | 6,189 |
+| qsa attn | 5,135 |
+
+`--ple-io mmap` 的 client wall 为 `182.157 s`、server prompt `175,382 ms`、host PLE
+`90,955 ms`，相对 direct A1 慢 `28.4%`，因此不再消耗 MMAP A2。
+
+生产 PLE 表的 20K-token、320K-row 随机读基准给出：
+
+| inflight | median batch | us/token |
+|---:|---:|---:|
+| 256 | `15,737.4 ms` | `786.9` |
+| 512 | `15,365.4 ms` | `768.3` |
+| 1,024 | `13,917.7 ms` | `695.9` |
+
+1,024 快 `11.56%`，slab 从约 2 MiB 增至 8 MiB。profile candidate 的 prompt 为
+`128,303.5 ms`、host PLE `43,453 ms`、主 PLE `18,525 ms`。
+
+最终非剖析三组相邻冷重放：
+
+| pair | prompt 256 → 1,024 | prompt gain | wall 256 → 1,024 | wall gain |
+|---:|---:|---:|---:|---:|
+| 1 | `123,571.7 → 120,024.4 ms` | 2.87% | `130.198 → 130.127 s` | 0.05% |
+| 2 | `130,616.7 → 129,175.0 ms` | 1.10% | `137.576 → 136.071 s` | 1.09% |
+| 3 | `123,543.4 → 116,645.9 ms` | 5.58% | `130.352 → 123.564 s` | 5.21% |
+
+配对中位为 prompt `2.87%`、wall `1.09%`；所有请求 cached `0`、sentinel 正确、
+finish `stop`、零工具、零 HTTP/engine 错误。第一组 client wall 有约 3.5 秒启停
+离群，所以结论同时保留服务端 prompt 与配对方向，不宣称通用任务加速 `2.87%`。
+
+当前 server/vision/engine `89451/89453/89458`，health loaded、engine `0.1.51`、
+6 slots / 2 groups、swap 0、available RAM `13,219 MiB`，`strata.service` inactive。
+engine hash 仍为
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`；baseline config
+`4b396f441ef30f62ab5398cf7b18b3ed902175fd70db7a789ff9a9c14f7e0a5e`，candidate config
+`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`。
+
+证据目录 `/opt/ai/logs/agent-ple-inflight-20261031T092456Z/`。
+完整记录见
+[`AGENT_PLE_INFLIGHT_RESULT-20261031.md`](work/AGENT_PLE_INFLIGHT_RESULT-20261031.md)。
+
+下一项只测 `--ple-row-cache 4194304`，基线保留已采纳的 1,024 在途；默认 1M 行缓存约
+95 MB，候选增量约 270 MiB。先要求 profile 的 prompt、host PLE 与 phase 同向，再做两组
+非剖析配对；失败恢复 1,024 配置并关闭容量路线。

@@ -2,7 +2,8 @@
 
 Date: 2026-10-31
 
-Status: active.
+Status: complete. Result:
+[`AGENT_COMPACTION_REAL_SHAPE_RESULT-20261031.md`](AGENT_COMPACTION_REAL_SHAPE_RESULT-20261031.md).
 
 ## Problem
 
@@ -101,4 +102,16 @@ Stop before implementation if:
 
 Do not repeat the exact-pin test, change the 262144 context, or scan cache
 sizes without a newly measured divergence.
+
+## Outcome
+
+The frozen trace was not Strata traffic: its Codex provider was configured for
+the direct DeepSeek API. A privacy-safe live capture through the active B4
+server then reproduced three real Codex compactions with `99.1002-99.1304%`
+reuse and normal completion.
+
+The current kept-tool cache therefore has no defect to implement against. The
+implementation branch stops here without a server restart. The next main item
+is `AGENT-TOOL-CONTEXT-DIET`, selected from the full local-session scan rather
+than the misattributed compaction trace.
 
