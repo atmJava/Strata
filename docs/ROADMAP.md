@@ -58,7 +58,8 @@
 | M43 | 普通热续轮 prefill 主相位 | 596/94K prompt 仍占 wall 约 93%；连续 short-read、MTP batch、官方版本与 GDN conv 候选均未穿透到 1% wall | 一次 `STRATA_PREFILL_TIMING=1` profile 取得 21 相、host staging 与双卡数值；找到单相绝对 >=0.05 s、真实可移除且 wall 保守上界 >=1% 的机制 | **已完成**：596/94K 实际 fresh 均约 554 token；stage 1 GPU/host `459/501 ms`、stage 2 `647/788 ms`；stage 2 最大项 `wait copy 173 ms` |
 | M44 | 554-token 热续轮加深 streamed expert ring | phase map 的 stage 2 `wait copy 173 ms` 占 GPU timeline `26.7%`；乐观 wall 上界约 11% | B 只设 `STRATA_PREFILL_STREAM_MIN=0`；路径、质量、健康与资源门通过后，596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3% | **否决**：596 wall `1.509808→1.898041 s`，慢 `25.714%`、绝对多 `0.388233 s`；whole-chunk 分支同时改变 shared defer 与 issuer，不能单独归因 ring 深度；未跑 94K/并发 |
 | M45 | routing-aware expert prefetch 可行性 | staged walk 已在每层 router 后按实际 routed、非驻留专家建序；后续层 routing 依赖当前层输出 | 只读确认 routing 可用时点与跨层可预见性，判断是否已有 selected-only 路径、能否更早预取，并给出整请求上界与回滚 | **已完成并关闭跨层推测**：没有提前获知后续层 routing 的源码路径；554 x top-10 为 `5,540` pairs、每层 512 专家，不是少量专家 |
-| M46 | grouped staged expert lookahead | 当前 grouped staged path 保持 8 个实际传输在前；32-slot ring 与 16-expert gather 的安全上限为 15；stage 2 `wait copy` 中位 `173 ms` | 默认 8 不变，B 只设 `STRATA_PREFILL_STAGED_AHEAD=15`；质量/路径门全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3% | **当前**：`AGENT-HOT-TURN-STAGED-PREFETCH`；隐藏 15.1 ms 即达 1%，隐藏 50 ms 达绝对门；失败停止该参数轴 |
+| M46 | grouped staged expert lookahead | 当前 grouped staged path 保持 8 个实际传输在前；32-slot ring 与 16-expert gather 的安全上限为 15；stage 2 `wait copy` 中位 `173 ms` | 默认 8 不变，B 只设 `STRATA_PREFILL_STAGED_AHEAD=15`；质量/路径门全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3% | **否决**：路径/质量全过；596 wall `1.510583→1.505333 s`，只快 `0.3475%`、绝对 `5.25 ms`；prompt 慢 `0.5996%`；未跑 94K/并发，A2 已恢复 |
+| M47 | 热续轮 dequant 重复工作审计 | stage 2 `dequant 106 ms`；production 为 native IQ3_XXS、554 fresh token、grouped staged path | 只读证明同一 expert/layout 是否重复转换、真实触发率和生产路径；单一可移除部分须给整请求 wall >=1% 且绝对 >=0.05 s 上界、数值/回滚边界；未过门不构建不重启 | **当前**：`AGENT-HOT-TURN-DEQUANT-AUDIT`；不改源码，不扫 dequant 参数/group/profiler 邻域 |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 
@@ -78,9 +79,10 @@
 full streamed ring 因此进入端到端验证，但 596 wall 反而从 `1.509808 s` 升到
 `1.898041 s`，慢 `25.714%`。该分支同时切换 whole-chunk stream、shared-expert defer
 和 cross-layer issuer，不能单独归因 ring 深度。只读审计又确认 staged 路径已经只拷贝
-本层实际选中、非驻留专家，后续层 routing 无法提前获知，跨层推测预取关闭。当前只把
-grouped staged 的实际传输在前数从 8 提到安全上限 15；stage 2 173 ms 中隐藏 15.1 ms
-即可达到 596 wall 1%，隐藏 50 ms 达到绝对门。失败立即停止该参数轴，不扫邻近设置。
+本层实际选中、非驻留专家，后续层 routing 无法提前获知，跨层推测预取关闭。grouped staged
+lookahead 8→15 随后通过质量门，但 596 wall 只改善 `0.3475%`、绝对 `5.25 ms`，prompt
+反慢 `0.5996%`，因此该参数轴关闭。当前转只读审计 `dequant 106 ms` 是否含同一
+expert/layout 的重复转换；未给出真实触发和整请求保守上界前不构建、不重启。
 
 隔天旧会话仍是 p99 尾部：223,114 prompt token、cached `0`、TTFT `113.014 s`。但 34 个
 有效会话只有 1 个超过 24h，现有 session file 又不支持 layer split 和 batch。该方向保留

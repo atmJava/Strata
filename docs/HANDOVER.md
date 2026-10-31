@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T22:30+08:00（STREAM_RING 判决后）。
+> 整理时间：2026-10-31T22:50+08:00（STAGED_PREFETCH 判决后）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,11 +12,11 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-155。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-156。
 
 ## 2. 当前断点
 
-- **全局目标已第二十次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
+- **全局目标已第二十一次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
   等待，再处理首工具/首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
@@ -25,7 +25,7 @@
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
   平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十版完成后再次尝试创建新目标，
   接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十版计划
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十一版计划
   为权威，不要回到平台旧目标的状态快照。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
@@ -39,13 +39,13 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `166198/166200/166205`。server cwd 为
+- **当前运行**：server/vision/engine `169846/169849/169854`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
   `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`
   未重建，config `6ece1a13...`、server `10bd8318...`，server 进程含
   `STRATA_BATCH_SERIAL_TWO=1`。`strata.service` 仍 inactive/dead。engine env 不含
-  `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`。
+  `STRATA_DECODE_TIMING`、`STRATA_VERIFY_PROFILE` 与 `STRATA_PREFILL_STAGED_AHEAD`。
   当前显式引擎参数含 `--ple-inflight 1024`，不含 `--ple-row-cache`；源码默认仍为 256，
   rollback 为同一源码目录 + `4b396f44...` direct config。健康、6 slots / 2 groups、
   swap 0 和确定性 smoke 已复验。
@@ -152,14 +152,17 @@
   554 x top-10 有 `5,540` 个 routed pairs，不是少量专家。未跑 94K/并发矩阵，A2 已
   恢复。见
   [result](work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
-- **当前状态与下一动作**：`AGENT-HOT-TURN-STAGED-PREFETCH` 已预注册。只读审计确认
-  当前层 staged walk 已经只拷贝本层实际 routed、非驻留专家，后续层 routing 依赖当前层
-  输出，跨层 selected-expert prefetch 没有源码路径，因此该方向关闭。候选只在 grouped
-  staged path 把实际传输在前数从默认 8 提到安全上限 15，保留 shared-expert defer 和
-  全部算术。stage 2 `wait copy` 中位 `173 ms`；隐藏 `15.1 ms` 即达到 596 wall 1%，
-  隐藏 `50 ms` 即过绝对门。A1/B/A2 覆盖同口径 596/94K；失败立即恢复 A2，不扫邻近
-  深度、stager thread/batch/ring 或 stream threshold。见
-  [contract](work/AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md)。
+- **上一项判决**：`AGENT-HOT-TURN-STAGED-PREFETCH` 否决。B 只增加
+  `STRATA_PREFILL_STAGED_AHEAD=15`，真实路径、实际 env、质量、health 和资源门全过；
+  但 596 wall 从 A1 `1.510583 s` 变为 `1.505333 s`，只快 `0.3475%`、绝对 `5.25 ms`；
+  prompt 从 `1384.3 ms` 变为 `1392.6 ms`，反慢 `0.5996%`。按停止门未跑 B 的 94K、
+  2/4/6/8，不扫邻近深度或 stager 参数；A2 已恢复。见
+  [result](work/AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)。
+- **当前状态与下一动作**：只读执行 `AGENT-HOT-TURN-DEQUANT-AUDIT`。追踪 phase map
+  stage 2 的 `dequant 106 ms`，确认 production native IQ3_XXS、554-token grouped
+  staged path 是否对同一 expert/layout 重复转换，并量化真实命中率。只有单一可移除部分
+  给出整请求 wall `>=1%` 且绝对 `>=0.05 s` 的保守上界，才预注册实现；未过门不改源码、
+  不重启，也不扫描 dequant 参数、group 或 profiler 邻域。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说

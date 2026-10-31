@@ -2,7 +2,9 @@
 
 日期：2026-10-31
 
-状态：预注册；源码已准备，尚未构建或启动候选。
+状态：**已否决。** B 的 596 wall 只改善 `0.3475%`、绝对 `5.25 ms`，prompt 慢
+`0.5996%`；按停止门未跑 B 的 94K 和并发矩阵。生产已恢复 A2。完整结果见
+[`AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md`](AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)。
 
 ## 只读审计结论
 

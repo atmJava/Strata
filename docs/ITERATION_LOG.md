@@ -3,6 +3,36 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-127 · staged lookahead 加深无效；转 dequant 重复工作审计
+
+- 目标 / 指标：验证 grouped staged walk 的实际传输 lookahead 从 8 提到安全上限 15，
+  能否减少 596 fresh-token 热续轮的 `wait copy` 并达到 wall `>=1%` 且绝对 `>=0.05 s`。
+- 假设与预期：ring 有 32 slots、MMQ group 最多持 16 个 staged slots，因此最多可安全
+  保持 15 个后续传输；理论上只需隐藏 `15.1 ms` 就达到 596 wall 1%。
+- 改动与实验：A1 深拷贝后只替换 `exe` 为隔离构建并增加
+  `STRATA_PREFILL_STAGED_AHEAD=15`。启动、实际 env、hash、health、6/2、资源、
+  A1/B/A2 三组 fixed greedy 和 smoke 全过后，测同口径 596 三波。
+- 结果：A1 wall 中位 `1.510583 s`，B `1.505333 s`，只改善 `0.3475%`、绝对
+  `5.25 ms`；prompt `1384.3→1392.6 ms`，慢 `0.5996%`。
+- 质量：B 路径和全部质量门通过；零 HTTP/engine/OOM/CUDA 错误；A1/B/A2 greedy 逐字
+  相等且 finish `stop`；64-token smoke 正常。
+- 判决：**AGENT-HOT-TURN-STAGED-PREFETCH 否决。** 双门未过，按停止门不跑 94K、
+  2/4/6/8，不扫邻近深度或 stager 参数；A2 已恢复。
+- 预期被推翻：`wait copy` 不是单纯由 lookahead 不足造成；多排传输没有降低 prompt，
+  该参数轴关闭。
+- 生产状态与回滚：server/vision/engine `169846/169849/169854`，engine
+  `105a4171...`、config `6ece1a13...`；health loaded、262144、6/2、systemd inactive，
+  A2 parity repeatable/exact。
+- 证据：L-156、
+  [`AGENT_HOT_TURN_STAGED_PREFETCH_RESULT`](work/AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)、
+  `/opt/ai/logs/agent-hot-turn-staged-prefetch-20261031T1445Z/`。
+- 复盘：这轮再次验证局部调度参数不足以穿透 wall。phase map 剩余的第二大 phase 是
+  `dequant 106 ms`，但必须先证明同一 expert/layout 被重复转换，且真实生产路径可去掉。
+- 下一步与理由：只读 `AGENT-HOT-TURN-DEQUANT-AUDIT`。追踪 native IQ3_XXS 554-token
+  grouped staged path 的 stage 1/2、MMQ gather 和后续 kernel 数据流；只有单一重复部分
+  给出整请求 wall `>=1%` 且绝对 `>=0.05 s` 的保守上界才预注册实现。否则关闭该方向，
+  继续复盘下一个真实主相位；不扫描 dequant 参数、group 或 profiler 邻域。
+
 ## I-20261031-126 · full streamed ring 反向 25.7%；先审计选中专家预取
 
 - 目标 / 指标：验证把 554-token 热续轮从 32-slot staged walk 切到 full streamed ring，

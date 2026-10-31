@@ -115,14 +115,17 @@
   完成后读取该层 top-k，按实际选中专家建序，已经只拷贝本层 routed、非驻留专家；
   后续层 routing 依赖当前层结果，不能提前获知。源码没有跨层 speculative routing，
   因此该方向关闭。当前 grouped staged path 实际只保持 8 个传输在前，而不是 15 个位置。
-- 当前项：AGENT-HOT-TURN-STAGED-PREFETCH（grouped staged lookahead）。32-slot ring
-  与 16-expert gather 允许安全
-  保持 15 个后续传输。候选只在默认 8 之外增加 `STRATA_PREFILL_STAGED_AHEAD=15`，
-  保留同一 routed 顺序、shared-expert defer、group、copy stream、release event 和
-  kernel 顺序。stage 2 `wait copy` 中位 `173 ms`；只需隐藏 `15.1 ms` 就达到 596 wall
-  1%，隐藏 `50 ms` 达到绝对 `0.05 s`。A1/B/A2 测同口径 596/94K；失败立即恢复 A2，
-  不扫邻近深度、stager thread/batch/ring 或 stream threshold。见
-  [contract](work/AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md)。
+- 上一项否决：`AGENT-HOT-TURN-STAGED-PREFETCH`。B 只增加
+  `STRATA_PREFILL_STAGED_AHEAD=15`，路径、实际 env、质量、health 和资源门全过；但
+  596 wall 从 A1 `1.510583 s` 变为 `1.505333 s`，只快 `0.3475%`、绝对 `5.25 ms`；
+  prompt 从 `1384.3 ms` 变为 `1392.6 ms`，反慢 `0.5996%`。按停止门未跑 B 的 94K、
+  2/4/6/8，不扫邻近深度或 stager 参数。A2 已恢复。见
+  [result](work/AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)。
+- 当前项：AGENT-HOT-TURN-DEQUANT-AUDIT（只读）。检查 stage 2 `dequant 106 ms`
+  是否对同一 expert/layout 重复转换，以及真实 production native IQ3_XXS、554-token、
+  grouped staged path 的命中率。只有单一可移除部分能给整请求 wall `>=1%` 且绝对
+  `>=0.05 s` 的保守上界，才预注册实现；未过门不改源码、不重启，也不扫 dequant 参数、
+  group 或 profiler 邻域。
 - 降级项：`AGENT-HISTORY-STATE-RESIDENCY` 仍保留为低频 p99 可行性。34 个有效会话只有
   1 个超过 24 小时间隔、2 个超过 12 小时，不得排在普通热续轮之前；检查双卡 layer split、
   六 batch slots、prompt cache 下多 stage 状态格式、223K 容量、恢复时间、写放大、
@@ -137,7 +140,7 @@
   上三次真实 Codex compaction 已复用约 `99.1%`，不能再写成 Strata 缺陷。精确 pin
   可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
   中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
-- 当前运行：server/vision/engine `166198/166200/166205`。server cwd 为
+- 当前运行：server/vision/engine `169846/169849/169854`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`，cwd 为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z`。监听 `127.0.0.1:8080`；
@@ -146,7 +149,8 @@
   `STRATA_BATCH_SERIAL_TWO=1`、
   `STRATA_ADMIT_MERGE_FIRST=1` 和 `STRATA_PIPE_BYIELD_NODRAIN=1`；engine env 不含
   `STRATA_DECODE_TIMING`/`STRATA_VERIFY_PROFILE`。
-  `strata.service` 仍 inactive/dead、`MainPID=0`、`NRestarts=8`。回滚为同一源码目录 +
+  `strata.service` 仍 inactive/dead、`MainPID=0`、`NRestarts=8`；engine env 不含
+  `STRATA_PREFILL_STAGED_AHEAD`。回滚为同一源码目录 +
   direct-256 config
   `4b396f44...`；移除 `--ple-inflight` 即恢复默认 256。
   恢复过程中的 `use-config.sh` 误指向 systemd，而现网是手动实例；单元因实验配置不兼容重试 8 次后

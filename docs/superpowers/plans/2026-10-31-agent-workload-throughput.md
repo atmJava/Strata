@@ -2,7 +2,7 @@
 
 日期：2026-10-31
 
-状态：第二十次评审后修订，可以继续执行。
+状态：第二十一次评审后修订，可以继续执行。
 
 ## 全局目标
 
@@ -309,7 +309,7 @@ chunk 所有层 top-k 的路径，因此“跨层只预取 selected experts”�
 whole-chunk stream、shared-expert defer 和 cross-layer issuer，不能用它得出单一 ring
 深度结论。跨层推测 routing 关闭，不构建。
 
-### P2h：`AGENT-HOT-TURN-STAGED-PREFETCH`（当前）
+### P2h：`AGENT-HOT-TURN-STAGED-PREFETCH`（已否决）
 
 审计保留的唯一直接可动项是 grouped staged walk 的实际 lookahead：当前保持 8 个传输在前，
 而 32-slot ring 与 16-expert gather 允许安全保持 15 个。候选只在默认 8 之外增加 env
@@ -318,8 +318,25 @@ copy stream、release event 和 kernel 顺序。
 
 stage 2 `wait copy` 中位 `173 ms`；只需隐藏 `15.1 ms` 就达到 596 wall 的 1%，隐藏
 `50 ms` 达到绝对 `0.05 s`。A1/B/A2 覆盖同口径 596/94K；失败立即恢复 A2，不扫描邻近深度、
-stager thread/batch/ring 或 stream threshold。契约：
+stager thread/batch/ring 或 stream threshold。判决：B 通过路径、质量、健康与资源门，
+但 596 wall 只从 `1.510583 s` 变成 `1.505333 s`，改善 `0.3475%`、绝对 `5.25 ms`；
+prompt 从 `1384.3 ms` 变成 `1392.6 ms`，慢 `0.5996%`。按停止门未跑 94K 和并发矩阵，
+生产已恢复 A2。见
+[`AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)。
+契约：
 [`AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md)。
+
+### P2i：`AGENT-HOT-TURN-DEQUANT-AUDIT`（当前，只读）
+
+phase map 中 stage 2 下一大可证伪相位是 `dequant 106 ms`。先只读追踪 native IQ3_XXS
+的热续轮 grouped staged path：同一 expert/layout 是否在 stage 1、stage 2 或 MMQ gather
+前后被重复转换；生产实际 `T=554`、每层 `5,540` 个 routed pairs 下命中率是多少；哪些写回
+是后续 kernel 必需，哪些只是中间格式重复。
+
+只有源码和数据共同证明存在单一可移除重复工作，且按实测占比给出整请求 wall `>=1%` 与
+绝对 `>=0.05 s` 的保守上界，才预注册实现候选。审计本身不改源码、不重启，也不扫描
+dequant 参数、group 大小或 profiler 邻域。若不存在重复工作，关闭该方向并复盘下一个真实
+主相位，不能把“看到 106 ms”当成收益。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -395,10 +412,11 @@ stager thread/batch/ring 或 stream threshold。契约：
 stage 2 的 `wait copy 173 ms` 是最大可移动相位。当前执行
 `AGENT-HOT-TURN-STREAM-RING` 已否决：full ring 让 596 wall 慢 `25.714%`，没有把 stage 2
 copy 等待转成用户收益。当前生产为 server/vision/engine
-`166198/166200/166205`，health loaded、六 slots / 两 groups，`strata.service` inactive。
+`169846/169849/169854`，health loaded、六 slots / 两 groups，`strata.service` inactive。
 
 只读 routing 审计已完成：当前层 selected-only staged copy 已是生产路径，跨层推测 routing
-没有源码支持；full-ring 还切换了多个调度机制。当前改为
-`AGENT-HOT-TURN-STAGED-PREFETCH`，只在 grouped staged walk 把实际传输在前数 8 提到安全上限
-15，保留 shared-expert defer 和其他行为。若不能把 stage 2 `wait copy 173 ms` 转成至少
-1% 且 `0.05 s` wall，立即关闭该参数轴，不构建邻近深度或 stager 参数组合。
+没有源码支持；full-ring 还切换了多个调度机制。`AGENT-HOT-TURN-STAGED-PREFETCH` 随后把
+grouped staged walk 的实际传输在前数从 8 提到安全上限 15，但 596 wall 只改善
+`0.3475%`、绝对 `5.25 ms`，prompt 反慢 `0.5996%`，因此否决并关闭该参数轴。当前生产已
+恢复 A2。下一项执行只读 `AGENT-HOT-TURN-DEQUANT-AUDIT`，检查 `dequant 106 ms` 是否有
+同一 expert/layout 的重复转换；在给出真实触发、整请求保守上界和回滚前不改源码、不重启。

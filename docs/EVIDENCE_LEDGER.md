@@ -169,9 +169,49 @@
 | L-153 | 10-31 22:3x | 官方 `0.1.55` CLI 不支持 `--prompt-cache-long`；移除 128K-only 扩展后成功启动，三组 greedy/smoke 全过；596/94K hot-long A 参考 wall `1.500656/1.397534 s`，B 为 `1.588491/1.457059 s`，慢 `5.853%/4.259%`；A 漂移 `1.893%/2.250%` | **ENGINE-0.1.55-EVAL 否决**；不进入其 GDN env、189K 或并发矩阵；A2 已恢复旧 engine；下一项 `GDN-CONVL2` |
 | L-154 | 10-31 23:4x | GDN conv/L2 融合实际命中且质量全过；A1/B 的 596/94K prompt `1409.4→1394.2/1259.4→1258.6 ms`，wall `1.514727→1.502251/1.413078→1.410180 s`；wall 仅改善 `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`；A2 prompt/wall 漂移最大 `0.388%` | **GDN-CONVL2 否决**；不扫邻近参数；A2 已恢复；下一项 `AGENT-HOT-TURN-PHASE-MAP` |
 | L-155 | 10-31 14:1xZ | 554-token hot-long 进入 full streamed ring 后，596 wall 中位 `1.509808→1.898041 s`，慢 `25.714%`、绝对多 `0.388233 s`；prompt 中位 `1401.7→1787.9 ms`；实际 env、6/2、health、资源、greedy 和 smoke 全过 | **AGENT-HOT-TURN-STREAM-RING 否决**；该分支同时改变 whole-chunk stream、shared defer 与 issuer；未跑 94K/并发；A2 已恢复；后续审计确认 staged 已按 selected experts 拷贝，转 staged lookahead |
+| L-156 | 10-31 14:4xZ | grouped staged lookahead 8→15 实际命中且 A1/B/A2 质量全过；596 wall `1.510583→1.505333 s`，只改善 `0.3475%`、绝对 `5.25 ms`；prompt `1384.3→1392.6 ms`，慢 `0.5996%` | **AGENT-HOT-TURN-STAGED-PREFETCH 否决**；双门未过，未跑 B 的 94K/并发；关闭 lookahead 参数轴；A2 已恢复；下一项 `AGENT-HOT-TURN-DEQUANT-AUDIT` |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-156 · staged lookahead 8→15 没有穿透 596 wall
+
+**判定：`AGENT-HOT-TURN-STAGED-PREFETCH` 否决；下一项为只读
+`AGENT-HOT-TURN-DEQUANT-AUDIT`。**
+
+B 使用隔离源码副本重新构建的 engine；A1 深拷贝 config 后只替换 `exe` 并增加
+`STRATA_PREFILL_STAGED_AHEAD=15`。实际进程路径、env、binary/config hash、health
+loaded、262144、六 slots / 两 groups、systemd inactive、RAM/VRAM/swap 均通过；无 OOM、
+CUDA、engine/HTTP 错误。A1/B/A2 各三组 fixed greedy、每组两轮逐字相等，64-token smoke
+`stop`。
+
+596 hot-long 三波：
+
+| arm | wall repeats (s) | wall median | prompt repeats (ms) | prompt median |
+|---|---|---:|---|---:|
+| A1 | `1.516392 / 1.510583 / 1.486344` | `1.510583 s` | `1384.3 / 1385.7 / 1376.8` | `1384.3 ms` |
+| B | `1.519241 / 1.505333 / 1.498708` | `1.505333 s` | `1394.9 / 1392.6 / 1388.4` | `1392.6 ms` |
+
+wall 改善 `0.3475%`（`0.005250 s`），prompt 慢 `0.5996%`（`8.3 ms`）。按停止门未跑 B
+的 94K、2 路或 4/6/8，也不扫描 9/10/12/16 或 stager 参数。生产最终
+server/vision/engine `169846/169849/169854`，engine/config SHA 仍为 `105a4171...` /
+`6ece1a13...`，A2 parity repeatable/exact。
+
+证据目录 `/opt/ai/logs/agent-hot-turn-staged-prefetch-20261031T1445Z/`。关键 SHA-256：
+
+```text
+A1-596.json         ffd5c768c143fe24a4d4a46f58f2bae30d31752ff1855d1ebe6e894445f3e1a3
+B-596.json          3c460094d02618b5a4d74d4633129cb141df2b674ac608e6d21035326f917eb7
+B-config.json       96d4d0a3a5867a7d4355807dac14df62d0c82857d9b46d11c41630c89f4a720a
+B-parity.json       1c293c0980b37323534c8d70af6d22fbb92f1f4fab7e9fcce21846a5c88f6664
+B-smoke.json        787508dd13e2b639779d740eb04df3cc1b4f2f3f635ed09817c1190025933943
+A2-parity.json      bd7a3c1391aa567e39f8bedcb60821af99d3966d88e07699f7e5e4996c5f2963
+```
+
+完整记录见
+[`AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md`](work/AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)。
+下一项只读检查 `dequant 106 ms` 是否对同一 expert/layout 重复转换，并要求单一可移除部分
+给出真实触发后的 wall `>=1%` 且绝对 `>=0.05 s` 上界；未过门不构建、不重启。
 
 ## L-155 · full streamed ring 让小 chunk 热续轮更慢
 
