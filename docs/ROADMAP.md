@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-11-01T00:05+08:00。
+> 最后更新：2026-11-01（用户要求暂停优化）。
 
 ## 用户目标
 
@@ -60,7 +60,7 @@
 | M45 | routing-aware expert prefetch 可行性 | staged walk 已在每层 router 后按实际 routed、非驻留专家建序；后续层 routing 依赖当前层输出 | 只读确认 routing 可用时点与跨层可预见性，判断是否已有 selected-only 路径、能否更早预取，并给出整请求上界与回滚 | **已完成并关闭跨层推测**：没有提前获知后续层 routing 的源码路径；554 x top-10 为 `5,540` pairs、每层 512 专家，不是少量专家 |
 | M46 | grouped staged expert lookahead | 当前 grouped staged path 保持 8 个实际传输在前；32-slot ring 与 16-expert gather 的安全上限为 15；stage 2 `wait copy` 中位 `173 ms` | 默认 8 不变，B 只设 `STRATA_PREFILL_STAGED_AHEAD=15`；质量/路径门全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3% | **否决**：路径/质量全过；596 wall `1.510583→1.505333 s`，只快 `0.3475%`、绝对 `5.25 ms`；prompt 慢 `0.5996%`；未跑 94K/并发，A2 已恢复 |
 | M47 | 热续轮 dequant 重复工作审计 | stage 2 `dequant 106 ms`；production 为 native IQ3_XXS、554 fresh token、grouped staged path | 只读证明同一 expert/layout 是否重复转换、真实触发率和生产路径；单一可移除部分须给整请求 wall >=1% 且绝对 >=0.05 s 上界、数值/回滚边界；未过门不构建不重启 | **否决重复假设**：该 phase 实为 native gather 字节搬运；每层只处理唯一 selected expert，每 16 个一次 gather；stage 1/2 不同层，无重复转换；MMQ 固定 stride 不能直读任意 cache slot。未改源码/未重启，不扫参数 |
-| M48 | resident expert 绕开 MMQ gather | stage 1/2 gather 合计约 `183 ms`；hot-long cache hit 596 `95.1–98.1%`、94K `98.4–98.8%` | group 级比较 gather+MMQ 与已有 direct-pointer/fused；统计唯一 expert/group/resident 比例；只有真实比例 wall 保守上界 >=1% 且绝对 >=0.05 s、数值/资源门成立才预注册实现 | **当前**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`；不改生产、不重启；full-layer harness 在现役占用下 OOM，改用 group 级 |
+| M48 | resident expert 绕开 MMQ gather | stage 1/2 gather 合计约 `183 ms`；group 级 direct path `7.848` 对 MMQ `11.671 ms/layer`（`1.49x`）；596 1 路 wall 改善 `1.862%`（相对 A1 `2.145%`、`32.667 ms`），三波全胜 | group 级上界、路径命中、greedy 和 1/2 路测量已完成；原契约绝对 `0.05 s` 未过，94K prompt 无对应改善，4/6/8 未完成 | **暂停验收，未采纳**：用户的 1% 价值原则记录为正向信号，但不静默放宽契约；候选默认关闭，已恢复 A1 生产。恢复后先审计 48 层 direct-path 覆盖/fallback，而非重跑同形 A-B-A |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 
@@ -85,8 +85,10 @@ lookahead 8→15 随后通过质量门，但 596 wall 只改善 `0.3475%`、绝�
 反慢 `0.5996%`，因此该参数轴关闭。随后只读审计确认 `dequant 106 ms` 实际是 native
 group gather：每层只处理唯一 selected expert，stage 1/2 是不同层，路径互斥，没有同一
 expert/layout 的重复转换；MMQ 固定 stride 也不能直接读取任意 cache slot。重复工作假设
-关闭，当前转 group 级 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`，验证已有 direct-pointer/fused
-能否绕开 resident gather；未给出真实比例上界前不构建、不重启。
+关闭。`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 随后证明 group 级 direct path 快 `1.49x`，
+596 的 1 路 wall 有 `1.86%` 正向信号，但绝对节省只有 `32.667 ms`，94K prompt 没有
+对应改善，4/6/8 未完成。按用户要求暂停，候选保持默认关闭；恢复时先审计 direct-path
+的逐层覆盖率和 fallback 原因。
 
 隔天旧会话仍是 p99 尾部：223,114 prompt token、cached `0`、TTFT `113.014 s`。但 34 个
 有效会话只有 1 个超过 24h，现有 session file 又不支持 layer split 和 batch。该方向保留

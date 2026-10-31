@@ -173,10 +173,11 @@ struct MmqBufs {
           grp_d(GROUP * mmq::matrix_bytes(p.d, N, FF) + 4096) {}
 };
 // `direct`: no gathers - the products read the blobs where they are (they must lie at a fixed stride, every expert
-// with rows: the timing part's layout), the cost of MMQ's own kernels alone
+// with rows: the timing part's layout), the cost of MMQ's own kernels alone.  `group_gather`: gather each full group
+// in one launch, as Prefill does; individual gathers remain the fallback for blobs that are not 16-byte aligned.
 void run_mmq(const Pair& p, const Geo& geo, mmq::Context& ctx, MmqBufs& b, const Routing& r, const float* x_dev,
              const int32_t* src_dev, const std::vector<const uint8_t*>& blob, int64_t rows, cudaStream_t s,
-             bool direct = false, size_t stride = 0) {
+             bool direct = false, size_t stride = 0, bool group_gather = false) {
     const size_t gub = mmq::matrix_bytes(p.gu, 1280, N), db = mmq::matrix_bytes(p.d, N, FF);
     const int E = (int) r.cnt.size();
     std::vector<int32_t> order;
@@ -191,12 +192,25 @@ void run_mmq(const Pair& p, const Geo& geo, mmq::Context& ctx, MmqBufs& b, const
     ck(cudaMemcpyAsync(b.bounds.p, bh.data(), bh.size() * 4, cudaMemcpyHostToDevice, s), "bounds");
     mmq::iota(b.ident.as<int32_t>(), rows, s);
     mmq::quantize(x_dev, src_dev, b.xq.p, (int) p.gu, N, N, rows, s);
+    bool in_gathered_group = false;
     for (size_t j = 0; j < n; ++j) {
         const size_t q = j % GROUP;
         const uint8_t* bl = blob[(size_t) order[j]];
-        if (!direct)
-            mmq::gather_native(bl, bl + geo.up_off, gub / 2, bl + geo.down_off, db, b.grp_gu.as<uint8_t>() + q * gub,
-                               b.grp_d.as<uint8_t>() + q * db, s);
+        if (q == 0) {
+            in_gathered_group = false;
+            if (!direct && group_gather) {
+                mmq::GatherGroup gg;
+                gg.n = (int) std::min<size_t>(GROUP, n - j);
+                for (int i = 0; i < gg.n; ++i) gg.blob[i] = blob[(size_t) order[j + (size_t) i]];
+                in_gathered_group =
+                    mmq::gather_native_group(gg, geo.up_off, gub / 2, geo.down_off, db, b.grp_gu.p, gub, b.grp_d.p,
+                                             db, s, j + (size_t) gg.n == n ? 4096 : 0);
+            }
+        }
+        if (!direct && !in_gathered_group)
+            mmq::gather_native(bl, bl + geo.up_off, gub / 2, bl + geo.down_off, db,
+                               b.grp_gu.as<uint8_t>() + q * gub, b.grp_d.as<uint8_t>() + q * db, s,
+                               q + 1 == GROUP || j + 1 == n ? 4096 : 0);
         if (q + 1 < GROUP && j + 1 < n) continue;
         const size_t j0 = j - q, g = j0 / GROUP;
         const int ngx = (int) (q + 1);
@@ -214,8 +228,12 @@ void run_mmq(const Pair& p, const Geo& geo, mmq::Context& ctx, MmqBufs& b, const
         gu.n = ngx; gu.xq = b.xq.p; gu.bounds = b.bounds.as<int32_t>() + j0; gu.ids = b.ident.as<int32_t>();
         gu.total_rows = rows; gu.max_rows = maxr; gu.dst = b.gu.as<float>(); gu.ld_dst = 1280;
         ctx.run(gu, s);
-        mmq::swiglu(b.gu.as<float>() + r0 * 1280, b.h.as<float>() + r0 * FF, nr, FF, false, s);
-        mmq::quantize(b.h.as<float>() + r0 * FF, nullptr, b.hq.p, (int) p.d, FF, FF, nr, s);
+        if (mmq::swiglu_quantize_supported((int) p.d))
+            mmq::swiglu_quantize(b.gu.as<float>() + r0 * 1280, b.hq.p, nr, FF, false, (int) p.d, s);
+        else {
+            mmq::swiglu(b.gu.as<float>() + r0 * 1280, b.h.as<float>() + r0 * FF, nr, FF, false, s);
+            mmq::quantize(b.h.as<float>() + r0 * FF, nullptr, b.hq.p, (int) p.d, FF, FF, nr, s);
+        }
         mmq::Product dn;
         dn.w = direct ? (const void*) (b0 + geo.down_off) : b.grp_d.p; dn.type = (int) p.d; dn.w_rows = N; dn.w_cols = FF;
         dn.expert_bytes = direct ? stride : db;
@@ -323,6 +341,8 @@ void reference_part(const Pair& p, cudaStream_t s) {
     const std::vector<int32_t> ids = make_ids(T, E, rng, 2, 4);   // experts 0, 1 hot (several tiles), 60-63 unused
     const int64_t rows = (int64_t) T * K;
     const Routing r = sort_rows(ids, E);
+    const size_t n_order = (size_t) std::count_if(r.cnt.begin(), r.cnt.end(), [](int32_t c) { return c > 0; });
+    const size_t n_groups = (n_order + GROUP - 1) / GROUP;
     std::printf("%s - reference part: %d tokens, %d experts, rows per expert: max %d, experts without rows %d\n", p.name,
                 T, E, *std::max_element(r.cnt.begin(), r.cnt.end()), (int) std::count(r.cnt.begin(), r.cnt.end(), 0));
 
@@ -427,26 +447,32 @@ void reference_part(const Pair& p, cudaStream_t s) {
 // part 2: one layer at a real chunk, timed
 void timing_part(const Pair& p, int T, cudaStream_t s) {
     static const int E = [] { const char* v = std::getenv("S20_E"); return v != nullptr && std::atoi(v) > 0 ? std::atoi(v) : 512; }();   // S20_E=256: the Coder pack
+    static const int backing = [] {
+        const char* v = std::getenv("S20_BACKING");
+        return std::clamp(v != nullptr ? std::atoi(v) : 0, 1, 512);
+    }();
     const Geo geo(p);
     std::mt19937 rng(1360);
     const int64_t rows = (int64_t) T * K;
-    // 512 distinct blobs - the products read each once per tile, as the engine does
+    // Every routed expert needs a pointer.  S20_BACKING<N> aliases those pointers onto N real blobs, so the production
+    // 512-expert x top-10 routing and row counts fit beside the live service; the gather and compute work is unchanged.
     // at a stride of whole blocks of both formats (MMQ's expert stride counts blocks), + MMQ's read past the end
     size_t unit = ggml_type_size(p.gu);
     while (unit % ggml_type_size(p.d) != 0 || unit % 16 != 0) unit += ggml_type_size(p.gu);
     const size_t stride = (geo.bytes + unit - 1) / unit * unit;
-    Dev blobs((size_t) E * stride + 4096);
-    ck(cudaMemset(blobs.p, 0, (size_t) E * stride + 4096), "zero");
+    const int n_backing = std::min(E, backing);
+    Dev blobs((size_t) n_backing * stride + 4096);
+    ck(cudaMemset(blobs.p, 0, (size_t) n_backing * stride + 4096), "zero");
     {
         std::vector<uint8_t> b = make_blob(p, geo, rng);
-        for (int e = 0; e < E; ++e) {
+        for (int e = 0; e < n_backing; ++e) {
             b[4 + (size_t) (e % 16)] ^= (uint8_t) e;   // not all equal (inside the first block, not its scale)
             ck(cudaMemcpy(blobs.as<uint8_t>() + (size_t) e * stride, b.data(), geo.bytes, cudaMemcpyHostToDevice),
                "blob");
         }
     }
     std::vector<const uint8_t*> blob((size_t) E);
-    for (int e = 0; e < E; ++e) blob[(size_t) e] = blobs.as<uint8_t>() + (size_t) e * stride;
+    for (int e = 0; e < E; ++e) blob[(size_t) e] = blobs.as<uint8_t>() + (size_t) (e % n_backing) * stride;
     const std::vector<float> x = make_x(T, rng, -1);
     const std::vector<int32_t> ids = make_ids(T, E, rng, 0, 0);
     const Routing r = sort_rows(ids, E);
@@ -472,9 +498,12 @@ void timing_part(const Pair& p, int T, cudaStream_t s) {
         ck(cudaEventElapsedTime(&t, a, b), "elapsed");
         return t;
     };
-    auto mmq_run = [&] { run_mmq(p, geo, ctx, mb, r, x_dev.as<float>(), src_dev.as<int32_t>(), blob, rows, s); };
+    auto mmq_run = [&] {
+        run_mmq(p, geo, ctx, mb, r, x_dev.as<float>(), src_dev.as<int32_t>(), blob, rows, s, false, 0, true);
+    };
     auto fused_run = [&] { run_fused(p, geo, fb, x_dev.as<float>(), T, E, {0, E}, blob, s); };
     const bool all_routed = mq && std::count(r.cnt.begin(), r.cnt.end(), 0) == 0;
+    const bool direct_layout = all_routed && n_backing == E;
     auto direct_run = [&] {
         run_mmq(p, geo, ctx, mb, r, x_dev.as<float>(), src_dev.as<int32_t>(), blob, rows, s, true, stride);
     };
@@ -494,7 +523,7 @@ void timing_part(const Pair& p, int T, cudaStream_t s) {
         check("an MMQ run");
         fused_run();
         check("a fused run");
-        if (all_routed) {
+        if (direct_layout) {
             direct_run();
             check("an MMQ run without gathers");
         }
@@ -506,14 +535,14 @@ void timing_part(const Pair& p, int T, cudaStream_t s) {
     for (int rep = 0; rep < 8; ++rep) {
         tm.push_back(no_mmq ? 1.0f : once(mmq_run));
         tf.push_back(once(fused_run));
-        if (all_routed && !no_mmq) td.push_back(once(direct_run));
+        if (direct_layout && !no_mmq) td.push_back(once(direct_run));
     }
     if (td.empty()) td.push_back(0.0f);
     std::sort(tm.begin(), tm.end());
     std::sort(tf.begin(), tf.end());
     std::sort(td.begin(), td.end());
     const float t_mmq = tm[tm.size() / 2], t_f = tf[tf.size() / 2];
-    if (all_routed)
+    if (direct_layout)
         std::printf("  (MMQ's products alone, no gathers: %.3f ms - fused %.2fx)\n", td[td.size() / 2],
                     td[td.size() / 2] / t_f);
     std::vector<float> tf2;   // back to back
@@ -539,9 +568,9 @@ void timing_part(const Pair& p, int T, cudaStream_t s) {
     }
     const Err efm = mq ? compare(y_f, [&](size_t i) { return (int64_t) slot[i]; }, y_mmq,
                                  [&](size_t i) { return (int64_t) r.row_of[i]; }, (size_t) rows) : Err{};
-    std::printf("%s - timing part: %d tokens x top %d over %d experts, one layer: MMQ path %.3f ms, fused %.3f ms "
-                "(%.2fx); fused vs MMQ rel RMS %.3e worst row %.3e\n",
-                p.name, T, K, E, t_mmq, t_f, t_mmq / t_f, efm.rms, efm.worst);
+    std::printf("%s - timing part: %d tokens x top %d over %d experts (%zu routed, %zu groups), one layer: MMQ path "
+                "%.3f ms, fused %.3f ms (%.2fx); fused vs MMQ rel RMS %.3e worst row %.3e\n",
+                p.name, T, K, E, n_order, n_groups, t_mmq, t_f, t_mmq / t_f, efm.rms, efm.worst);
     {   // the grouping: every pair in its expert's rows (the near-identical blobs here would hide a wrong expert)
         const std::vector<int32_t> fsrc = download_i(fb.src, (size_t) rows);
         int64_t bad = 0, bad_src = 0;

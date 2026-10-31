@@ -1,13 +1,13 @@
 # 工作队列
 
 > 这是候选组合，不是执行顺序。AI 每轮根据 `ROADMAP.md` 的收益、置信度、信息量、成本和风险重新选择。
-> 状态：`待做` / `进行中` / `已完成` / `否决` / `搁置`。AI 可以新增、合并、搁置或重新排序候选，
+> 状态：`待做` / `进行中` / `已完成` / `否决` / `搁置` / `暂停`。AI 可以新增、合并、搁置或重新排序候选，
 > 但必须记录理由，不能篡改已有验收证据。
 > `未完成采纳项` 由预检与表格自动核对；已完成和否决项不再占据当前队列。
 
 ## 当前决策前沿
 
-0. **全局目标已第二十次修订**：优化真实 AI vibe coding 的任务墙钟、首个可执行结果、
+0. **全局目标已第二十三次修订并暂停**：优化真实 AI vibe coding 的任务墙钟、首个可执行结果、
    严重尾部和成功率；没有进入用户实际路径的能力只算机制收益。普通热续轮固定成本项
    `AGENT-HOT-TURN-FIXED-COST` 已否决：`short_read=0` 在所有热续轮尺寸都未取得
    1% 收益，1 路短热续 prompt/wall 反而慢 `13.75%/8.14%`，因此保留默认 64，
@@ -204,7 +204,7 @@
 | AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT | 判断能否只预取本 chunk 实际选中专家 | 只读源码/日志；证明 routing 在 copy 前何时可用、当前 lookahead 的等待来源、最坏路由密度和额外 bookkeeping；据 596/94K 给出 wall >=1% 且绝对 >=0.05 s 的整请求保守上界；说明 bitwise/数值影响、生产命中率与 env 回滚 | 已完成 | 每层 router 完成后才建 routed order；staged 路径已经只拷贝本层选中非驻留专家；后续层 routing 依赖当前层输出。554 x top-10 有 `5,540` 个 pairs、每层 512 专家 | **跨层推测预取关闭**；当前真实可动项是 grouped staged lookahead 默认 8、安全上限 15，转下一项；未重启 |
 | AGENT-HOT-TURN-STAGED-PREFETCH | 把 grouped staged expert lookahead 从 8 提到安全上限 15 | 默认 8 不变；B 只加 `STRATA_PREFILL_STAGED_AHEAD=15`；实际 env、6/2、health、greedy/smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3%；1 路通过后报告 2 路第二 TTFT/跨度，4 路非回退，6/8 安全 | 否决 | L-156：路径、质量、健康、资源全过；596 wall `1.510583→1.505333 s`，改善 `0.3475%`、绝对 `5.25 ms`；prompt `1384.3→1392.6 ms`，慢 `0.5996%` | 双门未过；按停止门未跑 94K/并发；A2 已恢复；不扫邻近深度、stager thread/batch/ring 或 stream threshold |
 | AGENT-HOT-TURN-DEQUANT-AUDIT | 判断 stage 2 的 `dequant 106 ms` 是否能消除重复工作 | 只读追踪 production native IQ3_XXS 554-token grouped staged path；明确同一 expert/layout 是否跨 stage、gather 或 kernel 重复转换、真实命中率和生产可达性；单一可移除部分须给整请求 wall >=1% 且绝对 >=0.05 s 保守上界、数值/回滚边界 | 否决 | L-157：该 phase 实为 native `gather_native_group` 字节搬运，不是 FP16 反量化；每层 order 只含唯一 selected expert，每 16 个一次 gather；stage 1/2 不同层，staged/streamed/fused/peer 互斥，未发现同一 expert/layout 重复转换；MMQ 固定 stride 不能直接读任意 cache slot | 重复工作假设关闭；不构建、不重启，不扫 dequant/group/profiler 参数；转 AGENT-HOT-TURN-RESIDENT-PATH-AUDIT |
-| AGENT-HOT-TURN-RESIDENT-PATH-AUDIT | 判断 resident expert 能否用已有 direct-pointer/fused 路径绕开 MMQ gather | 只读/GPU 小组预筛；group 级比较 gather+MMQ 与 `fused::experts_native`；统计 554-token routing 每层唯一 expert、group 和 resident/staged；只有真实比例的 wall 保守上界 >=1% 且绝对 >=0.05 s、数值/finish/工具语义和资源门成立才预注册实现；不改生产、不重启 | 进行中 | L-157：stage 1/2 gather 合计约 `183 ms`；hot-long cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`，但 resident slot 仍需转成 MMQ 连续 gate/up/down 布局 | 当前入口；先解决 full-layer harness OOM，只测 group 级；若 raw kernel 或数值门失败即关闭，不扫 group/dequant 参数 |
+| AGENT-HOT-TURN-RESIDENT-PATH-AUDIT | 判断 resident expert 能否用已有 direct-pointer/fused 路径绕开 MMQ gather | group 级/端到端；真实路径命中、greedy/finish 全过，596/94K 不反向；原契约要求至少一个 wall `>=1%` 且绝对 `>=0.05 s`，1 路通过后补 4/6/8 | 暂停，未采纳 | L-158：group 级 MMQ/direct 为 `11.671/7.848 ms/layer`（`1.49x`）；596 1 路 wall 相对 A1/A2 为 `-1.862%`（相对 A1 `-2.145%`、`-32.667 ms`），3/3 胜；2 路 hot-long `+0.705%`；94K wall `1.438884→1.401311 s` 但 prompt `1251.5→1251.2 ms`；A1/B/A2 固定 greedy 全等 | 用户“1% 多也算”认可正向价值，但绝对 `0.05 s` 未过，94K 不能归因；4 路 A2 被用户暂停，6/8 未跑。候选默认关闭，生产已恢复 A1；恢复后先做逐层覆盖/fallback 审计 |
 | AGENT-HISTORY-STATE-RESIDENCY | 跨进程恢复隔天旧会话，避免 113 秒冷 prefill | 先只读证明多 stage KV/checkpoint 可序列化；测 223K 状态大小、写放大、恢复时间和 RAM 峰值；真实旧会话等待至少减少 1% 且保存成本不转移到每轮；有指纹、失效、安全删除和精确回滚 | 搁置 | 真实 223K resume `113.014 s`；当前 session file 明确拒绝 `--layer-split`、`--peer-device`、`--batch`、`--prompt-cache 0`，不能直接用于双卡六槽生产 | **低频 p99**；34 个有效会话仅 1 个超过 24h；普通热续轮、首工具/首修改和重复测试优先；不实现、不重启 |
 | AGENT-REAL-DECODE-SHAPE | 按真实形状拆模型 decode 成本 | 只读汇总 output/reasoning 尺寸、请求类型、1/2 路并发和模型区间；不改服务、不输出正文；至少重放三种真实尺寸；只有真实触发率后的整任务 >=1% 上界才预注册一个机制 | 已完成 | 35 文件、152 root、14,768 请求；output/reasoning `10,343,967/3,347,547` token；单路模型 union `69,064.894 s`、两路 `171.303 s`；416/1490/4483 单路 `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s`；4483 出现提前 `stop` | **诊断完成，长输出稳定性未完全过门**；现役配置同时开着 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`，生产仪器开销成为下一项 |
 | AGENT-PROFILE-HYGIENE | 移除生产 decode 计时与 GPU 剖析器 | 当前 B4 形状 A1-B-A2-B2；B 只移除 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`；416/1490/4483 各 3 波；至少一个主要尺寸中位改善 >=1%，4483 不回退 >1%，A2 漂移 <=3%，finish/hash/health/6 slots 全过；失败精确恢复 | 已完成 | 416/1490/4483 A adjacent median `4.188/14.395/42.322 s`，B `3.911/13.620/37.230 s`；416/1490 改善 `6.61%/5.38%`，A2 漂移 `-2.45%/+0.66%`；4483 漂移 `-13.77%` 不用于加速归因 | **已采纳并留在生产**；B2 engine env 无两个 profiling 变量，health loaded、6 slots、64-token smoke 过；4483 在 B/A2 都有提前 `stop`，独立保留 |
@@ -239,7 +239,7 @@
 | UTIL-BATCH-GROUP-FIT | 隔离 2 路吞吐凹点的 1-vs-2 group 调度成本 | A 补 8 路；B 只把 groups 2→1；先过相同两次 greedy parity，再同测 2/4/6/8 路并恢复 A4；2 路 +≥1% 且 5/6 胜，4/6/8 不退>1%，零请求/资源错误 | 否决 | L-107：A3 `2/4/6/8=81.0/116.1/133.2/104.4 tok/s`；B 正常 loaded 且两次一致，但自然语言 94-token `stop` 对 A 96-token `length` | parity 失败，未跑吞吐；只改 group 数也会改变数值路径，不扫其他固定组数 |
 | UTIL-EXPDEC-GU | 验证 mode-8 gate/up 的 EXPDEC opt-in 接管 | 启动前证明两张卡 gate/up 均可到 `expdec_gu_kernel` 且 down 保持默认；通过后 6/2、正确 hash、parity 逐字相等，再测 2/4/6/8 路且 1% 门与资源/请求 hard gate 全过 | 否决 | L-108：进程/config 为 mode 8，fused/LDS 先完成 gate/up，down 分支直接 return；EXPDEC 调用不可达 | 启动前否决；未重启、未跑 parity/吞吐 |
 | UTIL-SLOT-CKPT-MOVE | 准入 checkpoint 从复制改为移动 | A 深拷贝且只加 `STRATA_SLOT_CKPT_MOVE=1`；6 slots / 2 groups、hash/health/资源正确；三组 greedy 两次逐字等于 A；A3-B-A4 的 2/4/6/8 路至少一级 ≥1% 且 5/6 胜，其他级不回退 >1%，零错误/外来请求 | 否决 | L-109：parity 全过；2/4 名义 `+3.099%/+2.259%`、胜 4/6 与 3/6，6 `+0.122%`，8 `-3.014%`、胜 2/6；A 漂移最大 8.944% | 不扫 checkpoint/cache/copy 邻近设置 |
-| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 进行中 | L-092/L-107/L-109/L-110/L-111：8 路尾部来自六槽轮换后的 underfilled groups；GDN/checkpoint 合并没有改善 | 不再扫 launch 聚合；转 vocab-row head split |
+| UTIL-MULTI | 2/8 路吞吐凹点 | 2 路聚合不得低于单路；8 路相对 6 路不退且 TTFT 有明确上界；同时记录 ITL 与每路吞吐 | 搁置（暂停） | L-092/L-107/L-109/L-110/L-111：8 路尾部来自六槽轮换后的 underfilled groups；GDN/checkpoint 合并没有改善，后续 head 方向也已否决 | 已拆成后续实验并收口；当前不运行，恢复时按新计划重新评估 |
 | UTIL-WINDOW-PROFILE | 拆当前 2/4/6/8 路窗口 | 同 boot 记录 active rows、stage hand-off、KV resolve、slot turnover 与 ITL；至少两项指标能区分 6 路峰值和 8 路尾部，并据此预注册一个不同机制候选 | 已完成 | L-111：occupancy `5.010`、tail `1.1349`、max wait `12,596 ms`；active rows/window `2.6837` 对 `2.9515`；padding/KV resolve 否决 | 只开现有 profiler/telemetry；PSTAT 未交付 |
 | UTIL-BATCH-HEAD | 合并两个 ready pipeline group 的 final-stage head rows | 源码门先证明 row ownership/order/一次额外 sync；GPU harness 的 logits、greedy、fixed-seed、state 全部 bitwise；A1-B-A2 的 2/4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不退 >1%，漂移 ≤3%、零错误/外来请求 | 否决 | L-112：末级 group 严格串行；等齐两组会阻塞同组下一窗口 16.9–19.2 ms，远大于 head 1.04 ms | 未构建、未重启；不重试延迟 verdict 的同形设计 |
 | UTIL-HEAD-SPLIT | 两张卡并发计算 output projection 的两个 vocabulary 区间 | 无损拆分；半区 logits 与 full call `memcmp` 相等，greedy/fixed-seed/counter 不变；并发临界路径投影端到端 ≥1%；接 server 后 A1-B-A2 过 2/4/6/8 门 | 否决 | L-113/L-114：harness 与 server 正确性全过；A1-B-A2 的 2/4/6/8 路 `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 回退超门 | 默认保持完整 head；不重试同一 peer graph 编排 |
@@ -276,7 +276,7 @@
 | F1F2 | 多路准入判据 | 由 S0b/S2 的证据决定可接受上界；不允许首 token 后静默数十秒 | 待做 | R11 旧提案 | AI 根据测量裁决，不等待用户 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀；有测试 | 待做 | | |
 
-未完成采纳项：20
+未完成采纳项：19
 
 ## 搁置
 

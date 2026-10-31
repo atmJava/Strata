@@ -3507,6 +3507,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         return false;
                     }
                     size_t n_order = 0;                   // the routed experts (the debug report; unknown when fused)
+                    bool fused_staged = false;             // this layer took the opt-in native staged-direct path
                     bool peer_now = false;                // multi-GPU: the peer computed rows of this layer (MMQ path only)
                     // set_cpu_pool: this layer's CPU experts (rows [T * K - rows_cpu, T * K) of Dm), computed on a thread
                     // that reads on_cpu: declared first, so the future (which waits for the thread) goes first
@@ -3840,6 +3841,22 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             }
                         }
                         n_order = order.size();
+                        // Short staged chunks can already hold all their non-resident experts in the existing
+                        // 32-slot staged ring.  The opt-in native branch below then hands each expert's cache or ring
+                        // pointer straight to the fused kernel instead of first gathering 16-expert MMQ groups.
+                        static const bool fused_staged_requested = [] {
+                            const char* v = std::getenv("STRATA_PREFILL_FUSED_STAGED");
+                            return v != nullptr && v[0] == '1';
+                        }();
+                        size_t fused_staged_misses = 0;
+                        if (fused_staged_requested && use_mmq && lay.native && fused::native_supported(mmq_gt, mmq_dt) &&
+                            m.pp == nullptr && on_cpu.empty() && on_peer.empty() && !sort_all && !sort_full) {
+                            for (const int32_t e : order)
+                                if (!(m.host_res && m.cache &&
+                                      m.host_res[(size_t) l * m.g->n_expert + e] >= 0))
+                                    ++fused_staged_misses;
+                            fused_staged = fused_staged_misses <= (size_t) STAGE_GRP;
+                        }
                         // set_cpu_pool: the CPU's experts on a thread while this one streams and runs the GPU's; their
                         // unweighted rows land in Dm's row order, so the combine weights them as any other row
                         if (rows_cpu > 0) {
@@ -3904,7 +3921,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         pt.mark(kPfGather, cs);
                         // the routed experts' input
                         const float* xsrc = m.mixed;
-                        if (use_mmq) {
+                        if (fused_staged) {
+                            fused::quantize_act_native(xsrc, T, N, m.Xq, m.cs);
+                            fused::group(m.ids, T * K, (int) K, (int) m.g->n_expert, m.GU, m.slot_dev, m.src_dev, m.cs);
+                        } else if (use_mmq) {
                             // step 2b: the layer's activations as q8_1 rows in expert order, straight from `mixed`:
                             // each token quantized once and written to its K rows
                             // (slot_dev, the inverse of src_dev).
@@ -4227,16 +4247,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             const char* v = std::getenv("STRATA_PREFILL_GROUP_GATHER");
                             return v == nullptr || std::atoi(v) != 0;
                         }();
-                        const bool group_gather = group_env && stream_all && use_mmq && lay.native &&
+                        const bool group_gather = group_env && stream_all && use_mmq && !fused_staged && lay.native &&
                                                   MMQ_GROUP <= mmq::kGatherGroupMax;
                         // The staged walk (a short prompt) groups too, resident and staged experts alike: its ring is
                         // then STAGE_GRP slots, two groups, and it stages no further ahead than the open group allows,
                         // so a group's staged slots stay unread-over until its flush (one wait on the last copy, one
                         // event releasing them all, as in the streamed walk).
-                        const bool group_resident = group_env && !stream_all && use_mmq && lay.native &&
+                        const bool group_resident = group_env && !stream_all && use_mmq && !fused_staged && lay.native &&
                                                     MMQ_GROUP <= mmq::kGatherGroupMax;
                         const bool gg_now = group_gather || group_resident;
-                        const int stage_n = group_resident ? STAGE_GRP : STAGE;
+                        const int stage_n = fused_staged || group_resident ? STAGE_GRP : STAGE;
                         // Stage ahead: the copy stream moves blobs host -> device while the compute stream works.
                         int stage_next = 0;
                         std::vector<int> stage_of(order.size(), -1);
@@ -4399,31 +4419,92 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             return true;
                         };
                         if (!stream_all) {
-                            size_t staged = 0;
-                            size_t pending = 0;
-                            const bool stream_ahead = stream_ahead_enabled();
-                            const size_t ahead = group_resident ? staged_ahead_limit() : (size_t) STAGE;
-                            const size_t lookahead = group_resident ? (size_t) (STAGE_GRP - MMQ_GROUP - 1) : STAGE - 1;
-                            for (size_t j = 0; j < order.size(); ++j) {
-                                // Resident experts occupy no staging slot. Keep `ahead` actual transfers ahead,
-                                // rather than a count of positions in the mixed resident/streamed order.
-                                while (staged < order.size() && (stream_ahead ? pending < ahead : staged <= j + lookahead)) {
-                                    if (!stage_one(staged)) return false;
-                                    if (stage_of[staged] >= 0) ++pending;
-                                    ++staged;
+                            if (fused_staged) {
+                                int last_stage = -1;
+                                for (size_t j = 0; j < order.size(); ++j) {
+                                    if (stage_of[j] >= 0) continue;
+                                    if (!stage_one(j)) return false;
+                                    if (stage_of[j] >= 0) last_stage = stage_of[j];
                                 }
-                                const int32_t e = order[j];
-                                if (stage_of[j] < 0) {
-                                    ++stats_.experts_resident;
-                                    if (!compute(j, m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]), -1))
-                                        return false;
-                                } else {
-                                    if (!group_resident) {   // grouped: the flush waits once, on the group's last copy
-                                        pt.mark(kPfWaitCopy, cs);
-                                        cudaStreamWaitEvent(m.cs, m.copied[stage_of[j]], 0);
+                                if (last_stage >= 0) {
+                                    pt.mark(kPfWaitCopy, cs);
+                                    cudaStreamWaitEvent(m.cs, m.copied[last_stage], 0);
+                                }
+                                pt.mark(kPfDequant, cs);
+                                const auto& f = lay.fmt[(size_t) l];
+                                const fused::NativeGeom ng{f.gu_type, f.d_type, f.gu_row, f.d_row, f.up_off, f.down_off};
+                                int used_stages[STAGE_GRP];
+                                int n_used_stages = 0;
+                                size_t j0 = 0;
+                                for (int32_t e0 = 0; e0 < m.g->n_expert; e0 += fused::kMaxBatch) {
+                                    const int32_t e1 = (int32_t) std::min<int64_t>(m.g->n_expert, e0 + fused::kMaxBatch);
+                                    while (j0 < order.size() && order[j0] < e0) ++j0;
+                                    size_t j1 = j0;
+                                    while (j1 < order.size() && order[j1] < e1) ++j1;
+                                    if (j1 == j0) continue;
+                                    fused::Batch b;
+                                    b.e0 = e0;
+                                    b.e1 = e1;
+                                    for (size_t j = j0; j < j1; ++j) {
+                                        const int32_t e = order[j];
+                                        if (stage_of[j] >= 0) {
+                                            b.blob[e - e0] = m.stage_dev[stage_of[j]];
+                                            used_stages[n_used_stages++] = stage_of[j];
+                                        } else {
+                                            b.blob[e - e0] =
+                                                m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]);
+                                            ++stats_.experts_resident;
+                                        }
                                     }
-                                    if (!compute(j, m.stage_dev[stage_of[j]], stage_of[j])) return false;
-                                    --pending;   // compute recorded the slot's release event before any reuse
+                                    pt.mark(kPfGemmGU, cs);
+                                    fused::experts_native(b, ng, (int) m.g->n_expert, T * K, m.GU, m.Xq, m.src_dev, m.H,
+                                                          m.Dm, m.cs);
+                                    pt.mark(kPfGemmD, cs);
+                                    j0 = j1;
+                                }
+                                if (n_used_stages > 0) {
+                                    const int rel = used_stages[n_used_stages - 1];
+                                    cudaEventRecord(m.used[rel], m.cs);
+                                    for (int i = 0; i < n_used_stages; ++i) m.used_of[used_stages[i]] = rel;
+                                }
+                                if (static bool said = false; !said) {
+                                    said = true;
+                                    std::fprintf(stderr,
+                                                 "strata: prompt staged experts on the native fused path "
+                                                 "(STRATA_PREFILL_FUSED_STAGED=1): %zu routed, %zu staged\n",
+                                                 n_order, fused_staged_misses);
+                                }
+                            } else {
+                                size_t staged = 0;
+                                size_t pending = 0;
+                                const bool stream_ahead = stream_ahead_enabled();
+                                const size_t ahead = group_resident ? staged_ahead_limit() : (size_t) STAGE;
+                                const size_t lookahead = group_resident ? (size_t) (STAGE_GRP - MMQ_GROUP - 1) : STAGE - 1;
+                                for (size_t j = 0; j < order.size(); ++j) {
+                                    // Resident experts occupy no staging slot. Keep `ahead` actual transfers ahead,
+                                    // rather than a count of positions in the mixed resident/streamed order.
+                                    while (staged < order.size() &&
+                                           (stream_ahead ? pending < ahead : staged <= j + lookahead)) {
+                                        if (!stage_one(staged)) return false;
+                                        if (stage_of[staged] >= 0) ++pending;
+                                        ++staged;
+                                    }
+                                    const int32_t e = order[j];
+                                    if (stage_of[j] < 0) {
+                                        ++stats_.experts_resident;
+                                        if (!compute(j,
+                                                     m.cache->device_slot(
+                                                         m.host_res[(size_t) l * m.g->n_expert + e]),
+                                                     -1))
+                                            return false;
+                                    } else {
+                                        if (!group_resident) {   // grouped: the flush waits once, on the group's last copy
+                                            pt.mark(kPfWaitCopy, cs);
+                                            cudaStreamWaitEvent(m.cs, m.copied[stage_of[j]], 0);
+                                        }
+                                        if (!compute(j, m.stage_dev[stage_of[j]], stage_of[j])) return false;
+                                        --pending;   // compute recorded the slot's release event before any reuse
+                                    }
                                 }
                             }
                         } else {
@@ -4515,9 +4596,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // (fused: GU and H hold the grouping tables and int8 rows, not floats)
                         // (the CPU's rows, the last rows_cpu of GU and H, are never written by the GPU: not checked)
                         const int64_t gpu_rows = T * K - rows_cpu;
-                        const int64_t bgu = fused_l ? 0 : bad(m.GU, gpu_rows * 1280), bdm = bad(m.Dm, T * K * N),
+                        const int64_t bgu = (fused_l || fused_staged) ? 0 : bad(m.GU, gpu_rows * 1280),
+                                      bdm = bad(m.Dm, T * K * N),
                                       bbo = bad(m.bo, T * N);
-                        const int64_t bh = m.H && !fused_l ? bad(m.H, gpu_rows * 640) : -1;
+                        const int64_t bh = m.H && !(fused_l || fused_staged) ? bad(m.H, gpu_rows * 640) : -1;
                         static int64_t reported = -1;
                         if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks) {
                             reported = stats_.chunks;

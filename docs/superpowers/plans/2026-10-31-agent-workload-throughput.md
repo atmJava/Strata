@@ -2,7 +2,8 @@
 
 日期：2026-10-31
 
-状态：第二十二次评审后修订，可以继续执行。
+状态：第二十三次修订后暂停。用户于 2026-10-31 要求保留进度并暂停优化；恢复前不启动
+新候选、不重启服务做实验、不继续未完成的并发矩阵。
 
 ## 全局目标
 
@@ -12,9 +13,15 @@
 每轮必须先用真实触发率和绝对秒数证明收益，不能把局部 kernel 改善或 token/s 当作结果。
 当前 frontier 已从“猜相邻 kernel”收窄到 596/94K 普通热续轮中反复出现的 expert
 布局/传输成本。`wait copy`、lookahead 与“重复 dequant”三条假设已经分别被实测或
-源码审计否决；下一步只审计 resident expert 能否通过已有 direct-pointer/fused 路径
-绕开 MMQ gather。任何候选仍须先证明生产 routing 的真实触发率和保守整任务上界，再
-决定是否改源码或重启。
+源码审计否决。resident direct-pointer 候选在 group 级达到 `1.49x`，端到端 596 的
+1 路 wall 改善 `1.862%`（相对 A1 为 `2.145%`、`32.667 ms`）且三波全胜；这符合用户
+“1% 多也算”的价值原则，但仍未过本项预注册的绝对 `0.05 s` 门，94K wall 差值也没有
+对应 prompt 改善，4/6/8 未完成。因此只保留为暂停中的未采纳候选，不把 `1.86%`
+写成完整验收，也不放宽质量或非回退门。
+
+恢复执行时，最高优先级不是重跑同形 A-B-A，而是先统计 48 层中实际进入 direct path
+的层数和 fallback 原因，解释为什么端到端 `1.86%` 远低于 group 级 `12.1%` 乐观
+上界。只有覆盖缺口给出新的整请求 `>=1%` 保守收益，才补 4/6/8 门；否则关闭该路线。
 
 优先级按用户实际感受到的结果排列：
 
@@ -344,7 +351,7 @@ gate/up/down 布局，`Product` 只有固定 stride、没有 per-expert 指针�
 见
 [`AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
 
-### P2j：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`（当前，只读预筛）
+### P2j：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`（暂停验收，未采纳）
 
 上面虽关闭“重复转换”，但 phase map 仍证明 stage 1/2 合计约 `183 ms` 花在
 gather；同时 hot-long expert-cache hit 为 596 约 `95.1–98.1%`、94K 约
@@ -366,6 +373,19 @@ gather；同时 hot-long expert-cache hit 为 596 约 `95.1–98.1%`、94K 约
 `>=0.05 s`，才预注册端到端实现候选。若 direct path 本身不更快或数值门不成立，关闭
 resident-gather 方向，不再改 group/dequant 参数，转向 `wait copy` 的宿主读取结构或其他
 有独立证据的主相位。该审计不改生产、不重启。
+
+后续实测：group 级 `512 experts / 32 groups` 的 MMQ 为 `11.671 ms/layer`，
+direct-pointer fused 为 `7.848 ms/layer`，`1.49x`，48 层乐观上界 `183.5 ms`；
+rel RMS `2.020e-4`、worst row `3.096e-3`。596 的 A1/B/A2 1 路 wall 为
+`1.522684/1.490017/1.513878 s`，B 相对合并基线改善 `1.862%`，相对 A1 改善
+`2.145%`、绝对 `32.667 ms`，三波全胜。2 路 hot-long 为 `+0.705%`、2/3 胜；
+2 路 hot-short 控制项 prompt 为 `-1.304%`。94K B/A2 wall 为
+`1.401311/1.438884 s`，但 prompt 为 `1251.2/1251.5 ms`，不能把 wall 差归给
+prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零错误、零外来请求。
+
+判决：机制方向为正，但按预注册绝对门未完整通过与；4 路 A2 在用户暂停时中止，没有
+结果文件，6/8 未运行。候选保持默认关闭并从未进入生产 env。完整结果见
+[`AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -427,6 +447,10 @@ resident-gather 方向，不再改 group/dequant 参数，转向 `wait copy` 的
 
 ## 当前断点
 
+**2026-10-31 暂停。** 用户要求保留计划进度、更新文档并停止优化。已停止进行中的 4 路
+基线，移除 A2 候选进程并恢复 A1 原始 config/engine；没有启动新目标。恢复时从
+`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的覆盖审计开始，不重跑已完成的同形三臂测量。
+
 `AGENT-CONTEXT-DIET-REAL-YIELD` 已否决产品化；`AGENT-HISTORY-STATE-RESIDENCY` 降为
 低频 p99 可行性项。
 
@@ -449,6 +473,6 @@ grouped staged walk 的实际传输在前数从 8 提到安全上限 15，但 59
 `0.3475%`、绝对 `5.25 ms`，prompt 反慢 `0.5996%`，因此否决并关闭该参数轴。当前生产已
 恢复 A2。`AGENT-HOT-TURN-DEQUANT-AUDIT` 随后确认该 phase 实际是 native group gather，
 每层只处理唯一 selected experts，没有同一 expert/layout 的重复转换；MMQ 固定 stride
-要求使 resident cache slot 不能直接替代组 buffer。该重复工作假设否决；当前转为只读
-`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`，用 group 级 harness 验证已有 direct-pointer/fused
-路径能否绕开 resident gather，并在 `>=1%`、`>=0.05 s` 上界和数值门成立前不改源码、不重启。
+要求使 resident cache slot 不能直接替代组 buffer。resident direct-path 随后在 group
+级和 596 端到端取得真实正向信号，但因绝对门与并发安全门未完整通过，按用户要求暂停，
+保持默认关闭。当前没有运行中的优化实验。

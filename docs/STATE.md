@@ -7,11 +7,14 @@
 - 全局目标：针对真实 AI vibe coding 负载，同时缩短任务完成时间、首个可执行结果时间和
   严重尾部，并保持工具调用、代码修改、测试结果和任务成功率正确。通常 1 个主代理、偶尔
   2 个、峰值 1 主 3 子代理；1/2 路是主优化目标，4 路非回退，6/8 只做安全回归。
+- **当前暂停**：用户于 2026-10-31 要求保留计划进度、更新文档并暂停优化。当前没有
+  运行中的压测或优化实验；除非用户明确恢复，不启动新候选、不重跑挂起的 4 路矩阵。
+- 当前项：AGENT-HOT-TURN-RESIDENT-PATH-AUDIT（暂停验收，未采纳）
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第二十二次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
+  已完成第二十三次修订并暂停。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
   单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。没有接入用户实际路径的能力
   只算机制收益，不能写成体验已改善；重启成本必须计入当轮。
-  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第二十二版更新后仍受旧 unfinished goal
+  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第二十三版更新后仍受旧 unfinished goal
   限制，当前工具不能改写目标文本或恢复它。本仓库计划是当前执行的权威目标，不能把平台
   旧目标当作已更新。
 - 当前阶段：真实 Agent 请求级优化已采纳 title、线程级 compaction LRU（在对应测试请求
@@ -127,12 +130,14 @@
   slot 仍须转成 MMQ 固定-stride 连续布局，不能安全直接删除。未构建、未重启，不扫
   dequant/group/profiler 参数。见
   [result](work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
-- 当前项：AGENT-HOT-TURN-RESIDENT-PATH-AUDIT（只读/GPU 小组预筛）。stage 1/2
-  gather 合计约 `183 ms`，hot-long cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`；
-  审计已有 `fused::experts_native` direct-pointer 机制是否能绕开 resident gather。先做
-  group 级比较并统计每层唯一 expert/group/resident 比例；只有真实比例的 wall 保守上界
-  `>=1%` 且绝对 `>=0.05 s`、数值和资源门成立才预注册实现。不改生产、不重启，不扫
-  group/dequant 参数。
+- 暂停项：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`。group 级 native direct-pointer 为
+  `7.848 ms/layer` 对 MMQ `11.671 ms/layer`（`1.49x`），48 层乐观上界 `183.5 ms`。
+  596 fresh 的 1 路 A1/B/A2 wall 为 `1.522684/1.490017/1.513878 s`；B 相对合并基线
+  改善 `1.862%`，相对 A1 改善 `2.145%`、`32.667 ms`，三波全胜。按用户“1% 多也算”
+  这是正向信号，但未过原契约绝对 `0.05 s` 门。94K wall 名义改善但 prompt 持平，不能
+  归因给 prefill；4 路 A2 被暂停，6/8 未跑。候选默认关闭、未采纳，恢复后先审计逐层
+  覆盖/fallback。见
+  [result](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
 - 降级项：`AGENT-HISTORY-STATE-RESIDENCY` 仍保留为低频 p99 可行性。34 个有效会话只有
   1 个超过 24 小时间隔、2 个超过 12 小时，不得排在普通热续轮之前；检查双卡 layer split、
   六 batch slots、prompt cache 下多 stage 状态格式、223K 容量、恢复时间、写放大、
@@ -147,12 +152,12 @@
   上三次真实 Codex compaction 已复用约 `99.1%`，不能再写成 Strata 缺陷。精确 pin
   可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
   中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
-- 当前运行：server/vision/engine `169846/169849/169854`。server cwd 为
+- 当前运行：server/vision/engine `172634/172636/172641`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`，cwd 为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z`。监听 `127.0.0.1:8080`；
   engine `105a4171...` 未重建，config `6ece1a13...`，server `10bd8318...`，health loaded、
-  262144 context、6 slots / 2 groups；实际核对到 `--ple-inflight 1024`、
+  262144 context、6 slots / 2 groups、expert slots `17274`；实际核对到 `--ple-inflight 1024`、
   `STRATA_BATCH_SERIAL_TWO=1`、
   `STRATA_ADMIT_MERGE_FIRST=1` 和 `STRATA_PIPE_BYIELD_NODRAIN=1`；engine env 不含
   `STRATA_DECODE_TIMING`/`STRATA_VERIFY_PROFILE`。
@@ -343,7 +348,7 @@
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
   已重写和评审，按请求级缓存、排队和工具路径优先，不再从低收益局部内核开始。
-- 未完成采纳项：20
+- 未完成采纳项：19
 - 阻塞：服务器已恢复到双卡可用，当前无基础设施阻塞。DFlash2 drafter 权重仍缺失；代码、
   服务接线和工具已保留，该路线不阻塞主线。
 
@@ -556,5 +561,6 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-31T17:10+08:00（第九版真实 Agent 计划通过评审；真实 decode
-  形状完成；发现生产仍启用 decode/GPU 剖析器；当前执行现役 profiling A-B-A；本轮尚未重启）
+- 最后更新：2026-11-01（第二十三版计划；resident direct path 取得 596 1 路
+  `1.862%` 正向信号，未过绝对 `0.05 s` 门且 4/6/8 未完成；按用户要求暂停并恢复
+  A1 生产，health loaded、6 slots / 2 groups、systemd inactive）

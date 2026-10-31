@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T23:59+08:00（DEQUANT_AUDIT 判决后）。
+> 整理时间：2026-11-01（RESIDENT_PATH 暂停后）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -16,16 +16,25 @@
 
 ## 2. 当前断点
 
-- **全局目标已第二十二次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
+- **全局目标已第二十三次修订并暂停**：用户于 2026-10-31 明确要求保留进度、更新文档并
+  暂停优化。当前没有运行中的实验或优化目标；恢复时必须由用户明确要求。全局价值仍是
+  优先优化普通单代理编辑—测试循环中的模型请求
   等待，再处理首工具/首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
   触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
   可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十二版更新后接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十二版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十三版更新后接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十三版计划
   为权威，不要回到平台旧目标的状态快照。
+- **暂停前的最后候选**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的 native
+  direct-pointer 路径真实命中，group 级 `11.671 → 7.848 ms/layer`（`1.49x`）。
+  596 fresh、1 路 wall 相对 A1/A2 合并基线改善 `1.862%`，相对 A1 改善 `2.145%`、
+  `32.667 ms`，三波全胜；这符合用户“1% 多也算”的原则，但未过预注册的绝对
+  `0.05 s` 门。94K wall 名义改善 `2.612%` 但 prompt 基本不变，不能归因给 prefill；
+  4 路 A2 在约 `1:44` 后被用户暂停，没有结果，6/8 未跑。候选保持默认关闭，未采纳。
+  见 [result](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
   `handoff_safe=1`，DKMS 与 initramfs 自动路径固定，功耗墙各为 `280 W`。当前慢不是
@@ -163,12 +172,11 @@
   未发现同一 expert/layout 重复转换。resident slot 仍需转成 MMQ 固定-stride 连续布局。
   未构建、未重启。见
   [result](work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
-- **当前状态与下一动作**：只读/GPU 小组预筛
-  `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`。stage 1/2 gather 合计约 `183 ms`；hot-long
-  cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`。先在 group 级比较
-  `gather+MMQ` 与已有 `fused::experts_native` direct-pointer，并统计每层唯一
-  expert/group/resident 比例；只有真实比例的 wall 保守上界 `>=1%` 且绝对 `>=0.05 s`、
-  数值和资源门成立才预注册实现。不改生产、不重启，不扫 group/dequant 参数。
+- **暂停项与下一动作**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 已完成 group 级和
+  1/2 路测量，但按原契约未完整通过：596 的 1 路 B 相对 A1/A2 改善 `1.862%`，
+  绝对 `32.667 ms`，3/3 胜；94K wall 差没有对应 prompt 改善；4 路 A2 在用户暂停时
+  中止，6/8 未跑。候选默认关闭、未采纳。用户恢复后先审计 48 层 direct-path
+  覆盖与 fallback 原因，不重跑已完成的三臂。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说

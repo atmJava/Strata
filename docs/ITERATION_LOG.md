@@ -3,6 +3,33 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-129 · resident direct path 有 1.86% 信号；用户要求暂停并保留进度
+
+- 目标 / 指标：验证 resident direct-pointer/fused 能否绕开 MMQ group gather，并至少
+  在真实 596/94K 热长轮上取得用户可感知收益。
+- 假设与预期：大部分专家已在 VRAM，直接 pointer 可删除每层 gather；group 级上限为
+  `183.5 ms`。按用户 1% 价值原则，即使绝对节省不到 50 ms 也应保留正向候选。
+- 改动与实验：在短 staged chunk 增加默认关闭的 native direct path；group 级保留
+  512-expert 生产 routing；随后跑 A1/B/A2 596、A2 94K 和三组固定 greedy。
+- 结果：group 级 MMQ/direct 为 `11.671/7.848 ms/layer`（`1.49x`）。596 1 路
+  A1/B/A2 wall 为 `1.522684/1.490017/1.513878 s`，B 相对合并基线改善 `1.862%`，
+  相对 A1 改善 `2.145%`、`32.667 ms`，3/3 胜；2 路 hot-long `+0.705%`、2/3 胜。
+  94K B/A2 wall 为 `1.401311/1.438884 s`，但 prompt `1251.2/1251.5 ms`，
+  不能把 wall 差归因给 prefill。A1/B/A2 固定 greedy 全等。
+- 判决：正向机制信号，但原契约绝对 `0.05 s` 门未过，94K 无对应 prompt 改善，
+  4/6/8 未完成；不采纳为生产默认。用户随后要求暂停优化，4 路测量中止，A1 生产恢复。
+- 预期被推翻：group 级 `1.49x` 没有等比例进入整请求；596 只实现 `1.86%`，说明
+  多数层可能 fallback、成本被重叠，或实际路由与理想 group harness 不同。
+- 生产状态与回滚：已停止 A2 server/engine，切回原 A1 config 和 engine
+  `105a4171...`；候选默认关闭。远端用户文件未清理。
+- 证据：L-158、
+  [`AGENT_HOT_TURN_RESIDENT_PATH_RESULT`](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)、
+  `/opt/ai/logs/agent-resident-path-20261031T2300Z/`。
+- 学到什么：1% 价值原则和预注册的绝对门必须同时写清；可以用前者判断“值得保留”，
+  不能用它静默改写已冻结的验收结论。
+- 下一步与理由：暂停。用户明确恢复后，先做逐层 direct-path 覆盖/fallback 审计，
+  解释 `1.86%` 与 `12.1%` 上界的差距；不重跑同形三臂，也不继续挂起的 4 路实验。
+
 ## I-20261031-128 · `dequant 106 ms` 不是重复转换；转 resident direct-path 小组预筛
 
 - 目标 / 指标：检查普通 Agent 554-token 热续轮的 `dequant 106 ms` 是否包含同一

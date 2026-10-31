@@ -171,9 +171,37 @@
 | L-155 | 10-31 14:1xZ | 554-token hot-long 进入 full streamed ring 后，596 wall 中位 `1.509808→1.898041 s`，慢 `25.714%`、绝对多 `0.388233 s`；prompt 中位 `1401.7→1787.9 ms`；实际 env、6/2、health、资源、greedy 和 smoke 全过 | **AGENT-HOT-TURN-STREAM-RING 否决**；该分支同时改变 whole-chunk stream、shared defer 与 issuer；未跑 94K/并发；A2 已恢复；后续审计确认 staged 已按 selected experts 拷贝，转 staged lookahead |
 | L-156 | 10-31 14:4xZ | grouped staged lookahead 8→15 实际命中且 A1/B/A2 质量全过；596 wall `1.510583→1.505333 s`，只改善 `0.3475%`、绝对 `5.25 ms`；prompt `1384.3→1392.6 ms`，慢 `0.5996%` | **AGENT-HOT-TURN-STAGED-PREFETCH 否决**；双门未过，未跑 B 的 94K/并发；关闭 lookahead 参数轴；A2 已恢复；下一项 `AGENT-HOT-TURN-DEQUANT-AUDIT` |
 | L-157 | 10-31 15:0xZ | phase map 的 `dequant 106 ms` 在生产 native IQ3_XXS staged path 中是 `gather_native_group` 字节搬运；每层 order 唯一，每 16 个 gather 一次；stage 1/2 不同层，staged/streamed/fused/peer 互斥；hot-long cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`；MMQ 固定 stride 无法直读任意 cache slot；group 级 direct-path 预筛因现役占用下 full-layer harness OOM 尚未取得性能数据 | **AGENT-HOT-TURN-DEQUANT-AUDIT 否决重复工作假设**；不改源码、不重启、不扫 dequant/group/profiler 参数；下一项 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`，只做 group 级 |
+| L-158 | 10-31 15:2xZ | group 级 `512 experts / 32 groups`：MMQ `11.671 ms/layer`、native direct `7.848 ms/layer`，`1.49x`，48 层乐观上界 `183.5 ms`；596 A1/B/A2 1 路 wall `1.522684/1.490017/1.513878 s`，合并基线改善 `1.862%`，相对 A1 `2.145%`、`32.667 ms`，3/3 胜；2 路 hot-long `+0.705%`、2/3 胜；94K B/A2 wall `1.401311/1.438884 s` 但 prompt `1251.2/1251.5 ms`；固定 greedy 三臂全等 | **RESIDENT-PATH 正向但暂停验收，未采纳**；用户的 1% 原则认可方向，原 `0.05 s` 绝对门未过，94K 不归因；4 路在 `1:44` 后用户暂停，6/8 未跑；候选默认关闭，恢复 A1 后不继续实验 |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-158 · resident direct path 有真实 1.86% 信号，但暂停验收
+
+**判定：GROUP 级和 596 端到端方向为正；未满足原绝对 `0.05 s` 门，用户要求暂停，
+不采纳、不重跑。**
+
+group 级 512-expert 路由保留生产 top-10 和行数分布。MMQ group gather 为
+`11.671 ms/layer`，`fused::experts_native` direct pointer 为 `7.848 ms/layer`，
+`1.49x`；48 层乐观上界 `183.5 ms`。数值 rel RMS `2.020e-4`、worst row `3.096e-3`。
+
+596 fresh 的 1 路 A1/B/A2 wall 为 `1.522684/1.490017/1.513878 s`。B 相对 A1/A2
+合并基线的预注册比较改善 `1.862%`，相对 A1 为 `2.145%`、绝对 `32.667 ms`，
+三波全胜。2 路 hot-long 为 `3.466643/3.477050/3.490913 s`，比较 `+0.705%`，
+2/3 胜；控制项 hot-short 的 prompt 为 `-1.304%`。
+
+94K B/A2 hot-long wall 为 `1.401311/1.438884 s`，但 prompt 为
+`1251.2/1251.5 ms`，不能把 wall 差归因给 resident prefill。94K cold 为
+`37.662558/37.710150 s`，无可见回退。A1/B/A2 固定 greedy 全部逐字一致，
+finish 全为 `stop`，596 A2 共 27 请求、零错误、零外来。
+
+4 路 A2 基线在用户暂停时已运行约 `1:44`，没有结果 JSON；6/8 未跑。候选 env
+保持默认关闭，未进入生产。恢复时先审计 48 层 direct-path 命中与 fallback，
+解释 `1.86%` 与 group 级上界差距；不重跑已经完成的同形三臂 A1/B/A2。
+
+证据目录：
+`/opt/ai/logs/agent-resident-path-20261031T2300Z/`。完整记录见
+[`AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md`](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
 
 ## L-157 · `dequant 106 ms` 是 resident/staged gather，不是重复反量化
 
