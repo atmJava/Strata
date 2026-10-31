@@ -1845,6 +1845,11 @@ class StrataEngine:
         prompt, left = list(ids), int(max_new)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
+        # STRATA_BATCH_SERIAL_TWO (opt-in): exactly two low-concurrency requests
+        # run one after the other on the faster solo path. A third request still
+        # promotes the active stream to a batch slot, and four streams keep the
+        # production batch layout. The default remains unchanged.
+        serial_two = os.environ.get("STRATA_BATCH_SERIAL_TWO") == "1"
         ok = yield from self._take_control(cancel, len(prompt), new=True)
         if not ok:
             return
@@ -1867,7 +1872,7 @@ class StrataEngine:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
                 with self.slot_cv:
-                    alone = not any(self.slot_busy) and self.waiting == 0
+                    alone = not any(self.slot_busy) and self.waiting <= (1 if serial_two else 0)
                 if alone and left > 1:
                     head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
                     self._last_done = None                  # (#879: this request's DONE decides below)
@@ -1885,10 +1890,12 @@ class StrataEngine:
                     self._ctl_erred = False
                     def others():
                         with self.slot_cv:
-                            return self.waiting > 0
+                            return self.waiting > (1 if serial_two else 0)
 
                     def give_way():   # at a PP line, and between two far apart (the engine takes it at its next boundary)
                         nonlocal reserved
+                        if serial_two:
+                            return
                         if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
                                 self._shorter_waiting(len(prompt))):
                             with self.slot_cv:          # the slot the part read will wait in

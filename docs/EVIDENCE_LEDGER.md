@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-132，按编号）
+## 台账索引（L-000…L-136，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -146,9 +146,95 @@
 | L-130 | 10-31 13:2x | 真实 Codex 会话 3,614 请求：input `640.4M`、cached `97.22%`、uncached `17.82M`、output `2.77M`；36 次 compaction 每次数十万输入仅有约 3.5–7.6K 缓存，合计约占全部 uncached input 一半 | **只读诊断完成；客户端 token 形状不等于 Strata server timing** |
 | L-131 | 10-31 13:3x | B4 真实 HTTP 180,279-token 冷 turn `65.555 s`；同会话 compaction `180,301` input、cached `180,272`（`99.984%`）、wall `2.385 s`、仅重读 29 token | **AGENT-COMPACTION-LARGE 验证通过；不是 1/2/4 路吞吐声明** |
 | L-132 | 10-31 14:1x | B4 的 12K Agent 形状：1 路冷/续轮 wall `7.382/1.610 s`，2 路 `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅约 50–73 ms | **AGENT-SERVER-BREAKDOWN 完成；下一项拆热缓存 prompt 固定/恢复成本** |
+| L-133 | 10-31 15:0x | serial batch-MTP 两路 `88.50 → 91.38 tok/s`（`+3.25%`、输出逐字一致），但四路 `136.01 → 96.58`（`-28.99%`）；A2 漂移 `-1.39%/-0.74%/-0.15%` | **UTIL-MTP-LOWCONC 四路非回退门否决；不扫 MTP 参数；A2 已恢复** |
+| L-134 | 10-31 15:1x | 恰好两路 solo 串行：512-token 完成跨度 `11.776 → 10.004 s`（`-15.05%`），64-token `1.692 → 1.554 s`（`-8.18%`）；1 路 `-0.38%`，4 路持平，6 路 `163.07 tok/s` 零错误 | **UTIL-TWO-STREAM-SERIAL 采纳；三路恢复 batch；第二条 TTFT 约 `5.1 s`** |
+| L-135 | 10-31 15:1x | `spec_min_p 0/0.5/0.7/0.9` wall `4.51–4.54 s`；aux CPU `4.5489/4.5561 s`；`pcie_frac 0/0.15/0.31/0.45` `4.597–4.611 s`；checkpoint 开关 `0.4461/0.4465 s` | **固定负载无可测差异；这些参数轴停止扫描** |
+| L-136 | 10-31 14:2x | 210K history: cold `75.295 s`，相同热 turn `9.605–9.784 s`；compaction cached `208,527/208,554=99.987%`，output 347/532/734，wall `5.853/8.845/85.017 s`；第三次 recovery 后约 75 秒无新 token | **210K compaction 缓存通过，但暴露出恢复与 recovery 尾部；下一项只读拆 208K 热恢复和长尾频率** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-136 · AGENT-COST-MAP：94K/189K 热续轮与 210K compaction 的秒级成本
+
+**判定：诊断完成，长前缀热恢复和 recovery 尾部进入下一项。** 同一现役服务、无重启：
+
+- 实际 94,885-token 续轮 cached `94,282`（`99.36%`），prompt `1.942 s`，wall `2.086 s`；
+- 实际 189,093-token 续轮 cached `188,490`（`99.68%`），prompt `2.243 s`，wall `2.430 s`；
+- 实际 208,532-token 相同热 turn 三次 wall `9.784/9.605/9.620 s`，usage cached
+  `196,608`，engine 日志从 `204,800` 开始显示已读进度；
+- 208,554-token compaction 三次均 completed，cached `208,527`（`99.987%`），输出
+  `347/532/734`，wall `5.853/8.845/85.017 s`；
+- 第三次 compaction 在 512 reasoning token 后触发 `reasoning_loop_recovery`，随后约
+  75 秒没有新 token，最终正常完成。
+
+结论：compaction 的前缀复用已在 210K 规模成立，不应继续重复同形缓存优化；长历史热恢复
+与 recovery 无进展尾部才是剩余秒级大头。单次尾部异常不能当成稳定中位数，下一项先统计
+真实触发率并做只读阶段拆解。
+
+证据见
+[`AGENT_210K_COMPACTION_RESULT-20261031.md`](work/AGENT_210K_COMPACTION_RESULT-20261031.md)
+及 `/opt/ai/logs/agent-cost-map-*20261031.json`、`agent-compaction-210k-*20261031.json`。
+
+## L-135 · 固定负载参数筛：spec/aux/PCIe/checkpoint 均无可测差异
+
+**判定：停止扫描这些轴。** 固定 prompt、512 output token 下：
+
+- `spec_min_p=0/0.5/0.7/0.9` 的 wall 均约 `4.51–4.54 s`；
+- aux CPU 开关为 `4.5489` 对 `4.5561 s`；
+- `pcie_frac=0/0.15/0.31/0.45` 为 `4.597/4.592/4.600/4.611 s`；
+- compaction checkpoint 开关为 `0.4461` 对 `0.4465 s`。
+
+差异都小于同 boot 噪声，也没有正向触发路径证据。继续扫描邻近值只会消耗重启和冷加载。
+这些数据是配置筛选，不是新的数值 parity 或生产吞吐声明。
+
+## L-134 · UTIL-TWO-STREAM-SERIAL：两路 solo 串行通过长/短 A-B-A 并采纳
+
+**判定：采纳。** 两路 batch 时两个 group 各只有一行，聚合 `88.50 tok/s` 反而低于单路
+`104.20 tok/s`。候选只增加 server opt-in `STRATA_BATCH_SERIAL_TWO=1`：恰好两条请求时
+第一条保持 solo，第二条等待后也走 solo；第三条出现时沿用原机制进入 batch。
+
+A1/A2/B 使用同一固定 prompt、512 output token、1/2/4 路各 3 波：
+
+| 指标 | A1 | A2 | B | B vs A1/A2 合并中位 |
+| --- | ---: | ---: | ---: | ---: |
+| 1 路 tok/s | 104.20 | 102.75 | 103.08 | `-0.38%` |
+| 2 路完成跨度 | 11.716 s | 11.776 s | **10.004 s** | **`-14.83%`** |
+| 2 路对相邻 A2 | | 11.776 s | **10.004 s** | **`-15.05%`** |
+| 4 路 tok/s | 136.01 | 135.81 | 135.96 | `+0.04%` |
+| 4 路完成跨度 | 15.219 s | 15.237 s | 15.236 s | `-0.01%` |
+
+两路三波输出均为 solo 哈希
+`220155f501fc622223d644c110f1e1d0ce50d7fc487167b56c280a1e02aed2e1`，4 路保持 batch
+哈希 `3606b981...`；全部请求为 512 token、`finish=length`。恢复 A3 后补测 64-token
+两路 5 波，现役 `1.692 s`，候选 3 波 `1.554 s`，改善 `8.18%`。6 路 256-token 安全烟测
+`163.07 tok/s`、完成跨度 `9.646 s`、零错误。
+
+候选第二条请求 TTFT 为 `5.073–5.105 s`；这是用第二条启动延迟换两请求总完成时间的明确
+取舍。fake engine 证明两请求为 `GEN/GEN`，三请求恢复 `BGEN`；变量关闭路径保持原行为。
+原始 A 源码与配置未被覆盖，回滚为原源码目录 + `a-config.json` 且不带该 env。
+
+完整记录见
+[`UTIL_TWO_STREAM_SERIAL_RESULT-20261031.md`](work/UTIL_TWO_STREAM_SERIAL_RESULT-20261031.md)。
+
+## L-133 · UTIL-MTP-LOWCONC：两路 +3.25%，四路 -28.99%，非回退门否决
+
+**判定：否决。** groups=1 + `--batch-mtp` 启动日志确认 6 个 slot drafters，固定 512-token
+负载的 1/2/4 路为：
+
+| 路数 | A tok/s | B tok/s | 变化 |
+| ---: | ---: | ---: | ---: |
+| 1 | 104.20 | 103.73 | `-0.46%` |
+| 2 | 88.50 | 91.38 | **`+3.25%`** |
+| 4 | 136.01 | 96.58 | **`-28.99%`** |
+
+B 输出逐字等于 A、零 HTTP/执行错误；但四路损失远高于 1% 非回退门。不追加波次，也不扫描
+MTP 阈值、草稿深度或组数。A2 的 1/2/4 路为
+`102.75/87.85/135.81 tok/s`，相对 A1 漂移 `-1.39%/-0.74%/-0.15%`，在 3% 内。
+
+证据目录 `/opt/ai/logs/agent-mtp-lowconc-20261031T0745Z/`：
+`a1.json`、`a2.json`、`b.json`、`b-server.log`、`a-config.json`、`b-config.json`。
+完整记录见
+[`UTIL_MTP_LOWCONC_RESULT-20261031.md`](work/UTIL_MTP_LOWCONC_RESULT-20261031.md)。
 
 ## L-132 · AGENT-SERVER-BREAKDOWN：热续轮仍各有约 1.4–1.5 秒 prompt 成本
 

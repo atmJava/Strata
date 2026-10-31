@@ -5,6 +5,7 @@ real StrataEngine and Service, so the server's side is tested without a GPU: req
 wait for a slot, /metrics shows the slots, each request's history row is its own, and a conversation's next turn
 goes back to the slot that holds it."""
 import json
+import os
 import queue
 import sys
 import tempfile
@@ -789,6 +790,50 @@ class ParallelService(FakeEngineCase):
         # never more than two in the slots at once (the fake logs how many were active at each admission)
         active = [int(x.split()[3]) for x in self.log.read_text().splitlines() if x.startswith("BGEN")]
         self.assertTrue(all(a <= 1 for a in active), active)
+
+    def test_serial_two_keeps_exactly_two_on_the_solo_path(self):
+        with mock.patch.dict(os.environ, {"STRATA_BATCH_SERIAL_TWO": "1"}):
+            self.start(6, slot_cache=True, says_groups=2, more=("--batch-groups", "2"))
+            out = {}
+
+            def go(key, text):
+                out[key] = self.chat(text, max_tokens=64)
+
+            first = threading.Thread(target=go, args=("a", "first LONGREPLY"))
+            second = threading.Thread(target=go, args=("b", "second"))
+            first.start()
+            time.sleep(0.05)
+            second.start()
+            first.join(30)
+            second.join(30)
+
+        self.assertEqual(out["a"]["choices"][0]["message"]["content"], "ok, " + "la " * 15 + "done.")
+        self.assertEqual(out["b"]["choices"][0]["message"]["content"], "ok, done.")
+        calls = [line for line in self.log.read_text().splitlines() if line.startswith(("GEN ", "BGEN "))]
+        self.assertEqual([line.split()[0] for line in calls], ["GEN", "GEN"])
+
+    def test_serial_two_promotes_when_a_third_request_waits(self):
+        with mock.patch.dict(os.environ, {"STRATA_BATCH_SERIAL_TWO": "1"}):
+            self.start(6, slot_cache=True, says_groups=2, more=("--batch-groups", "2"))
+            errors = []
+
+            def go(text):
+                try:
+                    self.chat(text, max_tokens=64)
+                except Exception as exc:  # noqa: BLE001 - surfaced below
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=go, args=(text,))
+                       for text in ("first LONGREPLY", "second", "third")]
+            for thread in threads:
+                thread.start()
+                time.sleep(0.05)
+            for thread in threads:
+                thread.join(30)
+
+        self.assertEqual(errors, [])
+        calls = [line for line in self.log.read_text().splitlines() if line.startswith(("GEN ", "BGEN "))]
+        self.assertIn("BGEN", [line.split()[0] for line in calls])
 
 
 if __name__ == "__main__":

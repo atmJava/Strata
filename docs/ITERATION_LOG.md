@@ -3,6 +3,60 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-108 · 成本地图定位到 208K 热恢复与 recovery 长尾
+
+- 目标 / 指标：按真实长上下文尺寸和秒数重排下一项，不再把 12K prompt 当作代表；同时验证
+  用户常见的约 180K/210K 历史压缩。
+- 改动与实验：无源码/服务改动。同一服务补测工具型 94K/189K 热续轮；新增
+  `probe-long-compaction.py`，真实发送 208K history turn 后 Codex compaction，完成 3 次
+  高上限运行；只保存 token、缓存、wall 和状态。
+- 结果：94K/189K 热续轮 wall `2.086/2.430 s`；相同 208K 热 turn 三次
+  `9.784/9.605/9.620 s`。210K compaction 三次均 completed，cached
+  `208,527/208,554 = 99.987%`，输出 `347/532/734` token，wall
+  `5.853/8.845/85.017 s`。
+- 异常：第三次在 512 reasoning token 后触发 `reasoning_loop_recovery`，随后约 75 秒没有
+  新 token，最后正常完成。该异常不计入普通中位数，也不能由一次样本推出生产频率。
+- 判决：**AGENT-COST-MAP 第一轮完成。** compaction 前缀缓存到 210K 仍有效，不再重做；
+  剩余最大项是 208K 热状态恢复的约 9.6 秒，以及 recovery 的无进展长尾。
+- 生产状态与回滚：server/vision/engine `50648/50651/50656` 未变，health loaded、
+  6 slots / 2 groups、systemd inactive；本轮没有重启。新增探针单测 4 项、offline preflight
+  和 diff 检查通过。
+- 证据：L-136、[`AGENT_210K_COMPACTION_RESULT-20261031.md`](work/AGENT_210K_COMPACTION_RESULT-20261031.md)、
+  `/opt/ai/logs/agent-cost-map-*.json`、`/opt/ai/logs/agent-compaction-210k-*.json`。
+- 下一步与理由：进入 `AGENT-LONG-HOT-RESTORE`，只读拆 checkpoint/host/KV restore，并用
+  历史日志统计 recovery 尾部频率；候选须先证明真实频率加权后能节省整任务 ≥1%。
+
+## I-20261031-107 · 两路凹点改为 solo 串行：长/短输出分别改善 14.83%/8.18%
+
+- 目标 / 指标：先验证 serial batch-MTP 能否恢复两路聚合；失败后只改变两条低并发请求的
+  slot 准入，目标是两请求总完成时间至少改善 1%，且 1/4 路不退、第三条仍恢复 batch。
+- 假设与预期：两路在两个 group 中各只有一行，流水线收益被跨 stage 争用抵消；同一
+  prompt 顺序跑两次总完成 `10.659 s`，低于并发中位 `11.776 s`，说明 solo 串行有
+  `>1%` 上界。候选只让恰好两条请求保持 solo，三路以上沿用原 batch。
+- 改动与实验：`UTIL-MTP-LOWCONC` 用 groups=1 + `--batch-mtp`；随后
+  `UTIL-TWO-STREAM-SERIAL` 在独立源码副本只加 server opt-in
+  `STRATA_BATCH_SERIAL_TWO=1`。A-B-A 使用固定 512-token prompt、1/2/4 路各 3 波；
+  恢复 A3 后补 64-token 两路 5 波基线，候选补 3 波。
+- 结果：serial batch-MTP 的 2 路 `88.50 → 91.38 tok/s`（`+3.25%`），但 4 路
+  `136.01 → 96.58`（`-28.99%`），立即否决。A2 漂移
+  `-1.39%/-0.74%/-0.15%` 在 3% 内。两路 solo 候选把 512-token 完成跨度
+  `11.776 → 10.004 s`（`-15.05%`，对 A1/A2 合并中位 `-14.83%`）；64-token
+  `1.692 → 1.554 s`（`-8.18%`）。1 路 `103.08` 对合并中位 `-0.38%`，4 路
+  `135.96 tok/s` 和 `15.236 s` 基本持平；6 路安全烟测 `163.07 tok/s`、零错误。
+- 判决：**serial batch-MTP 否决；两路 solo 串行采纳。** 候选 2 路三波均等于 solo
+  输出哈希，4 路保持原 batch 哈希，所有请求同 token 数和 finish；fake engine 证明
+  两请求为 `GEN/GEN`，三请求恢复 `BGEN`。代价是第二条 TTFT 约 `5.1 s`。
+- 生产状态与回滚：最终候选由独立源码副本加载，原引擎 hash 不变，6 slots / 2 groups；
+  配置 `7c901092...`，server `10bd8318...`。回滚为原源码目录 + `a-config.json`，
+  不带 `STRATA_BATCH_SERIAL_TWO`；原源码和配置从未被覆盖。
+- 证据：L-133/L-134、[`UTIL_MTP_LOWCONC_RESULT-20261031.md`](work/UTIL_MTP_LOWCONC_RESULT-20261031.md)、
+  [`UTIL_TWO_STREAM_SERIAL_RESULT-20261031.md`](work/UTIL_TWO_STREAM_SERIAL_RESULT-20261031.md)；
+  `/opt/ai/logs/agent-mtp-lowconc-20261031T0745Z/`。
+- 下一步与理由：第三次复盘后转入 `AGENT-COST-MAP`。真实会话 input 中位约 `188K`，12K
+  热续轮的 `1.4–1.5 s` 不能代表绝对值；先无重启测 64K/128K/180K 热前缀及真实频率，
+  再按“触发次数 × 绝对秒数”选择 host/restore/prefill/准入/decode。两路必须同时报告
+  第二条 TTFT，不能把 `5.1 s` 首结果延迟藏在完成跨度收益里。
+
 ## I-20261031-106 · 1/2 路 breakdown：热续轮仍有约 1.4–1.5 秒 prompt 固定成本
 
 - 目标 / 指标：在同一 B4 服务上区分 1/2 路冷首轮和同会话续轮的 wall、prompt、decode、

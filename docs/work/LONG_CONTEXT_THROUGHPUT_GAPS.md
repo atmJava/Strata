@@ -2,6 +2,14 @@
 
 **状态：分析记录及 2026-10-31 L0/显式 layer-major 执行记录；不是已实现的优化，也不是新的默认配置。**
 
+**2026-10-31 two-stream scheduler addendum**：`UTIL-MTP-LOWCONC` 的两路
+`+3.25%` 被四路 `-28.99%` 否决。随后 `UTIL-TWO-STREAM-SERIAL` 只在恰好两路时保留
+solo 串行，第三条出现即恢复 batch；512-token 两路完成跨度 `11.776 → 10.004 s`
+（`-15.05%`），64-token `1.692 → 1.554 s`（`-8.18%`），1 路 `-0.38%`，4 路持平，
+6 路安全。代价是第二条请求 TTFT 约 `5.1 s`。这说明此阶段的用户可见大头可能来自
+低并发调度，而不是继续改长上下文 GPU 内核；后续长上下文工作仍须分别测量 prompt read
+与两路总完成时间，不能用一个总量指标互相掩盖。
+
 **2026-10-31 decode addendum**：`UTIL-QFUSE-HC` 已补测生产 Q8 HC read 的完整
 `gr_up_q8_kernel + native_quantize_q8_1` 路径。两卡输出与 q8 image 全 bitwise，局部路径在
 T=1/2/3 有 `+1.31–2.67%`，但每次只省 `0.44–0.79 us`；每个 24 层 stage 只有 48 次读，

@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T13:40+08:00。
+> 整理时间：2026-10-31T15:05+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-131。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-135。
 
 ## 2. 当前断点
 
@@ -23,9 +23,14 @@
 - **当前已采纳**：title 为 `1.8–2.1 ms`、零引擎/token；线程级 compaction LRU 使 1 主
   3 子代理各复用约 99.5%；共享 system 放在 tools 前使共同前缀由 `320` 增至 `54,366`
   字节；自动 boundary pin 使后续兄弟复用 `97.34%`，相对 B3a 后三墙钟
-  `5.001 → 1.335 s`（`-73.31%`）。B4 当前 server/vision/engine
-  `38589/38592/38627`，`127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups，
-  engine `105a4171...` 未重建。
+  `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
+  solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
+  `-8.18%`，1/4 路不退，6 路安全。
+- **当前运行**：server/vision/engine `50648/50651/50656`，源码
+  `/opt/ai/src/strata-two-stream-serial-20261031`，`127.0.0.1:8080`、health loaded、
+  262144、6 slots / 2 groups；engine `105a4171...` 未重建，config `7c901092...`、
+  server `10bd8318...`，server 进程含 `STRATA_BATCH_SERIAL_TWO=1`。`strata.service`
+  仍 inactive/dead。
 - **真实 trace 新结论**：解析 29 小时 Codex 会话的 3,614 请求，cached `97.22%`，
   uncached `17.82M`。普通 uncached 中位只有 265 token；36 次 compaction 每次约 26–30
   万 input、仅约 3.5–7.6K cached，合计约占全部 uncached input 一半。这是客户端请求
@@ -38,8 +43,11 @@
 - **同服务 breakdown 已完成**：1 路冷/续轮 wall `7.382/1.610 s`，2 路
   `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅
   `50–73 ms`。2 路冷首轮 TTFT `10.993 s`，其中 slot wait `7.307 s`。
-- **下一动作**：AGENT-PROMPT-FIXED 只做无重启相位拆解，把热续轮约 1.4–1.5 秒分成 host、
-  checkpoint restore、uncached prefill 和准入；保守整任务上界不足 1% 就立即转下一瓶颈。
+- **下一动作**：AGENT-LONG-HOT-RESTORE。第一轮成本地图已完成：实际 94K/189K 热续轮
+  `2.086/2.430 s`，相同 208K 热 turn 三次 `9.605–9.784 s`；210K compaction 均复用
+  `99.987%` 且 completed，但一条 recovery 路径出现约 75 秒无新 token 的尾部。下一步只读
+  拆 checkpoint/host restore/KV restore，并统计 recovery 真实频率；两路继续同时报告
+  第二条 TTFT。
 - 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，UTIL-KERNEL、
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的

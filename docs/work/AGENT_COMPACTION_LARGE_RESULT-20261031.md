@@ -43,6 +43,9 @@ compaction 返回 24 output token，状态 `completed`。该验证只证明长�
 ## 限制
 
 - 目标为约 180K token，未覆盖 256K 边界。
+- 后续已在约 210K 补做同会话 compaction：复用 `99.987%`，但出现一次 recovery 无进展
+  长尾。见
+  [`AGENT_210K_COMPACTION_RESULT-20261031.md`](AGENT_210K_COMPACTION_RESULT-20261031.md)。
 - 单个 conversation、单线程；1 主 3 子代理交错已由 8.3K compaction replay 覆盖。
 - 真实客户端日志中的 compaction 最大约 30 万 token，超过当前 Strata 262144 context；
   触发频率证据可用于选路，但不能把该绝对长度直接搬到当前服务。
