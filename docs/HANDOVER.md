@@ -16,7 +16,7 @@
 
 ## 2. 当前断点
 
-- **全局目标已第三十一次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+- **全局目标已第三十二次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
   Xid、engine 非预期退出或错误结果风险时，立即暂停性能实验并保存事故。没有新事故时，
   不空等低频故障，继续建立代表性任务质量门，再恢复普通单代理编辑—测试循环的性能优化。
   质量、任务成功率、测试正确性和工具协议都是硬门，不能用速度交换失败或严格收口缺失。
@@ -25,20 +25,22 @@
   4 路非回退，6/8 只做安全回归。任何局部候选先算真实触发率后的整任务 1% 上界；没有进入
   用户实际路径的能力只算机制收益。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第三十一版更新后该接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第三十一版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第三十二版更新后该接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第三十二版计划
   为权威，不要回到平台旧目标的状态快照。
 - **DSH 真实路径成本已拆清**：7 个基础/fixture 会话 runner 总墙钟 `197.776 s`，模型
   step `184.332 s`（`93.202%`），工具区间并集 `10.505 s`（`5.312%`）；40/40 个主
   step 关联成功，7 个未关联请求正好是每个新会话一次的隐藏标题请求。标题约 266 prompt
   token、118 output token、零工具，中位 `9.8 s`，会与主请求争用 GPU/cache。
-- **当前主动项是 `DSH-TITLE-INTERFERENCE`**：保留标题语义，验证主任务结束后再异步生成。
-  代理 ABBA 已通过：短任务 `task_wall` 合并中位 `17.637→15.238 s`（`13.602%`），
-  配对中位 `13.465%`、`5/6` 胜；12/12 质量与 provider 标题通过。长任务 B
-  `37.943/41.297 s` 对 A `46.411/82.438 s`，B 不明显回退，但 A 臂 8→11 step
-  漂移，只作非回退判断。见
+- **已完成 `DSH-TITLE-INTERFERENCE`，opt-in 采纳**：生产单会话主 turn
+  `19.629→16.078 s`（`18.091%`）、runner wall `21.484→18.065 s`（`15.914%`）；
+  3/3 质量与 provider 标题。双会话 fail-open 后 2/2 质量/provider，defer 增量 0。
+  重启 `136 s`，新增 Xid `0`。见
   [结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
-- **产品候选已实现**：默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission
+- **当前主动项是 `DSH-FIRST-TURN-PREFIX-REUSE`**：B2 新会话首步 `6.258/6.347 s`，
+  prompt `5.179/5.213 s`；连续新会话复用的相同前缀仍只有 `582` token，约 `5,590`
+  token 被重读。先查 title 是否覆盖共享前缀，以及可固定的静态 system/tool 前缀。
+- **产品候选已部署为 opt-in**：`STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission
   层只识别 DSH 精确 wire shape；恰好一个普通 inference admission 存在时等待，主请求
   释放即继续，60 s fail-open，不读 prompt 正文。两个会话同时启动时立即 fail open，
   避免短命客户端只留 fallback；专项连续 5 轮通过。见
@@ -85,13 +87,14 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `172634/172636/193790`。engine `172641` 已在
-  Xid 后退出并由 server 自动重启。server cwd 为
+- **当前运行**：server/vision/engine `222685/222690/222697`。上一实例已由标题生产重启
+  替换。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
   `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`
-  未重建，config `6ece1a13...`、server `10bd8318...`，server 进程含
-  `STRATA_BATCH_SERIAL_TWO=1`。`strata.service` 仍 inactive/dead。engine env 不含
+  未重建，config `6ece1a13...`、server `8f03c745...`，server 进程含
+  `STRATA_BATCH_SERIAL_TWO=1`、`STRATA_DEFER_TITLE_REQUESTS=1`。
+  `strata.service` 仍 inactive/dead；本次重启到 ready `136 s`。engine env 不含
   `STRATA_DECODE_TIMING`、`STRATA_VERIFY_PROFILE` 与 `STRATA_PREFILL_STAGED_AHEAD`。
   当前显式引擎参数含 `--ple-inflight 1024`，不含 `--ple-row-cache`；源码默认仍为 256，
   rollback 为同一源码目录 + `4b396f44...` direct config。健康、6 slots / 2 groups、
@@ -333,11 +336,11 @@
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=8`（误触发的失败启动已停止） |
-| server/engine/vision | `162903/162910/162905`，health loaded，监听 `:8080` |
+| server/engine/vision | `222685/222697/222690`，health loaded，监听 `:8080` |
 | server cwd | `/opt/ai/src/strata-two-stream-serial-20261031` |
 | engine binary/cwd | `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`；cwd 为同目录上一级 |
-| B4 running | engine `105a4171...`，config `6ece1a13...`，server `10bd8318...` |
-| latest accepted candidates | title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
+| current running | engine `105a4171...`，config `6ece1a13...`，server `8f03c745...` |
+| latest accepted candidates | title gate opt-in、Codex title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
 | GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；`vram_free_mib=1005` |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |

@@ -73,3 +73,13 @@ HTTP 形状没有 session id，无法安全判断哪个标题属于哪个主请�
 移除 `STRATA_DEFER_TITLE_REQUESTS=1` 并重启 server 即回到原调度。若需要回滚源码，恢复
 安装前的 `serve/server.py` 备份；engine 二进制、GPU 和模型配置不变。
 
+## 生产判决
+
+**opt-in 采纳。** 生产单会话主 turn 中位 `19.629 → 16.078 s`（`18.091%`），runner
+wall `21.484 → 18.065 s`（`15.914%`），3/3 质量、provider 标题和错误门通过。双会话
+2/2 质量、provider 标题通过，日志 defer 增量为 0；双会话恢复原并发，不把其视为加速。
+
+生产 A 备份为 `/opt/ai/backups/prod-title-defer-20261031T191327Z/`，第一版双会话不通过
+的候选备份为 `/opt/ai/backups/prod-title-failopen-20261031T192532Z/`。最终 server hash
+为 `8f03c745ec3d8341fe3fac8e1cba8f7842c04d2ad33fd479caf96582902cb9e0`。
+

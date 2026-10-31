@@ -2,8 +2,8 @@
 
 日期：2026-11-01
 
-状态：`AGENT-DSH-REAL-PATH-COST` 完成；标题延后代理 A/B 通过；server 内产品候选已实现，
-等待生产验证。
+状态：`AGENT-DSH-REAL-PATH-COST` 与 `DSH-TITLE-INTERFERENCE` 完成；server gate 已作为
+默认关闭的 opt-in 部署到生产。
 
 ## 结论
 
@@ -98,6 +98,37 @@ B 没有明显回退。A2 的步数和耗时相对 A1 明显漂移，因此长�
 inference admission 释放后继续。设计、失败开放、60 s 上限和回滚见
 [`DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md`](DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
 
+## 生产结果
+
+生产 A 为未启用 gate 的现有实例，B2 为 `STRATA_DEFER_TITLE_REQUESTS=1` 的最终实现。
+单会话各 3 个 `single-file` fixture，两个臂都使用相同最终消息契约：
+
+| 口径 | A 中位 | B2 中位 | B2 节省 | A/B |
+|---|---:|---:|---:|---:|
+| 主任务 `task_wall_s` | `19.629 s` | `16.078 s` | `3.551 s`，`18.091%` | `3/3 -> 3/3` |
+| runner 进程 wall | `21.484 s` | `18.065 s` | `3.419 s`，`15.914%` | `3/3 -> 3/3` |
+
+B2 的单会话主 turn 为 `18.242/16.006/16.078 s`，全部代码、测试、受保护测试和严格
+sentinel 通过，错误 `0/0`，三次最终标题都有 provider 事件。server 日志只有 3 次
+`deferred DSH title request`，对应 3 个单会话。
+
+第一版 gate 在双会话中等到所有主请求结束，两个标题各等 `26.6 s`，短命 headless 客户端
+退出后只留下 fallback。最终实现只在“总 admission - 活跃标题 = 1”时延后；两个普通请求
+立即 fail open。修正后双会话 2/2 主任务、测试和严格 sentinel 通过，错误 `0/0`，日志
+defer 增量为 0，两个最终标题均恢复为 provider。双会话因此保留原并发争用，不宣称速度
+收益。
+
+两个生产长任务也都完成代码、测试和严格 sentinel；其中一次模型提交了 ripgrep 不支持的
+look-around 正则，收到错误后改用有效 grep 并完成，统计中保留该 `tool_error=1`，不能从
+数据中删除。该错误不是 gate 协议失败，但说明模型工具使用仍有偶发重试。
+
+最终生产为 server/vision/engine `222685/222690/222697`，server hash
+`8f03c745ec3d8341fe3fac8e1cba8f7842c04d2ad33fd479caf96582902cb9e0`，health loaded、
+262144、六 slots / 两 groups。B2 重启到 ready 为 `136 s`；窗口新增 NVRM Xid 为 `0`。
+
+**判定：opt-in 采纳。** 单会话收益远超 1%，双会话标题质量由 fail-open 保住，不能把
+gate 改成默认开启或声称双会话也变快。
+
 ## 证据
 
 - `/opt/ai/logs/dsh-session-cost-contract-20261101.json`
@@ -109,4 +140,13 @@ inference admission 释放后继续。设计、失败开放、60 s 上限和回�
 - `/opt/ai/logs/dsh-title-defer-abba-20261101/`
   包含本轮 16 个 runner 报告、成本/ABBA 汇总和隐私安全 shape；目录文件 SHA-256 由保存时
   `sha256sum` 输出固定。
+- `/opt/ai/logs/prod-title-defer-20261031T191130Z-a/`
+- `/opt/ai/logs/prod-title-defer-20261031T191327Z-b/`
+- `/opt/ai/logs/prod-title-defer-20261031T191327Z-b-long/`
+- `/opt/ai/logs/prod-title-defer-20261031T191327Z-b-dual/`
+- `/opt/ai/logs/prod-title-failopen-20261031T192532Z-single/`
+- `/opt/ai/logs/prod-title-failopen-20261031T192532Z-dual/`
+- `/opt/ai/logs/prod-title-failopen-20261031T192532Z/server.log`
+- `/opt/ai/backups/prod-title-defer-20261031T191327Z/`（原始 A server/config）
+- `/opt/ai/backups/prod-title-failopen-20261031T192532Z/`（B1 server/config）
 

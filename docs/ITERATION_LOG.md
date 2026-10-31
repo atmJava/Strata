@@ -3,6 +3,33 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-140 · 标题 opt-in 生产通过；下一目标转首轮共享前缀
+
+- 目标 / 指标：以生产真实 DSH 请求确认标题延后的用户主任务收益、2 会话标题质量和最终
+  回滚边界，然后立即选择下一个最大等待项。
+- 假设与预期：最终 fail-open 版本应保留单会话收益，双会话恢复 provider 标题；标题不再
+  占用首步后，主模型首轮 prompt 会成为下一最大项。
+- 为什么选这条路线：单会话是用户最常见场景；标题是已证明可消除的并发源。若继续追局部
+  kernel 而不处理主模型首步，仍会困在 93.2% 模型等待里。
+- 改动与实验：生产 A 3 次、B2 3 次单会话；B2 双会话 2 次；第一版 B1 还跑过 6 次单会话、
+  2 个长任务和 1 组双会话。所有任务使用同一最终消息契约，读取新增 Xid、health 和实际
+  defer 日志。
+- 结果：B2 单会话主 turn 中位 `19.629 → 16.078 s`（`18.091%`，绝对 `3.551 s`），
+  runner wall `21.484 → 18.065 s`（`15.914%`）；3/3 质量和 provider 标题。双会话
+  修正后 2/2 质量、错误为零、defer 增量为 0、最终标题 provider。生产六 slots / 两
+  groups，重启 `136 s`，新增 Xid `0`。
+- 判决：**`DSH-TITLE-INTERFERENCE` 以默认关闭的 opt-in 采纳。** 双会话恢复原并发，
+  不宣称双会话加速。第一版双会话 fallback 记录保留，未删除。
+- 预期被推翻：没有 session id 时，“等到所有主请求结束”会延迟短命客户端标题；只在恰好
+  一个普通请求时延后才是安全范围。
+- 生产状态与回滚：server/vision/engine `222685/222690/222697`，server hash
+  `8f03...`；原 A 与 B1 备份均在 `/opt/ai/backups/`。
+- 证据：L-167、[结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)、
+  [契约](work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
+- 下一步与理由：B2 新会话首步 `6.258/6.347 s`，其中 prompt `5.179/5.213 s`；连续
+  新会话复用的相同前缀仍只有 `582` token，约 `5,590` token 被重读。转
+  `DSH-FIRST-TURN-PREFIX-REUSE`，优先查 title 是否覆盖共享前缀及可固定的静态前缀。
+
 ## I-20261101-139 · 生产双会话暴露标题 fallback，gate 改为多主请求 fail open
 
 - 目标 / 指标：生产复现单会话收益，同时保证用户偶尔开的两个会话仍生成 provider 标题，

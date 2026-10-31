@@ -7,14 +7,16 @@
 
 ## 当前决策前沿
 
-0. **全局目标已第三十一次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+0. **全局目标已第三十二次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
    Xid、engine 非预期退出或错误结果风险时，暂停性能实验并保存事故。没有新事故时，不把
    “等待低频故障”当作主线，继续处理真实用户的质量与等待。
    - `AGENT-DSH-REAL-PATH-COST` 已完成：模型 step 占 `93.202%`，工具并集占 `5.312%`；
      40/40 个主 step 关联成功，7 个未关联请求正好是每个新会话一次的标题请求。
-   - 当前主动项：`DSH-TITLE-INTERFERENCE`。保留标题语义，验证主任务结束后再异步生成，
-     避免与主请求争用 GPU/cache；代理 ABBA 已通过，当前验证默认关闭的 server admission
-     产品候选；不改用户本地 profile。
+   - `DSH-TITLE-INTERFERENCE` 已完成并 opt-in 采纳：生产单会话主 turn
+     `19.629→16.078 s`（`18.091%`），双会话 fail-open 后质量/provider 标题通过。
+   - 当前主动项：`DSH-FIRST-TURN-PREFIX-REUSE`。B2 新会话首步 `6.258/6.347 s`，
+     prompt `5.179/5.213 s`；连续新会话只复用 `582` token，约 `5,590` 个相同前缀
+     仍重读。先查 title 是否覆盖共享前缀和静态 system/tool 前缀。
    - 测试口径：runner 进程 wall 和主任务 `task_wall_s` 分开；代理必须逐块流式转发；
      ABBA 平衡并保留标题质量/长任务非回退门。
    - 质量项已完成：用户 DSH Web 实际走 Qwen/Strata relay；旧 headless 是 DeepSeek
@@ -181,7 +183,8 @@
 | AGENT-TERMINAL-QUALITY-COMPARISON | 用同一 Schema 3 fixture 对照 Codex/Strata 与 DSH，并消除模型/provider 混淆 | 报告明确 runner/model/provider 标签；6 个基础 fixture 均保留测试、测试字节、最终 sentinel、工具错误和 wall；DSH 至少可重复一次；判断 DSH 能否配置到 Strata endpoint；不能用混合 hosting 结果归因引擎 | 已完成 | L-163：DSH Web `atm/qwen.../:8888`；旧 headless 为 DeepSeek 官方。显式 overlay 后 6 个基础测试 `6/6`、严格 `3/6`，事件/工具错误 `0/0`，wall `243.865 s` | **完成**；旧 DSH/DeepSeek `6/6` 不再作当前路径基线；不改用户 profile |
 | AGENT-STRICT-RESPONSE-CONTRACT | 缩小 Qwen/Strata 在完全正确后仍多写说明的最终收口缺口 | 同一失败 fixture 至少重复 5 次；比较当前配置、更明确的 final-message contract 和可行的 messages 配置；代码/测试不退化，严格 sentinel 通过率提高且其他 fixture 不下降 | 已完成 | L-164：`transaction-rollback` 当前 prompt `4/5`、明确契约 `5/5`；6 个基础 fixture 严格 `3/6 -> 6/6`，测试 `6/6`、受保护测试未改、错误 `0/0` | **完成**；调用方明确最终 assistant message 只能是什么，不静默裁剪；未改用户 DSH |
 | AGENT-DSH-REAL-PATH-COST | 拆 DSH 实际工具循环并找整任务 >=1% 的下一机制 | 只读覆盖基础 fixture 和长任务；记录每 step input/cached/fresh、output/reasoning、prompt/decode、finish、工具类别/回流、客户端 wall；给出真实触发率与绝对秒数；低于 1% 或无法进入实际路径不实现 | 已完成 | L-165：7 会话 runner `197.776 s`，模型 `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联；7 个未关联标题请求，中位 `9.8 s`；短任务关闭标题主 turn `5/6`、`-11.843%`，长任务 `0/2` 胜 | **完成**；关闭标题不能通用产品化；转 `DSH-TITLE-INTERFERENCE` |
-| DSH-TITLE-INTERFERENCE | 保留 DSH 标题语义但避免与主请求争用 | 显式 overlay/proxy，不改用户 profile；至少 6 对短任务 ABBA、2 对长任务；主指标 `task_wall_s`，runner wall 次之；短任务中位 >=1%，长任务无明显回退，标题不退化/fallback；记录 prompt/decode/cache/零错误；代理真实流式；两个会话无法安全配对时 fail open | 进行中 | L-166：短任务 `17.637→15.238 s`（`13.602%`）、配对中位 `13.465%`、`5/6` 胜；12/12 质量/provider 标题；长任务 B 不明显回退；16/16 无错误。生产短任务主 turn `20.887%`；2 会话首次测试发现标题 fallback，已改为 fail open 并进入复测 | **代理通过；生产候选复测中**；默认关闭 server admission gate；新 Xid 抢占 |
+| DSH-TITLE-INTERFERENCE | 保留 DSH 标题语义但避免与主请求争用 | 显式 overlay/proxy，不改用户 profile；至少 6 对短任务 ABBA、2 对长任务；主指标 `task_wall_s`，runner wall 次之；短任务中位 >=1%，长任务无明显回退，标题不退化/fallback；记录 prompt/decode/cache/零错误；代理真实流式；两个会话无法安全配对时 fail open | 已完成 | L-167：生产单会话主 turn `19.629→16.078 s`（`18.091%`），runner wall `15.914%`；3/3 质量/provider；双会话 2/2 质量/provider、defer 增量 0；重启 `136 s`、新增 Xid `0` | **opt-in 采纳并保持运行**；双会话恢复原并发；回滚移除 `STRATA_DEFER_TITLE_REQUESTS=1` |
+| DSH-FIRST-TURN-PREFIX-REUSE | 减少连续新会话首轮重复 prefill | 隐私安全关联 B2 首步 server prompt/cache；至少 3 个连续新会话复现约 `5,590` fresh token；只读区分 title 覆盖、prefix hash 不同和 header 边界丢失；候选须让 1 路整任务改善 >=1%、绝对秒数明确，代码/测试/provider 标题不退，2 路不产生冲突；不改用户 profile | 进行中 | B2 首步 `6.258/6.347 s`，prompt `5.179/5.213 s`，只复用 `582` token；同会话后续复用通常 >95% | **当前**；先只读审计，未改源码/未重启 |
 | AGENT-CODEX-TITLE | Codex thread-title 请求不进入引擎 | 三个 title 请求返回合法标题且 engine request/prompt/output 增量均为 0；普通 Responses 请求仍进入引擎；健康与配置可回滚 | 已完成 | L-126：B `1.8–2.1 ms`、零引擎请求/token；普通请求 +1；A2 基线 `1.978–10.292 s` | **已采纳并保持运行**；配置可回滚，无引擎重建 |
 | AGENT-CODEX-COMPACTION-LRU | 多线程 compaction 保留各自工具前缀 | 1 主 3 子代理交错时每个线程的 compaction 均用自己的工具集合；并发安全、有界 LRU 和淘汰测试通过；无效 metadata/title 不污染缓存；默认关闭路径字节不变 | 已完成 | L-127：8.3K prompt 复用量 `99.52–99.64%`，墙钟 `0.69–0.89 s`；45 tests OK，title 仍零引擎 | **已采纳并保持运行**；B2 配置/源码可回滚 |
 | AGENT-STATIC-SYSTEM-PREFIX | 让兄弟 agent 复用共享 system 前缀 | deterministic 渲染证明新顺序增加共享字节，同时 tool/system 内容集合不变；真实模型仍按声明工具调用；1/2 路端到端改善 ≥1%，4 路不退 >1%；默认关闭 byte-identical | 已完成 | L-128：共同前缀 `320 → 54,366` 字节；后续兄弟复用 `5,120` token，平均墙钟 `24.56%`，后三 `33.34%`；四次并发工具隔离通过 | **已采纳并保持运行**；B3a 6/2、engine hash 不变；需同步 pack 模板 |

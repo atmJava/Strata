@@ -2,7 +2,7 @@
 
 日期：2026-10-31
 
-状态：第三十一次修订后继续执行。用户实际 DSH Web 路径已对齐到 Qwen/Strata relay；
+状态：第三十二次修订后继续执行。用户实际 DSH Web 路径已对齐到 Qwen/Strata relay；
 6 个基础 coding fixture 的代码/测试全过，明确最终消息契约后严格通过从 `3/6` 提到
 `6/6`。真实路径成本已拆清：模型 step 占 `93.202%`，工具并集只占 `5.312%`；当前主动
 项转为“保留标题语义但避免与主请求争用”。GPU0 Xid 13 仍是随时抢占的 P0 风险，固定重放
@@ -30,9 +30,9 @@
 标题请求约 266 prompt token、118 output token、零工具，中位 `9.8 s`，并与主请求争用
 GPU/cache。`DSH-TITLE-INTERFERENCE` 的代理 ABBA 已通过：短任务主任务中位
 `17.637 → 15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 标题仍由
-provider 模型生成，长任务 `A B B A` 中 B 不明显回退。当前在验证默认关闭的 server
-admission 产品候选，不关闭标题。部署前复盘补齐了 1/2 会话并发：活跃标题独立计数；
-恰好一个普通请求时才延后，两个会话同时启动时 fail open，避免短命客户端取消标题。
+provider 模型生成，长任务 `A B B A` 中 B 不明显回退。生产 opt-in 验证已完成：单会话
+主 turn `19.629→16.078 s`（`18.091%`），双会话 fail-open 后 2/2 质量/provider 标题。
+当前主动项转为新会话首轮约 `5,590` token 共享前缀重读。
 
 短任务关闭标题的旧 A/B 为：runner wall `16.854 → 14.901 s`（`-10.647%`），主任务
 turn wall `14.929 → 13.001 s`（`-11.843%`），均 `5/6` 胜；长任务无标题 `0/2` 胜，
@@ -103,7 +103,7 @@ GPU0 的稳定性是独立的硬件/驱动问题，不是解锁问题。2026-10-
 - engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
 - engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
 - config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
-- 当前 PID：server / vision / engine `172634 / 172636 / 193790`
+- 当前 PID：server / vision / engine `222685 / 222690 / 222697`
 - 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
 
 生产启动与恢复约需 2–3 分钟。每次重启必须说明预期节省能否覆盖加载、缓存丢失和不可用
@@ -253,7 +253,7 @@ Codex 目录结果仍见
 见
 [`AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md`](../../work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
 
-### P1：`DSH-TITLE-INTERFERENCE`（代理通过，产品验证中）
+### 已完成：`DSH-TITLE-INTERFERENCE`（opt-in 采纳）
 
 保留 DSH 标题语义，验证标题在主任务完成后异步生成，避免同时争用模型执行和 prompt
 cache。测试只使用显式 overlay/proxy，不修改用户本地 profile：
@@ -278,6 +278,23 @@ DSH 的精确标题形状；活跃标题单独计数。恰好一个普通 infere
 没有 session id，无法安全配对。匹配不看 prompt 文本；disabled、不匹配、超时和 drain
 都 fail open。契约见
 [`DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md`](../../work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
+
+生产结果：单会话主 turn `19.629→16.078 s`（`18.091%`），runner wall
+`21.484→18.065 s`（`15.914%`），3/3 质量和 provider 标题；双会话 fail-open 后 2/2
+质量和 provider 标题。产品以 opt-in 保持运行，双会话不宣称提速。
+
+### P1：`DSH-FIRST-TURN-PREFIX-REUSE`
+
+B2 新会话首步仍为 `6.258/6.347 s`，其中 prompt `5.179/5.213 s`。DSH 报告
+`cached=582`，约 `5,590` token 相同前缀仍 fresh；同一会话后续 prompt 通常复用超过
+`95%`。先做隐私安全只读关联，检查 title 后缓存状态、共同静态 system/tool 前缀和边界：
+
+- 至少 3 个连续新会话复现首步 fresh/cached 与 server prompt；
+- 区分 title 覆盖、prompt hash/边界不同、conversation cache 槽位和普通 LRU 淘汰；
+- 候选必须进入真实单会话，整任务改善 >=1% 并给绝对秒数；
+- 2 会话不产生标题或缓存冲突；质量、provider 标题、health、6 slots / 2 groups、
+  零新增 Xid 全过；
+- 未定位前不改源码、不重启，不重扫已否决的局部 kernel 参数。
 
 ### P1 历史：`AGENT-HOT-TURN-FIXED-COST`（已否决）
 
@@ -584,16 +601,16 @@ prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零�
 
 ## 当前断点
 
-**2026-11-01 第三十一次修订后继续执行。** 用户已放弃“鹈鹕 SVG”问题；原 DSH 请求在
+**2026-11-01 第三十二次修订后继续执行。** 用户已放弃“鹈鹕 SVG”问题；原 DSH 请求在
 76 个 reasoning token 后触发 GPU0 Xid 13，约 60 次精确重放未复现。当前不空等低频事故：
 只读探针持续记录下一次 Xid，任何新事故立即抢占。质量侧已确认用户 DSH Web 走
 Qwen/Strata relay；同一路径 6 个基础 fixture 代码/测试全过，明确最终消息契约后严格
 `3/6 -> 6/6`。真实路径成本已拆清：模型 `93.202%`、工具并集 `5.312%`，标题请求是
-已识别的额外并发源。`DSH-TITLE-INTERFERENCE` 的代理 ABBA 已通过：短任务主任务中位
-`13.602%`、`5/6` 胜，标题 12/12 由 provider 生成，长任务不明显回退。当前验证默认关闭
-的 server admission 产品候选，再决定是否部署；不再用局部工具或内核噪声代替用户等待。
-生产 server/vision/engine 为 `172634/172636/193790`，旧 engine `172641` 已由 Xid 退出并
-自动重启，health loaded、六 slots / 两 groups。
+已识别的额外并发源。`DSH-TITLE-INTERFERENCE` 已 opt-in 采纳：生产单会话主 turn
+`19.629→16.078 s`（`18.091%`），runner wall `15.914%`；双会话 fail-open 后质量和
+provider 标题通过。当前主动项转为 `DSH-FIRST-TURN-PREFIX-REUSE`：连续新会话首步只
+复用 `582` token，约 `5,590` 个相同前缀仍重读。生产 server/vision/engine 为
+`222685/222690/222697`，health loaded、六 slots / 两 groups，新增 Xid `0`。
 
 `AGENT-CONTEXT-DIET-REAL-YIELD` 已否决产品化；`AGENT-HISTORY-STATE-RESIDENCY` 降为
 低频 p99 可行性项。
@@ -608,8 +625,8 @@ Qwen/Strata relay；同一路径 6 个基础 fixture 代码/测试全过，明�
 `AGENT-HOT-TURN-PHASE-MAP` 已完成：596/94K 热长轮都只约有 554 个 fresh token；
 stage 2 的 `wait copy 173 ms` 是最大可移动相位。`AGENT-HOT-TURN-STREAM-RING` 已否决：
 full ring 让 596 wall 慢 `25.714%`，没有把 stage 2 copy 等待转成用户收益。当前生产为
-server/vision/engine `172634/172636/193790`，health loaded、六 slots / 两 groups，
-`strata.service` inactive。旧 engine `172641` 已由 GPU0 Xid 13 退出并自动重启。
+server/vision/engine `222685/222690/222697`，health loaded、六 slots / 两 groups，
+`strata.service` inactive。
 
 只读 routing 审计已完成：当前层 selected-only staged copy 已是生产路径，跨层推测 routing
 没有源码支持；full-ring 还切换了多个调度机制。`AGENT-HOT-TURN-STAGED-PREFETCH` 随后把

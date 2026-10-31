@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-166，按编号）
+## 台账索引（L-000…L-167，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -180,9 +180,55 @@
 | L-164 | 11-01 18:1x–18:2xZ | 同一 `transaction-rollback` 当前 prompt `4/5`、明确最终消息契约 `5/5`；完整 6 个基础 fixture 严格 `3/6 -> 6/6`，测试 `6/6`，受保护测试未改，事件/工具错误 `0/0`，新增 Xid `0` | **AGENT-STRICT-RESPONSE-CONTRACT 通过**：不得静默改写回复；真实客户端应明确最终消息只能是什么；未改用户 DSH、engine 或生产 config |
 | L-165 | 11-01 18:2xZ–19:0xZ | 7 个基础/fixture 会话 runner `197.776 s`：模型 `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联，7 个未关联请求正好是每会话一次的标题。短任务关闭标题 runner `16.854→14.901 s`、主 turn `14.929→13.001 s`，`5/6` 胜；长任务 `0/2` 胜，cache 有跨臂污染 | **AGENT-DSH-REAL-PATH-COST 完成；DSH-TITLE-INTERFERENCE 当前**：不能关闭标题产品化；保留语义并延后到主任务结束，ABBA + 标题质量门；runner wall 与 `task_wall_s` 分开，代理必须真实流式 |
 | L-166 | 11-01 18:47Z–19:05Z | 标题延后 ABBA：短任务 6 对 `task_wall` 合并中位 `17.637→15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 质量与 provider 标题；长任务 B `37.943/41.297 s` 对 A `46.411/82.438 s`，B 不回退，但 A 臂 8→11 step 漂移，只作非回退；16/16 无错误、无新增 Xid | **代理候选通过**：主任务结束前不生成标题仍保留标题质量；进入默认关闭的 server admission 产品候选，随后做生产 A/B |
+| L-167 | 11-01 19:1xZ–19:3xZ | 生产 A/B2 单会话主 turn `19.629→16.078 s`（`18.091%`），runner wall `21.484→18.065 s`（`15.914%`）；3/3 质量/provider 标题。第一版双会话各等 `26.6 s` 后只留 fallback，否决；多普通请求 fail-open 修正后双会话 2/2 质量/provider，defer 增量 0。两个长任务完成，其中一个保留 `tool_error=1` 后恢复。最终 PID `222685/222690/222697`、六 slots / 两 groups、重启 `136 s`、新增 Xid `0` | **DSH-TITLE-INTERFERENCE opt-in 采纳**：单会话真实收益成立，双会话保留原并发；不能默认开启或宣称双会话加速。下一项 `DSH-FIRST-TURN-PREFIX-REUSE` |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-167 · 标题延后在生产单会话成立，双会话改为 fail-open
+
+**判定：`DSH-TITLE-INTERFERENCE` 以默认关闭的 opt-in 采纳。**
+
+生产 A 为未启用 gate 的实例，B2 为 `STRATA_DEFER_TITLE_REQUESTS=1` 最终实现。各跑
+3 个单会话 `single-file` fixture：
+
+| 口径 | A 中位 | B2 中位 | B2 节省 |
+|---|---:|---:|---:|
+| 主任务 `task_wall_s` | 19.629 s | 16.078 s | 3.551 s，18.091% |
+| runner 进程 wall | 21.484 s | 18.065 s | 3.419 s，15.914% |
+
+B2 三次单会话代码、测试、受保护测试、严格 sentinel、事件/工具错误全过，最终标题都由
+provider 生成。server 日志实际记录 3 次 defer。
+
+第一版在双会话中等待所有普通请求结束：两个标题各等 `26.6 s`，headless 客户端在标题
+完成前退出，最终只留 fallback。修正版仅在一个普通请求存在时延后；两个普通请求立即
+fail open。双会话复测 2/2 主任务、测试、严格 sentinel 和错误门通过，defer 增量为 0，
+两个最终标题都恢复 `fallback,provider`。双会话保留原并发性能，没有可归因提速。
+
+两个生产长任务完成代码、测试和严格 sentinel。一次模型使用 ripgrep 不支持的 look-around
+正则，收到错误后改用有效 grep 并完成；该 `tool_error=1` 保留在统计，不删除，也不归因
+给标题 gate。
+
+最终生产 server/vision/engine 为 `222685/222690/222697`，health loaded、262144、
+六 slots / 两 groups；server hash
+`8f03c745ec3d8341fe3fac8e1cba8f7842c04d2ad33fd479caf96582902cb9e0`，重启到 ready
+`136 s`，窗口新增 Xid `0`。
+
+**新 frontier**：B2 新会话首步仍为 `6.258/6.347 s`，prompt `5.179/5.213 s`；相同
+约 `5,590` token 前缀在连续新会话中没有复用，只命中 `582` token。下一步转向
+`DSH-FIRST-TURN-PREFIX-REUSE`，先查 title 是否覆盖共享前缀缓存以及可安全固定的静态前缀。
+
+证据：
+
+- `/opt/ai/logs/prod-title-defer-20261031T191130Z-a/`
+- `/opt/ai/logs/prod-title-defer-20261031T191327Z-b/`
+- `/opt/ai/logs/prod-title-defer-20261031T191327Z-b-long/`
+- `/opt/ai/logs/prod-title-defer-20261031T191327Z-b-dual/`
+- `/opt/ai/logs/prod-title-failopen-20261031T192532Z-single/`
+- `/opt/ai/logs/prod-title-failopen-20261031T192532Z-dual/`
+- `/opt/ai/logs/prod-title-failopen-20261031T192532Z/server.log`
+- `/opt/ai/backups/prod-title-defer-20261031T191327Z/`
+- `/opt/ai/backups/prod-title-failopen-20261031T192532Z/`
 
 ## L-166 · 保留语义的标题延后在 ABBA 中通过代理验证
 
