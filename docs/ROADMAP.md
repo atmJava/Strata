@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T07:50+08:00。
+> 最后更新：2026-10-31T09:54+08:00。
 
 ## 用户目标
 
@@ -65,8 +65,12 @@ head 已在源码门否决：末级每级只有一个 verifier 和一套 head �
 `3.241%/6.122%`，2/4 路的增益没能保住其他并发级，因此否决并移除源码。`UTIL-B6-ROWS`
 随后在 kernel screening/reach 门否决：两卡 exactness 全过，但相对生产 IL 的 T=2 中位慢
 `5.868%`、0/22 胜，Q5_K/Q6_K 单点回退 `15.96-38.63%`，而且 B6 不能替换当前 IL dispatch。
-下一项回到真实阶段成本，寻找不经 IL 替换的独立固定成本机制。P7 只有 NCU 证明 Tensor
-管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
+随后 `UTIL-LFUSE-SHARED` 用现成共享专家 launch fusion 验证了共享门/router 与
+sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但 A1-B-A2 的
+2/4/6/8 路为 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`；只有 8 路
+名义过 1%，未过 5/6 胜，A 漂移还达 `+4.053%`。2/4/6 回退超过 1%，因此否决并恢复 A2。
+下一项回到真实阶段成本，寻找不经 IL/LFUSE 替换、也不重复 launch/head/group 聚合的独立
+固定成本机制。P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
 
 ## 候选路线
 
@@ -105,6 +109,7 @@ head 已在源码门否决：末级每级只有一个 verifier 和一套 head �
 | UTIL-HEAD-Q8-FUSE | M14 | 在现有 Q8 mixer 中把末层 pending write 与最终 mixer 合并 | 已证伪（GPU/正确性） | 中；独立 harness 后可有一次 A1-B-A2 | **否决**：5 个交替进程的 80 个 direct/graph 逐字比较全失败；最大节省 `1.315 µs`，门槛 `182.7 µs`；未构建、未重启 |
 | UTIL-POLL-TURNOVER | M14 | 降低完成 poll、group hand-off 与下一 stage launch 的串行周转成本 | 已证伪（高并发） | 中；一次候选启动和恢复，附首次构建控制失败 | **否决**：同选项 B2 parity 全过，但 6/8 路回退 `3.241%/6.122%`，最佳级胜场也不足；源码已移除 |
 | UTIL-B6-ROWS | M13/M14 | Q4_K/Q5_K/IQ4_XS 多列 MMVQ 跨 rows 复用 activation fragment | 已证伪（生产 reach） | 低；现有精确 opt-in，仅本机 kernel screening | **否决**：全 parity，但相对 IL T=2 中位 `-5.868%`、0/22 胜，Q5_K/Q6_K 回退最高 `38.63%`；未构建、未重启 |
+| UTIL-LFUSE-SHARED | M14 | 共享专家标量 gate 并入 router，sigmoid+scale 并入 resident combine | 已证伪（吞吐/漂移） | 中；两卡 harness、A1-B-A2 各 12 waves | **否决**：parity 与 greedy 全过，但 2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`、胜场 `1/6, 1/6, 2/6, 4/6`；8 路 A 漂移 `+4.053%`，A2 已恢复 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -208,6 +213,10 @@ head 已在源码门否决：末级每级只有一个 verifier 和一套 head �
 35. **下一项审计 one-row GDN batch 与流水窗口状态**：8 路仍是六槽加两排队请求，单行窗口
     仍做 scalar/barrier/launch 序列。下一候选必须尝试不同机制，保持每行算术与 token 选择；
     不重跑 self-commit 开关、checkpoint move、固定 groups 或 piped MTP。
+36. **UTIL-LFUSE-SHARED 已否决**：两卡独立 parity、B 启动路径与 B/A2 冻结 greedy 全过；
+    A1-B-A2 的 2/4/6/8 路为 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场
+    `1/6, 1/6, 2/6, 4/6`。8 路虽名义 `+4.362%`，但 A 漂移 `+4.053%` 且胜场不足；
+    2/4/6 超过 1% 回退线。A2 已恢复，下一项重新做源码/阶段成本审计。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

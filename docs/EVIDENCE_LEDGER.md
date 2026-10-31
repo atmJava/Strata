@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（118 条：L-000…L-117，按编号）
+## 台账索引（119 条：L-000…L-118，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -132,6 +132,7 @@
 | L-115 | 10-31 23:4xZ | Q8 head fusion 五交替进程各 `T=1..8` direct/graph：80 个逐字比较全失败；最大节省 `1.315 µs`，1% 窗口门槛 `182.7 µs`，graph `T=4..8` 慢约 `1–3 µs` | **UTIL-HEAD-Q8-FUSE GPU/正确性门否决；未构建、未重启；转 UTIL-POLL-TURNOVER 只读门** |
 | L-116 | 10-31 08:5xZ | poll fast B1 漏掉 A 编译开关而作废；同选项 B2 parity 全过，但相邻 A2/B2/A3 的 2/4/6/8 路为 `+9.129%/+7.885%/-3.241%/-6.122%`，胜场 `4/6, 5/6, 1/6, 0/6` | **UTIL-POLL-TURNOVER 吞吐/漂移门否决；源码已移除、A3 已恢复；转 UTIL-B6-ROWS kernel 门** |
 | L-117 | 10-31 09:1xZ | B6 两卡全部 parity；相对生产 IL 选择，T=2 中位 `-5.868%`、0/22 胜，Q6_K/Q5_K 单点回退 `16-39%`；真实张量代理投影无生产宽度稳定 ≥1% | **UTIL-B6-ROWS kernel screening/reach 门否决；未构建、未重启；转不同生产路径源码审计** |
+| L-118 | 10-31 10:0x | LFUSE 两卡 parity 与 B/A2 greedy 全过；2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`；8 路的 A 漂移 `+4.053%` | **UTIL-LFUSE-SHARED 吞吐/漂移门否决；A2 已恢复；转不同源码/阶段成本审计** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3913,6 +3914,49 @@ graph 路径没有提供可复现收益，部分行反而回退。
 `batch_poll -> verdict -> stage hand-off -> batch_launch`，以及 `conc_serving` 的 doorbell
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
+
+## L-118 UTIL-LFUSE-SHARED：正确性通过，但 2/4/6 路回退超过 1%
+
+**判定**：**UTIL-LFUSE-SHARED 在端到端吞吐、配对胜率和漂移门否决。** 现有
+`STRATA_LFUSE=1` + `STRATA_MMVF_ROWS=1` 路径把共享专家 scalar gate 并入 multi-row router，
+并把 sigmoid/scale 折入 resident combine。两卡独立 parity 与 B/A2 冻结 greedy 全部通过，
+但只有 8 路名义过 1%，且 8 路只有 4/6 配对胜、A 漂移超过 3%；2/4/6 路均回退超过 1%。
+
+**路径与构建**：A 的 native/resident/static batch/async resident 条件真实满足
+`lfuse_on(n)`；2 路每组单行不进入目标 branch，4/6/8 路每组分别为 2/3/4 行。真实 shared
+gate/up 类型为 IQ3_S/IQ4_XS/Q4_K/Q5_K/Q6_K，Q8_0 pair 未命中，未计入收益。候选 config 的
+diff 只有 `STRATA_LFUSE=1` 与 `STRATA_MMVF_ROWS=1`；engine/config SHA-256 为
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
+`2c40636bb6fa9f9a593a8d8bb9452f534951321b94aa8cd2cba6a47334f11dcc`。
+
+**正确性与启动**：GPU0/GPU1 的 `mmvf_rows_parity` 均为 `432 cases, 1660200 values,
+0 mismatches`；`fusions_parity` 均为 0 failures。B 以六 slots / 两组、health loaded 启动，
+engine 环境含两个候选 key。B 与 A2 各跑三组冻结 greedy 两次；6/6 行逐字相同，B/A2 相同，
+finish 全为 `stop`。
+
+**A1-B-A2**：每臂 12 waves，2/4/6/8 路各三次 400-token burst。
+
+| streams | A1 | B | A2 | A1/A2 median | B delta | paired wins | A drift |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 85.449 | 74.602 | 72.174 | 77.3185 | `-3.513%` | 1/6 | `-15.536%` |
+| 4 | 117.720 | 100.875 | 110.355 | 110.5865 | `-8.782%` | 1/6 | `-6.256%` |
+| 6 | 123.243 | 119.019 | 121.402 | 122.3185 | `-2.697%` | 2/6 | `-1.494%` |
+| 8 | 107.109 | 114.674 | 111.450 | 109.8805 | `+4.362%` | 4/6 | `+4.053%` |
+
+没有 4/6/8 级同时满足 `>=1%` 与 `5/6` 胜；2/4/6 超过 1% 非回退线，8 路漂移超过 3%。
+因此不能把 8 路局部增益采纳为全局默认。
+
+**请求与资源**：三臂均无脚本错误、HTTP/执行错误或外来请求；finish 仅为 `length/stop`
+（A1 `12/7`、B `12/6`、A2 `12/8`）。B 加载约 155 秒；B→A2 停服约 9 秒、加载约 198 秒。
+A2 恢复后 engine/config hash 正确，6 slots / groups `0,1`，engine env 无 LFUSE/MMVF；RAM
+`49 GiB used / 13 GiB available`、swap `12.3 MiB`、GPU free `803/904 MiB`，systemd
+仍 inactive/dead、`MainPID=0`、`NRestarts=23`。
+
+**证据**：`/opt/ai/logs/util-lfuse-shared-20261031T0929CST/`，`all-sha256.txt` sha256
+`330132790c59ecb3a4f01468ed520c3e86af208faa97f1089f068c8298e0753b`。**没测什么**：没有
+长上下文、混合流量、自然语言 parity、其他模型或非 CUDA backend；结论只覆盖现有 LFUSE
+分支与该双 2080 Ti 生产形状。完整结果见
+[`UTIL_LFUSE_SHARED_RESULT-20261031.md`](work/UTIL_LFUSE_SHARED_RESULT-20261031.md)。
 
 ## L-117 UTIL-B6-ROWS：精确 row reuse 未胜过生产 IL，kernel screening 否决
 

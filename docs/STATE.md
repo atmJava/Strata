@@ -6,11 +6,13 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-LFUSE-SHARED（共享专家门融合启动/性能门）
-- 当前工作：只读审计确认 A 的 native/resident/静态批次条件满足现有 `lfuse_on(n)`，真实
-  shared gate/up 类型不命中 Q8_0 pair，因此只把 `STRATA_LFUSE=1` 的标量门并入 router
-  与 combine，并用 `STRATA_MMVF_ROWS=1` 提供 aux launch。2 路每组单行不在路径上；
-  4/6/8 路先过独立 parity、冻结 greedy 和 A1-B-A2，1% 代价约两次加载。
+- 当前项：UTIL-LFUSE-SHARED 已完成并在端到端吞吐门否决；正在为下一项做源码/阶段成本
+  审计，只接受生产可达、独立于已否决 LAUNCH/head/group 路径且有 ≥1% 实测路径的候选。
+- 上一项：UTIL-LFUSE-SHARED 启动和正确性全过。两卡 `mmvf_rows_parity` 的
+  `432 cases / 1,660,200 values` 零 mismatch，`fusions_parity` 零失败；B/A2 三组冻结 greedy
+  两轮逐字一致。A1-B-A2 的 2/4/6/8 路为 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场
+  `1/6, 1/6, 2/6, 4/6`，A 漂移 `-15.536%/-6.256%/-1.494%/+4.053%`；只有 8 路名义过 1%，
+  但未过 5/6 胜与漂移门，2/4/6 回退超过 1%。A2 已恢复，不保留 LFUSE/MMVF env。
 - 上一项：UTIL-B6-ROWS 在 kernel screening/reach 门否决。两卡全部 parity；但相对生产
   `STRATA_SM75_PERF=1` 选择的 IL rows，T=2/3/4 中位为
   `-5.868%/0.000%/+0.586%`，胜场 `0/22, 7/28, 18/28`，Q5_K/Q6_K 单点回退
@@ -94,10 +96,9 @@
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：执行 `UTIL-LFUSE-SHARED` contract。两卡先跑 `mmvf_rows_parity` 与
-  `fusions_parity`；通过后只增加两个 env 启动 B，三组冻结 greedy 两轮等于 A 才跑同周期
-  A1-B-A2 的 2/4/6/8 路。2 路不在 LFUSE 路径，不能把它未变的数字算作收益。
-- 当前候选：无运行中 server 候选。A3 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
+- 下一动作：完成 LFUSE 收口后，从真实 stage 成本和源码选择下一项不同机制；先只读审计
+  生产可达性、触发率、固定/临界路径和保守 ≥1% 依据，再预注册 contract。未过源码门不重启。
+- 当前候选：无运行中 server 候选。A2 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
   仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
@@ -111,12 +112,13 @@
 
 - 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
   这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；poll-turnover 判决后恢复的 server/engine/vision PID 为
-  `593069/593112/593073`，engine 为 `105a4171...`，6 slots / 2 groups，没有
+  `loaded=true`；LFUSE 判决后恢复的 server/engine/vision PID 为
+  `604897/604926/604905`，engine 为 `105a4171...`，6 slots / 2 groups，没有
   `STRATA_VERIFY_PROFILE`、`STRATA_BATCH_TELEMETRY`、`STRATA_BATCH_GDN_GROUPS`、
   `STRATA_SLOT_CKPT_MOVE`、`STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、
   `STRATA_FUSE_HEAD_GR`、`STRATA_POLL_FAST`、`--expert-cache-cpu-order` 或其它实验
-  profiler/QSA/kernel env。A2→B2 加载约 155 秒，B2→A3 加载约 130 秒。
+  profiler/QSA/kernel env，也没有 `STRATA_LFUSE` 或 `STRATA_MMVF_ROWS`。B 加载约 155 秒，
+  B→A2 加载约 198 秒。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
@@ -156,6 +158,9 @@
 - UTIL-B6-ROWS 已否决：两卡 exactness 全过，但 B6 相对生产 IL 的 T=2 中位慢 `5.868%`，
   0/22 胜；仅有 4 列中位 `+0.586%` 且 duration-weighted 为 `-1.000%`。B6 也不在 IL 的
   production dispatch 上，不能靠 env 替换。没有 server build、重启或 A-B-A。
+- UTIL-LFUSE-SHARED 已否决：两卡 parity 与 B/A2 冻结 greedy 全过，但 A1-B-A2 的
+  2/4/6/8 路为 `-3.513%/-8.782%/-2.697%/+4.362%`、胜场 `1/6, 1/6, 2/6, 4/6`。仅 8 路
+  名义过 1%，却未达到 5/6 胜且 A 漂移 `+4.053%`；2/4/6 回退超过 1%。A2 已恢复。
 - UTIL-PIPED-MTP 已否决：A1/A2 合并中位 `78.3/108.55/125.7 tok/s`，B 为
   `93.9/104.4/113.4`；2 路 `+19.92%`、5/6 胜，但 4/6 路 `-3.82%/-9.79%`。固定 greedy
   文本 B 两次不同；B 的 CUDA1 cache 比 A 少 169 slots，下一项先做 cache-neutral 隔离。

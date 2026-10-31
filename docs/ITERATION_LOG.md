@@ -3,6 +3,38 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-91 · Shared-expert LFUSE is exact but regresses three concurrency levels
+
+- 目标 / 指标：验证现有 `STRATA_LFUSE=1` + `STRATA_MMVF_ROWS=1` 的共享专家标量门/router
+  融合能否把双卡生产 decode window 至少提高 1%，同时 2/4/6/8 路没有超过 1% 的回退。
+- 假设与预期：4/6/8 路每组 2/3/4 行命中 `lfuse_on(n)`，shared scalar gate 搭乘 multi-row
+  router launch，sigmoid+scale 折入 resident combine。profile 中两 stage `shared+quant`
+  合计约 `1.17 ms/window`，1% 门槛约 `0.236 ms`，因此存在可测空间。
+- 为什么选这条路线：它使用已有 exact 分支，不改源码和算术；与已否决的 IL 替换、head split、
+  跨 group 延迟和固定 group 数不同，而且 2 路不在路径上，可检查未触碰行为。
+- 改动与实验：候选只向 A 的深拷贝 config 增加两个 env，diff 仅两行。两卡先跑
+  `mmvf_rows_parity`/`fusions_parity`，再启动 B 跑三组冻结 greedy 两次；随后同 boot
+  A1-B-A2 各在 2/4/6/8 路跑三波 400-token 请求，最后按六组配对计算胜场与 A/B/A2 medians。
+- 结果：两卡 `432 cases / 1,660,200 values` 零 mismatch，fusion 零失败；B 的 6 slots /
+  2 groups、两个 env、health 和资源均正确，B/A2 的 6 条冻结结果逐字相同。性能为
+  `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`；A 漂移
+  `-15.536%/-6.256%/-1.494%/+4.053%`。四臂零脚本/请求错误、零外来请求，finish 只有
+  `length/stop`。
+- 判决：**UTIL-LFUSE-SHARED 吞吐与漂移门否决。** 8 路虽然名义达到 1%，但只有 4/6 胜且
+  A 漂移超过 3%；2/4/6 路回退均超过 1%，不能按单一最佳并发级采纳。
+- 预期部分推翻：launch fusion 的真实算术正确且 8 路窗口受益，但 fork stream、resident
+  combine 和不同 group rows 让低/中并发付出更高成本；阶段成本上界不等于端到端收益。
+- 生产状态与回滚：A2 server/engine/vision 为 `604897/604926/604905`，engine sha256
+  `105a4171...`、config `88de996a...`、health loaded、6 slots / 2 groups；systemd 保持
+  inactive/dead，运行环境无 `STRATA_LFUSE`/`STRATA_MMVF_ROWS`。
+- 证据：台账 L-118、`UTIL_LFUSE_SHARED_RESULT-20261031.md`、远端
+  `/opt/ai/logs/util-lfuse-shared-20261031T0929CST/`；`all-sha256.txt` sha256
+  `330132790c59ecb3a4f01468ed520c3e86af208faa97f1089f068c8298e0753b`。
+- 学到什么：共享专家阶段有足够理论上界，不等于现有 fusion 的 event/stream 编排更便宜；
+  8 路局部收益必须同时看 A2 漂移和配对胜率，不能覆盖 2/4/6 的稳定回退。
+- 下一步与理由：关闭 LFUSE，重新做源码与 stage 成本审计。下一候选必须不经 IL/LFUSE 替换，
+  也不重复 launch/head/group 聚合；先给出真实触发率、临界路径和 ≥1% 可测依据，再考虑重启。
+
 ## I-20261031-90 · B6 row reuse is exact but cannot replace the production IL path
 
 - 目标 / 指标：验证现有精确 `STRATA_B6_MMVQ_ROWS=1` 能否在真实 2080 Ti 六槽窗口把生产解码

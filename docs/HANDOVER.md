@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T09:23+08:00。
+> 整理时间：2026-10-31T09:54+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -44,7 +44,12 @@
   exactness 门通过，但相对生产 IL rows，T=2 中位慢 `5.868%`、0/22 胜；T=3/4 中位为
   `0.000%/+0.586%`，duration-weighted 为 `+0.496%/-1.000%`，同时 Q5_K/Q6_K 有
   `15.96-38.63%` 的单点回退。仅设置 B6 env 也不能替换 IL dispatch，所以没有构建或重启。
-  当前断点转为 B6 收口后的下一项不同机制源码/阶段成本审计。
+  `UTIL-LFUSE-SHARED` 随后完成两卡独立 parity、候选启动和 A1-B-A2。两卡
+  `mmvf_rows_parity` 的 432 cases/1,660,200 values 零 mismatch，`fusions_parity` 零失败，
+  B/A2 三组冻结 greedy 两轮逐字一致；但 2/4/6/8 路相对 A 合并中位为
+  `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`。只有 8 路名义过 1%，
+  未过 5/6 胜，A 漂移还达 `+4.053%`；2/4/6 回退超过 1%，因此否决并恢复 A2。当前断点转为
+  下一项不同机制源码/阶段成本审计。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -87,7 +92,7 @@
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
 | 候选 health | 200，`loaded=true` |
 | 当前 engine | sha256 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` / `0.1.51` |
-| 当前 PID | server `593069`、engine `593112`；vision `593073` |
+| 当前 PID | server `604897`、engine `604926`；vision `604905` |
 | current config | sha256 `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -111,8 +116,8 @@ STRATA_SM75_PERF=1
 `STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING`、`STRATA_PA_GROUP3`、
 `STRATA_IQ3_GRID_REPL`、`STRATA_IQ3_ACT_RELOAD`、`STRATA_IQ3_WEIGHT_REUSE`、
 `STRATA_IQ3_GRID_PAD`、`STRATA_IQ3_WEIGHT_RO`、`STRATA_BATCH_MTP`、
-`STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、`STRATA_FUSE_HEAD_GR`、`STRATA_PROFILE_*` 或
-`STRATA_NCU_*`；`STRATA_POLL_FAST` 已随否决移除。
+`STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、`STRATA_FUSE_HEAD_GR`、`STRATA_LFUSE`、
+`STRATA_MMVF_ROWS`、`STRATA_PROFILE_*` 或 `STRATA_NCU_*`；`STRATA_POLL_FAST` 已随否决移除。
 `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
 引擎子进程，不能替代 service drop-in。
 

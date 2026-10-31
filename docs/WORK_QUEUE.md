@@ -121,10 +121,12 @@
     bitwise/数值影响和回滚，才预注册新候选。审计确认 `STRATA_LFUSE=1` +
     `STRATA_MMVF_ROWS=1` 在 4/6/8 路真实可达；2 路每组单行不进分支，shared gate/up
     类型也不命中 Q8_0 pair，因此只把 scalar gate/router 与 gated-combine 计入候选。
-34. **UTIL-LFUSE-SHARED 进入启动/性能门**：只加两个现有 env，不改源码。先跑两卡
-    `mmvf_rows_parity`/`fusions_parity` 与 B/A2 三组冻结 greedy；随后同周期 A1-B-A2
-    的 2/4/6/8 路、每级 3 波。4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不回退 >1%，2 路
-    保持，漂移 ≤3% 才采纳；失败立即恢复 A。
+34. **UTIL-LFUSE-SHARED 已在端到端吞吐门否决**：两卡 `mmvf_rows_parity` 的
+    `432 cases / 1,660,200 values` 零 mismatch，`fusions_parity` 零失败，B/A2 冻结 greedy
+    逐字一致。A1-B-A2 的 2/4/6/8 路为 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场
+    `1/6, 1/6, 2/6, 4/6`；只有 8 路名义过 1%，未过 5/6 胜，A 漂移 `+4.053%`，2/4/6
+    回退超过 1%。A2 已恢复。下一项做源码/阶段成本审计，避开已否决的 launch/head/group
+    和 LFUSE 同形设计。
 
 ## 候选
 
@@ -162,7 +164,7 @@
 | UTIL-POLL-TURNOVER | 降低 `pump()` 完成检测、group hand-off 与下一 stage launch 之间的串行固定间隙 | 先只读审计并量化 `batch_poll -> verdict -> hand-off -> batch_launch`；必须有真实窗口命中、临界路径保守收益 ≥1%、不改变事件顺序/数值路径和明确回滚，才允许实现与 A1-B-A2 | 否决 | L-116：同选项 B2 parity 全过，但 6/8 路 `-3.241%/-6.122%`，最佳级 4 路胜场也只 5/6 且仍无其他级保障；B1 因编译开关缺失作废 | 源码已移除；不重试无 ring 快返回 |
 | UTIL-B6-ROWS | 在 Q4_K/Q5_K/IQ4_XS MMVQ 中跨 rows 复用 activation fragment | 独立 GPU 对 parity cases 逐字相等；生产 6-column kernel 中位 ≥1% 且 5/7 胜、保守窗口占比仍 ≥1%；之后 A-B-A 的 2/4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不回退 >1% | 否决（reach/screening） | L-117：两卡全 parity，但相对 IL T=2 中位 `-5.868%`、0/22 胜；Q6_K/Q5_K 回退最高 `38.63%` | 未构建、未重启；B6 不能替换 production IL dispatch，不扫描 rows 或同形 routing |
 | UTIL-COST-AUDIT | 从真实 stage 成本与源码找 B6 后下一项不同机制 | 指明生产 dispatch、真实命中率/张量形状、每窗口绝对成本与 ≥1% 保守计算；排除已有否决项；输出可预注册的单一候选或明确停止理由 | 已完成 | L-117；stage 2 `waitA/shared+quant/head` 与 stage 1 `q8+qkv/z/out-proj` profile | 产出 LFUSE-SHARED；未改源码、未重启 |
-| UTIL-LFUSE-SHARED | 共享专家标量门并入 router、sigmoid+scale 并入 resident combine | 独立 BF16 row/aux 与 fusion parity 逐字；B 只加 `STRATA_LFUSE=1`/`STRATA_MMVF_ROWS=1`；冻结 greedy 两轮等于 A；A1-B-A2 的 4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不退 >1%，2 路不变，漂移 ≤3% | 进行中（启动/性能门） | 真实 shared 类型为 IQ3_S/IQ4_XS/Q4_K/Q5_K/Q6_K；Q8_0 pair 未命中。stage `shared+quant` 为 1.17 ms/窗口，1% 为 0.236 ms | 只测现成 exact 分支，不改源码或扫描 env；不把未执行的 pair 或 2 路算收益 |
+| UTIL-LFUSE-SHARED | 共享专家标量门并入 router、sigmoid+scale 并入 resident combine | 独立 BF16 row/aux 与 fusion parity 逐字；B 只加 `STRATA_LFUSE=1`/`STRATA_MMVF_ROWS=1`；冻结 greedy 两轮等于 A；A1-B-A2 的 4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不退 >1%，2 路不变，漂移 ≤3% | 否决（吞吐/漂移） | L-118：parity 与 greedy 全过；2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`，8 路仅 4/6 胜且 A 漂移 `+4.053%` | A2 已恢复；不改源码、不扫描 LFUSE/MMVF env，不重试同形 shared fusion |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |

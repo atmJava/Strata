@@ -961,6 +961,32 @@ Q6_K 单点从 `67.3` 到 `93.3 us`（`-38.63%`），另有 Q6_K `-37.89%/-27.44
 所以只作补充。候选在 screening/reach 门否决，未加 routing、未构建、未重启。完整证据见
 [`UTIL_B6_ROWS_RESULT-20261031.md`](UTIL_B6_ROWS_RESULT-20261031.md) 和台账 L-117。
 
+### 16.5.20 UTIL-LFUSE-SHARED：正确性通过，2/4/6 路回退超过 1%
+
+生产 A 的 native shared-expert、resident experts、static batch 与 asynchronous resident
+条件满足现有 `lfuse_on(n)`。2 路每组只有一行，不进入 LFUSE；4/6/8 路每组分别为两、三、四行。
+真实 shared gate/up 类型是 IQ3_S/IQ4_XS/Q4_K/Q5_K/Q6_K，Q8_0-only pair 分支未命中，也没有
+把 pair launch 计入收益。
+
+两卡 `mmvf_rows_parity` 均为 `432 cases, 1660200 values, 0 mismatches`，
+`fusions_parity` 均为 0 failures。B 以 6 slots / 2 groups、health loaded 启动，运行环境包含
+`STRATA_LFUSE=1` 与 `STRATA_MMVF_ROWS=1`；B/A2 三组冻结 greedy 各两轮逐字一致，finish
+全为 `stop`。
+
+同 boot A1-B-A2 的 2/4/6/8 路、每级 3 波结果：
+
+| streams | A1 | B | A2 | A1/A2 median | B delta | paired wins | A drift |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 85.449 | 74.602 | 72.174 | 77.3185 | **-3.513%** | 1/6 | **-15.536%** |
+| 4 | 117.720 | 100.875 | 110.355 | 110.5865 | **-8.782%** | 1/6 | **-6.256%** |
+| 6 | 123.243 | 119.019 | 121.402 | 122.3185 | **-2.697%** | 2/6 | -1.494% |
+| 8 | 107.109 | 114.674 | 111.450 | 109.8805 | **+4.362%** | 4/6 | **+4.053%** |
+
+只有 8 路名义超过 1%，但 4/6 胜和 A 漂移都不合格；2/4/6 路直接越过 1% 非回退门。因此否决，
+A2 恢复为 server/engine/vision `604897/604926/604905`，engine/config hash 保持
+`105a4171.../88de996a...`，运行环境没有 LFUSE/MMVF 标记。完整证据见
+[`UTIL_LFUSE_SHARED_RESULT-20261031.md`](UTIL_LFUSE_SHARED_RESULT-20261031.md) 和台账 L-118。
+
 ### 16.6 并发和会话快照
 
 这两项放在单流路径稳定后。并发测试至少要有：

@@ -128,3 +128,22 @@ of model loading per transition. The microbenchmarks cost no restart. If any gat
 A and verify its hashes, health, PID, slots, groups, runtime environment and resources.
 
 Do not write an API key, token or private prompt to the repository, logs or conversation.
+
+## Outcome
+
+**Rejected.** Both independent parity harnesses and the frozen B/A2 probes passed, and the candidate
+started with six slots / two groups and the exact expected binary. Throughput did not pass the
+registered gates:
+
+| streams | A1/A2 median | B median | B delta | paired wins | A drift |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 77.3185 | 74.602 | **-3.513%** | 1/6 | **-15.536%** |
+| 4 | 110.5865 | 100.875 | **-8.782%** | 1/6 | **-6.256%** |
+| 6 | 122.3185 | 119.019 | **-2.697%** | 2/6 | -1.494% |
+| 8 | 109.8805 | 114.674 | **+4.362%** | 4/6 | **+4.053%** |
+
+Only eight streams reached the nominal gain, and it still failed the 5/6 pair-win and 3% drift gates.
+Two, four and six streams exceeded the one-percent non-regression limit. The candidate was not
+retained. A2 was restored from the exact baseline config and binary, with no LFUSE/MMVF environment
+variables in the engine; full evidence is in
+[`UTIL_LFUSE_SHARED_RESULT-20261031.md`](UTIL_LFUSE_SHARED_RESULT-20261031.md).
