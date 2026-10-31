@@ -6,10 +6,11 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-COST-AUDIT（只读阶段成本/源码审计）
-- 当前工作：`UTIL-B6-ROWS` 已完成并在生产路径 screening 门否决。下一步选择一条不依赖替换
-  `native_mmvq_il`、不重复已关闭 launch/head/group/checkpoint/GDN 聚合的独立机制；先用现有
-  profile 的真实窗口成本证明保守 ≥1% 可达，再预注册 contract。未形成候选前不重启。
+- 当前项：UTIL-LFUSE-SHARED（共享专家门融合启动/性能门）
+- 当前工作：只读审计确认 A 的 native/resident/静态批次条件满足现有 `lfuse_on(n)`，真实
+  shared gate/up 类型不命中 Q8_0 pair，因此只把 `STRATA_LFUSE=1` 的标量门并入 router
+  与 combine，并用 `STRATA_MMVF_ROWS=1` 提供 aux launch。2 路每组单行不在路径上；
+  4/6/8 路先过独立 parity、冻结 greedy 和 A1-B-A2，1% 代价约两次加载。
 - 上一项：UTIL-B6-ROWS 在 kernel screening/reach 门否决。两卡全部 parity；但相对生产
   `STRATA_SM75_PERF=1` 选择的 IL rows，T=2/3/4 中位为
   `-5.868%/0.000%/+0.586%`，胜场 `0/22, 7/28, 18/28`，Q5_K/Q6_K 单点回退
@@ -93,10 +94,9 @@
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：B6 已否决，不构建其 server candidate。只读审计现有 stage profile 和源码中尚未
-  开启的 shared-expert/quantization 固定成本路径，优先选择能直接减少真实窗口 CUDA event 或
-  kernel launch 且保持 token/算术语义的机制；必须排除已否决的同形实现，并先写清命中率、
-  1% 临界路径计算、数值影响与回滚。
+- 下一动作：执行 `UTIL-LFUSE-SHARED` contract。两卡先跑 `mmvf_rows_parity` 与
+  `fusions_parity`；通过后只增加两个 env 启动 B，三组冻结 greedy 两轮等于 A 才跑同周期
+  A1-B-A2 的 2/4/6/8 路。2 路不在 LFUSE 路径，不能把它未变的数字算作收益。
 - 当前候选：无运行中 server 候选。A3 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
   仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
