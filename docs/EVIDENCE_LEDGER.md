@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-137，按编号）
+## 台账索引（L-000…L-138，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -151,9 +151,60 @@
 | L-135 | 10-31 15:1x | `spec_min_p 0/0.5/0.7/0.9` wall `4.51–4.54 s`；aux CPU `4.5489/4.5561 s`；`pcie_frac 0/0.15/0.31/0.45` `4.597–4.611 s`；checkpoint 开关 `0.4461/0.4465 s` | **固定负载无可测差异；这些参数轴停止扫描** |
 | L-136 | 10-31 14:2x | 210K cold `75.295 s`；208K 长前缀分支复用 `196,608`、重读 `11,924`，prompt `9.314–9.486 s`、wall `9.605–9.784 s`；compaction cached `208,527/208,554=99.987%`，两次正常 prompt `248–283 ms`，recovery 运行 `prompt_ms=75.474 s`，三臂 wall `5.853/8.845/85.017 s` | **compaction 前缀缓存通过；长前缀边界回落与 recovery 尾部待拆；后续 L-137 已校正场景口径** |
 | L-137 | 10-31 14:5x | 全量本地 rollout 14,183 请求/109 次 compaction，compaction 占 uncached input `51.24%`；压缩后立即回读旧历史 0/109。精确 pin `208528` 把合成分支从 `9.016–9.523 s` 降到 `0.274 s`。用户澄清 180K“重读历史”是放置超过一天后重新打开旧会话 | **三类场景已拆分；exact pin/`cap=9` 降为低频诊断；下一项为 AGENT-OLD-SESSION-RESUME；全局循环暂停** |
+| L-138 | 10-31 15:x | 冻结 29h Codex 快照：14 root、4,180 请求、6,297 工具，root 墙钟 `54,324 s`；最长 root 模型/工具 union `14,855/31,088 s`、空档 `15.843 s`。44 次真实 compaction 仅 1 次缓存 >=50%，占 uncached input `54.32%`、推断模型跨度 `2.18%` 墙钟；480/1708-token 两路串行第二请求 TTFT `4.7/16.384 s` | **AGENT-END-TO-END-TRACE 完成；下一项 AGENT-COMPACTION-REAL-SHAPE；客户端形状不等于 server timing** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-138 · 整任务 trace：工具/模型覆盖墙钟，真实 compaction 只有 1/44 高命中
+
+**判定：AGENT-END-TO-END-TRACE 完成；下一项真实 compaction 形状对齐。**
+
+冻结 rollout 快照
+`/tmp/rollout-01a18a33-20261031T-trace.jsonl`，SHA-256
+`fe7850a8437145585e620777a42a6b1cc5b97f7bfa47eb7d4606dd74a4660803`：
+
+- 14 root task，11 completed、3 aborted，4,180 模型请求，6,297 次工具调用；
+- root 墙钟 union `54,324 s`，推断模型 union `20,329.489 s`，工具 union
+  `36,362.965 s`；
+- input `753,516,637`、cached `731,605,376`（`97.09%`）、output `3,360,058`、
+  reasoning `982,658`；
+- output 中位/p90/p99 `483/1,714/5,069`，reasoning `45/646/2,741`；
+- 工具等待中位/p90/p99 `910/30,004/30,166 ms`，输出 `26,452,799` 字符；
+- 914 个 `>=10K` 字符输出合计 `18,139,007` 字符，占 `68.57%`；
+- 最长 root `44,783 s`（12h26m），3,287 模型请求、4,769 工具调用，模型/工具 union
+  `14,854.926/31,087.885 s`，overlap `1,175.654 s`，未归因 `15.843 s`；
+- `write_stdin` 946 次、span sum `22,408.605 s`，618 次 >=30 s；
+  `exec_command` 4,677 次、`16,710.132 s`；`apply_patch` 571 次但仅 `15.08 s`。
+
+工具和模型区间是客户端推断，且互相重叠；工具跨度含真实命令执行与轮询，不能写成
+Strata 可节省时间。初版工具只统计 `function_call`，审计后补入
+`custom_tool_call` 与 `tool_search_call`，隐私测试确认正文不进入结果。
+
+真实 compaction：
+
+- 44 次请求中 1 次缓存率 >=50%，43 次 <50%；
+- 总 input `12,480,353`、cached `578,048`、uncached `11,902,305`；
+- miss 中位 input/cached/uncached `283,884/7,424/277,803`；
+- compaction 推断模型跨度 `1,186.236 s`，占 root 墙钟 `2.18%`；
+- compaction uncached input 占全部 uncached input `54.32%`。
+
+因此即使只去掉一半 compaction 模型跨度，整任务上界仍约 `1.09%`。但客户端 provider
+不保证与 B4 相同，不能直接说当前 Strata compaction LRU 失效；已预注册
+`AGENT-COMPACTION-REAL-SHAPE`，先做隐私安全结构 fingerprint。
+
+真实 output 长度重放（现役 B4、无重启、输出 hash 全部一致、零错误）：
+
+- 480 token：1 路 `4.682 s`、`104.83 tok/s`；2 路完成跨度 `9.354 s`，第二请求 TTFT
+  `4.701–4.708 s`；
+- 1,708 token：1 路 `16.385 s`；2 路完成跨度 `32.790 s`，第二请求 TTFT `16,384 ms`。
+
+两路串行对总完成时间有利，但第二个请求在 p90 输出形状下会等待完整一代。后续角色感知
+双路策略必须同时报告第二请求 TTFT。
+
+**证据**：`/tmp/agent-trace-01a18a33-frozen.json`、
+`/tmp/agent-decode-480-20261031.json`、`/tmp/agent-decode-1708-20261031.json`；
+完整说明见 [`AGENT_END_TO_END_TRACE_RESULT-20261031.md`](work/AGENT_END_TO_END_TRACE_RESULT-20261031.md)。
 
 ## L-136 · AGENT-COST-MAP：94K/189K 热续轮与 210K compaction 的秒级成本
 

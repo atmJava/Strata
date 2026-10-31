@@ -7,18 +7,12 @@
 
 ## 当前决策前沿
 
-0. **全局目标已改为真实 Agent 负载**：1/2 路为主、4 路上限，6/8 只做安全回归。Agent A/A
-   证明普通会话续轮复用约 95%，因此停止重复优化基础缓存。`codex_thread_titles` 与
-   `codex_compaction_cache` 多线程 LRU 均已采纳；后者让 1 主 3 子代理的 compaction 各复用
-   约 99.5%。共享 system 已移到 tools 之前并采纳，后续兄弟请求复用 `5,120` token，平均墙钟
-   降低 `24.56%`。自动 boundary pin 和 `UTIL-TWO-STREAM-SERIAL` 也已采纳；后者把
-   512-token 两路完成跨度降低 `15.05%`、64-token 降低 `8.18%`，第三条出现时恢复
-   batch。[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-   当前目标已校正：用户所说的“180K 重读历史”是隔天重新打开约 180K token 的旧会话，
-   不是 compaction 后重走旧历史分支。恢复执行后的下一项是 `AGENT-OLD-SESSION-RESUME`。
-   210K compaction 前缀已复用 `99.987%`；精确 pin 虽能把 208K 合成分支从约 9 秒降到
-   `0.274 s`，但真实 rollout 的 109 次 compaction 中立即触发为 0/109，因此 exact pin /
-   `cap=9` 只保留为低频诊断，不作当前实现目标。
+0. **全局目标已改为真实 AI vibe coding 任务**：同时优化任务墙钟、首个可执行结果、严重
+   尾部和任务成功率；1/2 路为主、4 路非回退、6/8 只做安全回归。整任务 trace 已完成，
+   当前项是只读 `AGENT-COMPACTION-REAL-SHAPE`。冻结快照最长 root `44,783 s`，模型/
+   工具 union `14,855/31,088 s`；真实 44 次 compaction 仅 1 次缓存率 >=50%，占全部
+   uncached input `54.32%`，是当前唯一优先解释的大头。隔天约 180K 旧会话恢复保留为
+   p99 必测项，但不再是未经成本地图证明的第一项。
 1. **P4 已采纳**：同一新引擎 boot 上，代码由 A 合并中位 41.1875 s 降到 5.074 s（−87.681%）；
    96K by_kind +2.761%、wave +2.202%，短 JSON 3.980 s，三臂零错误且 needle 全对。
 2. **余量风险**：短 JSON 距 4 s 约 20 ms，96K 距 3% 约 0.24 个百分点；生产指标靠近边界时
@@ -173,7 +167,9 @@
 | AGENT-SERVER-BREAKDOWN | 拆 1/2 路热续轮和冷首轮成本 | 同服务记录 wall、prompt、decode、TTFT、slot wait、cached；全部请求成功且无外来请求；区分短输出与真实长输出 | 已完成 | L-132：1 路冷/续 `7.382/1.610 s`；2 路 `11.075/2.290 s`；续轮 prompt `1.4–1.5 s`，decode 仅约 50–73 ms | 短输出不能代表长 decode；下一项拆固定/恢复路径 |
 | AGENT-COST-MAP | 建立真实请求尺寸与秒数的优化优先级 | 不改服务；复用 12K/94K/189K 热续轮与 96K/180K/210K 长读证据；补 210K 后 Codex compaction；记录 2 路第二条 TTFT、单请求 wall、完成跨度；只保留真实加权上界 ≥1% 的方向 | 已完成 | L-136：94K/189K 热续轮 `2.09/2.43 s`，208K 分支重读 `9.67 s`；210K compaction 缓存 `99.987%`，两次正常 wall `5.853/8.845 s`，recovery 臂 `85.017 s` | 压缩缓存收口；L-137 把“隔天旧会话恢复”与合成分支分开，下一项转为旧会话恢复 |
 | AGENT-LONG-CHECKPOINT-BRANCH | 验证 long-prompt 分支 checkpoint 保留机制 | 用精确 token pin 跑 history→compaction→history，确认旧边界可复用；再扫描真实 compaction 的立即后续请求，决定是否值得实现自动保留 | 已完成 | 精确 pin `208528` 后分支 cached `208528/208533`、wall `0.274 s`，无 pin 对照 `9.016–9.523 s`；真实 14,183 请求/109 次 compaction 的立即回读为 0/109 | **机制成立但低频，不作主目标**；不自动启用 exact pin 或 `cap=9`，除非真实频率另有证据 |
-| AGENT-OLD-SESSION-RESUME | 测量隔天约 180K 旧会话的冷恢复成本 | 固定会话年龄来源与约 180K 形状；记录 input、cached/uncached、prompt、TTFT、wall、slot wait、finish、并发和资源；区分真实旧会话与冷缓存代理；候选须有真实触发率后的整任务 ≥1% 上界、正确性和回滚 | 待做 | 现有 180K 冷 turn `65.555 s` 是同服务新合成会话，只能作代理；尚未覆盖超过一天未使用后的恢复 | 全局优化循环当前暂停；恢复后先执行本项，不与 compaction LRU 或压缩后旧分支混算 |
+| AGENT-END-TO-END-TRACE | 建立真实 vibe coding 任务时间账本 | 只读关联 root、模型轮次、工具等待/输出、compaction、recovery、取消和空档；至少复算 3 个真实任务与 1 个长会话；不输出 prompt 正文；明确客户端跨度与 Strata server timing 的边界；有合成回归测试 | 已完成 | L-138：14 root、4,180 请求、6,297 工具；最长 root `44,783 s`，模型/工具 union `14,855/31,088 s`、空档 `15.843 s`；真实 44 次 compaction 中 43 次缓存率 <50% | 工具支持 function/custom/tool-search；10 tests OK；无重启、无正文输出 |
+| AGENT-COMPACTION-REAL-SHAPE | 对齐真实 Codex compaction 与已缓存前缀 | 隐私安全记录 metadata、工具来源、消息类型、结构边界、公共 token 前缀和 server 缓存字段；至少 3 个真实形状或 2 真实+1 确定性 fixture；只有证明内容相同前缀才实现 opt-in；候选须有整任务 >=1% 保守上界和精确回滚 | 进行中 | 真实 compaction 占 uncached input `54.32%`、推断模型跨度占 root 墙钟 `2.18%`；43/44 次缓存率 <50%，而 180K 合成复用 `99.984%` | 当前唯一主项；先只读，不重启；若分歧来自真实内容变化则立即停止实现 |
+| AGENT-OLD-SESSION-RESUME | 测量隔天约 180K 旧会话的冷恢复成本 | 固定会话年龄来源与约 180K 形状；记录 input、cached/uncached、prompt、TTFT、wall、slot wait、finish、并发和资源；区分真实旧会话与冷缓存代理；候选按 p99 体验和真实触发频率评估 | 待做 | 现有 180K 冷 turn `65.555 s` 是同服务新合成会话，只能作代理；尚未覆盖超过一天未使用后的恢复 | p99 必测；先由整任务 trace 判断优先级，不与 compaction LRU 或压缩后旧分支混算 |
 | UTIL-MTP-LOWCONC | 用 serial batch-MTP 恢复两路每槽投机 | 同 boot A-B-A；1/2 路至少一级 ≥1%，4 路不退 >1%，输出、finish、health、资源不变 | 否决 | L-133：2 路 `88.50 → 91.38 tok/s`（`+3.25%`），但 4 路 `136.01 → 96.58`（`-28.99%`）；A 输出逐字 | 不扫描 draft depth、阈值或组数；A2 已恢复 |
 | UTIL-TWO-STREAM-SERIAL | 恰好两路依次走 solo，三路恢复 batch | 两路完成跨度至少改善 1%；1/4 路不退，6 路安全；solo 输出重复一致，零错误 | 已完成 | L-134：512-token `11.776 → 10.004 s`（`-15.05%`），64-token `1.692 → 1.554 s`（`-8.18%`）；1 路 `-0.38%`、4 路持平、6 路 `163.07 tok/s` | **已采纳**；`STRATA_BATCH_SERIAL_TWO=1`，第二条 TTFT 约 5.1 s 是明确取舍 |
 | S0b | 长读时邻居停顿 | 同 boot A-B 证明机制有效，停顿 ≤1 s 或给出经证据支持的上界 | 否决 | L-068：路径 3/3 触发但无用户收益；L-082 撤回“整个 0.1.51 回退”的临时概括 | 不再重复同形实验 |
@@ -237,7 +233,7 @@
 | F1F2 | 多路准入判据 | 由 S0b/S2 的证据决定可接受上界；不允许首 token 后静默数十秒 | 待做 | R11 旧提案 | AI 根据测量裁决，不等待用户 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀；有测试 | 待做 | | |
 
-未完成采纳项：20
+未完成采纳项：21
 
 ## 搁置
 

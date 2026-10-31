@@ -4,28 +4,33 @@
 > 当前断点写在前；后面的“近期判决索引”只用于防重复，不驱动当前任务。完整证据见
 > `WORK_QUEUE.md` 和 `EVIDENCE_LEDGER.md`。
 
-- 目标：针对用户真实 Agent 负载（通常 1 会话、少量 2 会话、峰值 4 会话）缩短端到端
-  任务时间；优先消除非必要 prefill、compaction 重读和关键路径等待，不再以 6/8 路为联合
-  收益门。
+- 全局目标：针对真实 AI vibe coding 负载，同时缩短任务完成时间、首个可执行结果时间和
+  严重尾部，并保持工具调用、代码修改、测试结果和任务成功率正确。通常 1 个主代理、偶尔
+  2 个、峰值 1 主 3 子代理；1/2 路是主优化目标，4 路非回退，6/8 只做安全回归。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已重新拟定并通过评审。1/2 路是主验收，4 路是非回退上限，6/8 只做安全回归；局部优化
-  必须先给出真实触发率后的整任务 1% 上界，否则不构建、不重启。
-- 当前阶段：真实 Agent 请求级优化已采纳 title、线程级 compaction LRU、共享 system 前缀
-  顺序、自动 boundary pin 和两路串行准入。B4 后三个兄弟请求复用 `97.34%`，后三墙钟
-  `5.001 → 1.335 s`（`-73.31%`）。
+  已完成第六次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
+  单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。重启成本必须计入当轮。
+- 当前阶段：真实 Agent 请求级优化已采纳 title、线程级 compaction LRU（在对应测试请求
+  形状上有效）、共享 system 前缀顺序、自动 boundary pin 和两路串行准入。B4 后三个兄弟
+  请求复用 `97.34%`，后三墙钟 `5.001 → 1.335 s`（`-73.31%`）。
 - 当前已采纳：`UTIL-TWO-STREAM-SERIAL`。恰好两路时第一条保持 solo、第二条随后也走
   solo；第三条出现后恢复生产 batch。512-token 两路完成跨度 `11.776 → 10.004 s`
   （`-15.05%`），64-token 两路 `1.692 → 1.554 s`（`-8.18%`）；1 路相对 A1/A2
   合并中位 `-0.38%`，4 路吞吐/完成时间不退，6 路 `163.07 tok/s` 安全。第二条请求
   TTFT 约 `5.1 s` 是已接受的取舍。见 L-134。
-- 当前项：AGENT-OLD-SESSION-RESUME
-  全局优化循环已由用户暂停，当前只做文档和目标校正。用户所说的“重读历史 180K 会话”
-  是指放置超过一天后重新打开约 180K token 的旧会话，不是 compaction 后重走旧历史
-  分支。现有 180K 冷 turn `65.555 s` 是同服务新合成会话，只是近似基线，尚未覆盖旧会话
-  恢复。
-- 长上下文口径：210K compaction 已复用 `99.987%`；两次未触发 recovery 的运行
+- 当前项：AGENT-COMPACTION-REAL-SHAPE
+  `AGENT-END-TO-END-TRACE` 已完成。冻结真实会话中 compaction 占全部 uncached input
+  `54.32%`、推断模型跨度占 root 墙钟 `2.18%`；44 次中 43 次缓存率低于 50%，中位
+  重读 `277,803` token。先做隐私安全的结构诊断，找出它与 180K 合成请求
+  `99.984%` 复用之间的第一个分歧。只有证明存在内容相同的失配前缀才实现 opt-in 候选；
+  当前不重启服务。
+- 旧会话口径：用户所说的“重读历史 180K 会话”是放置超过一天后重新打开约 180K token
+  的旧会话，不是 compaction 后重走旧历史分支。现有 180K 冷 turn `65.555 s` 只是代理；
+  `AGENT-OLD-SESSION-RESUME` 保留为 p99 必测项，不再是未经成本地图证明的第一项。
+- 长上下文口径：210K 合成 compaction 已复用 `99.987%`；两次未触发 recovery 的运行
   prompt `0.248–0.283 s`，recovery 运行的 `prompt_ms` 为 `75.474 s`，其中包含约
-  75 秒无新 token 的尾部。精确 pin
+  75 秒无新 token 的尾部。合成成功不能推广为真实客户端已解决：冻结真实 session 的
+  44 次 compaction 中 43 次缓存率低于 50%。精确 pin
   可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
   中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
 - 当前运行：候选 server/vision/engine `50648/50651/50656`，源码
@@ -37,10 +42,10 @@
 - 口径修正：两路串行把第二条 TTFT 推到约 `5.1 s`，只证明“总完成时间优先”的批处理
   取舍，不能作为交互式双会话或全局用户收益。后续双路实验必须同时报告第二条 TTFT、
   单请求 wall 和完成跨度。
-- 当前证据断点：真实 Codex 29 小时会话共 3,614 请求，cached `97.22%`；36 次长历史
-  compaction 每次约 26–30 万 input、仅约 3.5–7.6K cached，占全部 uncached input 约一半。
-  现役 B4 的 180K live HTTP probe（人工合成会话）已证明 compaction 复用 `180,272/180,301 =
-  99.984%`、墙钟 `2.385 s`，冷 turn 为 `65.555 s`。见
+- 当前证据断点：冻结的 29 小时 Codex 快照有 44 次真实 compaction，只有 1 次缓存率
+  >=50%；43 次中位重读 `277,803` token，合计占全部 uncached input `54.32%`。现役 B4
+  的 180K live HTTP probe（人工合成会话）则复用 `180,272/180,301 = 99.984%`、墙钟
+  `2.385 s`；两者不能混为一谈。见
   [AGENT_WORKLOAD_TRACE](work/AGENT_WORKLOAD_TRACE-20261031.md)、
   [AGENT_COMPACTION_LARGE_RESULT](work/AGENT_COMPACTION_LARGE_RESULT-20261031.md)。
 - 最新成本地图：实际 94K 热续轮 wall `2.086 s`、189K `2.430 s`；210K compaction
@@ -55,11 +60,17 @@
   `11 passed`；long-context runner 与 `serve/test_reasoning_loop_recovery.py` 的联合
   回归曾为 `24 passed in 0.88s`。GPU 上的 180K/210K 结果来自 live probe，不是普通离线
   测试；合成分支 pin 是人工 live 验证，不是自动 GPU 回归。
-- trace 工具已固化：`tools/server/probe-codex-sessions.py` 只读汇总 totals、root、
-  compaction 和 top uncached，不输出 prompt 正文，4 tests OK。
+- trace 工具已固化：`tools/server/trace-agent-tasks.py` 只读关联 root、模型、全部工具、
+  compaction、取消和空档，不输出正文；当前与 session 探针联合 `10 passed`。
 - 同服务 1/2 路 breakdown：1 路冷/续轮 wall `7.382/1.610 s`，2 路
   `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅
   `50–73 ms`。见 [AGENT_SERVER_BREAKDOWN](work/AGENT_SERVER_BREAKDOWN-20261031.md)。
+- 最新整任务形状校正：冻结快照有 14 个 root、4,180 个模型请求、6,297 次工具调用、
+  7.54 亿 input token、97.09% cached；output 中位/p90/p99 `483/1,714/5,069`。
+  工具等待中位 `910 ms`、p90/p99 `30.0/30.2 s`；2,645 万输出字符中，914 个 `>=10K`
+  输出占 `68.57%`。11 个任务完成、3 个中止；最长 root `44,783 s`，其中模型
+  `14,855 s`、工具 `31,088 s`、未归因空档 `15.843 s`。该形状说明真实 decode、工具轮转
+  和上下文膨胀都不能由 64-token 探针代表。
 
 ## 近期判决索引（只用于防重复）
 
@@ -200,7 +211,7 @@
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
   已重写和评审，按请求级缓存、排队和工具路径优先，不再从低收益局部内核开始。
-- 未完成采纳项：20。
+- 未完成采纳项：21。
 - 阻塞：服务器已恢复到双卡可用，当前无基础设施阻塞。DFlash2 drafter 权重仍缺失；代码、
   服务接线和工具已保留，该路线不阻塞主线。
 
@@ -412,5 +423,5 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-31T15:00+08:00（长上下文三分类校正；全局循环暂停，下一项为
-  隔天约 180K 旧会话恢复；无重启）
+- 最后更新：2026-10-31T15:29+08:00（第六版真实 Agent 计划通过评审；整任务 trace 完成，
+  当前执行真实 compaction 形状诊断；无重启）

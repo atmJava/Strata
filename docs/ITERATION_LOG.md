@@ -3,6 +3,40 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-110 · 整任务账本完成：下一大头是真实 compaction 形状，不是 kernel
+
+- 目标 / 指标：把真实 vibe coding root task 拆成模型、工具、compaction、取消和空档，
+  选出有整任务 >=1% 保守上界的下一主项。
+- 假设与预期：工具等待可能很大但不能都归因 Strata；真实 compaction 若仍大量未命中，
+  会比继续调两路串行或亚毫秒 kernel 更有价值。
+- 为什么选这条路线：此前两次 synthetic compaction 都复用约 99.98%，却缺少真实
+  root-task 时间账本，无法判断用户实际等待在哪里。
+- 改动与实验：新增 `trace-agent-tasks.py`，按 root 汇总客户端推断模型区间、工具调用到
+  返回区间、union、overlap、未归因 gap、compaction 和 token；审计发现初版漏掉
+  `custom_tool_call`/`tool_search_call`，已补齐并增加隐私回归。冻结 rollout 快照后复算，
+  并在现役 B4 无重启重放 480/1708-token 的 1/2 路真实输出形状。
+- 结果：14 root、4,180 模型请求、6,297 工具调用；root 墙钟 union `54,324 s`，模型 union
+  `20,329 s`，工具 union `36,363 s`。最长 root `44,783 s`，模型 `14,855 s`、工具
+  `31,088 s`、未归因 `15.843 s`。工具等待 p90/p99 `30.0/30.2 s`；2,645 万输出字符中
+  `68.57%` 来自 914 个 `>=10K` 输出。44 次真实 compaction 只有 1 次缓存率 >=50%，合计
+  占 uncached input `54.32%`，推断模型跨度约 `1,186 s`，为 root 墙钟 `2.18%`。
+- 判决：**AGENT-END-TO-END-TRACE 完成。** 下一项改为
+  `AGENT-COMPACTION-REAL-SHAPE`，先解释真实 43/44 次失配；若只消除一半重读，保守整任务
+  上界仍约 `1.09%`。工具 context diet 和角色感知两路调度保留为后续。
+- 预期被推翻：180K 合成 compaction 的 `99.984%` 复用不能证明真实 Codex compaction 已
+  解决；本次冻结会话的缓存命中为 1/44。该结论仍是客户端 provider token 形状，不能直接
+  归因给 Strata，必须继续做同形状 fingerprint。
+- 生产状态与回滚：B4 server/vision/engine `50648/50651/50656` 未变、未重启；
+  新工具改动可独立回退，不影响服务。
+- 证据：L-138、[`AGENT_END_TO_END_TRACE_RESULT-20261031.md`](work/AGENT_END_TO_END_TRACE_RESULT-20261031.md)、
+  `/tmp/agent-trace-01a18a33-frozen.json`、`/tmp/agent-decode-480-20261031.json`、
+  `/tmp/agent-decode-1708-20261031.json`。
+- 学到什么：先做整任务事务账本再选机制；工具执行与模型工作重叠时必须用 union；合成
+  compaction 只能证明请求构造，不证明真实客户端结构。
+- 下一步与理由：执行 `AGENT-COMPACTION-REAL-SHAPE`。只记录结构化 fingerprint 和缓存
+  字段，找到第一个分歧；若真实内容本身不同则停止该实现方向，转角色感知两路或工具
+  context diet。
+
 ## I-20261031-109 · 长上下文目标校正：隔天旧会话恢复，不是压缩后分支
 
 - 目标 / 指标：确认用户所说的 180K“重读历史”到底属于哪类负载，并清除把 compaction、
@@ -17,7 +51,7 @@
   `29,351,478 / 57,278,644 = 51.24%`。109 次 compaction 后第一次请求均未回到压缩前
   历史，input 中位只有压缩前的约 `5.2%`。精确 pin `208528` 使合成分支 cached
   `208528/208533`、wall `0.274 s`，无 pin 对照 `9.016–9.523 s`。
-- 判决：**未定项改为口径校正。** compaction 前缀复用已解决；exact pin / `cap=9`
+- 判决：**未定项改为口径校正。** 合成 compaction 的前缀复用已解决；exact pin / `cap=9`
   机制成立但真实立即触发为 0/109，降为低频诊断。180K 新合成 cold turn `65.555 s`
   不能写成隔天旧会话恢复已覆盖。
 - 预期被推翻：压缩后旧历史分支不是用户当前描述的主负载。
@@ -29,8 +63,9 @@
   `/opt/ai/logs/agent-long-branch-pin-exact-20261031T1300Z.json`。
 - 学到什么：用户口语中的“重读历史”必须记录会话年龄、缓存状态和请求形状，不能从 token
   大小或一次合成实验反推场景。
-- 下一步与理由：全局循环当前暂停；恢复后先执行 `AGENT-OLD-SESSION-RESUME`，测放置
-  超过一天、约 180K 上下文旧会话的冷恢复，再决定实现方向。
+- 下一步与理由（I-110 已重排）：当时全局循环暂停并计划先执行
+  `AGENT-OLD-SESSION-RESUME`；后续真实任务形状显示 decode、工具轮转和大型输出同样是
+  大头，恢复后改为先做 `AGENT-END-TO-END-TRACE`，旧会话保留为 p99 必测项。
 
 ## I-20261031-108 · 成本地图定位到 208K 边界重读与 recovery 长尾（后续校正）
 
