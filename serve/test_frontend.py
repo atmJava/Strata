@@ -1,5 +1,6 @@
 """Chat history normalization before rendering the model's prompt."""
 import copy
+import hashlib
 from pathlib import Path
 import unittest
 
@@ -175,6 +176,77 @@ class UnreadContentParts(unittest.TestCase):
                                          {"type": "image", "source": {"type": "url", "url": "image.png"}}]}]})
         self.assertIn("<|vision_start|><|image_pad|><|vision_end|>",
                       self.template.render(msgs[0], tools=msgs[1], **msgs[2]))
+
+
+class SystemBeforeTools(unittest.TestCase):
+    """Codex siblings share a long instruction block but may carry different tools.  The opt-in order keeps that
+    block in their common prompt prefix; the off path is the exact prompt rendered before the option existed."""
+
+    def setUp(self):
+        self.template = ChatTemplate(Path(__file__).with_name("chat_template.jinja"))
+        shared = "Shared agent instructions: preserve correctness and report evidence. "
+        self.system = (shared * (54_015 // len(shared) + 1))[:54_015]
+        user = ("User task detail. " * 900)[:16_200]
+        self.messages = [
+            {"role": "system", "content": self.system},
+            {"role": "developer", "content": "Developer rule stays shared."},
+            {"role": "user", "content": user},
+        ]
+
+    @staticmethod
+    def tool(name):
+        return [{"type": "function", "name": name, "description": "A distinct test tool.",
+                 "parameters": {"type": "object", "properties": {"value": {"type": "string"}},
+                                "required": ["value"]}}]
+
+    def render(self, tool, **kwargs):
+        return self.template.render(self.messages, tools=self.tool(tool),
+                                    add_generation_prompt=False, **kwargs)
+
+    @staticmethod
+    def common_prefix(a, b):
+        n = 0
+        for x, y in zip(a.encode(), b.encode()):
+            if x != y:
+                break
+            n += 1
+        return n
+
+    def test_the_default_path_is_the_prompt_rendered_before_the_option(self):
+        omitted = self.render("alpha")
+        explicit_off = self.render("alpha", system_before_tools=False)
+        self.assertEqual(explicit_off, omitted)
+        # sha256 of the same fixture rendered by the template at dabc70a3, before this option existed.
+        self.assertEqual(hashlib.sha256(omitted.encode()).hexdigest(),
+                         "e3323f3b1a861f43edac50a63d67503307952e1fc03d142c9a7bfdc9c14766a8")
+
+    def test_enabled_system_order_increases_the_prefix_shared_by_different_tools(self):
+        before_a, before_b = self.render("alpha"), self.render("beta")
+        after_a = self.render("alpha", system_before_tools=True)
+        after_b = self.render("beta", system_before_tools=True)
+        self.assertEqual(self.common_prefix(before_a, before_b), 320)
+        self.assertGreaterEqual(self.common_prefix(after_a, after_b), 54_000)
+        self.assertLess(after_a.index(self.system), after_a.index("# Tools"))
+        self.assertGreater(before_a.index(self.system), before_a.index("# Tools"))
+
+    def test_enabled_order_keeps_every_system_and_tool_character(self):
+        before = self.render("alpha")
+        after = self.render("alpha", system_before_tools=True)
+        self.assertEqual(len(after), len(before))
+        for text in (self.system, "Developer rule stays shared.", '"name": "alpha"',
+                     "Reasoning effort is set to xhigh.", "<tool_call>", "<function="):
+            with self.subTest(text=text):
+                self.assertEqual(after.count(text), before.count(text))
+                self.assertGreater(after.count(text), 0)
+
+    def test_enabled_order_keeps_declared_tool_order(self):
+        tools = self.tool("alpha") + self.tool("beta")
+        prompt = self.template.render(self.messages, tools=tools, add_generation_prompt=False,
+                                      system_before_tools=True)
+        self.assertLess(prompt.index('"name": "alpha"'), prompt.index('"name": "beta"'))
+        missing = self.template.render(self.messages, tools=self.tool("alpha"),
+                                       add_generation_prompt=False, system_before_tools=True)
+        self.assertNotIn('"name": "beta"', missing)
 
 
 if __name__ == "__main__":

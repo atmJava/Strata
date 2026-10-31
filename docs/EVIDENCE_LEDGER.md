@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-127，按编号）
+## 台账索引（L-000…L-128，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -141,9 +141,61 @@
 | L-125 | 10-31 12:3x | Agent A/A：同会话续轮复用 `95.16–95.21%`，prompt `约 7.3 → 1.4 s`；新会话 69% 实际共享前缀时 prompt 约 `3.2 s`。Codex title 仍进引擎，`1.978–10.292 s`、额外 146–184 output token | **诊断完成；基础缓存停止作候选，转 AGENT-CODEX-TITLE；A2 未重启** |
 | L-126 | 10-31 12:5x | Codex title B 三项 `1.8–2.1 ms`、零 engine request/prompt/output；普通 Responses 仍 +1 request、64 prompt/8 output | **ACT：采纳并保持运行；无引擎重建** |
 | L-127 | 10-31 12:5x | Compaction LRU：1 主 3 子代理各 8.3K prompt，compaction 复用 `99.52–99.64%`、墙钟 `0.69–0.89 s`；8 请求全 200，title 仍零引擎 | **ACT：采纳并保持运行；45 tests OK；B2 已加载** |
+| L-128 | 10-31 13:0x | 共享 system 移到 tools 前后，不同 tools 的后三次请求各复用 `5,120` token；平均墙钟 `7.515 → 5.669 s`（`-24.56%`），后三 `7.502 → 5.001 s`（`-33.34%`）；共同前缀 `320 → 54,366` 字节 | **AGENT-STATIC-SYSTEM-PREFIX 采纳并保持运行；B3a 6/2；工具、compaction、title 与 health 全过** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-128 · AGENT-STATIC-SYSTEM-PREFIX：兄弟 Agent 共享 system 前缀，墙钟下降约四分之一
+
+**判定：采纳。** Qwen 模板原先把每个线程各不相同的 tools 放在共享 system 前。主线程和
+子代理只差一个工具名时，共同前缀在 `320` 字节处结束。opt-in 后把 merged system 放在
+tools 前；默认关闭仍与改动前逐字相同。固定 fixture 的共同前缀升到 `54,366` 字节，system、
+developer 文本、tool JSON、tool order 和 tool-call grammar 均保留。
+
+**部署坑**：第一次 B3 重启后，请求仍显示 `cached=0`。运行中 `Service` 优先读取
+`/opt/ai/strata-data/packs/sc117_iq3_xxs/tokenizer/chat_template.jinja`，而不是仓库
+`serve/chat_template.jinja`。只改仓库模板不会改变线上提示。备份 pack 模板并同步候选后，
+第二次重启才进入真实候选路径。
+
+**真实结果**：B2 用相同四线程、不同 tools 的 Agent 形状测到每请求 `11,081` prompt、
+cached 全 0、墙钟 `7.554/7.511/7.486/7.508 s`。B3a 的同形 sequential replay 为：
+
+| Thread | Input | Cached | Reuse | Wall |
+|---|---:|---:|---:|---:|
+| 0 | 9,888 | 0 | 0% | `7.674 s` |
+| 1 | 9,888 | 5,120 | 51.78% | `5.019 s` |
+| 2 | 9,888 | 5,120 | 51.78% | `4.996 s` |
+| 3 | 9,888 | 5,120 | 51.78% | `4.986 s` |
+
+平均墙钟从 `7.515` 降到 `5.669 s`（`24.56%`）；后三个兄弟请求从 `7.502` 降到
+`5.001 s`（`33.34%`）；前两个可比请求合计从 `15.065` 降到 `12.693 s`（`15.74%`）。
+这正是用户 1 主加子代理的主路径收益，而不是无关后台请求。
+
+**正确性与安全**：四个请求均只调用自己的 tool。四次并发在预热边界上均复用 `5,120`
+token 且工具正确；八请求安全并发全部完成、七次复用 `8,192`、一次冷请求正常完成。
+1 主 3 子代理 compaction 复用 `8,130/8,138/8,138/8,138` token（`99.50%`）；允许足够
+输出时 compaction 正常 `completed`。title 为 `2.0 ms`，usage 和 metrics 增量全为 0。
+
+**测试与运行**：本地 `serve.test_frontend` 30 tests OK、`serve.test_responses` 46 tests OK；
+远端同样通过，跳过 1 项缺 `jsonschema` 的可选测试。离线 preflight PASS。B3a
+server/vision/engine `36610/36613/36618`，监听 `127.0.0.1:8080`，health loaded、262144、
+6 slots / 2 groups；engine `105a4171...` 不变，config `a8a8a42f...`、template
+`8f0ac93c...`。无 HTTP、执行、CUDA、timeout、traceback 或外来请求错误。
+
+**限制**：缓存停在 `5,120`-token checkpoint，而不是完整共享边界；真正同时冷启动的请求
+不能共享第一次读。四/八并发结果只作安全和工具隔离门，不作为聚合峰值声明。没有为同一
+候选再消耗两组 engine 重启做 A-B-A；引擎、输出长度和并发形状未变，而真实主路径已有秒级
+收益。
+
+**证据**：`/opt/ai/logs/agent-static-system-prefix-20261031T0500Z/`，包括
+`b3a-sequential-replay.json`、`b3a-parallel4.json`、`b3a-safety8.json`、
+`b3a-compaction-replay.json`、`b3a-title.json`、`frontend-unit.log`、`responses-unit.log`、
+`final-metrics.json` 和 `original/`。完整记录见
+[`AGENT_STATIC_SYSTEM_PREFIX_RESULT-20261031.md`](work/AGENT_STATIC_SYSTEM_PREFIX_RESULT-20261031.md)。
+
+**下一步**：共享 system 约 8.5K–9K token，但引擎只在 `5,120` 处恢复。先检查现有
+`strata_prefix` pin 能否自动固定在 tools 前的共同边界，并从同一真实负载计算剩余上界。
 
 ## L-127 · AGENT-CODEX-COMPACTION-LRU：1 主 3 子代理各保留工具前缀
 

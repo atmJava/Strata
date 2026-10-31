@@ -3817,6 +3817,7 @@ class Service:
         self.reasoning_close_retry = False            # #1053 (opt-in): close the thinking once when a reply ends inside it
         self.codex_compaction_cache = False           # #924 (opt-in): a Codex compaction is rendered with its conversation's tools
         self.codex_thread_titles = False              # #923 (opt-in): answer Codex's thread-title turns without the engine
+        self.codex_system_before_tools = False        # opt-in: shared Codex instructions precede the per-thread tool list
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
         self.model_arch = None                        # the config's architecture ("qwen4exp"): None = no model-card defaults
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
@@ -7560,6 +7561,7 @@ def make_handler(svc: Service):
             messages = responses_api.input_messages(req)
             tools, names, skipped = responses_api.request_tools(req)
             kw = responses_api.template_kwargs(req, {"reasoning_effort": svc.effort_default()})
+            kw["system_before_tools"] = svc.codex_system_before_tools
             try:
                 self._no_local_images(messages)              # as on the chat route: no file read for a foreign page
             except ValueError as e:
@@ -8655,6 +8657,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                   "Chat settings shared with other apps, can set its own)", flush=True)
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default
+    svc.codex_system_before_tools = cfg.get("codex_system_before_tools") is True
     try:
         svc.set_aliases(cfg.get("aliases"))             # #297: other names the model answers to
     except ValueError as e:

@@ -74,6 +74,9 @@
     {%- if reasoning_instructions %}
         {{- reasoning_instructions + '\n\n' }}
     {%- endif %}
+    {%- if system_before_tools is defined and system_before_tools and merged_system %}
+        {{- merged_system + '\n\n' }}
+    {%- endif %}
     {{- "# Tools\n\nYou have access to the following functions:\n\n<tools>" }}
     {%- for tool in tools %}
         {{- "\n" }}
@@ -81,7 +84,7 @@
     {%- endfor %}
     {{- "\n</tools>" }}
     {{- '\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>' }}
-    {%- if merged_system %}
+    {%- if merged_system and (system_before_tools is undefined or not system_before_tools) %}
         {{- '\n\n' + merged_system }}
     {%- endif %}
     {{- '<|im_end|>\n' }}

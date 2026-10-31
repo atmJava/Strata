@@ -137,9 +137,11 @@ prompt token、长上下文读取和排队时间。用户通常单会话，偶�
 
 ## 当前断点和下一动作
 
-当前 B2 已启用 title 和多线程 compaction LRU。AGENT-STATIC-SYSTEM-PREFIX 只有部分源码，
-尚未通过源码门，也尚未部署。下一步顺序是：提交已采纳成果 → 补静态前缀测试 → 评审源码门
-结果 → 只有通过才进行 B3 的一次真实 Agent 验证。
+title、多线程 compaction LRU 和 AGENT-STATIC-SYSTEM-PREFIX 均已采纳。B3a 当前复用
+`5,120` token，兄弟请求平均墙钟下降 `24.56%`；但共享 system 边界仍有约 8.5K–9K token，
+缓存只到 `5,120`。手动 boundary pin 已复用 `9,976/10,229`（`97.53%`），墙钟约
+`1.09–1.13 s`。下一项是默认关闭地自动注入该 pin，守住 prompt 字节不变、显式用户 prefix
+不被覆盖和工具隔离，再做一次真实服务验证。
 
 ## 计划评审
 

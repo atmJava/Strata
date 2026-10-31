@@ -3,6 +3,30 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-101 · 共享 system 先于 tools：兄弟请求墙钟下降约四分之一
+
+- 目标 / 指标：在主线程和子代理 system 相同、tools 不同时，让后续请求复用长共享前缀，
+  以真实 1/2/4 请求路径的墙钟为准，至少达到 1%。
+- 假设与预期：旧模板先写 tools，差异立刻截断共享前缀；把 system 放在 tools 前只改变顺序，
+  不改变 token 内容，应让引擎在共同边界形成缓存。
+- 改动与实验：增加默认关闭的 `system_before_tools` 和 Responses
+  `codex_system_before_tools`。默认输出与旧模板 SHA 相同；同 fixture 共同前缀从 `320`
+  升到 `54,366` 字节。首次 B3 仍无复用，根因是运行时加载 pack 内模板；备份后同步 pack，
+  再用相同 engine 重启一次。
+- 结果：B3a 的四个不同 tools 请求中，首请求冷读，后三次各复用 `5,120` token；墙钟
+  `7.674/5.019/4.996/4.986 s`。相对 B2 无复用基线 `7.515 s` 平均下降 `24.56%`，后三个
+  兄弟请求下降 `33.34%`，前两个可比请求合计下降 `15.74%`。四请求和八请求安全并发均
+  只调用自己的工具；compaction 保持约 `99.5%` 复用，title 保持 `2 ms`/零引擎。
+- 判决：**AGENT-STATIC-SYSTEM-PREFIX 采纳并保持运行。** 输出长度不变，工具选择正确，
+  health、6 slots / 2 groups 和 engine hash 不变，无 HTTP/CUDA/timeout/外来请求错误。
+- 生产状态与回滚：B3a server/vision/engine `36610/36613/36618`，config
+  `a8a8a42f...`、template `8f0ac93c...`；还原 pack 模板并关闭 config 键即可回退，python
+  server 重启成本约 `138–151 s`，engine 不重建。
+- 证据：L-128、`AGENT_STATIC_SYSTEM_PREFIX_RESULT-20261031.md`；目录
+  `/opt/ai/logs/agent-static-system-prefix-20261031T0500Z/`。
+- 下一步与理由：共同 system 约 8.5K–9K token，但缓存停在 `5,120`。先验证现有
+  `strata_prefix` pin 能否把边界固定在 tools 前，并计算真实负载剩余上界；不直接改 engine。
+
 ## I-20261031-100 · 线程级 compaction 工具缓存让 1 主 3 子代理各复用约 99.5%
 
 - 目标 / 指标：让主线程和三个子代理在交错请求后，各自 compaction 仍使用自己的工具集合，

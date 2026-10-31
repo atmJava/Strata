@@ -386,6 +386,25 @@ class Server(unittest.TestCase):
 
 
 class OverHttp(Server):
+    def test_system_before_tools_is_an_off_by_default_responses_opt_in(self):
+        body = {"model": "m", "input": "hi", "instructions": "You are a coding agent.", "tools": TOOLS}
+        self.engine.scripts = [self.tok.encode(ANSWER, parse_special=True)] * 2
+        self.engine.script = self.engine.scripts[0]
+        code, before = self.post(body)
+        self.assertEqual(code, 200, before)
+        before_prompt = self.tok.decode(self.engine.last_prompt)
+        self.assertGreater(before_prompt.index("You are a coding agent."), before_prompt.index("# Tools"))
+
+        self.svc.codex_system_before_tools = True
+        code, after = self.post(body)
+        self.assertEqual(code, 200, after)
+        after_prompt = self.tok.decode(self.engine.last_prompt)
+        self.assertLess(after_prompt.index("You are a coding agent."), after_prompt.index("# Tools"))
+        self.assertEqual(len(after_prompt), len(before_prompt))
+        def text_of(response):
+            return [(item["type"], item["content"][0]["text"]) for item in response["output"]]
+        self.assertEqual(text_of(after), text_of(before))
+
     def test_non_streaming_text_with_reasoning(self):
         code, r = self.post({"model": "m", "input": "hi", "store": False})
         self.assertEqual(code, 200)

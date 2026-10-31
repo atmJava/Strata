@@ -2,7 +2,8 @@
 
 Date: 2026-10-31
 
-Status: preregistered before source changes.
+Status: accepted. Result:
+[`AGENT_STATIC_SYSTEM_PREFIX_RESULT-20261031.md`](AGENT_STATIC_SYSTEM_PREFIX_RESULT-20261031.md).
 
 ## Problem
 

@@ -10,8 +10,9 @@
 0. **全局目标已改为真实 Agent 负载**：1/2 路为主、4 路上限，6/8 只做安全回归。Agent A/A
    证明普通会话续轮复用约 95%，因此停止重复优化基础缓存。`codex_thread_titles` 与
    `codex_compaction_cache` 多线程 LRU 均已采纳；后者让 1 主 3 子代理的 compaction 各复用
-   约 99.5%。[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-   已重写并评审，当前检查 tools 位于共享 system 之前造成的兄弟线程前缀失配。
+   约 99.5%。共享 system 已移到 tools 之前并采纳，后续兄弟请求复用 `5,120` token，平均墙钟
+   降低 `24.56%`。[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
+   已将下一个大项指向 `strata_prefix` pin 剩余共享边界。
 1. **P4 已采纳**：同一新引擎 boot 上，代码由 A 合并中位 41.1875 s 降到 5.074 s（−87.681%）；
    96K by_kind +2.761%、wave +2.202%，短 JSON 3.980 s，三臂零错误且 needle 全对。
 2. **余量风险**：短 JSON 距 4 s 约 20 ms，96K 距 3% 约 0.24 个百分点；生产指标靠近边界时
@@ -159,7 +160,8 @@
 |---|---|---|---|---|---|
 | AGENT-CODEX-TITLE | Codex thread-title 请求不进入引擎 | 三个 title 请求返回合法标题且 engine request/prompt/output 增量均为 0；普通 Responses 请求仍进入引擎；健康与配置可回滚 | 已完成 | L-126：B `1.8–2.1 ms`、零引擎请求/token；普通请求 +1；A2 基线 `1.978–10.292 s` | **已采纳并保持运行**；配置可回滚，无引擎重建 |
 | AGENT-CODEX-COMPACTION-LRU | 多线程 compaction 保留各自工具前缀 | 1 主 3 子代理交错时每个线程的 compaction 均用自己的工具集合；并发安全、有界 LRU 和淘汰测试通过；无效 metadata/title 不污染缓存；默认关闭路径字节不变 | 已完成 | L-127：8.3K prompt 复用量 `99.52–99.64%`，墙钟 `0.69–0.89 s`；45 tests OK，title 仍零引擎 | **已采纳并保持运行**；B2 配置/源码可回滚 |
-| AGENT-STATIC-SYSTEM-PREFIX | 让兄弟 agent 复用共享 system 前缀 | deterministic 渲染证明新顺序增加共享字节，同时 tool/system 内容集合不变；真实模型仍按声明工具调用；1/2 路端到端改善 ≥1%，4 路不退 >1%；默认关闭 byte-identical | 进行中 | 源码：`chat_template.jinja` 先输出 tools，再输出 merged_system；实测不同 tools 的 4 线程 cold reuse 全为 0 | 先源码/前缀合同，不直接改生产默认 |
+| AGENT-STATIC-SYSTEM-PREFIX | 让兄弟 agent 复用共享 system 前缀 | deterministic 渲染证明新顺序增加共享字节，同时 tool/system 内容集合不变；真实模型仍按声明工具调用；1/2 路端到端改善 ≥1%，4 路不退 >1%；默认关闭 byte-identical | 已完成 | L-128：共同前缀 `320 → 54,366` 字节；后续兄弟复用 `5,120` token，平均墙钟 `24.56%`，后三 `33.34%`；四次并发工具隔离通过 | **已采纳并保持运行**；B3a 6/2、engine hash 不变；需同步 pack 模板 |
+| AGENT-PREFIX-PIN | 固定 tools 前的共享 system 边界 | 先只读证明现有 `strata_prefix` 能作用于 Responses 自动边界；同进程/真实负载复用明显超过 `5,120`；1/2 路再改善 ≥1%，4 路不退 >1%；失败可关闭 | 进行中 | L-128：共同前缀约 8.5K–9K token，实际 checkpoint 只到 `5,120`；手动 boundary pin 已复用 `9,976/10,229`（97.53%） | 下一项；合同预注册，不直接改 engine |
 | S0b | 长读时邻居停顿 | 同 boot A-B 证明机制有效，停顿 ≤1 s 或给出经证据支持的上界 | 否决 | L-068：路径 3/3 触发但无用户收益；L-082 撤回“整个 0.1.51 回退”的临时概括 | 不再重复同形实验 |
 | C1 | N×CTX 容量边界收尾 | 补 6 槽晚到首 token、queue/TTFT/wall；补 8 槽邻居停顿并给出上界 | 已完成 | L-070/L-071 | 6 槽默认；8 槽保留容量预设 |
 | P1 | 4 路聚合吞吐瓶颈 | 把 113.6 tok/s 拆成 batch/group、decode、expert exchange 等成本，并验证至少一个低风险改动 | 已完成 | L-072–L-075：流水线保留；恢复 HC_Q8 后受控中位 130.6 | 调度开关收口；HC_Q8 采纳 |

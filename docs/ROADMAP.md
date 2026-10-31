@@ -30,7 +30,8 @@ prefill 和稳定的正文生成；6/8 路只保留安全回归，不作为候�
 | M15 | Agent 会话前缀复用 | 同会话续轮约 95.2%；69% 共享前缀的新会话首轮 prompt 约 3.2 s | 新会话/续轮继续提高复用，且 1/2 路稳定改善 ≥1%、4 路不退 >1% | 缓存主体已工作；转入非正文 Codex 请求和 compaction 线程隔离 |
 | M16 | Codex title 请求 | A2 每个 title 进入引擎，`1.978–10.292 s`，额外 146–184 output token | 本地 title 路径 0 引擎请求、0 prompt/output token，合法标题且普通请求不受影响 | 已采纳：B 为 `1.8–2.1 ms`、零请求/token，普通请求仍进引擎 |
 | M17 | 多线程 Codex compaction 前缀 | 工具集合仅保留最后线程，1 主 3 子代理交错时早先线程可能重读整段历史 | 有界线程缓存使每个活跃线程保留自己的工具前缀；默认路径字节不变，LRU 淘汰和并发测试通过 | 已采纳：4 个线程各保留前缀，compaction 复用约 99.5%，墙钟 `0.69–0.89 s` |
-| M18 | 兄弟 Agent 共享 system 前缀 | tools 位于共享 agent instructions 之前；工具集合不同会使 10K 级通用 system 前缀失配 | 顺序调整只改变 tool block 与 system block 的相对位置，不改变内容；真实工具调用/质量门通过，缓存复用带来端到端收益 | 当前候选 `AGENT-STATIC-SYSTEM-PREFIX`，先做源码/前缀门 |
+| M18 | 兄弟 Agent 共享 system 前缀 | tools 位于共享 agent instructions 之前；工具集合不同会使 10K 级通用 system 前缀失配 | 顺序调整只改变 tool block 与 system block 的相对位置，不改变内容；真实工具调用/质量门通过，缓存复用带来端到端收益 | 已采纳：后续兄弟请求复用 `5,120` token，平均墙钟 `-24.56%`，后三请求 `-33.34%` |
+| M19 | 固定共享 system 边界 | system-before-tools 已共享长前缀，但首个缓存 checkpoint 停在 `5,120` token | 验证现有 `strata_prefix` pin 能在同一真实负载上提高复用，并给出整任务 ≥1% 上界 | 进行中：手动 boundary pin 已复用 `97.53%`，待自动注入和服务验收 |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 

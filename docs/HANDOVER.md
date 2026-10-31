@@ -19,11 +19,11 @@
 - **全局目标已按真实负载重置**：用户通常 1 会话、少量 2 会话、峰值 4 会话。6/8 路降为
   安全回归，不再要求每个候选同时提速。当前计划已重写并评审，1/2/4/6/8 明确定义为同时
   请求流数；任何局部候选先算真实触发率后的整任务 1% 上界，否则不构建、不重启。Agent A/A
-  已证明普通续轮复用约 95%、69% 共享前缀
-  的新会话 prompt 约 3.2 s，因此停止基础缓存候选。`AGENT-CODEX-TITLE` 与线程级 compaction
-  LRU 均已采纳并保持运行：title 为 `1.8–2.1 ms` 且零引擎/token；1 主 3 子代理的
-  compaction 各复用约 99.5%。下一步在源码层验证 tools 位于共享 system 之前造成的兄弟线程
-  前缀失配，先做 deterministic 测量，不直接改生产默认。
+  已证明普通续轮复用约 95%、69% 共享前缀的新会话 prompt 约 3.2 s。`AGENT-CODEX-TITLE`、
+  线程级 compaction LRU 和共享 system 前缀顺序均已采纳：title 为 `1.8–2.1 ms` 且零
+  引擎/token；1 主 3 子代理 compaction 各复用约 99.5%；不同 tools 的后续兄弟请求复用
+  `5,120` token，平均墙钟下降 `24.56%`。下一步验证已有 `strata_prefix` pin 能否把剩余
+  system 边界固定住，将复用从 `5,120` 提升到接近完整 system。
 - 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，UTIL-KERNEL、
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的
@@ -117,20 +117,20 @@
   B6 kernel/reach 门也已否决；batch side mixer 虽然过了 production-shaped GPU 门和真实
   T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决；Q5 head grid 也在
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
-  因此也已否决。当前候选为空，下一步继续审计末级约 `8.5%` 的 `waitA` 中 CPU expert-plan
-  计算/发布与 host spin 的绝对组成，不再改变跨 stage 服务顺序。
+  因此也已否决。当前请求级候选已采纳，下一步转入 `strata_prefix` 边界 pin 的源码与真实
+  负载验证，不再回到已关闭的本地 kernel 路线。
 
 ## 3. 当前生产
 
-生产 `strata.service` 保持 inactive；A2 以手动 baseline 实例运行，health loaded。
+生产 `strata.service` 保持 inactive；B3a 以手动实例运行，health loaded。
 
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=0` |
-| server/engine/vision | `26243/26252/26247`，health loaded |
-| A2 baseline | engine `105a4171...`，config `88de996a...`，parity 通过 |
-| latest rejected candidate | fair batch service；A1-B-A2 在 4/8 路回退，A2 已恢复 |
-| GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；约 `956/1022 MiB` free |
+| server/engine/vision | `36610/36618/36613`，health loaded，监听 `:8080` |
+| B3a running | engine `105a4171...`，config `a8a8a42f...`，template `8f0ac93c...` |
+| latest accepted candidates | title、compaction LRU、system-before-tools |
+| GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；`vram_free_mib=1005` |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 

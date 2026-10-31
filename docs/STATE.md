@@ -8,11 +8,16 @@
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
   已重写并通过评审。1/2 路是主验收，4 路是非回退上限，6/8 只做安全回归；局部优化必须
   先给出真实触发率后的整任务 1% 上界，否则不构建、不重启。
-- 当前阶段：Agent 会话诊断已完成。1/2/4 路短上下文 A/A、75% 共享前缀和 Codex
-  thread-title 基线证明普通会话缓存已工作，当前选择最低风险的真实工作流损失。
-- 当前项：AGENT-STATIC-SYSTEM-PREFIX — 当前模板先写每个线程各不相同的 tools，再写通常共享的
-  agent instructions/system。兄弟线程只要工具集合不同，共享的 10K 级 system 前缀就完全
-  无法复用。候选先做源码门和 deterministic prefix 测量，再决定是否实现 opt-in 顺序调整。
+- 当前阶段：真实 Agent 请求级优化已连续采纳三项。普通会话缓存已工作；title 不再进引擎；
+  多线程 compaction 各保留工具前缀；共享 system 现在位于 tools 之前，兄弟线程开始复用长前缀。
+- 当前项：AGENT-STATIC-SYSTEM-PREFIX 已采纳并保持运行。源码共同前缀由 `320` 字节升到
+  `54,366` 字节；真实四线程不同 tools 的后续请求各复用 `5,120` token。平均墙钟
+  `7.515 → 5.669 s`（`-24.56%`），后三个兄弟请求 `7.502 → 5.001 s`（`-33.34%`），
+  四次请求都只调用自己的工具。结果见
+  [AGENT_STATIC_SYSTEM_PREFIX_RESULT](work/AGENT_STATIC_SYSTEM_PREFIX_RESULT-20261031.md)。
+- 当前运行：B3a server/vision/engine `36610/36613/36618`，监听 `127.0.0.1:8080`，
+  engine `105a4171...` 未重建，config `a8a8a42f...`，模板 `8f0ac93c...`，健康 loaded、
+  262144 context、6 slots / 2 groups。title 仍 `2 ms`/零引擎；四次 compaction 复用约 99.5%。
 - 上一项：AGENT-CODEX-COMPACTION-LRU 已采纳并保持运行。B2 server/engine/vision
   `33065/33073/33068`，配置启用 title + compaction cache；真实 1 主 3 子代理 8.3K-token
   交错测试中四次 compaction 分别复用 `8274/8278/8288/8288` token（约 99.5%），墙钟
@@ -24,7 +29,7 @@
   HTTP 200、合法标题、`1.8–2.1 ms`，finished request 与 prompt/output token 增量全为 0；
   随后的普通 Responses 请求正常增加 1 个引擎请求。结果见
   [AGENT_CODEX_TITLE_RESULT](work/AGENT_CODEX_TITLE_RESULT-20261031.md)、台账 L-126。
-- 当前项证据：普通同会话续轮复用 `95.16–95.21%`，首轮约 `7.3 s` 的 prompt 读取降到
+- Agent 会话诊断证据：普通同会话续轮复用 `95.16–95.21%`，首轮约 `7.3 s` 的 prompt 读取降到
   约 `1.4 s`；共享约 69% 实际前缀的新会话首轮 prompt 为约 `3.2 s`。正式结果是
   [AGENT_SESSION_PROFILE_RESULT](work/AGENT_SESSION_PROFILE_RESULT-20261031.md)、台账 L-125。
 - 上一项：UTIL-BATCH-FAIR-SERVE 已在同 boot A1-B-A2 吞吐门否决。默认关闭的候选在每个
@@ -136,7 +141,9 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前迭代：UTIL-BATCH-FAIR-SERVE、UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
+- 当前迭代：AGENT-CODEX-TITLE、AGENT-CODEX-COMPACTION-LRU 和
+  AGENT-STATIC-SYSTEM-PREFIX 均已采纳。UTIL-BATCH-FAIR-SERVE、UTIL-PIPED-MTP、
+  cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
   调度、EXPDEC、checkpoint move、GDN recurrence 合并、跨 group head 延迟合并、
   vocabulary-row head split、Q8 head write/mixer fusion 和 batch poll 快返回均已否决；
   window profile 已完成。
@@ -144,18 +151,17 @@
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：继续只读审计末级约 `8.5%` 的 `waitA`，但不再改变跨 stage 服务顺序。重点区分
-  host 在 `pool()` 中计算 expert plan 的时间、发布 flag 后的 GPU consume 时间，以及 GPU
-  早于 host 到达时的 spin；只有真实触发率、保守整窗绝对节省 ≥1%、数值影响和回滚都明确
-  时才预注册下一候选。该审计与已否决的 `UTIL-POLL-TURNOVER`、本轮公平服务严格分开。
-- 当前候选：没有候选。A2 以 baseline engine `105a4171...`、config `88de996a...` 运行，
-  6 slots / 2 groups、health loaded；`STRATA_BATCH_SIDE_MIXER` 和
-  `STRATA_MMVQ_IL_HEAD_GRID`、`STRATA_BATCH_FAIR_SERVE` 都不在环境中。
+- 下一动作：静态前缀目前只复用 `5,120` token，而共同 system 边界约为 8.5K–9K token。
+  手动 `strata_prefix {"message": 0, "chars": len(system)}` 已把后三次请求提高到
+  `9,976/10,229`（`97.53%`）、墙钟约 `1.09–1.13 s`。下一项把这些字段安全自动注入，
+  默认关闭，通过同形源码、工具和 1/2/4 路门后再默认启用。
+- 当前候选：没有已部署候选；刚采纳的静态前缀保持运行。B3a engine 仍为
+  `105a4171...`，1/2/4/8 安全请求与 title/compaction 均无 HTTP、CUDA、timeout 或外来请求错误。
   EXPDEC 未启动；P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
-- 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
-  Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
+- 执行计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
+  已重写和评审，按请求级缓存、排队和工具路径优先，不再从低收益局部内核开始。
 - 未完成采纳项：20。
 - 阻塞：服务器已恢复到双卡可用，当前无基础设施阻塞。DFlash2 drafter 权重仍缺失；代码、
   服务接线和工具已保留，该路线不阻塞主线。
