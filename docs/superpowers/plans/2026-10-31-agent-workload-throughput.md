@@ -244,7 +244,7 @@ wall 方向收益立即停止。契约：
 不跑 189K、并发矩阵或邻近 GDN 参数；生产已恢复原 engine/config。见
 [`GDN_CONVL2_RESULT-20261031.md`](../../work/GDN_CONVL2_RESULT-20261031.md)。
 
-### P2e：`AGENT-HOT-TURN-PHASE-MAP`（当前）
+### P2e：`AGENT-HOT-TURN-PHASE-MAP`（已完成）
 
 普通 596 fresh-token 与 94K 热续轮的 prompt 仍占 wall 约 `93%`，但连续四个局部候选
 只得到 prompt 改善或很小的 wall 变化。下一项不再猜 kernel，直接用当前生产 engine
@@ -257,6 +257,25 @@ profiler 只用于定位，不计入性能收益。至少一个 phase 在代表�
 停止 kernel 邻域微调，转向 server admission/cache 或客户端请求结构的下一个证据支持项。
 契约：
 [`AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md)。
+
+结果：同口径 596/94K 热长轮实际 fresh 读取都约 554 token。三波中位 stage 1 为
+GPU timeline `459 ms`、host staging `501 ms`；stage 2 为 `647/788 ms`。stage 2
+最大 phase 是 `wait copy 173 ms`，随后 `gemm gate/up 130 ms`、`dequant 106 ms`、
+`gemm down 68 ms`。因此下一候选直接验证更深的 streamed expert ring，而不是继续
+GDN/短读/版本邻域。
+
+### P2f：`AGENT-HOT-TURN-STREAM-RING`（当前）
+
+554-token chunk 低于默认 `stream_all_min=1024`，当前走 32-slot staged walk，只提前
+15 个专家，stage 2 的 copy 等待达到 `173 ms`。B 只设置现有 env
+`STRATA_PREFILL_STREAM_MIN=0`，让同一真实请求进入更大的 streamed ring。
+
+乐观上限是把 stage 2 copy 等待隐藏到 stage 1 的 `13 ms`，约 `11%` wall；即使只隐藏
+10%，仍超过 1%。A1/B/A2 必须覆盖同口径 596/94K、1 路三波；至少一个 wall 改善
+`>=1%` 且绝对 `>=0.05 s`，两个形状不反向，A 漂移 `<=3%`，质量/health/资源全过。
+1 路通过后测 2 路第二 TTFT 与完成跨度，4 路非回退，6/8 安全回归。失败立即恢复 A，
+不扫描 stream threshold、ring 容量或邻近参数。契约：
+[`AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md)。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -328,7 +347,8 @@ profiler 只用于定位，不计入性能收益。至少一个 phase 在代表�
 596/94K wall 慢 `5.853%/4.259%`，版本级候选否决并恢复旧引擎。`GDN-CONVL2` 随后
 以真实 env、greedy 和质量门通过，但 596/94K wall 只改善 `0.8245%/0.2051%`，
 绝对节省 `0.012476/0.002898 s`，因此也已否决并恢复 A2。当前执行
-`AGENT-HOT-TURN-PHASE-MAP`：用一个 profiling boot 拆 596/94K 的真实主相位，再按
-至少 `0.05 s` 和 wall `1%` 上界选择下一机制。当前生产为
-server/vision/engine `164043/164045/164050`，health loaded、六 slots / 两 groups，
-`strata.service` inactive。
+`AGENT-HOT-TURN-PHASE-MAP` 已完成：596/94K 热长轮都只约有 554 个 fresh token；
+stage 2 的 `wait copy 173 ms` 是最大可移动相位。当前执行
+`AGENT-HOT-TURN-STREAM-RING`：只设置 `STRATA_PREFILL_STREAM_MIN=0`，验证更深的
+streamed ring 能否把 copy 等待穿透到用户 wall。当前生产为 server/vision/engine
+`165253/165255/165260`，health loaded、六 slots / 两 groups，`strata.service` inactive。

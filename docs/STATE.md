@@ -95,13 +95,19 @@
   `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`，未达 `1%` 且 `0.05 s` 双门。
   生产已恢复原 engine/config，不跑 189K、并发矩阵或邻近 GDN 参数。见
   [GDN_CONVL2_RESULT](work/GDN_CONVL2_RESULT-20261031.md)。
-- 当前项：AGENT-HOT-TURN-PHASE-MAP
-  用一个 profiling boot 在当前生产 engine 上
-  对同口径 596/94K 热长轮记录 21 个有序 prefill phase、host staging 和双卡数值。
-  profiler wall 不作为收益；只有单个真实可移除相位绝对 `>=0.05 s` 且保守 wall 上界
-  `>=1%` 才预注册实现候选。没有主相位时关闭 kernel 邻域微调，转向 server
-  admission/cache 或客户端请求结构。见
+- 上一项完成：`AGENT-HOT-TURN-PHASE-MAP`。同口径 596/94K 热长轮实际 fresh 读取都约
+  554 token；stage 1 的 GPU timeline/host staging 中位为 `459/501 ms`，stage 2 为
+  `647/788 ms`。stage 2 最大 phase 为 `wait copy 173 ms`，随后
+  `gemm gate/up 130 ms`、`dequant 106 ms`、`gemm down 68 ms`。profiler 请求
+  零错误、parity 全过，生产已恢复且无 `STRATA_PREFILL_TIMING`。见
   [契约](work/AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md)。
+- 当前项：AGENT-HOT-TURN-STREAM-RING
+  554-token chunk 低于默认 `stream_all_min=1024`，走 32-slot staged walk，只提前
+  15 个专家；stage 2 copy 等待 `173 ms`。B 只设置
+  `STRATA_PREFILL_STREAM_MIN=0` 进入更大的 streamed ring。理论 wall 上界约
+  `11%`，只隐藏 10% 也可过 1% 门。A1/B/A2 覆盖同口径 596/94K；1 路通过后测 2 路
+  第二 TTFT/完成跨度，4 路非回退，6/8 安全。失败立即恢复 A，不扫描阈值或 ring
+  容量。见 [契约](work/AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md)。
 - 降级项：`AGENT-HISTORY-STATE-RESIDENCY` 仍保留为低频 p99 可行性。34 个有效会话只有
   1 个超过 24 小时间隔、2 个超过 12 小时，不得排在普通热续轮之前；检查双卡 layer split、
   六 batch slots、prompt cache 下多 stage 状态格式、223K 容量、恢复时间、写放大、
@@ -116,7 +122,7 @@
   上三次真实 Codex compaction 已复用约 `99.1%`，不能再写成 Strata 缺陷。精确 pin
   可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
   中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
-- 当前运行：server/vision/engine `164043/164045/164050`。server cwd 为
+- 当前运行：server/vision/engine `165253/165255/165260`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`，cwd 为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z`。监听 `127.0.0.1:8080`；

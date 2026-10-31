@@ -39,7 +39,7 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `164043/164045/164050`。server cwd 为
+- **当前运行**：server/vision/engine `165253/165255/165260`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
   `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`
@@ -139,12 +139,18 @@
   `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`，未过 `1%` 和 `0.05 s` 双门。
   生产已恢复 A2，运行 env 无 `STRATA_GDN_CONVL2`；不跑 189K、并发矩阵或邻近参数。
   见 [GDN_CONVL2_RESULT](work/GDN_CONVL2_RESULT-20261031.md)。
-- **当前状态与下一动作**：`AGENT-HOT-TURN-PHASE-MAP`。用一个受控 profiling boot，
-  只给 A config 增加 `STRATA_PREFILL_TIMING=1`，对同口径 596/94K 热长轮记录 21 个
-  prefill phase、host staging 与双卡数值。profiler wall 不作收益；只有单相位绝对
-  `>=0.05 s` 且保守 wall 上界 `>=1%` 才进入实现。否则关闭 kernel 邻域微调，转向
-  server admission/cache 或客户端请求结构。完成后恢复无 profiler A2。见
-  [契约](work/AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md)。
+- **上一项完成**：`AGENT-HOT-TURN-PHASE-MAP`。同口径 596/94K 热长轮实际 fresh 读取
+  都约 554 token；stage 1 GPU timeline/host staging 中位 `459/501 ms`，stage 2
+  `647/788 ms`。stage 2 最大 phase 是 `wait copy 173 ms`，随后
+  `gemm gate/up 130 ms`、`dequant 106 ms`、`gemm down 68 ms`。profiler 路径、
+  parity、health 和请求质量全过；生产已恢复且无 `STRATA_PREFILL_TIMING`。
+- **当前状态与下一动作**：`AGENT-HOT-TURN-STREAM-RING`。554-token chunk 低于默认
+  `stream_all_min=1024`，当前 32-slot staged walk 只提前 15 个专家，stage 2 copy
+  等待 `173 ms`。B 只增加 `STRATA_PREFILL_STREAM_MIN=0`，进入更大的 streamed ring。
+  理论 wall 上界约 `11%`；A1/B/A2 覆盖同口径 596/94K，至少一个 wall 改善
+  `>=1%` 且绝对 `>=0.05 s`，两个形状不反向，A 漂移 `<=3%`。1 路通过后再测 2 路
+  第二 TTFT/完成跨度、4 路非回退和 6/8 安全。失败立即恢复 A，不扫阈值或 ring 容量。
+  见 [契约](work/AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md)。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说
