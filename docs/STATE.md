@@ -8,8 +8,9 @@
   严重尾部，并保持工具调用、代码修改、测试结果和任务成功率正确。通常 1 个主代理、偶尔
   2 个、峰值 1 主 3 子代理；1/2 路是主优化目标，4 路非回退，6/8 只做安全回归。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第十二次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
-  单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。重启成本必须计入当轮。
+  已完成第十五次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
+  单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。没有接入用户实际路径的能力
+  只算机制收益，不能写成体验已改善；重启成本必须计入当轮。
   平台内的旧“2/4/6/8 路引擎”目标仍为 paused，当前工具没有改写目标文本或恢复该目标的
   接口；本仓库计划是当前执行的权威目标，不能把平台旧目标当作已更新。
 - 当前阶段：真实 Agent 请求级优化已采纳 title、线程级 compaction LRU（在对应测试请求
@@ -56,12 +57,28 @@
   `0`、sentinel/finish 正确、零工具、零错误。`--ple-inflight 1024` 作为显式配置保留，
   engine 默认仍为 256。见
   [result](work/AGENT_PLE_INFLIGHT_RESULT-20261031.md)。
-- 当前项：AGENT-PLE-ROW-CACHE
-  已采纳基线默认缓存 1,048,576 行（约 95 MB）；候选只把
-  `--ple-row-cache` 提高到 4,194,304 行（增量约 270 MiB），先做相邻 profile，再做至少
-  两组非剖析配对。必须同向改善 prompt/host PLE/phase，且配对中位至少 1%；失败恢复 1,024
-  配置并关闭容量路线。见
-  [contract](work/AGENT_PLE_ROW_CACHE_CONTRACT-20261031.md)。
+- 上一项已否决：`AGENT-PLE-ROW-CACHE`。4M 行 profile 的 prompt 为
+  `136,549.2 ms` 对 `117,477.3 ms`，慢 `16.23%`；host PLE `51,905 ms` 对
+  `32,341 ms`，慢 `60.49%`；PLE phase 慢 `24.07%`。按预注册门恢复 1,024-inflight，
+  不扫邻近容量。见 [result](work/AGENT_PLE_ROW_CACHE_RESULT-20261031.md)。
+- 上一项否决：`AGENT-CONTEXT-DIET-REAL-YIELD`。覆盖率审计过门后，三组真实 Codex
+  编辑—测试配对的 diet wall 慢 `17.365%/86.935%/41.276%`，中位慢 `41.276%`；input
+  中位多 `38.190%`，两组请求增加、三组工具调用增加。六臂最终测试和 artifact 恢复正确，
+  但用户路径成本明确反向，因此不产品化。见
+  [result](work/AGENT_CONTEXT_DIET_REAL_YIELD_RESULT-20261031.md)。
+- 上一项否决：AGENT-HOT-TURN-FIXED-COST。A64/B0/A64r 各 63 请求，B0 没有热续轮
+  胜场；1 路短热续 prompt/wall 为 `520.8 ms/0.643 s` 对 `458.0 ms/0.596 s`，
+  慢 `13.75%/8.14%`；1 路长热续慢 `3.96%/3.55%`，2/4 路同样反向。保留默认
+  `short_read=64`，不扫描邻近阈值。A64r 已恢复，见
+  [result](work/AGENT_HOT_TURN_FIXED_COST_RESULT-20261031.md)。
+- 当前项：AGENT-EDIT-TEST-LOOP-TRACE 从最新 35 文件真实 Codex rollout 只读拆编辑—
+  测试循环：首个工具、首次代码修改、首个测试、同命令重复测试、失败回传后的额外模型
+  轮次，以及每类的 prompt/cached/output、1/2 路并发和绝对秒数。目标是从真实触发率选出
+  一个 >=1% 可实测候选；若最大成本来自工具执行或客户端行为，必须明确 Strata 边界。
+- 降级项：`AGENT-HISTORY-STATE-RESIDENCY` 仍保留为低频 p99 可行性。34 个有效会话只有
+  1 个超过 24 小时间隔、2 个超过 12 小时，不得排在普通热续轮之前；检查双卡 layer split、
+  六 batch slots、prompt cache 下多 stage 状态格式、223K 容量、恢复时间、写放大、
+  RAM/VRAM 峰值和安全删除。只有真实旧会话等待至少减少 1% 且成本不转移到每轮才实现。
 - 旧会话口径：用户所说的“重读历史 180K 会话”是放置超过一天后重新打开约 180K token
   的旧会话，不是 compaction 后重走旧历史分支。现有真实样本年龄 49 天，prompt
   `223,114` token，cached `0`；新合成 180K 冷 turn `65.555 s` 只保留为尺寸代理。见
@@ -72,15 +89,21 @@
   上三次真实 Codex compaction 已复用约 `99.1%`，不能再写成 Strata 缺陷。精确 pin
   可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
   中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
-- 当前运行：server/vision/engine `89451/89453/89458`，源码
-  `/opt/ai/src/strata-two-stream-serial-20261031`，监听 `127.0.0.1:8080`；engine
-  `105a4171...` 未重建，config `6ece1a13...`，server `10bd8318...`，health loaded、
+- 当前运行：server/vision/engine `159219/159221/159226`。server cwd 为
+  `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制为
+  `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`，cwd 为
+  `/opt/ai/src/strata-freeze-throughput-20261029T0812Z`。监听 `127.0.0.1:8080`；
+  engine `105a4171...` 未重建，config `6ece1a13...`，server `10bd8318...`，health loaded、
   262144 context、6 slots / 2 groups；实际核对到 `--ple-inflight 1024`、
   `STRATA_BATCH_SERIAL_TWO=1`、
   `STRATA_ADMIT_MERGE_FIRST=1` 和 `STRATA_PIPE_BYIELD_NODRAIN=1`；engine env 不含
   `STRATA_DECODE_TIMING`/`STRATA_VERIFY_PROFILE`。
-  `strata.service` 仍 inactive/dead。回滚为同一源码目录 + direct-256 config
+  `strata.service` 仍 inactive/dead、`MainPID=0`、`NRestarts=8`。回滚为同一源码目录 +
+  direct-256 config
   `4b396f44...`；移除 `--ple-inflight` 即恢复默认 256。
+  恢复过程中的 `use-config.sh` 误指向 systemd，而现网是手动实例；单元因实验配置不兼容重试 8 次后
+  已停止；单元原配置按备份恢复，手动实例由恢复日志验证。以后手动实验臂不得用
+  `use-config.sh` 作为“已切换”证据。
 - 口径修正：两路串行把第二条 TTFT 推到约 `5.1 s`，只证明“总完成时间优先”的批处理
   取舍，不能作为交互式双会话或全局用户收益。后续双路实验必须同时报告第二条 TTFT、
   单请求 wall 和完成跨度。
@@ -250,10 +273,13 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前候选：`AGENT-PLE-ROW-CACHE`。现役 B4 是已采纳的
+- 当前候选：`AGENT-EDIT-TEST-LOOP-TRACE`。现役 B4 是已采纳的
   两路串行版本，engine 仍为
   `105a4171...`；title、compaction LRU、共享 system、boundary pin 与两路串行均已通过
-  各自安全门；PLE inflight 已按三组配对采纳。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
+  各自安全门；PLE inflight 已按三组配对采纳，4M row-cache 已否决。上下文饮食真实
+  客户端配对反向，已否决产品化；短读阈值已否决，保留默认 64；当前只读分析编辑—测试
+  循环。P7 不恢复：实测
+  Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
@@ -264,9 +290,10 @@
 
 ## 生产
 
-- 最近核对时 `strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=0`。当前 B4
-  手动实例 server/engine/vision PID `78965/78973/78968`，health loaded，host uptime 自
-  `2026-10-31 02:43:50 UTC`，两张 2080 Ti 均可联合 initialize。
+- 最近核对时 `strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=8`。当前 B4
+  手动实例 server/engine/vision PID `159219/159226/159221`，health loaded，host uptime 自
+  `2026-10-31 02:43:50 UTC`，两张 2080 Ti 均可联合 initialize。server cwd 与 engine
+  路径不同，见上。
 - 历史 A2 对照基线的 engine/config hash 为
   `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
   `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`，frozen greedy

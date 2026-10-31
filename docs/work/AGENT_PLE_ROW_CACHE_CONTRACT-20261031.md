@@ -2,7 +2,8 @@
 
 Date: 2026-10-31
 
-Status: pre-registered before the first real aged-session row-cache experiment.
+Status: rejected by the profile-selection gate. See
+[`AGENT_PLE_ROW_CACHE_RESULT-20261031.md`](AGENT_PLE_ROW_CACHE_RESULT-20261031.md).
 
 ## Why this candidate
 

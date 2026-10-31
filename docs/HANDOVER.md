@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T18:15+08:00。
+> 整理时间：2026-10-31T20:10+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,17 +12,23 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-145。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-150。
 
 ## 2. 当前断点
 
-- **全局目标已第十二次修订并继续执行**：优化真实 AI vibe coding 的任务完成时间、首个可
+- **全局目标已第十五次修订并继续执行**：优先优化普通编辑—测试热续轮，再处理首工具/
+  首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
-  触发率后的整任务 1% 上界；低频旧会话恢复可按 p99 体验单独立项。完整计划在
+  触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
+  可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
   平台内的旧“2/4/6/8 路引擎”目标仍是 paused，当前目标接口不能改写文本或恢复它；接手时
-  以本仓库第十二版计划为权威，不要回到平台旧目标的状态快照。
+  以本仓库第十五版计划为权威，不要回到平台旧目标的状态快照。
+- **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
+  双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
+  `handoff_safe=1`，DKMS 与 initramfs 自动路径固定，功耗墙各为 `280 W`。当前慢不是
+  解锁失败。见 [核实记录](work/TU102_UNLOCK_VERIFY-20261031.md)。
 - **当前已采纳**：title 为 `1.8–2.1 ms`、零引擎/token；线程级 compaction LRU 在其
   测试形状上使 1 主 3 子代理各复用约 99.5%；B4 的三次真实 Codex compaction 复用约
   `99.1%`。共享 system 放在
@@ -31,13 +37,16 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `89451/89453/89458`，源码
-  `/opt/ai/src/strata-two-stream-serial-20261031`，`127.0.0.1:8080`、health loaded、
-  262144、6 slots / 2 groups；engine `105a4171...` 未重建，config `6ece1a13...`、
-  server `10bd8318...`，server 进程含 `STRATA_BATCH_SERIAL_TWO=1`。`strata.service`
-  仍 inactive/dead。engine env 不含 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`。
-  当前显式引擎参数含 `--ple-inflight 1024`；源码默认仍为 256，rollback 为同一源码目录
-  + `4b396f44...` direct config。
+- **当前运行**：server/vision/engine `159219/159221/159226`。server cwd 为
+  `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
+  `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
+  `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`
+  未重建，config `6ece1a13...`、server `10bd8318...`，server 进程含
+  `STRATA_BATCH_SERIAL_TWO=1`。`strata.service` 仍 inactive/dead。engine env 不含
+  `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`。
+  当前显式引擎参数含 `--ple-inflight 1024`，不含 `--ple-row-cache`；源码默认仍为 256，
+  rollback 为同一源码目录 + `4b396f44...` direct config。健康、6 slots / 2 groups、
+  swap 0 和确定性 smoke 已复验。
 - **真实 trace 完成**：冻结快照有 14 root、4,180 请求、6,297 工具、7.54 亿 input、
   97.09% cached；output 中位/p90/p99 `483/1,714/5,069`。最长 root `44,783 s`，其中
   推断模型 union `14,855 s`、工具 union `31,088 s`、未归因空档 `15.843 s`。工具等待
@@ -92,11 +101,24 @@
   `2.87%/1.09%`。全部 cached `0`、sentinel/finish 正确、零工具、零错误。当前只增加
   `--ple-inflight 1024`，默认 256 不变。见
   [result](work/AGENT_PLE_INFLIGHT_RESULT-20261031.md)。
-- **当前状态与下一动作**：执行 `AGENT-PLE-ROW-CACHE`。基线是 1,024 在途配置和默认
-  1,048,576 行缓存（约 95 MB）；候选只改为 `--ple-row-cache 4194304`（约 360 MB，
-  增量约 270 MiB）。先做相邻 profile，要求 prompt、host PLE 和 phase 同向且 prompt
-  至少改善 1%；再做至少两组非剖析配对。失败恢复 1,024 配置并关闭容量路线，不扫邻近值。
-  见 [contract](work/AGENT_PLE_ROW_CACHE_CONTRACT-20261031.md)。
+- **row-cache 已否决**：4M 行 profile 的 prompt 慢 `16.23%`、host PLE 慢 `60.49%`、
+  PLE phase 慢 `24.07%`，因此已恢复 1,024-inflight，不扫邻近容量。恢复时
+  `/opt/ai/bin/use-config.sh` 错指向 systemd；该单元重试 8 次后停止且原配置已恢复，
+  手动实例另行从 accepted config 启动并验证。手动实验臂以后必须使用手动 launcher。
+  见 [result](work/AGENT_PLE_ROW_CACHE_RESULT-20261031.md)。
+- **上一项判决**：`AGENT-CONTEXT-DIET-REAL-YIELD` 已否决产品化。覆盖率审计
+  过门后，三组真实 Codex 编辑—测试配对的 diet wall 慢
+  `17.365%/86.935%/41.276%`，中位慢 `41.276%`；input 中位多 `38.190%`，两组请求增加、
+  三组工具调用增加。六臂最终测试、finish 和 artifact 恢复正确，失败来自额外重读/复跑。
+  见 [result](work/AGENT_CONTEXT_DIET_REAL_YIELD_RESULT-20261031.md)。
+- **上一项判决**：`AGENT-HOT-TURN-FIXED-COST` 已否决。B0 没有热续轮胜场；1 路短热续
+  prompt/wall 慢 `13.75%/8.14%`，1 路长热续慢 `3.96%/3.55%`，2/4 路同样反向。
+  保留默认 64，不扫描邻近阈值。A64r 已恢复，见
+  [result](work/AGENT_HOT_TURN_FIXED_COST_RESULT-20261031.md)。
+- **当前状态与下一动作**：`AGENT-EDIT-TEST-LOOP-TRACE`。从最新 35 文件真实 Codex
+  rollout 只读拆首个工具、首次修改、首个测试、同命令重复测试、失败回传后的额外轮次，
+  以及每类的 prompt/cached/output、1/2 路并发和绝对秒数。产物必须给出真实触发率、
+  两类最重循环和一个 >=1% 可实测候选；工具执行或客户端行为占主导时明确 Strata 边界。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说
@@ -203,18 +225,21 @@
   T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决；Q5 head grid 也在
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
   因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线。
-  这些历史细节只用于防重复；第十一版当前入口是真实 223K 旧会话的冷 prefill 相图。
+  这些历史细节只用于防重复；当前入口是普通编辑—测试热续轮的
+  `AGENT-HOT-TURN-FIXED-COST`，223K 旧会话仅为低频 p99。
 
 ## 3. 当前生产
 
 生产 `strata.service` 保持 inactive；B4 以手动实例运行，health loaded。以下 PID、hash
-和参数于 2026-10-31T17:00+08:00 通过 relay 重新核对。
+和参数于 2026-10-31T18:40+08:00 通过 relay 重新核对。
 
 | 项 | 当前值 |
 |---|---|
-| service | `inactive/dead`、`MainPID=0`、`NRestarts=0` |
-| server/engine/vision | `78965/78973/78968`，health loaded，监听 `:8080` |
-| B4 running | engine `105a4171...`，config `4b396f44...`，server `10bd8318...` |
+| service | `inactive/dead`、`MainPID=0`、`NRestarts=8`（误触发的失败启动已停止） |
+| server/engine/vision | `159219/159226/159221`，health loaded，监听 `:8080` |
+| server cwd | `/opt/ai/src/strata-two-stream-serial-20261031` |
+| engine binary/cwd | `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`；cwd 为同目录上一级 |
+| B4 running | engine `105a4171...`，config `6ece1a13...`，server `10bd8318...` |
 | latest accepted candidates | title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
 | GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；`vram_free_mib=1005` |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |

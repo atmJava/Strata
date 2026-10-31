@@ -7,26 +7,18 @@
 
 ## 当前决策前沿
 
-0. **全局目标已改为真实 AI vibe coding 任务**：同时优化任务墙钟、首个可执行结果、严重
-   尾部和任务成功率；1/2 路为主、4 路非回退、6/8 只做安全回归。B4 上三次真实 Codex
-   compaction 已复用约 `99.1%`，原 43/44 低命中属于 DeepSeek 直连，不再算 Strata 缺陷。
-   `AGENT-TOOL-CONTEXT-DIET` 已完成：延迟折叠破坏前缀缓存，已否决；大型成功输出首次
-   出现即保存为完整文件并替换为稳定引用，三组配对墙钟改善 `13.63%/47.30%/20.28%`，
-   保持 opt-in。`AGENT-REAL-DECODE-SHAPE` 已完成：最新 35 文件、152 root 快照含
-   output/reasoning `10,343,967/3,347,547` token，单路模型 union `69,064.894 s`，
-   恰好两路仅 `171.303 s`。现役 `STRATA_DECODE_TIMING` 与
-   `STRATA_VERIFY_PROFILE` 已通过 A1-B-A2-B2 移除：416/1490 token 改善
-   `6.61%/5.38%`，B2 已在生产且 health/6 slots/smoke 通过。`AGENT-DRAFT-BREAKDOWN`
-   已完成并关闭：host graph gap 仅 `0.017 ms`，全消除 draft-head 的乐观 root 上界约
-   `0.8%`，不足以继续 MTP 微调。真实 49 天旧会话重放为 223,114 prompt token、cached
-   `0`、TTFT `113.014 s`、wall `113.3 s`，确认隔天旧会话的 p99 主成本是冷 prefill。
-   `AGENT-OLD-SESSION-PREFILL-PROFILE` 已确认默认 256 在途 direct 的 host PLE
-   wait `50,362 ms`、主 PLE phase `39,291 ms`，`mmap` 慢到 wall `182.157 s` 后否决。
-   `AGENT-PLE-INFLIGHT` 已完成三组非剖析冷配对：prompt 全部同向改善
-   `2.87%/1.10%/5.58%`，wall `0.05%/1.09%/5.21%`，配对中位为 `2.87%/1.09%`；
-   `--ple-inflight 1024` 已作为显式配置采纳，默认仍为 256。当前项是
-   `AGENT-PLE-ROW-CACHE`：从该配置只把默认 1,048,576 行缓存提高到 4,194,304 行，
-   先过相邻 profile 的 prompt/host PLE/phase 同向门，再做非剖析配对。
+0. **全局目标已第十五次修订**：优化真实 AI vibe coding 的任务墙钟、首个可执行结果、
+   严重尾部和成功率；没有进入用户实际路径的能力只算机制收益。普通热续轮固定成本项
+   `AGENT-HOT-TURN-FIXED-COST` 已否决：`short_read=0` 在所有热续轮尺寸都未取得
+   1% 收益，1 路短热续 prompt/wall 反而慢 `13.75%/8.14%`，因此保留默认 64，
+   不扫描邻近阈值。当前转为 `AGENT-EDIT-TEST-LOOP-TRACE`：按真实 Codex 事件拆首个
+   工具、首次修改、重复测试和失败纠错，优先选每次编辑—测试都会发生、可验证 >=1% 的
+   下一机制。初期只读，不重启。
+   真实 trace 中，工具 union `123,693 s` 是 35 文件快照的根任务主体，普通单路模型
+   union `66,228 s` 是第二大块；恰好两路仅 `171 s`。P2 才处理 Codex
+   首个工具/首修改、重复测试和纠错轮次。223K 隔天旧会话 `113.014 s`、
+   cached `0` 仍是 p99 尾部，但 34 个有效会话只有 1 个超过 24h，已降为
+   `AGENT-HISTORY-STATE-RESIDENCY` 低频可行性项，不能排在普通热续轮之前。
 1. **P4 已采纳**：同一新引擎 boot 上，代码由 A 合并中位 41.1875 s 降到 5.074 s（−87.681%）；
    96K by_kind +2.761%、wave +2.202%，短 JSON 3.980 s，三臂零错误且 needle 全对。
 2. **余量风险**：短 JSON 距 4 s 约 20 ms，96K 距 3% 约 0.24 个百分点；生产指标靠近边界时
@@ -184,13 +176,17 @@
 | AGENT-END-TO-END-TRACE | 建立真实 vibe coding 任务时间账本 | 只读关联 root、模型轮次、工具等待/输出、compaction、recovery、取消和空档；至少复算 3 个真实任务与 1 个长会话；不输出 prompt 正文；明确客户端跨度与 Strata server timing 的边界；有合成回归测试 | 已完成 | L-138：14 root、4,180 请求、6,297 工具；最长 root `44,783 s`，模型/工具 union `14,855/31,088 s`、空档 `15.843 s`；真实 44 次 compaction 中 43 次缓存率 <50% | 工具支持 function/custom/tool-search；10 tests OK；无重启、无正文输出 |
 | AGENT-COMPACTION-REAL-SHAPE | 对齐真实 Codex compaction 与已缓存前缀 | 隐私安全记录 metadata、工具来源、消息类型、结构边界、公共 token 前缀和 server 缓存字段；至少 3 个真实形状或 2 真实+1 确定性 fixture；只有证明内容相同前缀才实现 opt-in；候选须有整任务 >=1% 保守上界和精确回滚 | 已完成 | B4 + Codex 0.164 三次真实 compaction 分别 cached `11124/11225`、`11349/11452`、`11627/11729`，prompt `451.5–529.4 ms`，均 completed；冻结快照 provider 为 DeepSeek 直连 | **当前缓存路径有效，不实现新布局、不重启**；见 `AGENT_COMPACTION_REAL_SHAPE_RESULT` |
 | AGENT-TOOL-CONTEXT-DIET | 降低大型工具输出的上下文税 | opt-in；错误/失败/小输出原样保留，大型成功输出首次出现时保存完整文件和稳定引用；不调用额外模型摘要；真实 coding task 的代码修改、测试结果、错误定位与 finish 不受损；整任务 >=1% | 已完成 | L-140：三组八命令配对墙钟 `38.106→32.914 s`、`58.307→30.727 s`、`41.002→32.686 s`，改善 `13.63%/47.30%/20.28%`；needle 可精确找回，编辑/测试 `2 passed`、`PASS` | **通过并保持 opt-in**；延迟“保留最新六条”因前缀缓存从 `25K+` 跌到 `4,546` token、前九请求 `116.177 s` 被否决；生产未改、未重启 |
+| AGENT-CONTEXT-DIET-REAL-YIELD | 证明上下文饮食在真实会话和实际 coding 路径上的收益 | 隐私安全统计可折叠成功输出、错误输出、后续可见轮次和保守 token 上界；真实会话整任务上界至少 1% 才进入三组配对；编辑/测试正确、错误可见、artifact 可逐字恢复、wall 中位至少改善 1%、默认路径字节不变 | 否决 | 选择门曾通过；三组真实 Codex 配对 diet wall 慢 `17.365%/86.935%/41.276%`，中位慢 `41.276%`，input 中位多 `38.190%`；两组请求增加、三组工具调用增加 | **不产品化**；六臂最终测试/artifact 正确，失败来自额外重读/复跑；默认路径未改、未重启 |
+| AGENT-HOT-TURN-FIXED-COST | 降低普通 Agent 热续轮 prompt 固定成本 | 同一引擎/生产配置的 `A64/B0/A64r` 三次受控 boot；1/2 路各至少 3 波，覆盖短续写和约 596 fresh token；至少一个普通热续轮 prompt/wall 中位改善 1%、绝对节省 0.15 s；其他尺寸不退 >1%，A64r 漂移 <=3%，输出/finish/cache/health/6 slots/2 groups 全过，4 路不退 >1% | 否决 | 189 请求零错误/零外来；B0 无热续轮胜场；1 路短热续 prompt/wall 慢 `13.75%/8.14%`，1 路长热续慢 `3.96%/3.55%`；2/4 路同样反向；A64r 部分短读漂移 >3% | 保留默认 64，不扫邻近阈值；A64r 已恢复、health loaded、6 slots / 2 groups；见 result |
+| AGENT-EDIT-TEST-LOOP-TRACE | 拆真实 Codex 编辑—测试循环并选高收益机制 | 覆盖现有 35 文件真实 rollout；只读统计首工具、首修改、首测试、同命令重复测试和失败回传后的额外轮次；按会话/root 保留 prompt、cached、output、1/2 路并发和绝对秒数；产物给出触发率、两类最重循环和一个 >=1% 可实测候选；不输出正文 | 进行中 | 最新 35 文件快照 152 root、14,768 请求、6,297 工具；模型单路 union `66,228 s`、工具 union `123,693 s`；普通热续轮固定成本路线已否决 | 当前入口；初期只读，不改服务、不重启；若主成本在 Strata 之外会明确边界，不用 token/s 冒充任务收益 |
+| AGENT-HISTORY-STATE-RESIDENCY | 跨进程恢复隔天旧会话，避免 113 秒冷 prefill | 先只读证明多 stage KV/checkpoint 可序列化；测 223K 状态大小、写放大、恢复时间和 RAM 峰值；真实旧会话等待至少减少 1% 且保存成本不转移到每轮；有指纹、失效、安全删除和精确回滚 | 搁置 | 真实 223K resume `113.014 s`；当前 session file 明确拒绝 `--layer-split`、`--peer-device`、`--batch`、`--prompt-cache 0`，不能直接用于双卡六槽生产 | **低频 p99**；34 个有效会话仅 1 个超过 24h；普通热续轮、首工具/首修改和重复测试优先；不实现、不重启 |
 | AGENT-REAL-DECODE-SHAPE | 按真实形状拆模型 decode 成本 | 只读汇总 output/reasoning 尺寸、请求类型、1/2 路并发和模型区间；不改服务、不输出正文；至少重放三种真实尺寸；只有真实触发率后的整任务 >=1% 上界才预注册一个机制 | 已完成 | 35 文件、152 root、14,768 请求；output/reasoning `10,343,967/3,347,547` token；单路模型 union `69,064.894 s`、两路 `171.303 s`；416/1490/4483 单路 `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s`；4483 出现提前 `stop` | **诊断完成，长输出稳定性未完全过门**；现役配置同时开着 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`，生产仪器开销成为下一项 |
 | AGENT-PROFILE-HYGIENE | 移除生产 decode 计时与 GPU 剖析器 | 当前 B4 形状 A1-B-A2-B2；B 只移除 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`；416/1490/4483 各 3 波；至少一个主要尺寸中位改善 >=1%，4483 不回退 >1%，A2 漂移 <=3%，finish/hash/health/6 slots 全过；失败精确恢复 | 已完成 | 416/1490/4483 A adjacent median `4.188/14.395/42.322 s`，B `3.911/13.620/37.230 s`；416/1490 改善 `6.61%/5.38%`，A2 漂移 `-2.45%/+0.66%`；4483 漂移 `-13.77%` 不用于加速归因 | **已采纳并留在生产**；B2 engine env 无两个 profiling 变量，health loaded、6 slots、64-token smoke 过；4483 在 B/A2 都有提前 `stop`，独立保留 |
 | AGENT-DRAFT-BREAKDOWN | 拆 MTP draft 的 graph、step 与 host gap | B2 临时只加 `STRATA_DRAFT_TIMING=1` 与 `STRATA_MTP_PROFILE=1`；416/1490/4483 各 3 波；拆 round/step GPU、staging、launch、host gap、PLE、wait/sync；只选保守整任务 >=1% 且不改 draft/verify/sampling/finish 的单一组件；完成后精确恢复 B2 | 已完成 | draft round `2.463 ms`；round graph `0.978 ms`、step GPU `1.451 ms`、host gap `0.017 ms`；draft-head 全消除的乐观 root 上界约 `0.8%` | **关闭实现方向**；不扫 depth/spec-min-p/group/cache；B2 已恢复，engine env 无 draft profiler |
 | AGENT-OLD-SESSION-RESUME | 测量隔天约 180K 旧会话的冷恢复成本 | 固定会话年龄来源与约 180K 形状；记录 input、cached/uncached、prompt、TTFT、wall、slot wait、finish、并发和资源；区分真实旧会话与冷缓存代理 | 已完成 | 49 天真实会话：223,114 prompt、cached `0`、TTFT `113.014 s`、wall `113.3 s`、decode `292.8 ms`；输出 sentinel、finish `stop`、零工具 | **诊断完成**；p99 主成本是冷 prefill，不再用合成 180K 或 compaction 代替 |
 | AGENT-OLD-SESSION-PREFILL-PROFILE | 拆真实 223K 隔天旧会话的冷 prefill | 从精确 B2 只增加 `STRATA_PREFILL_TIMING=1`；同会话只重放一次冷请求；记录 21 相、host staging、主/对端 GPU、wall、TTFT、cache、finish/hash、RAM/VRAM；单相保守节省 >=`1.13 s` 才预注册实现；完成后恢复 B2 | 已完成 | L-145：256 在途 prompt `135,073.4/132,645.8 ms`，A 漂移 1.80%；host PLE `50,362 ms`、主 PLE `39,291 ms`；`gemm gate/up/down`、`qsa select`、`hc read`、`qsa attn` 为 `16,157/8,321/6,784/6,189/5,135 ms`；mmap wall `182.157 s` | **profile 完成**；选择 direct PLE in-flight，mmap 否决；不扫描邻近 kernel 参数 |
 | AGENT-PLE-INFLIGHT | 提高生产 PLE direct reader 的在途读深度 | 只把 256 改为 1,024；sentinel/finish/tool/health/资源不变；host PLE 至少改善 1.13 s；三组非剖析配对的 prompt 全同向，配对中位至少 1%；默认值保持 256 | 已完成 | L-145：profile prompt `135,073.4 → 128,303.5 ms`，host PLE `50,362 → 43,453 ms`，主 PLE `39,291 → 18,525 ms`；非剖析 prompt `2.87%/1.10%/5.58%`、wall `0.05%/1.09%/5.21%`，中位 `2.87%/1.09%` | **已采纳为显式配置**；当前 `--ple-inflight 1024`，源码默认 256，rollback 移除该参数 |
-| AGENT-PLE-ROW-CACHE | 扩大真实旧会话可命中的 PLE 行缓存 | 基线为已采纳 1,024 在途；候选只加 `--ple-row-cache 4194304`；profile 的 prompt/host PLE/phase 同向且 prompt 至少改善 1%；至少两组非剖析配对全部同向、配对中位至少 1%；资源/质量门全过 | 进行中 | 源码默认 1,048,576 行约 95 MB；候选 4,194,304 行约 360 MB，增量约 270 MiB；长 prompt 内重复行历史为 20–34%，尚未在真实 aged session 验证 | 只测这一容量，不扫邻近值；不组合 mmap/keep-alive/inflight/chunk/kernel 改动 |
+| AGENT-PLE-ROW-CACHE | 扩大真实旧会话可命中的 PLE 行缓存 | 基线为已采纳 1,024 在途；候选只加 `--ple-row-cache 4194304`；profile 的 prompt/host PLE/phase 同向且 prompt 至少改善 1%；至少两组非剖析配对全部同向、配对中位至少 1%；资源/质量门全过 | 否决 | L-146：A/B prompt `117,477.3/136,549.2 ms`，候选慢 `16.23%`；host PLE `32,341/51,905 ms`，慢 `60.49%`；PLE phase 慢 `24.07%`；输出/finish/tools 与资源门通过 | **profile 门否决**；恢复 1,024-inflight 配置，不扫邻近容量，不再组合 PLE 参数 |
 | UTIL-MTP-LOWCONC | 用 serial batch-MTP 恢复两路每槽投机 | 同 boot A-B-A；1/2 路至少一级 ≥1%，4 路不退 >1%，输出、finish、health、资源不变 | 否决 | L-133：2 路 `88.50 → 91.38 tok/s`（`+3.25%`），但 4 路 `136.01 → 96.58`（`-28.99%`）；A 输出逐字 | 不扫描 draft depth、阈值或组数；A2 已恢复 |
 | UTIL-TWO-STREAM-SERIAL | 恰好两路依次走 solo，三路恢复 batch | 两路完成跨度至少改善 1%；1/4 路不退，6 路安全；solo 输出重复一致，零错误 | 已完成 | L-134：512-token `11.776 → 10.004 s`（`-15.05%`），64-token `1.692 → 1.554 s`（`-8.18%`）；1 路 `-0.38%`、4 路持平、6 路 `163.07 tok/s` | **已采纳**；`STRATA_BATCH_SERIAL_TWO=1`，第二条 TTFT 约 5.1 s 是明确取舍 |
 | S0b | 长读时邻居停顿 | 同 boot A-B 证明机制有效，停顿 ≤1 s 或给出经证据支持的上界 | 否决 | L-068：路径 3/3 触发但无用户收益；L-082 撤回“整个 0.1.51 回退”的临时概括 | 不再重复同形实验 |

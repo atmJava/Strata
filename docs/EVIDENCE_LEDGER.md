@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-145，按编号）
+## 台账索引（L-000…L-150，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -159,9 +159,203 @@
 | L-143 | 10-31 17:x | draft round 收敛到 `2.463 ms`；round graph `0.978 ms`、step GPU `1.451 ms`、host graph gap `0.017 ms`；draft-head GEMV 全消除的乐观 root 上界约 `0.8%` | **AGENT-DRAFT-BREAKDOWN 完成，否决实现方向**；不扫 depth/spec-min-p/group/cache；B2 已恢复 |
 | L-144 | 10-31 17:x | 2026-09-12 真实会话 49 天后经 B4 resume：223,114 prompt、cached `0`、prompt/首 token `112.863/113.014 s`、wall `113.3 s`、decode `292.8 ms`、21 output/`stop`、零工具 | **AGENT-OLD-SESSION-RESUME 诊断完成**；p99 主体是冷 prefill；下一项 AGENT-OLD-SESSION-PREFILL-PROFILE |
 | L-145 | 10-31 18:x | 223K profile：256 direct prompt `135,073.4/132,645.8 ms`，A 漂移 1.80%，host PLE `50,362 ms`、主 PLE `39,291 ms`；mmap wall `182.157 s`。1,024 profile prompt `128,303.5 ms`、host PLE `43,453 ms`、主 PLE `18,525 ms`。三组非剖析 prompt 改善 `2.87%/1.10%/5.58%`，wall `0.05%/1.09%/5.21%` | **AGENT-PLE-INFLIGHT 采纳为显式参数**；prompt/wall 配对中位 `2.87%/1.09%`，默认仍 256；下一项 AGENT-PLE-ROW-CACHE |
+| L-146 | 10-31 18:2x | 4M PLE row cache 对 adopted 1,024-inflight：prompt `117,477.3→136,549.2 ms`（慢 `16.23%`），host PLE `32,341→51,905 ms`（慢 `60.49%`），PLE phase `22,658→28,113 ms`（慢 `24.07%`）；质量/资源门过但 profile 门失败 | **AGENT-PLE-ROW-CACHE 否决**；恢复 1,024-inflight，不扫邻近容量；复盘转向 AGENT-CONTEXT-DIET-REAL-YIELD |
+| L-147 | 10-31 19:0x | 真实会话饮食审计：36 会话、15,338 请求、22,250 工具输出；5,533 个 `>=4K`，2,332 可折叠；30/36 有覆盖、29/36 估算 >=1%；估算节省 `406,938,232/3,136,590,299` input（`12.9739%`），per-session p50/p75/p90 `14.8319%/25.8062%/65.3799%`；字符/4 估算而非墙钟 | **选择门通过**；下一步三组真实 codex 编辑—测试配对；不重启，默认路径不变 |
+| L-148 | 10-31 19:4x | 真实 Codex 0.164 三组 control/diet 编辑—测试配对：diet wall `25.338/180.964/181.097 s` 对 `21.589/96.806/128.187 s`，中位慢 `41.276%`；input 中位多 `38.190%`；请求 `6/19/18` 对 `6/8/10`，工具 `7/18/17` 对 `5/7/9`；六臂测试、finish、artifact 正确 | **AGENT-CONTEXT-DIET-REAL-YIELD 否决产品化**；额外重读/复跑吞掉局部字符收益；223K 降为低频 p99，转普通热续轮；未重启 |
+| L-149 | 10-31 20:1x | 项目 TU102 文档的锁定额 `62.40 TFLOPS`、双卡解锁 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 两卡均 `unlocked=1`、`result=0 handoff_safe=1`，DKMS/initramfs 固定，两卡功耗墙 `280 W`，满载约 `278 W` 无热降频 | **TU102-UNLOCK-VERIFY 完成**；算力已解锁，当前慢不是解锁失败；不再研究解锁、DKMS、initramfs 或功耗墙 |
+| L-150 | 10-31 20:5x | A64/B0/A64r 各 63 请求；B0 无热续轮胜场；1 路短热续 prompt/wall `520.8 ms/0.643 s` 对 `458.0 ms/0.596 s`，慢 `13.75%/8.14%`；1 路长热续慢 `3.96%/3.55%`，2/4 路同样反向；189 请求零错误、零外来、finish/reply 全对 | **AGENT-HOT-TURN-FIXED-COST 否决**；保留默认 64，不扫邻近阈值；A64r 已恢复；下一项 `AGENT-EDIT-TEST-LOOP-TRACE` |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-150 · 短热续固定成本反转；保留 `short_read=64`
+
+**判定：`AGENT-HOT-TURN-FIXED-COST` 否决。**
+
+同一 engine 与 production config 下运行 A64、fresh B0、fresh A64r，每臂 1/2/4 路各
+3 波，每波 cold、短热续、长热续各一次，共 63 请求。冷 prompt 中位约 16.9K token，
+热续轮复用约 `99.5%`。
+
+| 场景 | A64 prompt/wall | B0 prompt/wall | B0 change |
+|---|---:|---:|---:|
+| 1 路短热续 | `458.0 ms/0.596 s` | `520.8 ms/0.643 s` | `-13.75%/-8.14%` |
+| 1 路长热续 | `1418.2 ms/1.533 s` | `1471.0 ms/1.585 s` | `-3.96%/-3.55%` |
+| 2 路短热续 | `766.9 ms/1.814 s` | `767.0 ms/1.822 s` | `-3.10%/-3.07%` |
+| 2 路长热续 | `1625.2 ms/3.534 s` | `1665.9 ms/3.623 s` | `-2.71%/-2.72%` |
+| 4 路短热续 | `617.7 ms/3.224 s` | `689.5 ms/3.268 s` | `-9.41%/-3.86%` |
+| 4 路长热续 | `1604.3 ms/6.876 s` | `1635.7 ms/7.094 s` | `-3.24%/-3.45%` |
+
+2/4 路短读的 A/A 漂移超过 3%，因此精确百分比不作细归因；但 B0 没有胜场，所有方向
+一致反向，1 路 A/A 漂移只有 `0.066%/0.458%`，候选仍然明确失败。B0/A64r 重载分别
+约 153/189 秒，另有终止等待，未产生任何可回收收益。
+
+189 个请求零 HTTP/引擎错误、零外来请求、`finish=stop`、精确回复全对；提示、回复、
+reasoning、tool body 和 API key 均未进入结果。当前 server/vision/engine
+`159219/159221/159226`，A64r 配置 hash `6ece1a13...`，无显式 `--short-read`，
+health loaded、6 slots / 2 groups。
+
+完整记录见
+[`AGENT_HOT_TURN_FIXED_COST_RESULT-20261031.md`](work/AGENT_HOT_TURN_FIXED_COST_RESULT-20261031.md)。
+下一项 `AGENT-EDIT-TEST-LOOP-TRACE`，先只读拆真实编辑—测试循环。
+
+## L-149 · TU102 算力已解锁；当前瓶颈回到真实 Agent 请求路径
+
+**判定：`TU102-UNLOCK-VERIFY` 完成。算力已经解锁，不再研究或修改解锁链。**
+
+项目既有文档 [`tu102-unlock/README.md`](tu102-unlock/README.md) 用相同
+`8192^3`、FP16 in / FP32 accumulate 的 cuBLAS 测量记录：锁定参考
+`62.40 TFLOPS`，`03:00.0` 和 `04:00.0` 解锁后分别为 `93.69/94.07 TFLOPS`，
+整体约 `1.51x`。
+
+当前内核 `7.0.0-38-generic` 的两份 boot log 均为：
+
+```text
+0000:03:00.0 core=0 stage=11 mutated=1 unlocked=1 quiescent=1
+0000:04:00.0 core=0 stage=11 mutated=1 unlocked=1 quiescent=1
+result=0 handoff_safe=1
+```
+
+`tu102-unlock/1.0` DKMS、initramfs hook、module 与 firmware 都在当前启动链中；
+两张卡 `power.limit = power.max_limit = 280 W`。此前真实请求期间采样到 P2 /
+PCIe Gen3 x16、SM `1880–1920 MHz`、GPU0 峰值 `278.1 W`、温度 `57/52 °C`，
+只有 software power cap，没有热降频。
+
+因此已测的普通热续轮 `1.4–1.5 s` prompt 不能归因于解锁失败。完整核实记录见
+[`TU102_UNLOCK_VERIFY-20261031.md`](work/TU102_UNLOCK_VERIFY-20261031.md)。下一项改为
+`AGENT-HOT-TURN-FIXED-COST`；223K 旧会话降为低频 p99。
+
+## L-148 · 上下文饮食真实客户端配对反向；停止代理参数路线
+
+**判定：`AGENT-CONTEXT-DIET-REAL-YIELD` 否决产品化；下一项转 223K 跨重启状态驻留
+只读可行性。**
+
+三组真实 Codex 0.164 请求经 `codex exec -> agent-shape-proxy -> SSH -> B4` 执行。
+control/diet 使用相同 qwen3.8 模型、`low` reasoning、工具集、上下文和 fixture；每组先
+运行一次 61,284 字节成功报告，再跑测试、修改实现和复跑。
+
+| pair | task | control wall | diet wall | diet slowdown | requests C/D | tools C/D |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | simple bug | 21.589 s | 25.338 s | 17.365% | 6 / 6 | 5 / 7 |
+| 2 | 70-case failure | 96.806 s | 180.964 s | 86.935% | 8 / 19 | 7 / 18 |
+| 3 | parser bug | 128.187 s | 181.097 s | 41.276% | 10 / 18 | 9 / 17 |
+| median |  |  |  | **41.276% slower** |  |  |
+
+input token 为 `91,497→62,967`、`169,813→305,520`、`216,456→299,120`，配对中位
+多 `38.190%`。diet 总计替换 128 个输出、单请求共节省 `1,027,637` 字符，但额外重读和
+复跑使实际请求/input 反向。
+
+六臂最终测试通过、最终 `RESULT=PASS`、return code `0`、零代理 HTTP 错误；每个 diet arm
+都有 mode-0600 artifact，并能找回精确 report marker。故失败是产品路径成本，不是数据丢失。
+聚合 JSON SHA-256 为
+`da0081a5a1e75d17ef6212870d3ce5f8a3ab023e499c1a3a51f56627efc7d933`；control/diet shape
+日志分别为 `6b005ed7...`、`3d34090b...`。
+
+不把该代理设为推荐路径，不重启。`AGENT-HISTORY-STATE-RESIDENCY` 降为低频 p99：
+34 个有效会话只有 1 个超过 24h，且现有 session file 拒绝双卡 layer split、六 batch
+slots 和 prompt-cache 形状。下一项改为普通编辑—测试热续轮的
+`AGENT-HOT-TURN-FIXED-COST`。
+
+完整记录见
+[`AGENT_CONTEXT_DIET_REAL_YIELD_RESULT-20261031.md`](work/AGENT_CONTEXT_DIET_REAL_YIELD_RESULT-20261031.md)。
+
+## L-147 · 上下文饮食在真实会话中覆盖充分；从 token 估算转实际 coding 墙钟
+
+**判定：`AGENT-CONTEXT-DIET-REAL-YIELD` 的只读选择门通过；下一步三组真实 Codex
+编辑—测试配对。**
+
+扫描 36 个本地 Codex rollout，共 15,338 个请求、22,250 个工具输出、
+`3,136,590,299` input token，其中 cached `97.890%`。工具输出总计 `83,592,095`
+字符；5,533 个输出至少 4K，2,332 个被 fail-open 成功分类器判为可折叠。错误/失败大
+输出保留原文，custom/tool-search 输出不支持折叠且不计收益。
+
+按“首次出现即保存原文并替换稳定引用、到下一次 compaction 为止”的保守上界：
+
+| field | result |
+|---|---:|
+| sessions with foldable output | 30 / 36 |
+| sessions estimated at >=1% | 29 / 36 |
+| later visible foldable requests | 165,524 |
+| original repeated visible chars | 1,727,477,918 |
+| stable-reference visible chars | 99,724,991 |
+| estimated saved chars | 1,627,752,927 |
+| estimated saved tokens | 406,938,232 |
+| estimated saved input share | 12.9739% |
+| per-session p50 / p75 / p90 | 14.8319% / 25.8062% / 65.3799% |
+
+2,175 个可折叠输出在至少五个后续请求中可见，说明收益不是只来自一次合成样例。但是
+`12.9739%` 是字符/4 转换的模型可见 input 估算，不是 server prompt、wall 或生产收益。
+高缓存率下仍可能被固定成本和额外重读吞掉，因此不能据此改默认。
+
+扫描器不输出正文，结果 JSON 的 SHA-256 为
+`fa3dfdaa7921a04b130c68662016cba747e9c16bb27283edc221b0d1ac45b45b`。
+聚焦测试 `27 passed`。下一步使用相同 fixture、模型、工具、采样和输出上限，做三组
+control/diet `codex exec` 编辑—测试配对；要求正确性、错误可见、artifact 逐字恢复、
+finish 和轮次不退化，且 wall 中位至少改善 1%。该阶段只改 opt-in proxy，不重启服务器。
+
+完整记录见
+[`AGENT_CONTEXT_DIET_REAL_YIELD_RESULT-20261031.md`](work/AGENT_CONTEXT_DIET_REAL_YIELD_RESULT-20261031.md)。
+
+## L-146 · 4M PLE row cache 在真实 223K 请求上反转；停止 PLE 容量路线
+
+**判定：AGENT-PLE-ROW-CACHE 在 profile 门否决；恢复 1,024-inflight 配置；下一项转为
+上下文饮食真实收益审计。**
+
+基线是已采纳的 `--ple-inflight 1024` 配置，只启用
+`STRATA_PREFILL_TIMING=1`。候选仅增加：
+
+```text
+--ple-row-cache 4194304
+```
+
+两臂在相邻 fresh boot 中重放同一真实旧会话：
+
+| field | A adopted base | B 4M rows | B vs A |
+|---|---:|---:|---:|
+| prompt tokens | 228,478 | 228,507 | +0.013% |
+| cached | 0 | 0 | same |
+| server prompt | 117,477.3 ms | 136,549.2 ms | +16.23% slower |
+| client wall | 124.307 s | 143.403 s | +15.36% slower |
+| GPU timeline | 94,179 ms | 99,792 ms | +5.96% slower |
+| PLE phase | 22,658 ms | 28,113 ms | +24.07% slower |
+| host PLE | 32,341 ms | 51,905 ms | +60.49% slower |
+
+两臂均为 sentinel 正确、`finish=stop`、4 output token、零工具、零 HTTP/engine 错误，
+health、6 slots / 2 groups、swap `0` 均安全。候选在预注册 gate 中明显反向，因此没有
+进入非剖析配对。该结论只覆盖这一真实请求和这一容量；契约规定一次 miss 关闭容量路线，
+不做邻近值扫描。
+
+恢复后的手动实例为 server/vision/engine `93552/93554/93559`，engine
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`、config
+`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`、server
+`10bd83181940472dd936e6ab795bbba4401ab1d750a1631fecd46194ac76a405`；
+health loaded、262144 context、6 slots / 2 groups、swap `0`、available RAM
+`14,552 MiB`，确定性 smoke `stop`。运行参数含 `--ple-inflight 1024`，不含
+`--ple-row-cache`，也不含 decode profiling env。
+
+首次恢复误用 `/opt/ai/bin/use-config.sh`，它重启的是 systemd 单元而不是当前手动实例。
+单元因实验配置不兼容失败重试 8 次后已停止，其原配置按 `db061beb...` 备份恢复；随后
+手动实例从 accepted config 重新启动并核对。`strata.service` 仍为
+`inactive/dead`、`MainPID=0`、`NRestarts=8`。
+
+证据目录 `/opt/ai/logs/agent-ple-row-cache-20261031T101536Z/`：
+
+| Artifact | SHA-256 |
+|---|---|
+| A config | `00cdad904d46a9043f5d784891c52e7778cdd1e8e76f01b9d69330644e33efd9` |
+| B config | `9fdbaed52d0fe208b4e2310c87b5eb878afbfcf3ca617ab21d42cd8ab50f0b5b` |
+| A metrics | `6242bdc5aee306dc5808dd92b43d0a88631969ebc73653f4c5edcf12b725f392` |
+| B metrics | `1ddab3fdca010d6e1da33cd13bfcf95018a26363654421c79204138dca27fbfd` |
+| A profile lines | `c0b9758109f90f64648cfe5defbc5919c723e6676344724416a5a292a1f28dd2` |
+| B profile lines | `79a5bc17e40eba901413846a46b9e1c37cf4463bee7b45173fb15ec8dcfa9775` |
+
+整任务复盘说明工具 union `31,088 s` 高于模型 `14,855 s`，工具输出 `>=2K` 占
+`92.294%`，恰好两路模型 union 仅 `171.303 s`。上下文饮食已有三组
+`13.63%/47.30%/20.28%` 墙钟改善，但还没有真实覆盖率或实际路径验收。下一项为
+`AGENT-CONTEXT-DIET-REAL-YIELD`。现有 session file 拒绝 layer split 和 batch，不能
+直接用于当前 223K 跨重启恢复。
+
+完整记录见
+[`AGENT_PLE_ROW_CACHE_RESULT-20261031.md`](work/AGENT_PLE_ROW_CACHE_RESULT-20261031.md)。
 
 ## L-140 · 上下文饮食：首次出现即折叠过三组 1% 门，延迟折叠破坏缓存
 
