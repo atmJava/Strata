@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-128，按编号）
+## 台账索引（L-000…L-132，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -142,9 +142,98 @@
 | L-126 | 10-31 12:5x | Codex title B 三项 `1.8–2.1 ms`、零 engine request/prompt/output；普通 Responses 仍 +1 request、64 prompt/8 output | **ACT：采纳并保持运行；无引擎重建** |
 | L-127 | 10-31 12:5x | Compaction LRU：1 主 3 子代理各 8.3K prompt，compaction 复用 `99.52–99.64%`、墙钟 `0.69–0.89 s`；8 请求全 200，title 仍零引擎 | **ACT：采纳并保持运行；45 tests OK；B2 已加载** |
 | L-128 | 10-31 13:0x | 共享 system 移到 tools 前后，不同 tools 的后三次请求各复用 `5,120` token；平均墙钟 `7.515 → 5.669 s`（`-24.56%`），后三 `7.502 → 5.001 s`（`-33.34%`）；共同前缀 `320 → 54,366` 字节 | **AGENT-STATIC-SYSTEM-PREFIX 采纳并保持运行；B3a 6/2；工具、compaction、title 与 health 全过** |
+| L-129 | 10-31 13:1x | 自动 boundary pin：后续兄弟复用 `10,013/10,287 = 97.34%`，墙钟 `1.392/1.322/1.291 s`；B3a 总墙钟 `22.676 → 13.322 s`（`-41.25%`），后三 `5.001 → 1.335 s`（`-73.31%`） | **AGENT-PREFIX-PIN 采纳并保持运行；B4 6/2、engine hash 不变；49 tests OK** |
+| L-130 | 10-31 13:2x | 真实 Codex 会话 3,614 请求：input `640.4M`、cached `97.22%`、uncached `17.82M`、output `2.77M`；36 次 compaction 每次数十万输入仅有约 3.5–7.6K 缓存，合计约占全部 uncached input 一半 | **只读诊断完成；客户端 token 形状不等于 Strata server timing** |
+| L-131 | 10-31 13:3x | B4 真实 HTTP 180,279-token 冷 turn `65.555 s`；同会话 compaction `180,301` input、cached `180,272`（`99.984%`）、wall `2.385 s`、仅重读 29 token | **AGENT-COMPACTION-LARGE 验证通过；不是 1/2/4 路吞吐声明** |
+| L-132 | 10-31 14:1x | B4 的 12K Agent 形状：1 路冷/续轮 wall `7.382/1.610 s`，2 路 `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅约 50–73 ms | **AGENT-SERVER-BREAKDOWN 完成；下一项拆热缓存 prompt 固定/恢复成本** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-132 · AGENT-SERVER-BREAKDOWN：热续轮仍各有约 1.4–1.5 秒 prompt 成本
+
+**判定：诊断完成。** 现役 B4 上运行 1/2 路 Agent 形状，每级 3 波、2 轮、18 个请求全部
+成功且 `foreign=0`。1 路冷/续轮 wall 中位 `7.382/1.610 s`，2 路
+`11.075/2.290 s`。续轮 cached 约 95%，prompt 仍为 `1.522/1.409 s`；短输出 decode
+只有 `0.073/0.051 s`。
+
+2 路冷首轮 TTFT `10.993 s`，其中 slot wait `7.307 s`；1 路冷首轮 TTFT
+`7.336 s`。2 路续轮 TTFT `2.200 s`、slot wait `1.479 s`。
+
+这组短输出说明当前热轮主要不是 decode；下一项应拆 prompt 固定/恢复和准入。它不能否定
+真实长输出中的 decode 成本。
+
+**证据**：`/opt/ai/logs/agent-breakdown-20261031T0610Z.json`；完整记录见
+[`AGENT_SERVER_BREAKDOWN-20261031.md`](work/AGENT_SERVER_BREAKDOWN-20261031.md)。
+## L-131 · AGENT-COMPACTION-LARGE：180K 历史 compaction 复用 99.984%
+
+**判定：验证通过。** 现役 B4 使用同一真实 HTTP 路径，先发送
+`180,279` token 冷 turn，再发送同一 conversation 的 Codex compaction。冷 turn 墙钟
+`65.555 s`、cached 0；compaction input `180,301`、cached `180,272`，复用
+`99.984%`，只重读 29 token，墙钟 `2.385 s`。compaction 正常 `completed`，避免约
+`63.17 s` 的重复冷 prefill。
+
+此前 compaction replay 只覆盖约 8.3K prompt；本条补上长历史规模。测试没有改变
+engine，服务保持 6 slots / 2 groups、health loaded、262144 context。
+
+**限制**：单 conversation、单线程、约 180K，不是 1/2/4 路吞吐声明，也未覆盖 256K
+边界。真实客户端 trace 的最大 compaction 约 30 万 token，超过当前 Strata context；
+6.3 万到 30 万的差距说明不能把本条扩大为所有客户端上下文长度。
+
+**证据**：`/opt/ai/logs/agent-compaction-long-20261031T0530Z/result.json`；完整记录见
+[`AGENT_COMPACTION_LARGE_RESULT-20261031.md`](work/AGENT_COMPACTION_LARGE_RESULT-20261031.md)。
+
+## L-130 · AGENT-WORKLOAD-TRACE：真实会话的成本由长上下文事件主导
+
+**判定：只读诊断完成。** 解析本机一个约 29 小时 Codex 会话日志，共 3,614 条
+`token_usage_record`。合计 input `640,411,228`、cached `622,593,536`、缓存率
+`97.22%`、uncached `17,817,692`、output `2,769,364`、reasoning `794,887`。
+
+普通请求的 uncached input 中位数只有 265 token，但 p90 `7,907`、p99 `42,631`。
+36 次 compaction 前的大请求输入约 26–30 万 token，缓存通常只有 3.5–7.6K；单次
+uncached 约 25–29 万，36 次合计约 970 万，占全部 uncached input 约一半。典型事件
+如 `05:21:14`：input `296,336`、cached `7,808`、uncached `288,528`；其前一分钟普通
+turn 为 input `299,060`、cached `297,984`。
+
+这证明“长历史每轮都会冷读”不是事实，断点来自 compaction 请求结构。它也解释了为什么
+继续扫描局部 kernel 的整任务上界很小：优先消除 compaction 重读更接近用户关键路径。
+
+**限制**：这是客户端 token usage，不包含远端 Strata 逐请求 timing，且单个会话不能
+代表全部用户；不能把 token 数乘一个假想速率写成远端性能结果。
+
+**证据**：[`AGENT_WORKLOAD_TRACE-20261031.md`](work/AGENT_WORKLOAD_TRACE-20261031.md)。
+
+## L-129 · AGENT-PREFIX-PIN：自动固定共享 system 边界
+
+**判定：采纳。** `codex_auto_prefix_pin` 默认关闭；开启且
+`codex_system_before_tools` 已启用、请求有 tools、首个消息是字符串 system、客户端没有
+显式 `strata_prefix` 时，服务自动注入 system 后的精确 token pin。默认请求、显式用户
+prefix、无 tools 和无 system 路径保持不变。
+
+**真实服务结果**：四个不同 tools、相同 system 的串行请求中，首请求 input `10,287`、
+cached 0、wall `9.318 s`；后三次各 cached `10,013`（`97.34%`），wall
+`1.392/1.322/1.291 s`。B3a 总墙钟 `22.676 → 13.322 s`（`-41.25%`），后三兄弟
+`5.001 → 1.335 s`（`-73.31%`），前两个请求 `12.693 → 10.709 s`（`-15.63%`）。
+
+**门禁**：4 并发三个复用 `10,014`、一个冷读；8 并发七个复用约 9.8K、一个冷读，全部
+正确调用自己的 tool；冷启动 4 并发三个复用 `98.32%`、一个冷读；1 主 3 子代理
+compaction 复用 `99.526%`；title `1.9 ms`、零引擎/零 token。
+
+本地 `serve.test_responses` 49 tests OK，`serve.test_frontend` 30 tests OK；远端
+Responses 49 tests OK、1 个可选 `jsonschema` skip。pin 前后 prompt token ids 完全相同，
+边界正好位于 system 后、`\n\n# Tools` 前。B4 server/vision/engine
+`38589/38592/38627`，health loaded、262144、6 slots / 2 groups，engine hash 不变。
+Python server 加载约 147 s，没有重建 engine；无 HTTP、CUDA、timeout、traceback 或
+外来请求错误。
+
+**限制**：引擎一次只固定一个边界；同时冷启动的兄弟无法共享第一次读；4/8 路只作正确性
+和过载安全证据。真实客户端若使用不同 system，会替换当前固定前缀。
+
+**证据**：`/opt/ai/logs/agent-prefix-pin-20261031T0515Z/`；完整记录见
+[`AGENT_PREFIX_PIN_RESULT-20261031.md`](work/AGENT_PREFIX_PIN_RESULT-20261031.md)。
+
+**下一步**：真实 trace 已确认 compaction 是最大重复 prefill 来源；180K 验证复用
+`99.984%`。不再重复同形 compaction 实验，转向可重复 trace 工具和正文 decode/等待成本。
 
 ## L-128 · AGENT-STATIC-SYSTEM-PREFIX：兄弟 Agent 共享 system 前缀，墙钟下降约四分之一
 

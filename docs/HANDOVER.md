@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T12:55+08:00。
+> 整理时间：2026-10-31T13:40+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,18 +12,34 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-123。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-131。
 
 ## 2. 当前断点
 
-- **全局目标已按真实负载重置**：用户通常 1 会话、少量 2 会话、峰值 4 会话。6/8 路降为
-  安全回归，不再要求每个候选同时提速。当前计划已重写并评审，1/2/4/6/8 明确定义为同时
-  请求流数；任何局部候选先算真实触发率后的整任务 1% 上界，否则不构建、不重启。Agent A/A
-  已证明普通续轮复用约 95%、69% 共享前缀的新会话 prompt 约 3.2 s。`AGENT-CODEX-TITLE`、
-  线程级 compaction LRU 和共享 system 前缀顺序均已采纳：title 为 `1.8–2.1 ms` 且零
-  引擎/token；1 主 3 子代理 compaction 各复用约 99.5%；不同 tools 的后续兄弟请求复用
-  `5,120` token，平均墙钟下降 `24.56%`。下一步验证已有 `strata_prefix` pin 能否把剩余
-  system 边界固定住，将复用从 `5,120` 提升到接近完整 system。
+- **全局目标已重新拟定并评审通过**：用户通常 1 会话、少量 2 会话、峰值 4 会话。6/8 路
+  降为安全回归，不再要求每个候选同时提速。1/2/4/6/8 明确定义为同时请求流数；任何局部
+  候选先算真实触发率后的整任务 1% 上界，否则不构建、不重启。完整计划在
+  [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
+- **当前已采纳**：title 为 `1.8–2.1 ms`、零引擎/token；线程级 compaction LRU 使 1 主
+  3 子代理各复用约 99.5%；共享 system 放在 tools 前使共同前缀由 `320` 增至 `54,366`
+  字节；自动 boundary pin 使后续兄弟复用 `97.34%`，相对 B3a 后三墙钟
+  `5.001 → 1.335 s`（`-73.31%`）。B4 当前 server/vision/engine
+  `38589/38592/38627`，`127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups，
+  engine `105a4171...` 未重建。
+- **真实 trace 新结论**：解析 29 小时 Codex 会话的 3,614 请求，cached `97.22%`，
+  uncached `17.82M`。普通 uncached 中位只有 265 token；36 次 compaction 每次约 26–30
+  万 input、仅约 3.5–7.6K cached，合计约占全部 uncached input 一半。这是客户端请求
+  形状，不是 Strata server timing。
+- **长 compaction 已验证**：现役 B4 的 180K 真实 HTTP replay 中，cold turn 为
+  `65.555 s`，随后 compaction input `180,301`、cached `180,272`（`99.984%`）、wall
+  `2.385 s`，只重读 29 token。该路线不再重做同形实验。
+- **trace 工具已固化**：`tools/server/probe-codex-sessions.py` 只读汇总 totals、root、
+  compaction 和 top uncached，不输出 prompt 正文；4 tests OK。
+- **同服务 breakdown 已完成**：1 路冷/续轮 wall `7.382/1.610 s`，2 路
+  `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅
+  `50–73 ms`。2 路冷首轮 TTFT `10.993 s`，其中 slot wait `7.307 s`。
+- **下一动作**：AGENT-PROMPT-FIXED 只做无重启相位拆解，把热续轮约 1.4–1.5 秒分成 host、
+  checkpoint restore、uncached prefill 和准入；保守整任务上界不足 1% 就立即转下一瓶颈。
 - 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，UTIL-KERNEL、
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的

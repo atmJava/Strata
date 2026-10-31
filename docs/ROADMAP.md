@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T12:45+08:00。
+> 最后更新：2026-10-31T13:35+08:00。
 
 ## 用户目标
 
@@ -31,7 +31,10 @@ prefill 和稳定的正文生成；6/8 路只保留安全回归，不作为候�
 | M16 | Codex title 请求 | A2 每个 title 进入引擎，`1.978–10.292 s`，额外 146–184 output token | 本地 title 路径 0 引擎请求、0 prompt/output token，合法标题且普通请求不受影响 | 已采纳：B 为 `1.8–2.1 ms`、零请求/token，普通请求仍进引擎 |
 | M17 | 多线程 Codex compaction 前缀 | 工具集合仅保留最后线程，1 主 3 子代理交错时早先线程可能重读整段历史 | 有界线程缓存使每个活跃线程保留自己的工具前缀；默认路径字节不变，LRU 淘汰和并发测试通过 | 已采纳：4 个线程各保留前缀，compaction 复用约 99.5%，墙钟 `0.69–0.89 s` |
 | M18 | 兄弟 Agent 共享 system 前缀 | tools 位于共享 agent instructions 之前；工具集合不同会使 10K 级通用 system 前缀失配 | 顺序调整只改变 tool block 与 system block 的相对位置，不改变内容；真实工具调用/质量门通过，缓存复用带来端到端收益 | 已采纳：后续兄弟请求复用 `5,120` token，平均墙钟 `-24.56%`，后三请求 `-33.34%` |
-| M19 | 固定共享 system 边界 | system-before-tools 已共享长前缀，但首个缓存 checkpoint 停在 `5,120` token | 验证现有 `strata_prefix` pin 能在同一真实负载上提高复用，并给出整任务 ≥1% 上界 | 进行中：手动 boundary pin 已复用 `97.53%`，待自动注入和服务验收 |
+| M19 | 固定共享 system 边界 | system-before-tools 已共享长前缀，但首个缓存 checkpoint 停在 `5,120` token | 验证现有 `strata_prefix` pin 能在同一真实负载上提高复用，并给出整任务 ≥1% 上界 | 已采纳：自动 pin 后兄弟复用 `97.34%`，后三墙钟 `-73.31%`；安全门全过 |
+| M20 | 长历史 compaction 复用 | 客户端真实会话的 36 次 compaction 每次约 26–30 万 input，仅约 3.5–7.6K cached | 同一 Strata HTTP 路径下，长历史 compaction 复用接近前一轮普通 turn，且正常 completed | 验证通过：180K 输入复用 `99.984%`，wall `2.385 s`；cold turn 为 `65.555 s` |
+| M21 | 真实 Codex session 成本结构 | 29 小时、3,614 请求；cached `97.22%`，uncached `17.82M`，output `2.77M` | 用真实请求形状筛掉低于 1% 整任务上界的局部候选，并定位下一大头 | 工具化完成：`probe-codex-sessions.py`，4 tests OK，不输出 prompt 正文 |
+| M22 | 1/2 路热续轮成本 | 12K Agent prompt 续轮 cached 约 95%，wall `1.61/2.29 s`，prompt `1.52/1.41 s`，短输出 decode 仅 `73/51 ms` | 拆出 prompt 固定/恢复与准入，寻找整任务 ≥1% 的下一机制 | 诊断完成；下一项 AGENT-PROMPT-FIXED |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 

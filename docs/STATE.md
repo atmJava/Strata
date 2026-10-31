@@ -4,20 +4,36 @@
 > 本文件只写当前断点，不重复历史、规则或完整证据。
 
 - 目标：针对用户真实 Agent 负载（通常 1 会话、少量 2 会话、峰值 4 会话）缩短端到端
-  任务时间；优先消除非必要 prefill 和长上下文主计算，不再以 6/8 路为联合收益门。
+  任务时间；优先消除非必要 prefill、compaction 重读和关键路径等待，不再以 6/8 路为联合
+  收益门。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已重写并通过评审。1/2 路是主验收，4 路是非回退上限，6/8 只做安全回归；局部优化必须
-  先给出真实触发率后的整任务 1% 上界，否则不构建、不重启。
-- 当前阶段：真实 Agent 请求级优化已连续采纳三项。普通会话缓存已工作；title 不再进引擎；
-  多线程 compaction 各保留工具前缀；共享 system 现在位于 tools 之前，兄弟线程开始复用长前缀。
-- 当前项：AGENT-STATIC-SYSTEM-PREFIX 已采纳并保持运行。源码共同前缀由 `320` 字节升到
-  `54,366` 字节；真实四线程不同 tools 的后续请求各复用 `5,120` token。平均墙钟
-  `7.515 → 5.669 s`（`-24.56%`），后三个兄弟请求 `7.502 → 5.001 s`（`-33.34%`），
-  四次请求都只调用自己的工具。结果见
-  [AGENT_STATIC_SYSTEM_PREFIX_RESULT](work/AGENT_STATIC_SYSTEM_PREFIX_RESULT-20261031.md)。
-- 当前运行：B3a server/vision/engine `36610/36613/36618`，监听 `127.0.0.1:8080`，
-  engine `105a4171...` 未重建，config `a8a8a42f...`，模板 `8f0ac93c...`，健康 loaded、
-  262144 context、6 slots / 2 groups。title 仍 `2 ms`/零引擎；四次 compaction 复用约 99.5%。
+  已重新拟定并通过评审。1/2 路是主验收，4 路是非回退上限，6/8 只做安全回归；局部优化
+  必须先给出真实触发率后的整任务 1% 上界，否则不构建、不重启。
+- 当前阶段：真实 Agent 请求级优化已采纳 title、线程级 compaction LRU、共享 system 前缀
+  顺序和自动 boundary pin。B4 后三个兄弟请求复用 `97.34%`，相对 B3a 后三墙钟
+  `5.001 → 1.335 s`（`-73.31%`）。
+- 当前项：AGENT-PROMPT-FIXED
+  1/2 路短输出诊断显示，约 95% cached 的热续轮仍有 `1.4–1.5 s` prompt；先把这段拆成
+  host、checkpoint restore、uncached prefill 和准入，只保留整任务上界 ≥1% 的机制。
+- 当前运行：B4 server/vision/engine `38589/38592/38627`，监听 `127.0.0.1:8080`，
+  engine `105a4171...` 未重建，config `1d7dca58...`，server `a38a6655...`，模板
+  `8f0ac93c...`，health loaded、262144 context、6 slots / 2 groups。Python server
+  加载约 147 s；title 仍约 `1.9 ms`/零引擎，冷启动 4 并发和 8 路安全回归均通过。
+- 当前证据断点：真实 Codex 29 小时会话共 3,614 请求，cached `97.22%`；36 次长历史
+  compaction 每次约 26–30 万 input、仅约 3.5–7.6K cached，占全部 uncached input 约一半。
+  现役 B4 的 180K 真实 HTTP replay 已证明 compaction 复用 `180,272/180,301 =
+  99.984%`、墙钟 `2.385 s`，冷 turn 为 `65.555 s`。见
+  [AGENT_WORKLOAD_TRACE](work/AGENT_WORKLOAD_TRACE-20261031.md)、
+  [AGENT_COMPACTION_LARGE_RESULT](work/AGENT_COMPACTION_LARGE_RESULT-20261031.md)。
+- trace 工具已固化：`tools/server/probe-codex-sessions.py` 只读汇总 totals、root、
+  compaction 和 top uncached，不输出 prompt 正文，4 tests OK。
+- 同服务 1/2 路 breakdown：1 路冷/续轮 wall `7.382/1.610 s`，2 路
+  `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅
+  `50–73 ms`。见 [AGENT_SERVER_BREAKDOWN](work/AGENT_SERVER_BREAKDOWN-20261031.md)。
+- 上一项：AGENT-STATIC-SYSTEM-PREFIX 已把共同前缀由 `320` 字节升到 `54,366` 字节；
+  真实四线程不同 tools 的后续请求各复用 `5,120` token，平均墙钟
+  `7.515 → 5.669 s`（`-24.56%`），后三个兄弟请求 `7.502 → 5.001 s`（`-33.34%`）。
+  结果见 [AGENT_STATIC_SYSTEM_PREFIX_RESULT](work/AGENT_STATIC_SYSTEM_PREFIX_RESULT-20261031.md)。
 - 上一项：AGENT-CODEX-COMPACTION-LRU 已采纳并保持运行。B2 server/engine/vision
   `33065/33073/33068`，配置启用 title + compaction cache；真实 1 主 3 子代理 8.3K-token
   交错测试中四次 compaction 分别复用 `8274/8278/8288/8288` token（约 99.5%），墙钟
@@ -370,5 +386,5 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-31T11:15+08:00（batch side mixer 同 boot A-B-A 否决；A2 baseline
-  已恢复，服务器双卡正常）
+- 最后更新：2026-10-31T13:45+08:00（真实 Agent 计划重评；B4 boundary pin 和 180K
+  compaction 验证通过，服务器双卡正常）

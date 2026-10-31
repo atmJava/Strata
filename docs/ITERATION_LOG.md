@@ -3,6 +3,105 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-106 · 1/2 路 breakdown：热续轮仍有约 1.4–1.5 秒 prompt 固定成本
+
+- 目标 / 指标：在同一 B4 服务上区分 1/2 路冷首轮和同会话续轮的 wall、prompt、decode、
+  TTFT、slot wait 与 cached token，确认下一块大成本。
+- 假设与预期：短 Agent 输出下 decode 很小；如果续轮已 95% 缓存但 wall 仍超过 1 秒，
+  下一项应拆 prompt 固定/恢复，而不是继续优化短 decode。
+- 改动与实验：把本地 `probe-agent-sessions.py` 临时复制到远端 `/tmp`，运行 1/2 路各
+  3 波、每波 2 轮；目标 8K 上下文，实际约 12K，输出上限 64。未改服务、未重启。
+- 结果：1 路冷/续 wall `7.382/1.610 s`，2 路 `11.075/2.290 s`；续轮 cached 约
+  `95%`，prompt 中位 `1.522/1.409 s`，decode 仅 `0.073/0.051 s`。2 路冷首轮
+  TTFT `10.993 s`，其中 slot wait `7.307 s`。18 个请求全成功、无外来请求。
+- 判决：**AGENT-SERVER-BREAKDOWN 完成。** 当前短输出路径的下一大头是热缓存 prompt
+  固定/恢复和 2 路准入；不能把该结果外推到长输出 decode。
+- 生产状态与回滚：只读探针，B4 未改、未重启；临时脚本在 `/tmp`，不影响服务。
+- 证据：L-132、[`AGENT_SERVER_BREAKDOWN-20261031.md`](work/AGENT_SERVER_BREAKDOWN-20261031.md)；
+  `/opt/ai/logs/agent-breakdown-20261031T0610Z.json`。
+- 下一步与理由：进入 AGENT-PROMPT-FIXED，只做无重启的相位拆解；若候选保守整任务上界
+  不到 1%，直接转动态上下文或长输出 decode。
+
+## I-20261031-105 · 真实 session trace 已固化为不泄露正文的只读工具
+
+- 目标 / 指标：把一次性的 session 统计变成可重复入口，持续输出 totals、root turn、
+  compaction 缓存断裂、分位数和 top uncached event。
+- 假设与预期：只看客户端 token 形状即可筛掉多数局部候选，但不能替代 Strata server
+  timing；工具必须明确 scope，并避免把 prompt 正文复制到结果。
+- 改动与实验：新增 `tools/server/probe-codex-sessions.py` 与 4 个合成测试；支持 JSONL
+  文件/目录、嵌套 cached 字段、无效行计数、compaction 与前一普通请求对照、CLI 输出。
+- 结果：4 tests OK；对同一真实日志复算得到 36 次 compaction、约 `9,646,745` 未缓存
+  token。工具输出不含原始 prompt 文本，scope 固定写明
+  `Codex client token records; not Strata server timing`。
+- 判决：**AGENT-WORKLOAD-TRACE 工具化完成。**
+- 生产状态与回滚：本地只读工具和测试；错误时移除新脚本/README 行即可，不影响服务。
+- 证据：L-130、`tools/server/tests/test_probe_codex_sessions.py`。
+- 下一步与理由：客户端形状已足够选择“检查热续轮固定成本”，不再先改 kernel。
+
+## I-20261031-104 · 真实 trace 把最大重复成本定位到长历史 compaction
+
+- 目标 / 指标：根据真实 Codex session 而非合成 6/8 路矩阵，找出占未缓存输入和任务时间
+  最大的重复工作，并判断是否值得继续进入 kernel。
+- 假设与预期：普通续轮已经高缓存；若少数长上下文事件贡献大部分 uncached input，则请求级
+  compaction/前缀断裂应高于亚毫秒 kernel 的优先级。
+- 改动与实验：只读解析一个约 29 小时的 session，共 3,614 条 token usage；按 root turn、
+  compaction 和时间顺序汇总 input/cached/uncached/output/reasoning。没有改源码或服务。
+- 结果：总 input `640.4M`、cached `97.22%`、uncached `17.82M`。普通 uncached 中位仅
+  265 token，但 p99 为 `42,631`；36 次 compaction 每次约 26–30 万 input、只缓存约
+  3.5–7.6K，合计约占全部 uncached input 一半。compaction 前一轮普通 turn 通常仍有约
+  99% 缓存，说明断点来自 compaction 请求结构，而不是长历史每轮都冷读。
+- 判决：**AGENT-WORKLOAD-TRACE 完成。** 这是客户端请求形状证据，不包含 Strata 远端
+  timing；不能把 token 数直接换算成 engine 性能。计划据此把长历史 compaction 和真实
+  关键路径优先于局部 kernel。
+- 生产状态与回滚：只读本地日志，没有服务改动或回滚项。
+- 证据：L-130、[`AGENT_WORKLOAD_TRACE-20261031.md`](work/AGENT_WORKLOAD_TRACE-20261031.md)。
+- 下一步与理由：现役 compaction LRU 已有 8.3K 验证，但真实触发在数十万 token；先用同一
+  HTTP 路径做约 180K 长历史 replay，确认规模上仍能避免整段重读。
+
+## I-20261031-103 · 180K compaction 复用 99.984%，长历史整段重读已消除
+
+- 目标 / 指标：验证线程级 compaction 工具缓存不只对 8.3K fixture 有效，长历史下仍能复用
+  上一轮已缓存前缀并正常完成。
+- 假设与预期：若服务端确实把同一 conversation 的 tools 和 prompt 前缀对齐，180K
+  compaction 的 uncached 应只有尾部指令和模板差异，而不是整段历史。
+- 改动与实验：使用现役 B4，经 `127.0.0.1:8080/v1/responses` 先发 180,279-token 长 turn，
+  再发同 session/thread 的 Codex compaction，`tools: []`。未改源码、未重启。
+- 结果：cold turn 墙钟 `65.555 s`、cached 0；compaction input `180,301`、cached
+  `180,272`，复用 `99.984%`，只重读 29 token，墙钟 `2.385 s`，状态 `completed`。
+  相对冷读避免约 `63.17 s`。
+- 判决：**AGENT-COMPACTION-LARGE 验证通过。** 已有线程 LRU 不需要为规模重做；不再重复
+  同形 compaction 实验。
+- 生产状态与回滚：B4 保持 6 slots / 2 groups、health loaded、262144 context，engine
+  hash 不变。回滚是关闭 `codex_compaction_cache` 并重启 Python server。
+- 证据：L-131、[`AGENT_COMPACTION_LARGE_RESULT-20261031.md`](work/AGENT_COMPACTION_LARGE_RESULT-20261031.md)；
+  `/opt/ai/logs/agent-compaction-long-20261031T0530Z/result.json`。
+- 下一步与理由：计划评审通过后先固化真实 trace 工具，建立客户端 token 形状与 Strata
+  server timing 的统一入口；再比较正文 decode、动态上下文和准入的真实 1% 上界。
+
+## I-20261031-102 · 自动 boundary pin 把兄弟请求复用从 5,120 提到约 10,013 token
+
+- 目标 / 指标：固定共享 system 在 tools 前的精确 token 边界，使不同 tools 的兄弟请求在
+  1/2/4 路真实 Agent 形状上继续改善至少 1%，同时守住工具隔离和默认关闭语义。
+- 假设与预期：B3a 的共同前缀约 8.5K–9K token，但引擎最近 checkpoint 只恢复到 5,120；
+  现有 `strata_prefix` 若能自动指向 system 末尾，应避免剩余约 4.9K token 的重复读取。
+- 改动与实验：增加默认关闭的 `codex_auto_prefix_pin`。仅当 system-before-tools 开启、
+  请求有 tools、首消息是字符串 system 且客户端未显式提供 prefix 时，内部注入
+  `{"message": 0, "chars": len(system)}`。只改 Python server，未重建 engine。
+- 结果：四个不同 tools、相同 system 的请求中，首请求 wall `9.318 s`；后三次各复用
+  `10,013/10,287 = 97.34%`，wall `1.392/1.322/1.291 s`。相对 B3a 总墙钟
+  `22.676 → 13.322 s`（`-41.25%`），后三 `5.001 → 1.335 s`（`-73.31%`）。4/8
+  并发、冷启动并发、1 主 3 子代理 compaction 和 title 全过。
+- 判决：**AGENT-PREFIX-PIN 采纳并保持运行。** 工具调用均正确；pin on/off 的 prompt
+  token ids 完全相同；显式用户 prefix 不被覆盖。
+- 生产状态与回滚：B4 server/vision/engine `38589/38592/38627`，config
+  `1d7dca58...`、server `a38a6655...`，server 加载约 147 s。关闭/删除
+  `codex_auto_prefix_pin` 并重启 Python server即可回滚，engine 不变。
+- 证据：L-129、[`AGENT_PREFIX_PIN_RESULT-20261031.md`](work/AGENT_PREFIX_PIN_RESULT-20261031.md)；
+  `/opt/ai/logs/agent-prefix-pin-20261031T0515Z/`。本地 Responses 49、frontend 30
+  tests OK；远端 Responses 49 OK，1 个可选 `jsonschema` skip。
+- 下一步与理由：请求级收益已连续出现，继续局部调 kernel 的证据不足；先解析真实 Codex
+  session，找出整任务中最大的重复工作和触发率。
+
 ## I-20261031-101 · 共享 system 先于 tools：兄弟请求墙钟下降约四分之一
 
 - 目标 / 指标：在主线程和子代理 system 相同、tools 不同时，让后续请求复用长共享前缀，

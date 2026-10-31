@@ -62,6 +62,7 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `probe-gpu-utilization.py` | what the GPU hardware counters show during a controlled short decode and cold long prefill; separates SM activity, issue, Tensor, warps and DRAM | `/opt/ai/logs/gpu-util-*/probe.json`, `.nsys-rep` and `.sqlite`; `--check-only` validates the collection path without inference |
 | `agent_budget_ab.py` | agent-shaped A/B with a real tool loop, self-scoring tasks | `/opt/ai/runs/agent-budget-ab-*.json` |
 | `probe-agent-sessions.py` | metadata-only 1/2/4-conversation A/A for shared prompts, continuation turns, latency and cache reuse; no restart | JSON named by `--output` |
+| `probe-codex-sessions.py` | real Codex session token shape: totals, root turns, compaction cache gaps and top uncached events; never prints prompt text or server timing as attribution | JSON named by `--output` or stdout |
 | `quality_eval.py`, `quality_eval_budget.py` | small self-scoring quality eval (the quality gate) | stdout |
 | `effort-cost.py`, `effort_lang_ab.py`, `replay_effort_ab.py` | what a thinking budget costs and changes | jsonl / stdout |
 | `conv_cache_ab.py` | two long conversations alternating: parking and restore costs | stdout |
