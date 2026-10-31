@@ -19,7 +19,7 @@ from serve import responses  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.responses import (ENCRYPTED_PREFIX, ResponsesError, collect, input_messages, prompt_made,  # noqa: E402
                              prompt_tools, request_tools, template_kwargs, text_format, thread_title_events)
-from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
+from serve.server import DSH_MAIN_TOOLS, ByteTokenizer, MockEngine, Service, is_dsh_main_request, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ChatTemplate(ROOT / "serve/chat_template.jinja")
@@ -29,6 +29,26 @@ CALL = ("Let me look.\n</think>\n\nChecking.\n\n<tool_call>\n<function=exec_comm
 ANSWER = "Read it.\n</think>\n\nThe file says before."
 TOOLS = [{"type": "function", "name": "exec_command", "description": "Runs a command.", "strict": False,
           "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}]
+DSH_TOOLS = [
+    {"type": "function", "name": name, "description": f"{name} tool",
+     "parameters": {"type": "object", "properties": {}}}
+    for name in DSH_MAIN_TOOLS
+]
+
+
+def dsh_request(task="make a file", *, tools=None):
+    return {
+        "model": "m",
+        "stream": True,
+        "max_output_tokens": 32000,
+        "tools": DSH_TOOLS if tools is None else tools,
+        "input": [
+            {"role": "developer", "content": "You are a coding agent."},
+            {"role": "user", "content": "Current directory: /tmp/project"},
+            {"role": "user", "content": task},
+            {"role": "user", "content": "Use the tools and verify your work."},
+        ],
+    }
 
 
 # ------------------------------------------------------------------------------------------------ parsing
@@ -597,6 +617,79 @@ class AutoPrefixPin(Server):
         self.request(tools=[])
         self.assertNotIn("strata_prefix", self.samplings[-1])
         self.request(instructions=None)
+        self.assertNotIn("strata_prefix", self.samplings[-1])
+
+    def test_dsh_tool_prefix_pin_is_exact_and_default_off(self):
+        body = dsh_request()
+        self.assertTrue(is_dsh_main_request(body))
+        code, response = self.post(body)
+        self.assertEqual(code, 200, response)
+        self.assertNotIn("strata_prefix", self.samplings[-1])
+
+        self.svc.pin_dsh_tool_prefix = True
+        self.svc.codex_system_before_tools = True
+        body = dsh_request("make another file")
+        code, response = self.post(body)
+        self.assertEqual(code, 200, response)
+        pin = self.samplings[-1]["strata_prefix"]["tokens"]
+        self.assertGreater(pin, 0)
+        self.assertLess(pin, len(self.ids[-1]) - 1)
+        prefix = self.tok.decode(self.ids[-1][:pin])
+        self.assertIn("# Tools", prefix)
+        self.assertNotIn("<|im_start|>user", prefix)
+
+        second = dsh_request("make a third file")
+        code, response = self.post(second)
+        self.assertEqual(code, 200, response)
+        self.assertEqual(self.samplings[-1]["strata_prefix"]["tokens"], pin)
+
+        changed = dsh_request()
+        changed["tools"] = [dict(tool) for tool in DSH_TOOLS]
+        changed["tools"][0]["description"] = "changed after a DSH upgrade"
+        code, response = self.post(changed)
+        self.assertEqual(code, 200, response)
+        self.assertNotIn("strata_prefix", self.samplings[-1])
+
+    def test_dsh_tool_prefix_pin_does_not_change_ids_or_override_explicit(self):
+        self.svc.codex_system_before_tools = True
+        body = dsh_request("same task")
+        code, response = self.post(body)
+        self.assertEqual(code, 200, response)
+        before = self.ids[-1]
+        self.assertNotIn("strata_prefix", self.samplings[-1])
+
+        self.svc.pin_dsh_tool_prefix = True
+        code, response = self.post(body)
+        self.assertEqual(code, 200, response)
+        self.assertEqual(self.ids[-1], before)
+        pin = self.samplings[-1]["strata_prefix"]["tokens"]
+        self.assertEqual(self.tok.decode(self.ids[-1][:pin]), self.tok.decode(before[:pin]))
+
+        explicit = dsh_request("explicit")
+        explicit["strata_prefix"] = {"tokens": 40}
+        code, response = self.post(explicit)
+        self.assertEqual(code, 200, response)
+        self.assertEqual(self.samplings[-1]["strata_prefix"], {"tokens": 40})
+
+    def test_dsh_tool_prefix_pin_skips_non_dsh_and_title_shapes(self):
+        self.svc.pin_dsh_tool_prefix = True
+        ordinary = {"model": "m", "stream": True, "input": "hi", "instructions": "You are a coding agent.",
+                    "tools": TOOLS}
+        code, response = self.post(ordinary)
+        self.assertEqual(code, 200, response)
+        self.assertNotIn("strata_prefix", self.samplings[-1])
+
+        title = {
+            "model": "m",
+            "stream": True,
+            "max_output_tokens": 4096,
+            "input": [
+                {"role": "developer", "content": "Title instructions."},
+                {"role": "user", "content": "Make a title."},
+            ],
+        }
+        code, response = self.post(title)
+        self.assertEqual(code, 200, response)
         self.assertNotIn("strata_prefix", self.samplings[-1])
 
 

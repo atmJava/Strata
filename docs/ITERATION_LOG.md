@@ -3,6 +3,41 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-141 · 首轮前缀复用改善 35.7%；测试口径排除 checkpoint 污染
+
+- 目标 / 指标：减少连续新 DSH 会话首轮重复 prefill，并确认它在真实 1/2 会话路径上的
+  `task_wall_s`、质量、标题和健康收益，而不是只测首步 prompt。
+- 假设与预期：原自动 checkpoint 位于 system 后约 `582` token，system + tools 的稳定
+  前缀为 `5,463` token；若精确 DSH shape 固定后一个边界，后续新会话应只读约 `600`
+  fresh token，并显著降低首步和整任务等待。
+- 为什么选这条路线：真实 DSH 成本中模型等待占 `93.202%`，新会话首步又重复读取相同的
+  5K 级 token。它每次新建会话都会触发，高于旧会话恢复、局部 kernel 和低频并发尾部。
+- 改动与实验：server 增加默认关闭的 `STRATA_PIN_DSH_TOOL_PREFIX=1`，只匹配当前 DSH
+  主请求完整 wire shape；第一次接受后固定 system+tools/kwargs fingerprint，变化即
+  fail open，显式 `strata_prefix` 不被覆盖。生产采用一次干净 boot，先顺序 A 组 3 次、
+  再 B 组 3 次；每组首轮单列冷启动。
+- 结果：A2/A3 稳态 task 中位 `11.3715 s`，B2/B3 `7.3165 s`，绝对节省 `4.055 s`，
+  改善 `35.66%`；首步 cached `582→5,463`，model wall `6.2–6.4→2.7–3.0 s`。6 个
+  fixture 的代码/测试/受保护测试/严格 sentinel 通过；首轮一次可恢复工具参数错误，
+  单独重跑 `1/1` 零错误。双会话 2/2 完成、provider 标题 `2/2`，随后连续单会话
+  `7.985/7.936 s` 均命中 `5,463`。
+- 判决：**`DSH-FIRST-TURN-PREFIX-REUSE` opt-in 采纳。** 改动不改 profile、prompt token
+  ids、工具、采样、模型、量化或 engine；回滚只移除 env 并重启 server。
+- 预期被推翻：原先设计的同 boot ABBA 不能隔离两臂。B 写入更长 checkpoint 后，后续 A
+  会复用它；代理显式 `tokens=582` 也可能被 conversation cache 覆盖。该污染数据作废，
+  正式口径改为干净 boot 顺序 A→B、冷启动单列，并同步写入测试规则。
+- 生产状态与回滚：server/vision/engine `232891/232893/232899`，health loaded、
+  262144、6 slots / 2 groups；server `bd3e4289...`，engine/config 未重建。三个 server
+  env 为 title defer、two-stream serial 和 DSH prefix pin。最终备份为
+  `/opt/ai/backups/prod-dsh-prefix-final-20261031T200434Z/`；重启到 ready 约 `190 s`，
+  新增 Xid `0`，swap 约 `11 MiB`。
+- 证据：L-168、[结果](work/DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md)、
+  [契约](work/DSH_FIRST_TURN_PREFIX_REUSE_CONTRACT-20261101.md)。
+- 下一步与理由：94K/189K 高度 cached 的热续轮 prompt 仍约 `2.09/2.43 s`，短输出
+  decode 只有约 `50–73 ms`。转 `AGENT-DSH-REQUEST-PATH-MAP`，先在同一条真实 DSH
+  step 上拆模板渲染、PromptEncoder/cache lookup、admission、serialization、engine
+  prompt 与 decode；有 >=1% 保守上界后才实现，不先跳到 kernel。
+
 ## I-20261101-140 · 标题 opt-in 生产通过；下一目标转首轮共享前缀
 
 - 目标 / 指标：以生产真实 DSH 请求确认标题延后的用户主任务收益、2 会话标题质量和最终

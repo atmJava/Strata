@@ -12,11 +12,11 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-166。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-168。
 
 ## 2. 当前断点
 
-- **全局目标已第三十二次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+- **全局目标已第三十三次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
   Xid、engine 非预期退出或错误结果风险时，立即暂停性能实验并保存事故。没有新事故时，
   不空等低频故障，继续建立代表性任务质量门，再恢复普通单代理编辑—测试循环的性能优化。
   质量、任务成功率、测试正确性和工具协议都是硬门，不能用速度交换失败或严格收口缺失。
@@ -25,8 +25,8 @@
   4 路非回退，6/8 只做安全回归。任何局部候选先算真实触发率后的整任务 1% 上界；没有进入
   用户实际路径的能力只算机制收益。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第三十二版更新后该接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第三十二版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第三十三版更新后该接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第三十三版计划
   为权威，不要回到平台旧目标的状态快照。
 - **DSH 真实路径成本已拆清**：7 个基础/fixture 会话 runner 总墙钟 `197.776 s`，模型
   step `184.332 s`（`93.202%`），工具区间并集 `10.505 s`（`5.312%`）；40/40 个主
@@ -37,9 +37,16 @@
   3/3 质量与 provider 标题。双会话 fail-open 后 2/2 质量/provider，defer 增量 0。
   重启 `136 s`，新增 Xid `0`。见
   [结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
-- **当前主动项是 `DSH-FIRST-TURN-PREFIX-REUSE`**：B2 新会话首步 `6.258/6.347 s`，
-  prompt `5.179/5.213 s`；连续新会话复用的相同前缀仍只有 `582` token，约 `5,590`
-  token 被重读。先查 title 是否覆盖共享前缀，以及可固定的静态 system/tool 前缀。
+- **`DSH-FIRST-TURN-PREFIX-REUSE` 已采纳**：精确 DSH shape 的 checkpoint 从 system
+  结束的 `582` token 后移到 system + tools 的 `5,463` token 后。干净 boot 顺序 A→B
+  中，稳态 task 中位 `11.3715→7.3165 s`（`35.66%`、绝对 `4.055 s`），首步 model wall
+  `6.2–6.4→2.7–3.0 s`。6 个 fixture、双会话 provider 标题、健康和 Xid 门通过。原先
+  同 boot ABBA 被 conversation-cache checkpoint 污染，已作废。见
+  [结果](work/DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md)。
+- **当前主动项是 `AGENT-DSH-REQUEST-PATH-MAP`**：普通热续轮即使高度 cached，94K/189K
+  prompt 仍约 `2.09/2.43 s`。先用一条真实 DSH step 对齐客户端与服务端，拆模板渲染、
+  PromptEncoder/cache lookup、admission、serialization、engine prompt 与 decode；
+  找到每轮都有成本且保守上界 >=1% 的下一机制后才改代码。
 - **产品候选已部署为 opt-in**：`STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission
   层只识别 DSH 精确 wire shape；恰好一个普通 inference admission 存在时等待，主请求
   释放即继续，60 s fail-open，不读 prompt 正文。两个会话同时启动时立即 fail open，
@@ -87,14 +94,15 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `222685/222690/222697`。上一实例已由标题生产重启
-  替换。server cwd 为
+- **当前运行**：server/vision/engine `232891/232893/232899`。首轮前缀候选已是最终
+  生产实例。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
   `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`
-  未重建，config `6ece1a13...`、server `8f03c745...`，server 进程含
-  `STRATA_BATCH_SERIAL_TWO=1`、`STRATA_DEFER_TITLE_REQUESTS=1`。
-  `strata.service` 仍 inactive/dead；本次重启到 ready `136 s`。engine env 不含
+  未重建，config `6ece1a13...`、server `bd3e4289...`，server 进程含
+  `STRATA_BATCH_SERIAL_TWO=1`、`STRATA_DEFER_TITLE_REQUESTS=1`、
+  `STRATA_PIN_DSH_TOOL_PREFIX=1`。
+  `strata.service` 仍 inactive/dead；本次重启到 ready 约 `190 s`。engine env 不含
   `STRATA_DECODE_TIMING`、`STRATA_VERIFY_PROFILE` 与 `STRATA_PREFILL_STAGED_AHEAD`。
   当前显式引擎参数含 `--ple-inflight 1024`，不含 `--ple-row-cache`；源码默认仍为 256，
   rollback 为同一源码目录 + `4b396f44...` direct config。健康、6 slots / 2 groups、
@@ -326,21 +334,21 @@
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
   因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线。
   普通热续轮 `short_read`、编辑—测试重复测试和 MTP 批量 draft K/V 也已分别否决。
-  当前入口是官方 `ENGINE-0.1.55-EVAL`；223K 旧会话仅为低频 p99。
+当前入口是 `AGENT-DSH-REQUEST-PATH-MAP`；223K 旧会话仅为低频 p99。
 
 ## 3. 当前生产
 
 生产 `strata.service` 保持 inactive；B4 以手动实例运行，health loaded。以下 PID、hash
-和参数于 2026-10-31T18:40+08:00 通过 relay 重新核对。
+和参数于 2026-11-01 通过 relay 重新核对。
 
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=8`（误触发的失败启动已停止） |
-| server/engine/vision | `222685/222697/222690`，health loaded，监听 `:8080` |
+| server/engine/vision | `232891/232899/232893`，health loaded，监听 `:8080` |
 | server cwd | `/opt/ai/src/strata-two-stream-serial-20261031` |
 | engine binary/cwd | `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`；cwd 为同目录上一级 |
-| current running | engine `105a4171...`，config `6ece1a13...`，server `8f03c745...` |
-| latest accepted candidates | title gate opt-in、Codex title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
+| current running | engine `105a4171...`，config `6ece1a13...`，server `bd3e4289...` |
+| latest accepted candidates | DSH first-turn shared-prefix pin、title gate opt-in、Codex title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
 | GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；`vram_free_mib=1005` |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
@@ -352,6 +360,7 @@ STRATA_ADMIT_SHORT_FIRST=2048
 STRATA_ADMIT_MERGE_FIRST=1
 STRATA_BATCH_SERIAL_TWO=1
 STRATA_BATCH_STAGED_READ=1
+STRATA_DEFER_TITLE_REQUESTS=1
 STRATA_HC_Q8=1
 STRATA_MP_STAGED_READ=1
 STRATA_MP_STAGED_READ_MIN_TOKENS=2048
@@ -360,6 +369,7 @@ STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS=4096
 STRATA_PIPED_DECODE_LEADIN_MS=1600
 STRATA_PIPED_DECODE_LEADIN_WAIT_MS=750
 STRATA_PIPE_BYIELD_NODRAIN=1
+STRATA_PIN_DSH_TOOL_PREFIX=1
 STRATA_SHARED_SLOT_ROPE=1
 STRATA_SM75_PERF=1
 ```

@@ -122,9 +122,11 @@ defer 增量为 0，两个最终标题均恢复为 provider。双会话因此保
 look-around 正则，收到错误后改用有效 grep 并完成，统计中保留该 `tool_error=1`，不能从
 数据中删除。该错误不是 gate 协议失败，但说明模型工具使用仍有偶发重试。
 
-最终生产为 server/vision/engine `222685/222690/222697`，server hash
+L-167 当时的生产为 server/vision/engine `222685/222690/222697`，server hash
 `8f03c745ec3d8341fe3fac8e1cba8f7842c04d2ad33fd479caf96582902cb9e0`，health loaded、
 262144、六 slots / 两 groups。B2 重启到 ready 为 `136 s`；窗口新增 NVRM Xid 为 `0`。
+后续首轮前缀候选已替换该实例；当前生产与 hash 只能以
+[`STATE.md`](../STATE.md) 和 L-168 为准。
 
 **判定：opt-in 采纳。** 单会话收益远超 1%，双会话标题质量由 fail-open 保住，不能把
 gate 改成默认开启或声称双会话也变快。

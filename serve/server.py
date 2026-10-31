@@ -602,6 +602,40 @@ def is_dsh_title_request(req: dict) -> bool:
     )
 
 
+DSH_MAIN_TOOLS = (
+    "bash", "create_goal", "edit", "exit_plan_mode", "get_goal", "glob", "grep",
+    "interrupt_agent", "job_kill", "job_list", "job_output", "list_agents", "read",
+    "read_image", "send_message", "skill", "subagent", "subagent_fork", "todo_write",
+    "update_goal", "web_fetch", "web_search", "workflow", "working_directory", "write",
+)
+
+
+def is_dsh_main_request(req: dict) -> bool:
+    """The exact DSH Responses shape used for ordinary agent turns.
+
+    DSH sends no request-purpose metadata. Match its stable wire surface instead of
+    reading prompt text. A DSH release with another tool set fails open.
+    """
+    tools = req.get("tools")
+    items = req.get("input")
+    names = sorted(
+        tool.get("name")
+        for tool in tools or []
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+    )
+    return (
+        req.get("stream") is True
+        and req.get("max_output_tokens") == 32000
+        and not req.get("instructions")
+        and not req.get("client_metadata")
+        and names == sorted(DSH_MAIN_TOOLS)
+        and isinstance(items, list)
+        and len(items) >= 2
+        and isinstance(items[0], dict)
+        and items[0].get("role") == "developer"
+    )
+
+
 def cpu_isa_words() -> tuple:
     """(text, missing): the CPU's model and which of AVX / AVX2 / FMA / F16C it reports (Linux: /proc/cpuinfo), and the
     ones of those it lacks.  ("", []) where it cannot be read."""
@@ -3920,6 +3954,9 @@ class Service:
         # shape is exact, but has no purpose field. This opt-in lets the main
         # call finish before the title competes for the GPU and prompt cache.
         self.defer_title_requests = os.environ.get("STRATA_DEFER_TITLE_REQUESTS") == "1"
+        self.pin_dsh_tool_prefix = os.environ.get("STRATA_PIN_DSH_TOOL_PREFIX") == "1"
+        self.dsh_tool_prefix_key = None
+        self.dsh_tool_prefix_lock = threading.Lock()
         grace_ms = _timeout_env("STRATA_DEFER_TITLE_GRACE_MS", 250.0) or 0.0
         max_wait_s = _timeout_env("STRATA_DEFER_TITLE_MAX_WAIT_S", 60.0) or 60.0
         self.defer_title_grace_s = grace_ms / 1000.0
@@ -5078,6 +5115,22 @@ class Service:
                   f"(common start {n})", flush=True)
             return {}
         return {"tokens": n}
+
+    def accept_dsh_tool_prefix(self, messages, tools, kwargs) -> bool:
+        """Whether this request may pin the current DSH system-plus-tools prefix.
+
+        The first accepted shape fixes the fingerprint for this server start.
+        A client or tool description change then falls back instead of creating
+        another permanently pinned conversation.
+        """
+        key = hashlib.sha256(json.dumps(
+            {"messages": messages[:1], "tools": tools, "kwargs": kwargs},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).digest()
+        with self.dsh_tool_prefix_lock:
+            if self.dsh_tool_prefix_key is None:
+                self.dsh_tool_prefix_key = key
+            return self.dsh_tool_prefix_key == key
 
     def drop_embeddings(self) -> None:
         """Delete the combined image file prepare() wrote when no run() took it over (a run deletes its own as it
@@ -7685,9 +7738,20 @@ def make_handler(svc: Service):
                 messages, validator = prepare_format(responses_api.text_format(req), messages, with_tools=bool(tools))
             except ValueError as e:
                 raise ResponsesError(str(e).replace("response_format", "text.format"), "text.format") from None
-            if (svc.codex_auto_prefix_pin and svc.codex_system_before_tools and tools and
-                    req.get("strata_prefix") is None and messages and
-                    messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str)):
+            dsh_tool_prefix = (
+                svc.pin_dsh_tool_prefix
+                and is_dsh_main_request(req)
+                and req.get("strata_prefix") is None
+                and messages
+                and messages[0].get("role") == "system"
+                and isinstance(messages[0].get("content"), str)
+                and svc.accept_dsh_tool_prefix(messages, tools, kw)
+            )
+            if dsh_tool_prefix:
+                req = {**req, "strata_prefix": {"messages": 1}}
+            elif (svc.codex_auto_prefix_pin and svc.codex_system_before_tools and tools and
+                  req.get("strata_prefix") is None and messages and
+                  messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str)):
                 # Keep the shared system through the end of its turn; the engine pins the exact token
                 # boundary rendered before the tool boilerplate instead of restoring an earlier checkpoint.
                 req = {**req, "strata_prefix": {"message": 0, "chars": len(messages[0]["content"])}}

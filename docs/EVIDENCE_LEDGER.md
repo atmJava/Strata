@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-167，按编号）
+## 台账索引（L-000…L-168，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -181,9 +181,70 @@
 | L-165 | 11-01 18:2xZ–19:0xZ | 7 个基础/fixture 会话 runner `197.776 s`：模型 `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联，7 个未关联请求正好是每会话一次的标题。短任务关闭标题 runner `16.854→14.901 s`、主 turn `14.929→13.001 s`，`5/6` 胜；长任务 `0/2` 胜，cache 有跨臂污染 | **AGENT-DSH-REAL-PATH-COST 完成；DSH-TITLE-INTERFERENCE 当前**：不能关闭标题产品化；保留语义并延后到主任务结束，ABBA + 标题质量门；runner wall 与 `task_wall_s` 分开，代理必须真实流式 |
 | L-166 | 11-01 18:47Z–19:05Z | 标题延后 ABBA：短任务 6 对 `task_wall` 合并中位 `17.637→15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 质量与 provider 标题；长任务 B `37.943/41.297 s` 对 A `46.411/82.438 s`，B 不回退，但 A 臂 8→11 step 漂移，只作非回退；16/16 无错误、无新增 Xid | **代理候选通过**：主任务结束前不生成标题仍保留标题质量；进入默认关闭的 server admission 产品候选，随后做生产 A/B |
 | L-167 | 11-01 19:1xZ–19:3xZ | 生产 A/B2 单会话主 turn `19.629→16.078 s`（`18.091%`），runner wall `21.484→18.065 s`（`15.914%`）；3/3 质量/provider 标题。第一版双会话各等 `26.6 s` 后只留 fallback，否决；多普通请求 fail-open 修正后双会话 2/2 质量/provider，defer 增量 0。两个长任务完成，其中一个保留 `tool_error=1` 后恢复。最终 PID `222685/222690/222697`、六 slots / 两 groups、重启 `136 s`、新增 Xid `0` | **DSH-TITLE-INTERFERENCE opt-in 采纳**：单会话真实收益成立，双会话保留原并发；不能默认开启或宣称双会话加速。下一项 `DSH-FIRST-TURN-PREFIX-REUSE` |
+| L-168 | 11-01 19:4xZ–20:0xZ | 首轮 checkpoint `582→5,463`；干净 boot 顺序 A→B，A2/A3 task 中位 `11.3715 s`、B2/B3 `7.3165 s`（`35.66%`、`4.055 s`）；首步 model wall `6.2–6.4→2.7–3.0 s`。6 fixture、双会话 provider 标题、健康全过；一次可恢复工具参数错误单列并重跑 `1/1` 零错误。最终 PID `232891/232893/232899`、server `bd3e4289...`、重启约 `190 s`、新增 Xid `0` | **DSH-FIRST-TURN-PREFIX-REUSE opt-in 采纳**：精确 DSH shape 固定 system+tools；同 boot ABBA 被持久 checkpoint 污染，正式方法改为干净 boot A→B 且冷启动单列。下一项 `AGENT-DSH-REQUEST-PATH-MAP` |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-168 · 首轮 system+tools checkpoint 改善 35.66%，ABBA 因缓存污染作废
+
+**判定：`DSH-FIRST-TURN-PREFIX-REUSE` 以默认关闭的 opt-in 采纳并部署。**
+
+当前 DSH 主请求的 system + 25 个工具定义稳定为 `5,463` token。原有自动 checkpoint
+停在 system 后，只复用 `582` token；精确 shape gate 第一次接受后固定 system/tools/kwargs
+fingerprint，把 checkpoint 后移。产品默认关闭，生产显式设置
+`STRATA_PIN_DSH_TOOL_PREFIX=1`；shape 或工具描述变化、标题请求、显式 `strata_prefix`
+均 fail open，不创建第二个 pinned prefix。
+
+一次干净 boot 先跑 A 组，再在同一 boot 跑 B 组。A1/B1 是各自 checkpoint 建立前的冷启动，
+不混入稳态：
+
+| 会话 | task wall | 首步 cached | 首步 model wall |
+|---|---:|---:|---:|
+| A1 冷启动 | `24.226 s` | `0` | `19.023 s` |
+| A2 | `11.104 s` | `582` | `6.399 s` |
+| A3 | `11.639 s` | `582` | `6.215 s` |
+| B1 冷启动 | `10.613 s` | `582` | `7.480 s` |
+| B2 | `8.519 s` | `5,463` | `2.711 s` |
+| B3 | `6.114 s` | `5,463` | `2.995 s` |
+
+A2/A3 稳态中位 `11.3715 s`，B2/B3 `7.3165 s`，绝对节省 `4.055 s`，改善 `35.66%`。
+首步 cache 多复用 `4,881` token，model wall 从 `6.215–6.399 s` 降到
+`2.711–2.995 s`。冷启动仍读取 fresh token，不能把 B1 直接归因为加速。
+
+6 个 DSH coding fixture 的代码、测试、受保护测试与严格 `RESULT=PASS` 全过，event
+error 为零；首轮 `parser-edge` 有一次可恢复工具参数错误，保留在原始 `6/6` 统计中，
+单独重跑 `1/1` 为零工具错误。双会话 2/2 完成、最终 sentinel 与 provider 标题通过；
+双路 wall `27.018/28.263 s`，因重启后并行冷读，不作收益。随后两个连续单会话
+`7.985/7.936 s`，首步均命中 `5,463`。
+
+原先的同 boot ABBA 不能隔离两臂：B 写入 `5,463` checkpoint 后，后续 A 命中它；代理显式
+要求 `tokens=582` 时也可能被已有 conversation-cache checkpoint 覆盖。该组数据
+`/tmp/dsh-prefix-abba2-cost.json` 仅保留为方法反例。正式测试改为干净 boot 顺序 A→B，
+冷启动单列，并同步写入 `RULES.md`：会写持久 checkpoint 的实验不能用未验证的同 boot
+ABBA 判决。
+
+生产 server/vision/engine 为 `232891/232893/232899`；server
+`bd3e428932c0b9bb645b2ae9f37924b2e440b590333a0322cdd00cd28dd4ed82`，engine
+`105a4171...` 与 config `6ece1a13...` 未重建。health loaded、262144、6 slots /
+2 groups，三个 server env 为 `STRATA_DEFER_TITLE_REQUESTS=1`、
+`STRATA_BATCH_SERIAL_TWO=1`、`STRATA_PIN_DSH_TOOL_PREFIX=1`。重启到 ready 约
+`190 s`，新增 Xid `0`、swap 约 `11 MiB`；备份为
+`/opt/ai/backups/prod-dsh-prefix-final-20261031T200434Z/`。
+
+**新 frontier**：`AGENT-DSH-REQUEST-PATH-MAP`。94K/189K 热续轮已高度 cached，prompt
+仍约 `2.09/2.43 s`；下一步对齐同一条 DSH step 与服务端请求，拆模板、PromptEncoder/
+cache lookup、admission、serialization、engine prompt 与 decode，禁止直接跳到内核。
+
+证据：
+
+- `/tmp/dsh-prefix-clean-cost.json`
+- `/tmp/dsh-prefix-clean-20261101/`
+- `/tmp/dsh-prefix-abba2-cost.json`（污染反例，不用于判决）
+- `/tmp/strata-agent-quality-dsh-prefix-contract-20261101.json`
+- `/tmp/strata-agent-quality-dsh-prefix-contract-parser-rerun-20261101.json`
+- `/tmp/dsh-product-final-dual-cost.json`
+- `/tmp/dsh-product-final-sequential-cost.json`
 
 ## L-167 · 标题延后在生产单会话成立，双会话改为 fail-open
 

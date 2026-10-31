@@ -220,6 +220,83 @@ class AgentShapeProxyTest(unittest.TestCase):
             self.assertIs(result, req)
             self.assertEqual(summary["replaced"], 0)
 
+    def test_tool_prefix_pin_is_explicit_and_skips_no_tool_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = pathlib.Path(tmp) / "shapes.jsonl"
+            recorder = MODULE.ShapeRecorder(log)
+            server = object.__new__(MODULE.ShapeProxy)
+            server.diet = None
+            server.pin_tool_prefix = True
+            server.pin_first_turn_tokens = None
+            server.auxiliary_gate = MODULE.AuxiliaryGate()
+            server.recorder = recorder
+            server.path = "/v1/responses"
+            server.request_version = "HTTP/1.1"
+
+            body = json.dumps(
+                request([message("main")], tools=[{"type": "function", "name": "bash"}])
+            ).encode()
+            server.headers = {"Content-Length": str(len(body))}
+            server.rfile = type(
+                "Reader", (), {"read": lambda self, n: body[:n]}
+            )()
+            server.upstream = MODULE.urllib.parse.urlsplit("http://127.0.0.1:9")
+            server.send_error = lambda *args: None
+            server._forward("POST")
+
+            body = json.dumps(request([message("title")], tools=[])).encode()
+            server.headers = {"Content-Length": str(len(body))}
+            server.rfile = type(
+                "Reader", (), {"read": lambda self, n: body[:n]}
+            )()
+            server._forward("POST")
+
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertTrue(rows[0]["test_pin_tool_prefix"])
+            self.assertNotIn("test_pin_tool_prefix", rows[1])
+
+    def test_first_turn_prefix_isolates_control_from_longer_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = pathlib.Path(tmp) / "shapes.jsonl"
+            recorder = MODULE.ShapeRecorder(log)
+            server = object.__new__(MODULE.ShapeProxy)
+            server.diet = None
+            server.pin_tool_prefix = False
+            server.pin_first_turn_tokens = 582
+            server.auxiliary_gate = MODULE.AuxiliaryGate()
+            server.recorder = recorder
+            server.path = "/v1/responses"
+            server.request_version = "HTTP/1.1"
+            server.upstream = MODULE.urllib.parse.urlsplit("http://127.0.0.1:9")
+            server.send_error = lambda *args: None
+
+            first = request([message("main")], tools=[{"type": "function", "name": "bash"}])
+            body = json.dumps(first).encode()
+            server.headers = {"Content-Length": str(len(body))}
+            server.rfile = type(
+                "Reader", (), {"read": lambda self, n: body[:n]}
+            )()
+            server._forward("POST")
+
+            follow = request(
+                [
+                    message("main"),
+                    {"type": "function_call", "name": "bash", "arguments": "{}"},
+                    {"type": "function_call_output", "output": "done"},
+                ],
+                tools=[{"type": "function", "name": "bash"}],
+            )
+            body = json.dumps(follow).encode()
+            server.headers = {"Content-Length": str(len(body))}
+            server.rfile = type(
+                "Reader", (), {"read": lambda self, n: body[:n]}
+            )()
+            server._forward("POST")
+
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(rows[0]["test_pin_first_turn_tokens"], 582)
+            self.assertNotIn("test_pin_first_turn_tokens", rows[1])
+
     def test_auxiliary_gate_waits_for_main_request_and_leaves_ordinary_alone(self):
         gate = MODULE.AuxiliaryGate(max_output_tokens=4096, grace_s=1.0)
         main = {"max_output_tokens": 32000, "tools": [{"type": "function"}]}

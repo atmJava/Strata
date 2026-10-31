@@ -2,11 +2,11 @@
 
 日期：2026-10-31
 
-状态：第三十二次修订后继续执行。用户实际 DSH Web 路径已对齐到 Qwen/Strata relay；
+状态：第三十三次修订后继续执行。用户实际 DSH Web 路径已对齐到 Qwen/Strata relay；
 6 个基础 coding fixture 的代码/测试全过，明确最终消息契约后严格通过从 `3/6` 提到
 `6/6`。真实路径成本已拆清：模型 step 占 `93.202%`，工具并集只占 `5.312%`；当前主动
-项转为“保留标题语义但避免与主请求争用”。GPU0 Xid 13 仍是随时抢占的 P0 风险，固定重放
-无法复现时不空等。
+项转为“普通热续轮服务端请求路径固定成本”。标题争用和连续新会话首轮共享前缀已分别进入
+真实生产路径并取得收益。GPU0 Xid 13 仍是随时抢占的 P0 风险，固定重放无法复现时不空等。
 
 ## 全局目标
 
@@ -32,12 +32,18 @@ GPU/cache。`DSH-TITLE-INTERFERENCE` 的代理 ABBA 已通过：短任务主任�
 `17.637 → 15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 标题仍由
 provider 模型生成，长任务 `A B B A` 中 B 不明显回退。生产 opt-in 验证已完成：单会话
 主 turn `19.629→16.078 s`（`18.091%`），双会话 fail-open 后 2/2 质量/provider 标题。
-当前主动项转为新会话首轮约 `5,590` token 共享前缀重读。
+`DSH-FIRST-TURN-PREFIX-REUSE` 随后完成：精确 DSH shape 把 checkpoint 从 system 后的
+`582` token 后移到 system+tools 的 `5,463` token；干净 boot 顺序 A→B 的稳态 task
+中位 `11.3715→7.3165 s`（`35.66%`、绝对 `4.055 s`），首步 model wall
+`6.2–6.4→2.7–3.0 s`。6 个 fixture、双会话 provider 标题、健康和 Xid 门通过。
+当前主动项转为普通热续轮请求路径固定成本。
 
 短任务关闭标题的旧 A/B 为：runner wall `16.854 → 14.901 s`（`-10.647%`），主任务
 turn wall `14.929 → 13.001 s`（`-11.843%`），均 `5/6` 胜；长任务无标题 `0/2` 胜，
 首组 cache 存在跨臂污染。因此不能通用关闭标题，也不能把关闭臂收益直接产品化。下一步
-必须 ABBA 平衡、先修真实流式代理，并同时报告标题质量和长任务非回退。不能再把 Codex
+标题阶段使用过 ABBA 并同时报告标题质量和长任务非回退。缓存 checkpoint 阶段证明同 boot
+ABBA 会被持久状态污染，因此后续凡会写跨请求 checkpoint 的实验必须独立 boot，或把
+不可逆顺序明确写成 A→B 并单列冷启动。不能再把 Codex
 `apply_patch`、另一 provider 或局部 kernel 结果当成 DSH Web 的基线。
 
 `GPU-XID13-STABILITY` 继续作为 P0 监测项。DSH 的 15,419-token Responses 请求在 76 个
@@ -103,10 +109,14 @@ GPU0 的稳定性是独立的硬件/驱动问题，不是解锁问题。2026-10-
 - engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
 - engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
 - config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
-- 当前 PID：server / vision / engine `222685 / 222690 / 222697`
+- 当前 PID：server / vision / engine `232891 / 232893 / 232899`
+- 当前 server SHA-256：`bd3e428932c0b9bb645b2ae9f37924b2e440b590333a0322cdd00cd28dd4ed82`
+- 当前 server env：`STRATA_DEFER_TITLE_REQUESTS=1`、`STRATA_BATCH_SERIAL_TWO=1`、
+  `STRATA_PIN_DSH_TOOL_PREFIX=1`
 - 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
 
-生产启动与恢复约需 2–3 分钟。每次重启必须说明预期节省能否覆盖加载、缓存丢失和不可用
+生产启动与恢复到 ready 本轮实测约 `190 s`。每次重启必须说明预期节省能否覆盖加载、
+缓存丢失和不可用
 成本；能在一个 boot 内完成的动态 A/B 不重复重启。
 
 ## 真实成本证据
@@ -283,18 +293,37 @@ DSH 的精确标题形状；活跃标题单独计数。恰好一个普通 infere
 `21.484→18.065 s`（`15.914%`），3/3 质量和 provider 标题；双会话 fail-open 后 2/2
 质量和 provider 标题。产品以 opt-in 保持运行，双会话不宣称提速。
 
-### P1：`DSH-FIRST-TURN-PREFIX-REUSE`
+### 已完成：`DSH-FIRST-TURN-PREFIX-REUSE`
 
-B2 新会话首步仍为 `6.258/6.347 s`，其中 prompt `5.179/5.213 s`。DSH 报告
-`cached=582`，约 `5,590` token 相同前缀仍 fresh；同一会话后续 prompt 通常复用超过
-`95%`。先做隐私安全只读关联，检查 title 后缓存状态、共同静态 system/tool 前缀和边界：
+原 checkpoint 只复用 system 后的 `582` token，system + 25 tools 的稳定前缀为 `5,463`
+token。默认关闭的 `STRATA_PIN_DSH_TOOL_PREFIX=1` 只匹配当前 DSH 主请求 wire shape，
+第一次接受后固定 system/tools/kwargs fingerprint；shape、工具描述、标题请求或显式
+`strata_prefix` 变化均 fail open。生产 opt-in 已启用。
 
-- 至少 3 个连续新会话复现首步 fresh/cached 与 server prompt；
-- 区分 title 覆盖、prompt hash/边界不同、conversation cache 槽位和普通 LRU 淘汰；
-- 候选必须进入真实单会话，整任务改善 >=1% 并给绝对秒数；
-- 2 会话不产生标题或缓存冲突；质量、provider 标题、health、6 slots / 2 groups、
-  零新增 Xid 全过；
-- 未定位前不改源码、不重启，不重扫已否决的局部 kernel 参数。
+干净 boot 顺序 A→B 中，A2/A3 task 中位 `11.3715 s`，B2/B3 `7.3165 s`，改善
+`35.66%`、绝对 `4.055 s`；首步 cached `582→5,463`，model wall
+`6.215–6.399→2.711–2.995 s`。6 个 fixture、双会话 provider 标题、健康、6/2、零新增
+Xid 通过。一次 `parser-edge` 可恢复工具参数错误保留，单独重跑 `1/1` 零错误。
+
+原先的同 boot ABBA 因 B 写入更长 conversation-cache checkpoint 而污染后续 A，显式
+`tokens=582` 也不能可靠覆盖已有 checkpoint；该组作废。正式方法为干净 boot 顺序 A→B，
+冷启动单列。结果见
+[`DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md`](../../work/DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md)。
+
+### P1：`AGENT-DSH-REQUEST-PATH-MAP`
+
+普通热续轮即使有约 `95%+` cache 复用，94K/189K 的 prompt 仍约 `2.09/2.43 s`，而短输出
+decode 只有约 `50–73 ms`。先在同一条真实 DSH step 和对应 server request 上建立边界：
+
+- 客户端：step start、请求发出、首 stream、step finish；
+- server：body parse、Responses input/tool/template preparation、`PromptEncoder` 与
+  cache lookup、admission / slot wait、engine request serialization；
+- engine：prompt phase、TTFT、decode、finish；
+- 每段报告 prompt/context/cached/fresh、绝对秒数和典型 1/2 会话触发率；
+- 所有请求必须成功、finish 正确、无外来请求；诊断开关默认关闭且可完整移除；
+- 只有至少一个新的未关闭机制能在真实触发后保守改善整任务 >=1%，才预注册实现；
+- 不直接跳 kernel，不重扫 `short_read`、stream ring、staged lookahead、GDN、head split、
+  fair serve 等已否决项。
 
 ### P1 历史：`AGENT-HOT-TURN-FIXED-COST`（已否决）
 
@@ -601,16 +630,18 @@ prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零�
 
 ## 当前断点
 
-**2026-11-01 第三十二次修订后继续执行。** 用户已放弃“鹈鹕 SVG”问题；原 DSH 请求在
+**2026-11-01 第三十三次修订后继续执行。** 用户已放弃“鹈鹕 SVG”问题；原 DSH 请求在
 76 个 reasoning token 后触发 GPU0 Xid 13，约 60 次精确重放未复现。当前不空等低频事故：
 只读探针持续记录下一次 Xid，任何新事故立即抢占。质量侧已确认用户 DSH Web 走
 Qwen/Strata relay；同一路径 6 个基础 fixture 代码/测试全过，明确最终消息契约后严格
 `3/6 -> 6/6`。真实路径成本已拆清：模型 `93.202%`、工具并集 `5.312%`，标题请求是
 已识别的额外并发源。`DSH-TITLE-INTERFERENCE` 已 opt-in 采纳：生产单会话主 turn
 `19.629→16.078 s`（`18.091%`），runner wall `15.914%`；双会话 fail-open 后质量和
-provider 标题通过。当前主动项转为 `DSH-FIRST-TURN-PREFIX-REUSE`：连续新会话首步只
-复用 `582` token，约 `5,590` 个相同前缀仍重读。生产 server/vision/engine 为
-`222685/222690/222697`，health loaded、六 slots / 两 groups，新增 Xid `0`。
+provider 标题通过。`DSH-FIRST-TURN-PREFIX-REUSE` 也已 opt-in 采纳：稳态 task 中位
+`11.3715→7.3165 s`（`35.66%`、`4.055 s`），首步 model wall
+`6.2–6.4→2.7–3.0 s`。当前主动项为 `AGENT-DSH-REQUEST-PATH-MAP`。生产
+server/vision/engine 为 `232891/232893/232899`，server `bd3e4289...`、health loaded、
+六 slots / 两 groups，新增 Xid `0`。
 
 `AGENT-CONTEXT-DIET-REAL-YIELD` 已否决产品化；`AGENT-HISTORY-STATE-RESIDENCY` 降为
 低频 p99 可行性项。
@@ -625,7 +656,7 @@ provider 标题通过。当前主动项转为 `DSH-FIRST-TURN-PREFIX-REUSE`：�
 `AGENT-HOT-TURN-PHASE-MAP` 已完成：596/94K 热长轮都只约有 554 个 fresh token；
 stage 2 的 `wait copy 173 ms` 是最大可移动相位。`AGENT-HOT-TURN-STREAM-RING` 已否决：
 full ring 让 596 wall 慢 `25.714%`，没有把 stage 2 copy 等待转成用户收益。当前生产为
-server/vision/engine `222685/222690/222697`，health loaded、六 slots / 两 groups，
+server/vision/engine `232891/232893/232899`，health loaded、六 slots / 两 groups，
 `strata.service` inactive。
 
 只读 routing 审计已完成：当前层 selected-only staged copy 已是生产路径，跨层推测 routing

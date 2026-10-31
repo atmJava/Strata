@@ -80,6 +80,7 @@ wall `21.484 → 18.065 s`（`15.914%`），3/3 质量、provider 标题和错�
 2/2 质量、provider 标题通过，日志 defer 增量为 0；双会话恢复原并发，不把其视为加速。
 
 生产 A 备份为 `/opt/ai/backups/prod-title-defer-20261031T191327Z/`，第一版双会话不通过
-的候选备份为 `/opt/ai/backups/prod-title-failopen-20261031T192532Z/`。最终 server hash
-为 `8f03c745ec3d8341fe3fac8e1cba8f7842c04d2ad33fd479caf96582902cb9e0`。
+的候选备份为 `/opt/ai/backups/prod-title-failopen-20261031T192532Z/`。L-167 当时 server
+hash 为 `8f03c745ec3d8341fe3fac8e1cba8f7842c04d2ad33fd479caf96582902cb9e0`；后续首轮
+前缀候选已替换实例，当前生产以 [`STATE.md`](../STATE.md) 和 L-168 为准。
 

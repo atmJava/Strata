@@ -300,6 +300,21 @@ def request_shape(req: dict) -> dict:
     }
 
 
+def first_turn_request(req: dict) -> bool:
+    """Whether an agent request has not yet carried a tool round trip."""
+    items = req.get("input")
+    if not isinstance(items, list):
+        return False
+    return not any(
+        isinstance(item, dict)
+        and (
+            item.get("type") == "function_call_output"
+            or item.get("role") == "tool"
+        )
+        for item in items
+    )
+
+
 class AuxiliaryGate:
     """Delay one explicitly matched auxiliary request while a main request runs.
 
@@ -487,6 +502,8 @@ class ShapeProxy(BaseHTTPRequestHandler):
     upstream: urllib.parse.SplitResult
     diet: ContextDiet | None = None
     auxiliary_gate: AuxiliaryGate
+    pin_tool_prefix = False
+    pin_first_turn_tokens: int | None = None
 
     def log_message(self, fmt, *args):
         return
@@ -540,6 +557,9 @@ class ShapeProxy(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else None
         req = None
         shape = None
+        original_request_sha256 = None
+        pin_tool_prefix = False
+        pin_first_turn = False
         if method == "POST" and self.path.split("?", 1)[0].rstrip("/") == "/v1/responses":
             try:
                 req = json.loads(body or b"{}")
@@ -549,15 +569,41 @@ class ShapeProxy(BaseHTTPRequestHandler):
                 original_request_sha256 = digest(req)
                 if self.diet is not None:
                     req, diet_summary = self.diet.transform(req)
-                    if diet_summary["replaced"]:
-                        body = json.dumps(
-                            req, ensure_ascii=False, separators=(",", ":")
-                        ).encode("utf-8")
-                    shape = request_shape(req)
-                    shape["original_request_sha256"] = original_request_sha256
-                    shape["context_diet"] = diet_summary
                 else:
-                    shape = request_shape(req)
+                    diet_summary = None
+                if (
+                    self.pin_tool_prefix
+                    and req.get("tools")
+                    and req.get("strata_prefix") is None
+                ):
+                    req = {**req, "strata_prefix": {"messages": 1}}
+                    pin_tool_prefix = True
+                if (
+                    self.pin_first_turn_tokens is not None
+                    and req.get("tools")
+                    and req.get("strata_prefix") is None
+                    and first_turn_request(req)
+                ):
+                    req = {
+                        **req,
+                        "strata_prefix": {"tokens": self.pin_first_turn_tokens},
+                    }
+                    pin_first_turn = True
+                transformed = pin_tool_prefix or pin_first_turn or (
+                    diet_summary is not None and diet_summary["replaced"] > 0
+                )
+                if transformed:
+                    body = json.dumps(
+                        req, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8")
+                shape = request_shape(req)
+                shape["original_request_sha256"] = original_request_sha256
+                if diet_summary is not None:
+                    shape["context_diet"] = diet_summary
+                if pin_tool_prefix:
+                    shape["test_pin_tool_prefix"] = True
+                if pin_first_turn:
+                    shape["test_pin_first_turn_tokens"] = self.pin_first_turn_tokens
 
         auxiliary = False
         ordinary = False
@@ -642,6 +688,22 @@ def main() -> int:
         default=0.05,
         help="wait this long for a main request before allowing a lone auxiliary request through",
     )
+    parser.add_argument(
+        "--pin-tool-prefix",
+        action="store_true",
+        help=(
+            "test-only: add strata_prefix messages=1 to Responses requests with tools, "
+            "so the engine pins the end of the first system message plus the tool list"
+        ),
+    )
+    parser.add_argument(
+        "--pin-first-turn-tokens",
+        type=int,
+        help=(
+            "test-only: force the first DSH turn prefix to this token count so a prior "
+            "longer tool-block checkpoint cannot contaminate a control arm"
+        ),
+    )
     args = parser.parse_args()
 
     upstream = urllib.parse.urlsplit(args.upstream)
@@ -651,8 +713,12 @@ def main() -> int:
         parser.error("--context-diet-min-chars must be positive")
     if args.context_diet_keep_recent < 0:
         parser.error("--context-diet-keep-recent must be non-negative")
+    if args.pin_first_turn_tokens is not None and args.pin_first_turn_tokens <= 0:
+        parser.error("--pin-first-turn-tokens must be positive")
     ShapeProxy.upstream = upstream
     ShapeProxy.recorder = ShapeRecorder(args.log)
+    ShapeProxy.pin_tool_prefix = args.pin_tool_prefix
+    ShapeProxy.pin_first_turn_tokens = args.pin_first_turn_tokens
     try:
         ShapeProxy.auxiliary_gate = AuxiliaryGate(
             args.defer_auxiliary_max_output_tokens,
