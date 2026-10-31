@@ -138,9 +138,32 @@
 | L-122 | 10-31 11:1x | 重启后同 boot A1-B-A2 的 2/4/6/8 路为 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`；只有 8 路过双门，2/4 路回退超过 1%，2 路 A 漂移 `-7.067%` | **UTIL-BATCH-SIDE-MIXER 吞吐/漂移门否决；A2 已恢复；三臂 36 波零错误、零外来请求** |
 | L-123 | 10-31 11:2x | Q5 head IL grid 全 parity；有效 `screen2-gpu0-*` 中 T=2 的 capped grid 全慢于默认，T=3 最佳 grid `2560` 仅比默认快 `0.182` 个百分点，远低于 18.5% head 门槛 | **UTIL-Q5-HEAD-IL-GRID 性能筛选门否决；源码已移除；未构建 server、未重启** |
 | L-124 | 10-31 12:0x | Fair stage service 在 B 真实命中 8 个多行 batch capture，A1/B1/B2/A2 greedy 全逐字；2/4/6/8 路 `+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`，2 路 A 漂移 `-7.067%` | **UTIL-BATCH-FAIR-SERVE 吞吐/漂移门否决；A2 已恢复；三臂 180 请求零错误、零外来请求** |
+| L-125 | 10-31 12:3x | Agent A/A：同会话续轮复用 `95.16–95.21%`，prompt `约 7.3 → 1.4 s`；新会话 69% 实际共享前缀时 prompt 约 `3.2 s`。Codex title 仍进引擎，`1.978–10.292 s`、额外 146–184 output token | **诊断完成；基础缓存停止作候选，转 AGENT-CODEX-TITLE；A2 未重启** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-125 · Agent 会话缓存已工作；Codex title 仍占用引擎
+
+**判定**：方向重置成立。普通 1/2/4 会话的前缀缓存与续轮复用已经工作，不应继续把基础
+conversation cache 当性能候选。Codex thread-title 请求仍进入引擎，先做现有 opt-in 的配置 A/B。
+
+**测量**：新增只读 `tools/server/probe-agent-sessions.py`。约 12K-token prompt 的续轮复用中位为
+`95.16/95.19/95.21%`，prompt 中位 `1,450.4/1,414.5/1,378.4 ms`；新会话共享约 69% 实际前缀时
+prompt 中位 `3,199.1/3,177.1 ms`，整轮墙钟 `3.269/4.886 s`。预热后 2/4 路波级 95% 区间
+`0.16–2.45%`，1 路续轮约 `1%`。
+
+**Title 基线**：三次 `/v1/responses` title 请求墙钟 `10.292/2.791/1.978 s`，prompt
+`12,073` token，reuse `0/12,068/12,068`，output `154/184/146`；每次都让 engine requests +1。
+
+**证据**：`/opt/ai/logs/agent-sessions-aa-20261031T0428Z.json`
+（sha256 `f54ea469977619f64364b58ac15a127a4b0c8c9f1a5d28a15806e37506b8ce06`）、
+`/opt/ai/logs/agent-sessions-shared75-20261031T0438Z.json`
+（sha256 `20d6c367ca630ce9be3aa4fe7f1127edf8aa2a292bc9b487161090b02e605edc`）。
+首个 A/A JSON 的 `expected` 字段受探针计数 bug 影响，逐请求数据和二次计算有效；共享前缀
+运行已修正，`expected=24/seen=24/foreign=0`。
+
+**没测什么**：没有真实用户流量；没有 128K/210K Agent trace；没有把 Codex title 候选放进 server。
 
 
 ## L-000 · 基线快照（2026-10-24 00:5x CST / 2026-10-23 16:5x UTC，boot c61e5649）

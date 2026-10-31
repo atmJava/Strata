@@ -3,6 +3,25 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-98 · 真实 Agent 负载重置目标：基础缓存已工作，先移除 Codex title 引擎请求
+
+- 目标 / 指标：按用户实际的 1 主 3 子代理上限，重测 1/2/4 会话的共享前缀、续轮复用、
+  prompt、TTFT、decode 和整轮墙钟；先找秒级大头。
+- 假设与预期：历史 6/8 路矩阵与真实负载错配；长上下文重复 prefill 应比次毫秒内核更值得优化。
+- 改动与实验：新增只读 `probe-agent-sessions.py`，跑 1/2/4 路 A/A 和 75% 共享前缀场景；
+  另测三个 Codex title 请求。未改引擎、未重启 A2。
+- 结果：同会话续轮复用 `95.16–95.21%`，prompt 约 `7.3 s → 1.4 s`；69% 实际共享前缀的
+  新会话首轮 prompt 约 `3.2 s`。预热后 2/4 路波级 95% 区间为 `0.16–2.45%`。title 请求
+  仍进入引擎，为 `10.292/2.791/1.978 s`，各生成 146–184 token。
+- 判决：基础会话缓存路线停止作为候选；进入 `AGENT-CODEX-TITLE`，合同已预注册。下一步
+  再处理多线程 compaction 的单条目工具缓存。
+- 生产状态与回滚：A2 未动；只读探针和文档改动。输出无提示词正文，零请求错误。
+- 证据：L-125；`/opt/ai/logs/agent-sessions-aa-20261031T0428Z.json`、
+  `/opt/ai/logs/agent-sessions-shared75-20261031T0438Z.json`；
+  `serve/test_responses.py` = 41 passed, 3 subtests passed。
+- 学到什么：用户真实并发级下预热后的测量噪声已可低于 1%，但 1 路续轮仍需交错重复；
+  过滤非正文请求比继续下沉内核更直接。
+
 ## I-20261031-97 · Fair batch service 通过路径与 parity，但在 4/8 路回退和漂移门否决
 
 - 目标 / 指标：验证每个 stage 每轮只服务一个已到达 layer，能否让 `pump()` 先访问另一

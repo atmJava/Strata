@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T11:30+08:00。
+> 整理时间：2026-10-31T12:45+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -16,6 +16,10 @@
 
 ## 2. 当前断点
 
+- **全局目标已按真实负载重置**：用户通常 1 会话、少量 2 会话、峰值 4 会话。6/8 路降为
+  安全回归，不再要求每个候选同时提速。Agent A/A 已证明普通续轮复用约 95%、69% 共享前缀
+  的新会话 prompt 约 3.2 s，因此停止基础缓存候选。当前 `AGENT-CODEX-TITLE` 只启用已有
+  opt-in，合同已预注册；A2 尚未被该候选重启。下一步是 4 线程 Codex compaction 工具前缀 LRU。
 - 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，UTIL-KERNEL、
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的

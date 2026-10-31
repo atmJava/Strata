@@ -3,16 +3,27 @@
 > 接手顺序：`RULES.md` → 本文件 → `ROADMAP.md` → `ITERATION_LOG.md` 最近两条。
 > 本文件只写当前断点，不重复历史、规则或完整证据。
 
-- 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
-- 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
-  功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-BATCH-FAIR-SERVE 已在同 boot A1-B-A2 吞吐门否决。默认关闭的候选在每个
+- 目标：针对用户真实 Agent 负载（通常 1 会话、少量 2 会话、峰值 4 会话）缩短端到端
+  任务时间；优先消除非必要 prefill 和长上下文主计算，不再以 6/8 路为联合收益门。
+- 当前阶段：Agent 会话诊断已完成。1/2/4 路短上下文 A/A、75% 共享前缀和 Codex
+  thread-title 基线证明普通会话缓存已工作，当前选择最低风险的真实工作流损失。
+- 当前项：AGENT-CODEX-TITLE — A2 配置未启用现有 `codex_thread_titles`；三个约 12K-token
+  的 Codex title 请求为 `10.292/2.791/1.978 s`，每次都增加一个引擎请求并生成
+  `154/184/146` token。候选只启用现有 opt-in，让 title 由服务端直接回答；合同和门禁见
+  [AGENT_CODEX_TITLE_CONTRACT](work/AGENT_CODEX_TITLE_CONTRACT-20261031.md)。
+- 当前项证据：普通同会话续轮复用 `95.16–95.21%`，首轮约 `7.3 s` 的 prompt 读取降到
+  约 `1.4 s`；共享约 69% 实际前缀的新会话首轮 prompt 为约 `3.2 s`。正式结果是
+  [AGENT_SESSION_PROFILE_RESULT](work/AGENT_SESSION_PROFILE_RESULT-20261031.md)、台账 L-125。
+- 下一项候选：`AGENT-CODEX-COMPACTION-LRU`。现有 compaction 缓存只保留最后一个
+  `(session_id, thread_id)`；用户 1 主 3 子代理交错时会丢失先前线程的工具集合。先做
+  源码测试与 prompt 前缀比较，再决定是否需要 server reload。
+- 上一项：UTIL-BATCH-FAIR-SERVE 已在同 boot A1-B-A2 吞吐门否决。默认关闭的候选在每个
   stage 每轮最多服务一个已到达的 layer，以让 `pump()` 先访问另一 stage。B 通过构建、
   6 slots / 2 groups、启动标记、8 个多行 batch capture、A1/B1/B2/A2 冻结 greedy 逐字
   parity 和零请求错误门，但 2/4/6/8 路相对 A1/A2 合并中位为
   `+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`；4/8 路回退超过 1%，
   2 路 A 漂移 `-7.067%`，6 路仅 4/6 胜。
-- 当前项证据：B 启动约 `148 s`、恢复 A2 约 `198 s`，B 停止释放端口约 `9 s`；A2 已恢复且
+- 上一项证据：B 启动约 `148 s`、恢复 A2 约 `198 s`，B 停止释放端口约 `9 s`；A2 已恢复且
   parity 通过。证据目录
   `/opt/ai/logs/util-batch-fair-serve-20261031T0355UTC/`，结果见
   [UTIL_BATCH_FAIR_SERVE_RESULT](work/UTIL_BATCH_FAIR_SERVE_RESULT-20261031.md)、台账 L-124。
@@ -135,7 +146,7 @@
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
   Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
-- 未完成采纳项：19。
+- 未完成采纳项：20。
 - 阻塞：服务器已恢复到双卡可用，当前无基础设施阻塞。DFlash2 drafter 权重仍缺失；代码、
   服务接线和工具已保留，该路线不阻塞主线。
 
