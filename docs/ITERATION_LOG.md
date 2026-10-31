@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-128 · `dequant 106 ms` 不是重复转换；转 resident direct-path 小组预筛
+
+- 目标 / 指标：检查普通 Agent 554-token 热续轮的 `dequant 106 ms` 是否包含同一
+  expert/layout 的重复工作，并判断能否安全删除一部分。
+- 假设与预期：若同一 expert 被 stage、gather 或 MMQ kernel 重复处理，删除该部分可能
+  给出整请求 wall `>=1%` 且绝对 `>=0.05 s` 的收益。
+- 为什么选这条路线：它是 phase map 在 `wait copy` 之后的下一个绝对成本项，且只读审计
+  可以低成本证伪，不需要重启生产。
+- 改动与实验：追踪 production native IQ3_XXS、554-token、grouped staged path 的
+  order 构造、MMQ 组 buffer、gather kernel、Product stride 和 cache slot 布局；读取
+  profile 与 hot-long cache hit。另尝试现成 full-layer fused harness，因现役占用下
+  `cudaMalloc` OOM，未取得性能数据，也未停服。
+- 结果：`dequant` 实为 `gather_native_group` 原字节搬运，不是 FP16 反量化。每层
+  order 只含唯一 selected expert，每 16 个 gather 一次；stage 1/2 是不同层，四条
+  expert 路径互斥。596/94K hot-long cache hit 为 `95.1–98.1%/98.4–98.8%`，但 native
+  cache blob 与 MMQ 固定-stride 连续布局不同，不能安全直读。
+- 判决：**AGENT-HOT-TURN-DEQUANT-AUDIT 否决重复工作假设。** 不构建、不重启，也不扫
+  dequant/group/profiler 参数。
+- 预期被推翻：高 cache 命中不等于无需布局转换；`dequant` 名称也不代表 native 路径在
+  做数值反量化。
+- 生产状态与回滚：未改生产。server/vision/engine `169846/169849/169854`，health
+  loaded、262144、6/2、systemd inactive；engine/config hash 不变。
+- 证据：L-157、
+  [`AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT`](work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
+- 学到什么：继续围绕 phase 名称或 group 参数优化会误判真实成本；需要针对 resident
+  expert 的执行接口，而不是删除不存在的重复转换。
+- 下一步与理由：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`。stage 1/2 gather 合计约
+  `183 ms`，用 16-expert group 级 harness 比较 `gather+MMQ` 与已有
+  `fused::experts_native` direct-pointer，并统计真实 unique/resident 比例。只有保守
+  wall `>=1%` 且绝对 `>=0.05 s`、数值和资源门成立才预注册实现；否则关闭该方向。
+
 ## I-20261031-127 · staged lookahead 加深无效；转 dequant 重复工作审计
 
 - 目标 / 指标：验证 grouped staged walk 的实际传输 lookahead 从 8 提到安全上限 15，

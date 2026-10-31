@@ -2,7 +2,7 @@
 
 日期：2026-10-31
 
-状态：第二十一次评审后修订，可以继续执行。
+状态：第二十二次评审后修订，可以继续执行。
 
 ## 全局目标
 
@@ -10,9 +10,11 @@
 明确阻塞的时间，并减少完成同一任务所需的重复模型工作。当前执行主轴是通常 1 个主代理、
 偶尔 2 个的编辑—测试循环；优先消除每一轮都会发生的 prompt/read 与 decode 等待。
 每轮必须先用真实触发率和绝对秒数证明收益，不能把局部 kernel 改善或 token/s 当作结果。
-当前 frontier 已从“猜相邻 kernel”收窄到 596/94K 普通热续轮 phase map 中最大的可动项；
-任何围绕 `wait copy`、GEMM 或 dequant 的候选，都必须先证明生产 routing 的真实触发率和
-保守整任务上界，再决定是否改源码或重启。
+当前 frontier 已从“猜相邻 kernel”收窄到 596/94K 普通热续轮中反复出现的 expert
+布局/传输成本。`wait copy`、lookahead 与“重复 dequant”三条假设已经分别被实测或
+源码审计否决；下一步只审计 resident expert 能否通过已有 direct-pointer/fused 路径
+绕开 MMQ gather。任何候选仍须先证明生产 routing 的真实触发率和保守整任务上界，再
+决定是否改源码或重启。
 
 优先级按用户实际感受到的结果排列：
 
@@ -326,17 +328,44 @@ prompt 从 `1384.3 ms` 变成 `1392.6 ms`，慢 `0.5996%`。按停止门未跑 9
 契约：
 [`AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md)。
 
-### P2i：`AGENT-HOT-TURN-DEQUANT-AUDIT`（当前，只读）
+### P2i：`AGENT-HOT-TURN-DEQUANT-AUDIT`（已否决重复工作假设）
 
 phase map 中 stage 2 下一大可证伪相位是 `dequant 106 ms`。先只读追踪 native IQ3_XXS
 的热续轮 grouped staged path：同一 expert/layout 是否在 stage 1、stage 2 或 MMQ gather
 前后被重复转换；生产实际 `T=554`、每层 `5,540` 个 routed pairs 下命中率是多少；哪些写回
 是后续 kernel 必需，哪些只是中间格式重复。
 
-只有源码和数据共同证明存在单一可移除重复工作，且按实测占比给出整请求 wall `>=1%` 与
-绝对 `>=0.05 s` 的保守上界，才预注册实现候选。审计本身不改源码、不重启，也不扫描
-dequant 参数、group 大小或 profiler 邻域。若不存在重复工作，关闭该方向并复盘下一个真实
-主相位，不能把“看到 106 ms”当成收益。
+判决：生产 native IQ3_XXS 的 `dequant` phase 实际是
+`gather_native_group()` 原字节搬运，不是 FP16 反量化。每层 `order` 只含唯一 selected
+expert，每 16 个执行一次 gather；stage 1/2 是不同层，staged/streamed/fused/peer 路径
+互斥，未发现同一 expert/layout 被重复转换。resident cache blob 仍要转成 MMQ 的连续
+gate/up/down 布局，`Product` 只有固定 stride、没有 per-expert 指针表，因此不能安全地
+直接删除。没有形成可实现的重复工作候选；不构建、不重启，也不扫 dequant/group 参数。
+见
+[`AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
+
+### P2j：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`（当前，只读预筛）
+
+上面虽关闭“重复转换”，但 phase map 仍证明 stage 1/2 合计约 `183 ms` 花在
+gather；同时 hot-long expert-cache hit 为 596 约 `95.1–98.1%`、94K 约
+`98.4–98.8%`。真正的问题是大多数权重已在 VRAM，却还要复制成 MMQ 连续组布局。
+
+本项只审计已有 native direct-pointer/fused 机制是否能按生产形状替代 resident gather：
+
+1. 在 group 级 GPU harness 中比较 16-expert gather+MMQ 与
+   `fused::experts_native` direct-pointer 的单位 expert/行成本，避免再次分配完整 512-expert
+   层而 OOM；
+2. 从 representative 554-token routing 统计每层唯一 expert、group 数以及 resident/staged
+   比例；pair 命中率不能替代唯一权重命中率；
+3. 核算只把 resident experts 走 direct path、staged misses 仍走现路径时的整请求 wall
+   保守上界。全删 `183 ms` 是 10% 级上界，但必须扣除额外 launch、数值路径差异和分组开销；
+4. 复核 native fused 与 MMQ 的数值误差是否满足现有质量门，以及是否存在会破坏 token、
+   finish 或工具语义的顺序依赖。
+
+只有 group 级预筛显示至少一个真实 resident 比例的保守 wall 上界 `>=1%` 且绝对
+`>=0.05 s`，才预注册端到端实现候选。若 direct path 本身不更快或数值门不成立，关闭
+resident-gather 方向，不再改 group/dequant 参数，转向 `wait copy` 的宿主读取结构或其他
+有独立证据的主相位。该审计不改生产、不重启。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -407,16 +436,19 @@ dequant 参数、group 大小或 profiler 邻域。若不存在重复工作，�
 反向 `0.046%`，因此否决并恢复生产。`ENGINE-0.1.55-EVAL` 随后通过启动和正确性门，但
 596/94K wall 慢 `5.853%/4.259%`，版本级候选否决并恢复旧引擎。`GDN-CONVL2` 随后
 以真实 env、greedy 和质量门通过，但 596/94K wall 只改善 `0.8245%/0.2051%`，
-绝对节省 `0.012476/0.002898 s`，因此也已否决并恢复 A2。当前执行
+绝对节省 `0.012476/0.002898 s`，因此也已否决并恢复 A2。
 `AGENT-HOT-TURN-PHASE-MAP` 已完成：596/94K 热长轮都只约有 554 个 fresh token；
-stage 2 的 `wait copy 173 ms` 是最大可移动相位。当前执行
-`AGENT-HOT-TURN-STREAM-RING` 已否决：full ring 让 596 wall 慢 `25.714%`，没有把 stage 2
-copy 等待转成用户收益。当前生产为 server/vision/engine
+stage 2 的 `wait copy 173 ms` 是最大可移动相位。`AGENT-HOT-TURN-STREAM-RING` 已否决：
+full ring 让 596 wall 慢 `25.714%`，没有把 stage 2 copy 等待转成用户收益。当前生产为
+server/vision/engine
 `169846/169849/169854`，health loaded、六 slots / 两 groups，`strata.service` inactive。
 
 只读 routing 审计已完成：当前层 selected-only staged copy 已是生产路径，跨层推测 routing
 没有源码支持；full-ring 还切换了多个调度机制。`AGENT-HOT-TURN-STAGED-PREFETCH` 随后把
 grouped staged walk 的实际传输在前数从 8 提到安全上限 15，但 596 wall 只改善
 `0.3475%`、绝对 `5.25 ms`，prompt 反慢 `0.5996%`，因此否决并关闭该参数轴。当前生产已
-恢复 A2。下一项执行只读 `AGENT-HOT-TURN-DEQUANT-AUDIT`，检查 `dequant 106 ms` 是否有
-同一 expert/layout 的重复转换；在给出真实触发、整请求保守上界和回滚前不改源码、不重启。
+恢复 A2。`AGENT-HOT-TURN-DEQUANT-AUDIT` 随后确认该 phase 实际是 native group gather，
+每层只处理唯一 selected experts，没有同一 expert/layout 的重复转换；MMQ 固定 stride
+要求使 resident cache slot 不能直接替代组 buffer。该重复工作假设否决；当前转为只读
+`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`，用 group 级 harness 验证已有 direct-pointer/fused
+路径能否绕开 resident gather，并在 `>=1%`、`>=0.05 s` 上界和数值门成立前不改源码、不重启。

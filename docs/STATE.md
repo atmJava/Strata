@@ -8,13 +8,12 @@
   严重尾部，并保持工具调用、代码修改、测试结果和任务成功率正确。通常 1 个主代理、偶尔
   2 个、峰值 1 主 3 子代理；1/2 路是主优化目标，4 路非回退，6/8 只做安全回归。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第二十次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
+  已完成第二十二次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
   单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。没有接入用户实际路径的能力
   只算机制收益，不能写成体验已改善；重启成本必须计入当轮。
-  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第二十版完成后再次尝试创建新版目标，
-  接口仍以
-  “unfinished goal”拒绝；当前工具不能改写目标文本或恢复旧目标。本仓库计划是当前执行
-  的权威目标，不能把平台旧目标当作已更新。
+  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第二十二版更新后仍受旧 unfinished goal
+  限制，当前工具不能改写目标文本或恢复它。本仓库计划是当前执行的权威目标，不能把平台
+  旧目标当作已更新。
 - 当前阶段：真实 Agent 请求级优化已采纳 title、线程级 compaction LRU（在对应测试请求
   形状上有效）、共享 system 前缀顺序、自动 boundary pin 和两路串行准入。B4 后三个兄弟
   请求复用 `97.34%`，后三墙钟 `5.001 → 1.335 s`（`-73.31%`）。
@@ -121,11 +120,19 @@
   prompt 从 `1384.3 ms` 变为 `1392.6 ms`，反慢 `0.5996%`。按停止门未跑 B 的 94K、
   2/4/6/8，不扫邻近深度或 stager 参数。A2 已恢复。见
   [result](work/AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)。
-- 当前项：AGENT-HOT-TURN-DEQUANT-AUDIT（只读）。检查 stage 2 `dequant 106 ms`
-  是否对同一 expert/layout 重复转换，以及真实 production native IQ3_XXS、554-token、
-  grouped staged path 的命中率。只有单一可移除部分能给整请求 wall `>=1%` 且绝对
-  `>=0.05 s` 的保守上界，才预注册实现；未过门不改源码、不重启，也不扫 dequant 参数、
-  group 或 profiler 邻域。
+- 上一项否决：`AGENT-HOT-TURN-DEQUANT-AUDIT`。phase map 的 `dequant 106 ms` 实际是
+  native IQ3_XXS `gather_native_group` 的原字节搬运，不是 FP16 反量化。每层 `order`
+  只含唯一 selected expert，每 16 个执行一次 gather；stage 1/2 是不同层，
+  staged/streamed/fused/peer 路径互斥，未发现同一 expert/layout 重复转换。resident cache
+  slot 仍须转成 MMQ 固定-stride 连续布局，不能安全直接删除。未构建、未重启，不扫
+  dequant/group/profiler 参数。见
+  [result](work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
+- 当前项：AGENT-HOT-TURN-RESIDENT-PATH-AUDIT（只读/GPU 小组预筛）。stage 1/2
+  gather 合计约 `183 ms`，hot-long cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`；
+  审计已有 `fused::experts_native` direct-pointer 机制是否能绕开 resident gather。先做
+  group 级比较并统计每层唯一 expert/group/resident 比例；只有真实比例的 wall 保守上界
+  `>=1%` 且绝对 `>=0.05 s`、数值和资源门成立才预注册实现。不改生产、不重启，不扫
+  group/dequant 参数。
 - 降级项：`AGENT-HISTORY-STATE-RESIDENCY` 仍保留为低频 p99 可行性。34 个有效会话只有
   1 个超过 24 小时间隔、2 个超过 12 小时，不得排在普通热续轮之前；检查双卡 layer split、
   六 batch slots、prompt cache 下多 stage 状态格式、223K 容量、恢复时间、写放大、

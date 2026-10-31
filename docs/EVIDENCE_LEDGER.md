@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-155，按编号）
+## 台账索引（L-000…L-157，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -170,9 +170,40 @@
 | L-154 | 10-31 23:4x | GDN conv/L2 融合实际命中且质量全过；A1/B 的 596/94K prompt `1409.4→1394.2/1259.4→1258.6 ms`，wall `1.514727→1.502251/1.413078→1.410180 s`；wall 仅改善 `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`；A2 prompt/wall 漂移最大 `0.388%` | **GDN-CONVL2 否决**；不扫邻近参数；A2 已恢复；下一项 `AGENT-HOT-TURN-PHASE-MAP` |
 | L-155 | 10-31 14:1xZ | 554-token hot-long 进入 full streamed ring 后，596 wall 中位 `1.509808→1.898041 s`，慢 `25.714%`、绝对多 `0.388233 s`；prompt 中位 `1401.7→1787.9 ms`；实际 env、6/2、health、资源、greedy 和 smoke 全过 | **AGENT-HOT-TURN-STREAM-RING 否决**；该分支同时改变 whole-chunk stream、shared defer 与 issuer；未跑 94K/并发；A2 已恢复；后续审计确认 staged 已按 selected experts 拷贝，转 staged lookahead |
 | L-156 | 10-31 14:4xZ | grouped staged lookahead 8→15 实际命中且 A1/B/A2 质量全过；596 wall `1.510583→1.505333 s`，只改善 `0.3475%`、绝对 `5.25 ms`；prompt `1384.3→1392.6 ms`，慢 `0.5996%` | **AGENT-HOT-TURN-STAGED-PREFETCH 否决**；双门未过，未跑 B 的 94K/并发；关闭 lookahead 参数轴；A2 已恢复；下一项 `AGENT-HOT-TURN-DEQUANT-AUDIT` |
+| L-157 | 10-31 15:0xZ | phase map 的 `dequant 106 ms` 在生产 native IQ3_XXS staged path 中是 `gather_native_group` 字节搬运；每层 order 唯一，每 16 个 gather 一次；stage 1/2 不同层，staged/streamed/fused/peer 互斥；hot-long cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`；MMQ 固定 stride 无法直读任意 cache slot；group 级 direct-path 预筛因现役占用下 full-layer harness OOM 尚未取得性能数据 | **AGENT-HOT-TURN-DEQUANT-AUDIT 否决重复工作假设**；不改源码、不重启、不扫 dequant/group/profiler 参数；下一项 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`，只做 group 级 |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-157 · `dequant 106 ms` 是 resident/staged gather，不是重复反量化
+
+**判定：`AGENT-HOT-TURN-DEQUANT-AUDIT` 否决“重复工作”假设；下一项为只读/GPU
+group 级 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`。**
+
+生产 native IQ3_XXS、554 fresh token、`stream_all_min=1024` 走 grouped staged path。
+phase 名 `dequant` 对应 `gather_native_group()`：`copy16_group_kernel` 把每个 expert 的
+gate/up/down 量化字节复制到 MMQ 的连续组 buffer，并清零 tail；不是 FP16 反量化。
+
+源码给出：
+
+- 每层 `order` 由 `cnt[e] > 0` 的 expert 按 ID 建一次，每层每个 selected expert 唯一；
+- native group 每 16 个唯一 expert flush 一次，每层 gather 数为
+  `ceil(unique_routed_experts / 16)`；
+- stage 1/2 分别处理不同层；staged、streamed、fused、peer 路径互斥；
+- MMQ `Product` 只支持固定 `expert_bytes` stride，cache slot 的 native blob 也不是
+  gate/up 连续布局，所以 resident cache 不能直接替换组 buffer。
+
+596/94K 三次 hot-long expert-cache hit 分别为 `95.1/97.8/98.1%` 与
+`98.4/98.7/98.8%`。高命中不能消除布局转换。stage 1/2 的 gather 为 `77/106 ms`，
+全删上界约 `183 ms`，但需要独立 direct-pointer 机制。
+
+现成 full-layer `prefill_fused_iq_test --chunks=554 --no-ref` 在现役生产占用下
+`cudaMalloc` OOM；该结果只说明测试需要整层约 512 个 expert 权重，不构成性能结论。
+没有为此停服。下一步改用 16-expert group 级 harness，先比较
+`gather+MMQ` 与 `fused::experts_native`，再统计真实 resident 比例；不通过就关闭该方向。
+
+完整记录见
+[`AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md`](work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
 
 ## L-156 · staged lookahead 8→15 没有穿透 596 wall
 

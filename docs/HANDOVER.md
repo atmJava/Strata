@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T22:50+08:00（STAGED_PREFETCH 判决后）。
+> 整理时间：2026-10-31T23:59+08:00（DEQUANT_AUDIT 判决后）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,20 +12,19 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-156。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-157。
 
 ## 2. 当前断点
 
-- **全局目标已第二十一次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
+- **全局目标已第二十二次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
   等待，再处理首工具/首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
   触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
   可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十版完成后再次尝试创建新目标，
-  接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十一版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十二版更新后接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十二版计划
   为权威，不要回到平台旧目标的状态快照。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
@@ -158,11 +157,18 @@
   prompt 从 `1384.3 ms` 变为 `1392.6 ms`，反慢 `0.5996%`。按停止门未跑 B 的 94K、
   2/4/6/8，不扫邻近深度或 stager 参数；A2 已恢复。见
   [result](work/AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)。
-- **当前状态与下一动作**：只读执行 `AGENT-HOT-TURN-DEQUANT-AUDIT`。追踪 phase map
-  stage 2 的 `dequant 106 ms`，确认 production native IQ3_XXS、554-token grouped
-  staged path 是否对同一 expert/layout 重复转换，并量化真实命中率。只有单一可移除部分
-  给出整请求 wall `>=1%` 且绝对 `>=0.05 s` 的保守上界，才预注册实现；未过门不改源码、
-  不重启，也不扫描 dequant 参数、group 或 profiler 邻域。
+- **上一项判决**：`AGENT-HOT-TURN-DEQUANT-AUDIT` 否决“重复反量化/gather”假设。该
+  phase 实际是 native IQ3_XXS `gather_native_group` 原字节搬运，不是 FP16 反量化；
+  每层只处理唯一 selected expert，每 16 个一次 gather，stage 1/2 是不同层，路径互斥，
+  未发现同一 expert/layout 重复转换。resident slot 仍需转成 MMQ 固定-stride 连续布局。
+  未构建、未重启。见
+  [result](work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
+- **当前状态与下一动作**：只读/GPU 小组预筛
+  `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`。stage 1/2 gather 合计约 `183 ms`；hot-long
+  cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`。先在 group 级比较
+  `gather+MMQ` 与已有 `fused::experts_native` direct-pointer，并统计每层唯一
+  expert/group/resident 比例；只有真实比例的 wall 保守上界 `>=1%` 且绝对 `>=0.05 s`、
+  数值和资源门成立才预注册实现。不改生产、不重启，不扫 group/dequant 参数。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说
