@@ -1,5 +1,8 @@
 # UTIL-BATCH-SIDE-MIXER contract
 
+Status: rejected on 2026-10-31 at the server throughput and drift gates. See
+[`UTIL_BATCH_SIDE_MIXER_RESULT-20261031.md`](UTIL_BATCH_SIDE_MIXER_RESULT-20261031.md).
+
 ## Question
 
 Can a narrow side branch in the production `batch_rec_` path overlap the GDN query/key/value
@@ -139,6 +142,16 @@ No candidate throughput result exists and the candidate remains default-off and 
 After a manual host reboot, stop `strata.service`, confirm CUDA sees and can initialize both
 UUIDs together, then restart this contract from A1. Do not relax the matrix or replace it with
 a one-card result because of the infrastructure failure.
+
+## Final execution (2026-10-31)
+
+The host reboot restored both devices. A1-B-A2 then completed on one boot with all 36 waves.
+B changed 2/4/6/8-stream aggregate throughput by
+`-2.755%/-6.766%/+0.378%/+4.969%` against the combined A median, with paired wins
+`4/6, 1/6, 2/6, 5/6`. Two-stream A1-to-A2 drift was `-7.067%`. Only eight streams met both
+the 1% gain and 5/6-win gates, while two and four streams exceeded the 1% regression limit
+and two streams exceeded the 3% drift limit. The candidate is rejected. A2 is restored with
+the original engine/config and no candidate environment variable.
 
 ## Safety
 

@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-121，按编号）
+## 台账索引（L-000…L-122，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -134,7 +134,8 @@
 | L-117 | 10-31 09:1xZ | B6 两卡全部 parity；相对生产 IL 选择，T=2 中位 `-5.868%`、0/22 胜，Q6_K/Q5_K 单点回退 `16-39%`；真实张量代理投影无生产宽度稳定 ≥1% | **UTIL-B6-ROWS kernel screening/reach 门否决；未构建、未重启；转不同生产路径源码审计** |
 | L-118 | 10-31 10:0x | LFUSE 两卡 parity 与 B/A2 greedy 全过；2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`；8 路的 A 漂移 `+4.053%` | **UTIL-LFUSE-SHARED 吞吐/漂移门否决；A2 已恢复；转不同源码/阶段成本审计** |
 | L-120 | 10-31 10:1xZ | SIDE-MIXER 两卡 14 进程、196 条结果行、560 个 buffer 全 bitwise；T=3/4 整窗上界 `+1.10–1.29%`，但 `side_proj/sidem` 含 `!batch_rec_`，生产 `capture_batch()` 命中率为零 | **UTIL-SIDE-MIXER server 可达性门否决；未构建、未重启；转 batch-only 三/四行候选** |
-| L-121 | 10-31 10:4x | 修正到真实 18 GDN + 6 QSA 层序后，T=2 的 24 层 graph 两卡均 7/7 胜、全 bitwise，中位节省 `177.0208/191.7025 us`；B 三组 greedy 各两轮逐字一致并命中真实 T=2 capture | **GPU 预筛/B parity 通过；A1 6 路 baseline 的 GPU runtime 掉线阻断 A-B-A；候选未定、默认关闭，等待 reboot** |
+| L-121 | 10-31 10:4x | 修正到真实 18 GDN + 6 QSA 层序后，T=2 的 24 层 graph 两卡均 7/7 胜、全 bitwise，中位节省 `177.0208/191.7025 us`；B 三组 greedy 各两轮逐字一致并命中真实 T=2 capture | **GPU 预筛/B parity 通过；A1 6 路 GPU runtime 故障阻断 A-B-A；后由 L-122 完成** |
+| L-122 | 10-31 11:1x | 重启后同 boot A1-B-A2 的 2/4/6/8 路为 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`；只有 8 路过双门，2/4 路回退超过 1%，2 路 A 漂移 `-7.067%` | **UTIL-BATCH-SIDE-MIXER 吞吐/漂移门否决；A2 已恢复；三臂 36 波零错误、零外来请求** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3917,10 +3918,50 @@ graph 路径没有提供可复现收益，部分行反而回退。
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
 
+## L-122 UTIL-BATCH-SIDE-MIXER：同 boot A-B-A 在 2/4 路回退并漂移超门
+
+**判定**：**否决。** 主机重启恢复了双卡，原先阻断的 A1-B-A2 已完整执行。预筛与正确性
+仍然通过，但端到端候选只在 8 路表现正向，无法满足全部并发级、胜场和漂移门。
+
+**执行**：A1、B、A2 在同一 boot 中各自运行 2/4/6/8 路、每级 3 波、每请求最多 400 tokens。
+A1/B/A2 engine hash 分别为
+`105a4171...`、`49e1e84c...`、`105a4171...`，config 分别为
+`88de996a...`、`c0e3bc9b...`、`88de996a...`。B 只比 A 多
+`STRATA_BATCH_SIDE_MIXER=1`。三臂的三组冻结 greedy 各跑两轮，文本与 `finish=stop`
+归一化后全部相等。B 启动至 loaded 约 185 秒，B 停止至端口释放约 9 秒，A2 约 181 秒后
+loaded；无需再次重启服务器。
+
+| streams | A1 | B | A2 | A1/A2 combined | B delta | paired wins | A drift |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 76.809 | 71.840 | 71.381 | 73.8755 | `-2.755%` | 4/6 | `-7.067%` |
+| 4 | 115.342 | 107.790 | 115.882 | 115.612 | `-6.766%` | 1/6 | `+0.468%` |
+| 6 | 125.511 | 127.629 | 128.785 | 127.148 | `+0.378%` | 2/6 | `+2.609%` |
+| 8 | 114.787 | 120.449 | 111.930 | 114.747 | `+4.969%` | 5/6 | `-2.489%` |
+
+只有 8 路同时满足 `+1%` 和 `5/6`；2/4 路回退超过 1%，2 路漂移超过 3%。三臂各 12 波
+零 script/HTTP/执行错误、零外来请求；finish 只有 `length/stop`，数量分别为 A1
+`12/5`、B `12/6`、A2 `12/8`。
+
+**恢复**：A2 server/engine/vision PID `7724/7744/7739`，health loaded，6 slots /
+2 groups，engine/config 为原始 `105a4171...` / `88de996a...`，运行 env 无候选开关。
+RAM available `13 GiB`、swap `0 B`、GPU0/1 各约 `330/434 MiB` free，均 idle。
+`strata.service` 保持 inactive/dead、`MainPID=0`、`NRestarts=0`。
+
+**证据**：`/opt/ai/logs/util-batch-side-mixer3-postreboot-20261031T1045CST/`
+包含 A1/B/A2 的 parity、sweep、console、config、时间戳和最终资源快照。
+A1/B/A2 sweep sha256 分别为
+`1ec5d13a219850046163394adff3788d8a75d2f6c0e9d7754db31cdcc39a2089`、
+`2a4f80bd7fed683bb0326751a1c38deefffa941718f27fec96f5555aa3c81744`、
+`ceb6bc842371250812b9fc29b4dc5a03d65eac11513ca874b332a8cbe1ead1ac`；
+`all-sha256.txt` sha256 `a5904d25cef5b578a6baa389d9da9c6742715b7e5a0c991d668935fa6630dd01`。
+
+**没测什么**：没有长上下文、混合长 prefill 流量、自然语言质量套件、其他模型或非 CUDA 后端。
+该否决只覆盖当前 2×2080 Ti 生产形状上的 T=2 side-stream 路径。
+
 ## L-121 UTIL-BATCH-SIDE-MIXER：T=2 预筛/B parity 通过，baseline GPU runtime 故障阻断矩阵
 
-**判定**：**未定，候选默认关闭且未采纳。** 这不是候选吞吐判决。GPU 预筛、captured graph
-exactness、B parity 与真实生产 route-hit 已通过；A1-B-A2 的 6/8 路和 B/A2 尚未运行。
+**判定（当时）**：**未定，候选默认关闭且未采纳。** GPU 预筛、captured graph exactness、
+B parity 与真实生产 route-hit 已通过；当时 A1-B-A2 尚未完成。本项后由 L-122 否决。
 
 **可达性与实现**：`capture_batch()` 设置 `batch_rec_=true`，现有普通 side mixer 因此不可达。
 候选新增默认关闭的 `STRATA_BATCH_SIDE_MIXER=1`，仅在 `batch_rec_ && T==2 && !prof_on_`

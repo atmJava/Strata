@@ -1,11 +1,12 @@
 # UTIL-BATCH-SIDE-MIXER result
 
-**Status: server gate blocked. Not adopted and not rejected.**
+**Status: rejected at the server throughput and drift gates. Not adopted.**
 
-The default-off candidate has passed its production-shaped GPU screen, exactness probes,
-and a real two-row production-path hit check. The required same-boot A1-B-A2 throughput
-matrix has not run because GPU runtime state was lost after a baseline A1 failure. The
-server remains stopped until the host is rebooted and CUDA reports both devices again.
+The default-off candidate passed its production-shaped GPU screen, exactness probes, a real
+two-row production-path hit check, and a fresh post-reboot exactness check. The completed
+same-boot A1-B-A2 matrix then rejected it: two and four streams regressed by more than 1%,
+six streams did not improve by 1%, and the two-stream A1-to-A2 drift exceeded 3%. A2 is
+restored from the original baseline engine and config.
 
 ## Candidate
 
@@ -64,7 +65,29 @@ Evidence:
 - B parity sha256 `55c1f02225d57a9abb1f1601b02679b48004bad6558ccf92c45dd43c4cdce151`
 - manifest sha256 `b0fa4752742ff6f2fb14d36e1e6f06b7c62f08e60a0bc4b654762bbacc468f64`
 
-## A1 failure and current block
+## Same-boot A1-B-A2 throughput
+
+The host was rebooted. A1, B and A2 each ran three 400-token waves at 2/4/6/8 streams in
+one boot. Rates are aggregate output tokens per second. Paired wins compare each B
+repetition with the same A1 and A2 repetition, giving six comparisons per level.
+
+| streams | A1 | B | A2 | A1/A2 combined | B delta | paired wins | A drift |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 76.809 | 71.840 | 71.381 | 73.8755 | **-2.755%** | 4/6 | **-7.067%** |
+| 4 | 115.342 | 107.790 | 115.882 | 115.612 | **-6.766%** | 1/6 | +0.468% |
+| 6 | 125.511 | 127.629 | 128.785 | 127.148 | +0.378% | 2/6 | +2.609% |
+| 8 | 114.787 | 120.449 | 111.930 | 114.747 | **+4.969%** | 5/6 | -2.489% |
+
+Only eight streams met both the 1% gain and 5/6 paired-win gates. Two and four streams
+regressed by more than 1%, and the two-stream A1-to-A2 drift was -7.067%. The candidate
+therefore fails multiple hard gates and is rejected. This is a true end-to-end rejection,
+not the earlier infrastructure block.
+
+All 12 waves completed in every arm. There were no script, HTTP or execution errors, no
+foreign requests, and no finish reasons other than `length` and `stop`: A1
+`length=12, stop=5`; B `length=12, stop=6`; A2 `length=12, stop=8`.
+
+## Initial A1 failure and recovery
 
 A1 loaded successfully with the baseline engine and config:
 
@@ -87,26 +110,57 @@ selecting both UUIDs together failed with `cuInit=100`. A retry of the same A co
 failed before loading with `conversation parking does not support a layer split on one
 GPU (--split-device 0)`.
 
-The host uptime is still from 2026-10-29. Non-interactive sudo is unavailable, so the
-agent cannot safely reboot the machine. `strata.service` is `inactive/dead`,
+Before recovery, the host uptime was still from 2026-10-29. Non-interactive sudo was
+unavailable from the agent, so the reboot required the user's privileged session.
+At that checkpoint `strata.service` was `inactive/dead`,
 `MainPID=0`, `NRestarts=23`, and no server or engine process remains. The reverse SSH
 service is enabled and its tunnel remains reachable.
 
-This is a baseline/infrastructure failure, not evidence for or against the candidate.
-No 6-way or 8-way pair exists for either arm, and no A1-B-A2 performance conclusion can
-be drawn.
+The reboot restored both devices; `cuInit=0` and `cuDeviceGetCount=2`.
+`strata.service` was stopped immediately and no old server, engine or benchmark process
+remained. The new A1/B/A2 process triplets had the expected engine and config hashes.
+Every arm passed the three frozen greedy probes twice, with all six normalized
+text/finish tuples byte-identical across A1, B and A2.
 
-## Required continuation
+The B load took about 185 seconds; B-to-A2 released the port in about 9 seconds and A2
+reached loaded health about 181 seconds after launch. A server reboot was not repeated.
 
-1. Reboot the host with the user's existing privileged session.
-2. Stop `strata.service` immediately after boot so it cannot occupy the GPUs.
-3. Confirm `cuDeviceGetCount == 2`, both UUIDs initialize together, and no server,
-   engine, or benchmark process remains.
-4. Reload the same A1 config and rerun frozen parity.
-5. Run the full 2/4/6/8-stream, three-wave, 400-token A1-B-A2 matrix with one same-boot
-   session and restore A immediately after B.
-6. Apply the contract's 1%, 5/6 paired-win, 1% non-regression, 3% drift, request,
-   finish, foreign-request, six-slot, health, RAM, VRAM, and swap gates.
+## Restored A2
 
-Only a full pass may enable the candidate by default. A failure must remove the env and
-restore A.
+| item | value |
+| --- | --- |
+| server / engine / vision PID | `7724 / 7744 / 7739` |
+| engine sha256 | `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` |
+| config sha256 | `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f` |
+| engine environment | no `STRATA_BATCH_SIDE_MIXER` |
+| shapes | six slots, groups `0,1`, 262144 context |
+| RAM / swap | `13 GiB` available / `0 B` used of `4 GiB` |
+| VRAM | GPU0 `330 MiB`, GPU1 `434 MiB` free; both idle |
+| production systemd | `inactive/dead`, `MainPID=0`, `NRestarts=0` |
+
+A2 health remained loaded after the full sweep.
+
+## Evidence
+
+Directory:
+
+```text
+/opt/ai/logs/util-batch-side-mixer3-postreboot-20261031T1045CST/
+```
+
+The directory contains all three sweep and parity files, service logs, launch/health
+timestamps, final process and resource observations, both configs, and `all-sha256.txt`.
+
+- A1 sweep `1ec5d13a219850046163394adff3788d8a75d2f6c0e9d7754db31cdcc39a2089`
+- B sweep `2a4f80bd7fed683bb0326751a1c38deefffa941718f27fec96f5555aa3c81744`
+- A2 sweep `ceb6bc842371250812b9fc29b4dc5a03d65eac11513ca874b332a8cbe1ead1ac`
+- A1 parity `d757c7b57f4c78484fa85ca71c38afdc450cde9c8ef2dc6092d6ca602d7e0754`
+- B parity `911e3c1ee7eb19eaaa5a99a02e73f490d550a59515a135cfa03392ee97028680`
+- A2 parity `8faaf0e0bed875771f1c6816491d42d724b22942613dd62804870139419eddc6`
+- `all-sha256.txt` `a5904d25cef5b578a6baa389d9da9c6742715b7e5a0c991d668935fa6630dd01`
+
+## Not measured
+
+No long-context, mixed long-prefill traffic, natural-language quality suite, other model
+or non-CUDA backend was run. The rejection applies to the existing T=2 side-stream path
+on this two-2080-Ti production shape.

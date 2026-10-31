@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T10:15+08:00。
+> 最后更新：2026-10-31T11:15+08:00。
 
 ## 用户目标
 
@@ -112,7 +112,7 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
 | UTIL-LFUSE-SHARED | M14 | 共享专家标量 gate 并入 router，sigmoid+scale 并入 resident combine | 已证伪（吞吐/漂移） | 中；两卡 harness、A1-B-A2 各 12 waves | **否决**：parity 与 greedy 全过，但 2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`、胜场 `1/6, 1/6, 2/6, 4/6`；8 路 A 漂移 `+4.053%`，A2 已恢复 |
 | UTIL-QFUSE-HC | M14 | 生产 HC Q8 up read 同读写出 consumer q8_1，省掉独立量化 launch | 已证伪（整窗绝对收益） | 低；两卡独立 harness，未重启 | **否决**：两卡全 bitwise，T=1/2/3 完整局部路径 `+1.31–2.67%`；但每 read 仅省 `0.44–0.79 us`，每 stage 48 次后只有 `0.11–0.20%` |
 | UTIL-SIDE-MIXER | M14 | 用 side stream 重叠 qkv/gate 与 QSA q/k/v | 已证伪（生产可达性） | 低；两卡独立 harness，未重启 | **否决**：T=3/4 整窗上界 `+1.10–1.29%`，560 个 buffer 全 bitwise；但生产 batch window 含 `!batch_rec_` 排除，命中率为零 |
-| UTIL-BATCH-SIDE-MIXER | M14 | 只对 `batch_rec_ && T==2` 重叠 GDN qkv/gate 与 QSA q/K/V | production graph 两卡 7/7 胜、全 bitwise；服务端至少一级 `+1%`、5/6 胜、其他级不回退 >1%、漂移 ≤3% | 中；GPU 预筛和 B parity 已过，A1-B-A2 被 GPU runtime 故障阻塞 | **进行中（服务器阻塞）**；一行及三至八行保持串行 |
+| UTIL-BATCH-SIDE-MIXER | M14 | 只对 `batch_rec_ && T==2` 重叠 GDN qkv/gate 与 QSA q/K/V | production graph 两卡 7/7 胜、全 bitwise；服务端至少一级 `+1%`、5/6 胜、其他级不回退 >1%、漂移 ≤3% | 中；两卡 GPU 预筛、B parity、三次同 boot sweep | **否决**：2/4/6/8 路 `-2.755%/-6.766%/+0.378%/+4.969%`，只有 8 路过双门；2 路漂移 `-7.067%`，A2 已恢复 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -233,16 +233,16 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
     `!batch_rec_`，所以 env-only A-B-A 会测到零命中。下一步只为三/四行 batch window 实现
     窄范围 qkv/gate 分支，保持一/二行串行，并用 production-shaped graph parity 与 batch
     harness 先证明 ≥`0.183 ms`。
-39. **UTIL-BATCH-SIDE-MIXER 的 T=2 预筛与 B parity 已通过**：第一次 production-shape
+39. **UTIL-BATCH-SIDE-MIXER 已过预筛/parity，但在同 boot 端到端门否决**：第一次 production-shape
     harness 把每个 GDN layer 都重复执行 QSA，数据已修正。真实 18 GDN + 6 QSA 层序下，
     24 层 mixed graph 在两卡各 7 个独立进程中全 bitwise、全 7/7 胜，中位节省 GPU0
     `177.0208 us`（`0.9689%` stage）、GPU1 `191.7025 us`（`1.0493%`）；18 GDN 与 6 QSA
     组成图也无回退。B 以 6 slots / 2 groups、health loaded 启动，三组冻结 greedy 各两轮
     逐字一致，`busy=2, decoding=2` 的双槽探针触发两个 2 行 batch capture。
-    A1 baseline 在 6 路第 2 波遇到 `dequant launch: unspecified launch failure`，随后
-    CUDA 只枚举 1 张卡，host 仍停在 `2026-10-29` 的 boot；没有 6/8 路或 A-B-A 数据。
-    当前项阻塞在主机重启，候选默认关闭且未采纳。重启后先停 `strata.service`、确认双 UUID，
-    再从同一 A1 配置完整重跑。
+    主机重启后，A1-B-A2 在同一 boot 完成 36 波，2/4/6/8 路相对 A 合并中位为
+    `-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`。只有 8 路同时过
+    1% 与 5/6，2/4 路回退超过 1%，2 路 A1/A2 漂移为 `-7.067%`。候选否决，A2 已恢复；
+    不扫描 T=2 邻近窗口或按并发级套用条件。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

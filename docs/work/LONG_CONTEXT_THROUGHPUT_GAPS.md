@@ -16,13 +16,14 @@ T=1/2/3 有 `+1.31–2.67%`，但每次只省 `0.44–0.79 us`；每个 24 层 s
 在全部 18 层重复 GDN+QSA 工作，数据作废。修正为 18 GDN + 6 QSA 的真实层序后，只有 `T=2`
 在两卡都 7/7 胜且每个进程过 `182.7 us`，因此契约收窄到两行；一/三至八行保持串行。
 
-**2026-10-31 batch-side checkpoint**：`UTIL-BATCH-SIDE-MIXER` 的 24 层 mixed graph 中位节省
+**2026-10-31 batch-side result**：`UTIL-BATCH-SIDE-MIXER` 的 24 层 mixed graph 中位节省
 GPU0 `177.0208 us`（stage 的 `0.9689%`）、GPU1 `191.7025 us`（`1.0493%`），direct 与
 captured graph 全 bitwise。B 以 6 slots / 2 groups、health loaded 启动，三组冻结 greedy
 各两轮逐字一致；双槽探针显示 `busy=2, decoding=2` 并触发两次两行 batch capture，证明生产
-路径真实命中。A1 baseline 在 6 路第 2 波报 `dequant launch: unspecified launch failure`，
-随后 CUDA 只枚举一张卡，host 仍未重启，因此 A1-B-A2 及其 6/8 路结果不存在。候选默认关闭、
-未采纳；恢复后必须先从 A1 完整重跑，不能用单卡或 2/4 路趋势替代。
+路径真实命中。主机重启后同 boot A1-B-A2 的 2/4/6/8 路相对 A 合并中位为
+`-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`。只有 8 路同时过
+1% 与 5/6；2/4 路回退超过 1%，2 路 A 漂移 `-7.067%` 超过 3%。候选已否决，A2 已恢复；
+不扫描 T=2 邻近窗口，也不把单窗口形状收益当作固定并发级的端到端收益。
 
 本文审查 `freeze/server-adapt-0.2.7` 在真实服务器和长上下文负载下仍未被主线覆盖的吞吐
 优化方向。逐项实现和已经测得的局部收益见

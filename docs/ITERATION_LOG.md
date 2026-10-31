@@ -3,6 +3,38 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-95 · Batch side mixer 完成同 boot A-B-A，在 2/4 路回退和 2 路漂移门否决
+
+- 目标 / 指标：完成 `UTIL-BATCH-SIDE-MIXER` 在同一 boot 的 A1-B-A2，验证生产
+  `batch_rec_ && T==2` 侧分支能否至少把一个并发级提高 1%，同时其他级回退不超过 1%、
+  5/6 配对胜、A1/A2 漂移不超过 3%。
+- 假设与预期：预筛 mixed graph 已有 `177.0208/191.7025 us` 中位节省和两卡 7/7 胜；
+  真实 T=2 窗口命中后，至少一个级别应出现稳定端到端收益，且不会破坏 2/4 路基线。
+- 为什么继续这一项：A1 旧矩阵由 baseline GPU runtime 掉线阻断。重启后先停 service、
+  确认双卡联合 initialize，随后沿用原 contract 和冻结负载，不修改候选。
+- 改动与实验：A1/B/A2 各跑 2/4/6/8 路 × 3 波 × 400 tokens；B 仅比 A 多
+  `STRATA_BATCH_SIDE_MIXER=1`。三臂先跑三组冻结 greedy 各两轮，再按同 repetition 与
+  A1/A2 配对。逐项核对实际 engine/config hash、6 slots / 2 groups、health、RAM/VRAM/swap、
+  错误、finish 和外来请求。
+- 结果：2/4/6/8 路相对 A1/A2 合并中位为 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场
+  `4/6, 1/6, 2/6, 5/6`；A1→A2 漂移为 `-7.067%/+0.468%/+2.609%/-2.489%`。只有 8 路
+  同时过 1% 和 5/6，但 2/4 路回退超过 1%，2 路漂移超过 3%。
+- 判决：**UTIL-BATCH-SIDE-MIXER 否决。** 预筛收益没有转化为覆盖完整并发曲线的端到端收益；
+  不能按 8 路结果单独采纳，也不进入 T=2 邻近窗口扫描。
+- 预期为何落空：`T==2` 是单个 batch window 的内部形状，不等于固定并发级收益；同一侧流
+  overlap 在 2/4 路端到端路径上被其他流水/调度成本抵消，8 路的正向结果不足以满足非回退门。
+- 生产状态与回滚：A2 server/engine/vision PID `7724/7744/7739`，原始 engine
+  `105a4171...`、config `88de996a...`，health loaded、6 slots / 2 groups，运行 env
+  无候选开关；`strata.service` inactive/dead。RAM available `13 GiB`、swap 0、两卡 idle。
+- 证据：台账 L-122、`UTIL_BATCH_SIDE_MIXER_RESULT-20261031.md`；证据目录
+  `/opt/ai/logs/util-batch-side-mixer3-postreboot-20261031T1045CST/`，`all-sha256.txt`
+  `a5904d25cef5b578a6baa389d9da9c6742715b7e5a0c991d668935fa6630dd01`。
+- 学到什么：GPU 局部临界路径过 1% 仍是必要条件，不是充分条件；候选必须从第一轮就用
+  完整 A-B-A 并发曲线裁决。基础设施恢复本身不能改变预注册门限。
+- 下一步与理由：停止 side-stream 路线，回到真实窗口的调度/状态成本。优先只读检查 6 槽
+  轮换后 underfilled group 与新窗口准入之间的串行等待，寻找不延迟 verdict、不改变 slot
+  顺序且能覆盖多个并发级的不同机制；任何实现仍先过源码可达性和 ≥1% 绝对预算。
+
 ## I-20261031-94 · Batch side mixer 已过 GPU 与 parity 门，A1 GPU runtime 故障阻断吞吐矩阵
 
 - 目标 / 指标：验证默认关闭的 `STRATA_BATCH_SIDE_MIXER=1` 能否只对生产两行 batch window

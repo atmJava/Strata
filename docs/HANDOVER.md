@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T10:40+08:00。
+> 整理时间：2026-10-31T11:15+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-121。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-122。
 
 ## 2. 当前断点
 
@@ -61,10 +61,10 @@
   进程，全部 bitwise；24 层 mixed graph 的 GPU0/1 中位节省为 `177.0208/191.7025 us`
   （stage 的 `0.9689%/1.0493%`），两卡均 7/7 胜。B 以 6 slots / 2 groups、health loaded
   启动，三组冻结 greedy 各两轮逐字一致；双槽请求出现 `busy=2, decoding=2` 和两次 2 行
-  batch capture，证明生产路径真实命中。A1 baseline 的 2/4 路完成，但第 2 个 6 路波次报
-  `dequant launch: unspecified launch failure`，之后 CUDA 只枚举 1 张卡，同一 A 配置又被
-  single-GPU conversation parking 拒绝。当前服务器没有 server/engine，host 尚未重启；候选
-  尚未取得 6/8 路或 A1-B-A2 结果，状态为“预筛/parity 通过、端到端门阻塞”，不是采纳。
+  batch capture，证明生产路径真实命中。主机重启后，A1-B-A2 在同一 boot 完成：2/4/6/8 路
+  相对 A 合并中位为 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场
+  `4/6, 1/6, 2/6, 5/6`。只有 8 路同时过 1% 与 5/6，2/4 路回退超过 1%，2 路 A1/A2
+  漂移 `-7.067%` 超过 3%。候选已否决，A2 已恢复，不进入 T=2 邻近窗口扫描。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -94,23 +94,23 @@
   EXPDEC 因 mode 8 控制流短路而不可达；checkpoint move 与 GDN recurrence 合并都没有越过
   多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；跨 group 延迟合并、
   vocabulary-row head split、Q8 write/mixer fusion 与 batch poll 快返回都已否决。
-  B6 kernel/reach 门也已否决；batch side mixer 是目前唯一已过 production-shaped GPU 门和
-  真实 T=2 route-hit 的候选。恢复后先完成同一 boot 的 A1-B-A2，不因 GPU runtime 故障
-  放宽矩阵或改用单卡结果。
+  B6 kernel/reach 门也已否决；batch side mixer 虽然过了 production-shaped GPU 门和真实
+  T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决。当前候选为空，下一步
+  回到 6 槽轮换后的 underfilled group 与新窗口准入之间的调度/状态成本审计。
 
 ## 3. 当前生产
 
-生产 `strata.service` 保持 inactive；GPU runtime 故障后没有候选手动实例在监听。
+生产 `strata.service` 保持 inactive；A2 以手动 baseline 实例运行，health loaded。
 
 | 项 | 当前值 |
 |---|---|
-| service | `inactive/dead`、`MainPID=0`、`NRestarts=23` |
-| server/engine | 无运行进程；没有 health endpoint |
-| A1 baseline | engine `105a4171...`，config `88de996a...`，故障前 parity 通过 |
-| B candidate | engine `49e1e84c...`，config `c0e3bc9b...`，T=2 parity/route 通过 |
-| GPU state | `nvidia-smi` 见 2 张，各约 1 MiB；CUDA runtime `cuDeviceGetCount=1` |
-| host | uptime 仍为 `2026-10-29 01:52:32`，需要一次手工 reboot |
-| 形状 | 故障前为双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
+| service | `inactive/dead`、`MainPID=0`、`NRestarts=0` |
+| server/engine/vision | `7724/7744/7739`，health loaded |
+| A2 baseline | engine `105a4171...`，config `88de996a...`，parity 通过 |
+| B candidate | engine `49e1e84c...`，config `c0e3bc9b...`，已停止并否决 |
+| GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；约 `330/434 MiB` free |
+| host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |
+| 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
 关键生产开关：
 
@@ -128,7 +128,7 @@ STRATA_SHARED_SLOT_ROPE=1
 STRATA_SM75_PERF=1
 ```
 
-候选 B 只比 A 多了 `STRATA_BATCH_SIDE_MIXER=1`；当前没有进程在运行，也没有
+候选 B 只比 A 多了 `STRATA_BATCH_SIDE_MIXER=1`；该进程已停止，A2 运行环境没有
 `STRATA_PF_WMMA`、`STRATA_PA_V2T`、`STRATA_SEL_OVERLAP`、
 `STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING`、`STRATA_PA_GROUP3`、
 `STRATA_IQ3_GRID_REPL`、`STRATA_IQ3_ACT_RELOAD`、`STRATA_IQ3_WEIGHT_REUSE`、
@@ -139,9 +139,8 @@ STRATA_SM75_PERF=1
 引擎子进程，不能替代 service drop-in。
 
 当前生产基线是“已通过稳定性、正确性和同 boot 归因的最佳基线”，不是数学意义上的全局最优。
-故障恢复步骤：用户以现有提权会话执行 `sudo reboot`；启动后立即
-`sudo systemctl stop strata.service`；确认两卡 UUID 能联合 initialize、无残留
-server/engine/bench，再用原 A1 config 重跑完整矩阵。
+当前没有基础设施阻塞；如再次需要重启，启动后仍应立即停止 `strata.service`，确认两卡
+UUID 能联合 initialize、无残留 server/engine/bench，再用原 A1 config 重跑完整矩阵。
 
 ### UTIL-HEAD-SPLIT 服务端判决（否决）
 
