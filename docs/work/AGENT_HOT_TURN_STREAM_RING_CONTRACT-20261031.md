@@ -2,7 +2,9 @@
 
 日期：2026-10-31
 
-状态：预注册；phase map 已定位，候选尚未启动。
+状态：**已否决。** B 的 596 wall 慢 `25.714%`，按停止门未跑 94K 和并发矩阵。
+完整结果见
+[`AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md`](AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
 
 ## 证据与问题
 
@@ -75,3 +77,14 @@ B 必须先通过：
 A1 在同 boot 完成基准后，B 与 A2 各需一次约 3 分钟加载，合计约 6–7 分钟。候选只是
 一个 env；失败时删除该 env 即可精确回滚。完成 B 判决后必须恢复 A2、核对
 engine/config hash、实际 env、health、六 slots / 两 groups、systemd inactive 和 parity。
+
+## 判决
+
+B 的 596 hot-long wall 从 A1 中位 `1.509808 s` 变为 `1.898041 s`，慢 `25.714%`，
+绝对多 `0.388233 s`；prompt 中位从 `1401.7 ms` 变为 `1787.9 ms`。原因是 full ring
+按全部专家顺序预取，而 554-token chunk 只路由少量专家，额外 copy 远大于更早预取收益。
+质量、路径、健康、资源和资源门均通过，但这不能抵消明确的端到端回退。
+
+生产已恢复 A2，运行 env 不含该候选。不扫 threshold、ring 容量或邻近参数。下一项改为
+只读审计“路由结果何时可用、能否仅预取选中专家”，在给出真实命中率、绝对秒数上界、
+bitwise/数值影响和回滚前不改源码、不重启。

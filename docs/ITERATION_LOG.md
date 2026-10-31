@@ -3,6 +3,36 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-126 · full streamed ring 反向 25.7%；先审计选中专家预取
+
+- 目标 / 指标：验证把 554-token 热续轮从 32-slot staged walk 切到 full streamed ring，
+  能否隐藏 stage 2 的 `wait copy 173 ms`，并把收益穿透到用户 wall。
+- 假设与预期：该 chunk 低于默认 `stream_all_min=1024`，更深的 ring 可更早 fetch 非驻留
+  专家；若把等待隐藏到接近 stage 1 的 `13 ms`，乐观 wall 上界约 11%。
+- 改动与实验：B 只给 A1 config 增加 `STRATA_PREFILL_STREAM_MIN=0`。核对实际 env、
+  engine/config hash、六 slots / 两 groups、health、资源、三组 fixed greedy 和 smoke 后，
+  跑同口径 596 hot-long 三波。B 的 94K 和并发矩阵由停止门控制。
+- 结果：路径与质量门全过，但 596 wall 中位从 `1.509808 s` 升到 `1.898041 s`，慢
+  `25.714%`，绝对多 `0.388233 s`；prompt 中位从 `1401.7 ms` 升到 `1787.9 ms`。
+- 质量：真实 env 命中；health loaded、262144、6/2、systemd inactive；无 OOM、
+  CUDA/engine/HTTP 错误；三组 fixed greedy 各两轮 B 内重复且等于 A，64-token smoke 正常。
+- 判决：**AGENT-HOT-TURN-STREAM-RING 否决。** 按预注册停止门未跑 B 的 94K、2 路或
+  4/6/8；A2 已恢复且运行 env 无该候选。
+- 预期被推翻：`wait copy` 是真实大头，但 full ring 按全部专家顺序预取，而 554-token
+  chunk 只路由少量专家；额外 copy 远大于少数专家更早到达的收益。
+- 生产状态与回滚：server/vision/engine `166198/166200/166205`，engine
+  `105a4171...`、config `6ece1a13...`；A2 parity repeatable/exact、finish `stop`。
+- 证据：L-155、
+  [`AGENT_HOT_TURN_STREAM_RING_RESULT`](work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)、
+  `/opt/ai/logs/agent-hot-turn-stream-ring-20261031T1418Z/`。
+- 复盘：这一轮证明“看到大 phase 就直接加深 prefetch”仍然是局部思维。是否值得继续
+  `wait copy`，取决于 routing 是否在 copy 前足够早且完整可见，以及能否只预取实际选中
+  专家；这些都必须先用源码和真实路由统计给出整请求秒数上界。
+- 下一步与理由：`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`，只读、不重启。检查 554-token
+  chunk 的 top-k routing 可用时点、15-expert lookahead 的等待来源、最坏路由密度、
+  bookkeeping 与数值边界；只有 wall `>=1%` 且绝对 `>=0.05 s` 的保守上界才预注册实现。
+  否则转向 `dequant 106 ms` 是否含可证明的重复工作，不扫描更多 prefetch 参数。
+
 ## I-20261031-125 · GDN conv/L2 局部收益未穿透 wall；改为先拆热续轮主相位
 
 - 目标 / 指标：验证当前旧 engine 的 `STRATA_GDN_CONVL2=2` 能否把 596 fresh 与 94K

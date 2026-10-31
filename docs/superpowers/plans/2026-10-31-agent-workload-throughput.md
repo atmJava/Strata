@@ -2,7 +2,7 @@
 
 日期：2026-10-31
 
-状态：第十九次评审后修订，可以继续执行。
+状态：第二十次评审后修订，可以继续执行。
 
 ## 全局目标
 
@@ -10,6 +10,9 @@
 明确阻塞的时间，并减少完成同一任务所需的重复模型工作。当前执行主轴是通常 1 个主代理、
 偶尔 2 个的编辑—测试循环；优先消除每一轮都会发生的 prompt/read 与 decode 等待。
 每轮必须先用真实触发率和绝对秒数证明收益，不能把局部 kernel 改善或 token/s 当作结果。
+当前 frontier 已从“猜相邻 kernel”收窄到 596/94K 普通热续轮 phase map 中最大的可动项；
+任何围绕 `wait copy`、GEMM 或 dequant 的候选，都必须先证明生产 routing 的真实触发率和
+保守整任务上界，再决定是否改源码或重启。
 
 优先级按用户实际感受到的结果排列：
 
@@ -58,7 +61,7 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 - engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
 - engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
 - config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
-- 当前 PID：server / vision / engine `164043 / 164045 / 164050`
+- 当前 PID：server / vision / engine `166198 / 166200 / 166205`
 - 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
 
 生产启动与恢复约需 2–3 分钟。每次重启必须说明预期节省能否覆盖加载、缓存丢失和不可用
@@ -264,7 +267,7 @@ GPU timeline `459 ms`、host staging `501 ms`；stage 2 为 `647/788 ms`。stage
 `gemm down 68 ms`。因此下一候选直接验证更深的 streamed expert ring，而不是继续
 GDN/短读/版本邻域。
 
-### P2f：`AGENT-HOT-TURN-STREAM-RING`（当前）
+### P2f：`AGENT-HOT-TURN-STREAM-RING`（已否决）
 
 554-token chunk 低于默认 `stream_all_min=1024`，当前走 32-slot staged walk，只提前
 15 个专家，stage 2 的 copy 等待达到 `173 ms`。B 只设置现有 env
@@ -276,6 +279,31 @@ GDN/短读/版本邻域。
 1 路通过后测 2 路第二 TTFT 与完成跨度，4 路非回退，6/8 安全回归。失败立即恢复 A，
 不扫描 stream threshold、ring 容量或邻近参数。契约：
 [`AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md)。
+
+判决：B 通过路径、质量、健康与资源门，但 596 hot-long wall 从 A1 中位
+`1.509808 s` 升到 `1.898041 s`，慢 `25.714%`，绝对多 `0.388233 s`；prompt 中位从
+`1401.7 ms` 升到 `1787.9 ms`。full ring 按全部专家顺序预取，而 554-token chunk 只路由
+少量专家，额外 copy 远大于更早 fetch 的收益。按门未跑 94K/并发矩阵，生产已恢复 A2。
+见
+[`AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
+
+### P2g：`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`（当前，只读）
+
+phase map 仍显示 stage 2 有 `173 ms wait copy`，但 full-ring 已证明盲目加深预取会亏。
+当前只读审计需要回答：
+
+- 554-token chunk 的 top-k routing 在 copy 开始前多早可用，是否完整；
+- 当前 staged walk 为什么只提前 15 个专家，哪些等待来自 ring 容量、routing 可见性或
+  host/GPU 同步；
+- 只预取本 chunk 实际选中专家能否减少 copy，最坏路由密度和额外 bookkeeping 是什么；
+- 以真实 596/94K 三波 phase 和绝对秒数计算，单次整请求保守上界能否同时达到
+  wall `>=1%` 与 `>=0.05 s`；
+- 改动是否保持每行算术、top-k 结果、token 选择、finish 和工具语义逐字不变，以及能否
+  用 env 精确关闭。
+
+只有源码控制流、真实 routing 统计和保守上界都过门，才预注册 A1/B/A2 实现候选。审计本身
+不改源码、不重启、不产出性能声明；若 routing 无法提前且上界不足，则转向 `dequant` 是否
+存在可证明的重复工作，而不是扫描更多 prefetch 参数。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -349,6 +377,11 @@ GDN/短读/版本邻域。
 绝对节省 `0.012476/0.002898 s`，因此也已否决并恢复 A2。当前执行
 `AGENT-HOT-TURN-PHASE-MAP` 已完成：596/94K 热长轮都只约有 554 个 fresh token；
 stage 2 的 `wait copy 173 ms` 是最大可移动相位。当前执行
-`AGENT-HOT-TURN-STREAM-RING`：只设置 `STRATA_PREFILL_STREAM_MIN=0`，验证更深的
-streamed ring 能否把 copy 等待穿透到用户 wall。当前生产为 server/vision/engine
-`165253/165255/165260`，health loaded、六 slots / 两 groups，`strata.service` inactive。
+`AGENT-HOT-TURN-STREAM-RING` 已否决：full ring 让 596 wall 慢 `25.714%`，没有把 stage 2
+copy 等待转成用户收益。当前生产为 server/vision/engine
+`166198/166200/166205`，health loaded、六 slots / 两 groups，`strata.service` inactive。
+
+当前执行只读 `AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`：先查明 routing 结果在 copy 前是否
+可用、只预取选中专家能否在 596/94K 上给出 `>=1%` 且 `>=0.05 s` 的整请求保守上界，并
+证明不会改变模型算术。未过源码/上界门不构建、不重启；审计完成后立即按同一优先级门复盘
+下一项，不能停在局部 prefetch 参数扫描。

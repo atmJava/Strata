@@ -8,10 +8,10 @@
   严重尾部，并保持工具调用、代码修改、测试结果和任务成功率正确。通常 1 个主代理、偶尔
   2 个、峰值 1 主 3 子代理；1/2 路是主优化目标，4 路非回退，6/8 只做安全回归。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第十九次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
+  已完成第二十次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
   单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。没有接入用户实际路径的能力
   只算机制收益，不能写成体验已改善；重启成本必须计入当轮。
-  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第十九版完成后再次尝试创建新版目标，
+  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第二十版完成后再次尝试创建新版目标，
   接口仍以
   “unfinished goal”拒绝；当前工具不能改写目标文本或恢复旧目标。本仓库计划是当前执行
   的权威目标，不能把平台旧目标当作已更新。
@@ -101,13 +101,20 @@
   `gemm gate/up 130 ms`、`dequant 106 ms`、`gemm down 68 ms`。profiler 请求
   零错误、parity 全过，生产已恢复且无 `STRATA_PREFILL_TIMING`。见
   [契约](work/AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md)。
-- 当前项：AGENT-HOT-TURN-STREAM-RING
-  554-token chunk 低于默认 `stream_all_min=1024`，走 32-slot staged walk，只提前
-  15 个专家；stage 2 copy 等待 `173 ms`。B 只设置
-  `STRATA_PREFILL_STREAM_MIN=0` 进入更大的 streamed ring。理论 wall 上界约
-  `11%`，只隐藏 10% 也可过 1% 门。A1/B/A2 覆盖同口径 596/94K；1 路通过后测 2 路
-  第二 TTFT/完成跨度，4 路非回退，6/8 安全。失败立即恢复 A，不扫描阈值或 ring
-  容量。见 [契约](work/AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md)。
+- 上一项否决：`AGENT-HOT-TURN-STREAM-RING`。B 只设置
+  `STRATA_PREFILL_STREAM_MIN=0`，真实命中 full streamed ring，并通过实际 env、
+  六 slots / 两 groups、health、资源、三组 fixed greedy 和 smoke。但 596 hot-long
+  wall 从 A1 中位 `1.509808 s` 升到 `1.898041 s`，慢 `25.714%`，绝对多
+  `0.388233 s`；prompt 中位从 `1401.7 ms` 升到 `1787.9 ms`。full ring 按全部专家
+  顺序预取，而 554-token chunk 只路由少量专家，额外 copy 远大于更早 fetch 的收益。
+  按停止门未跑 94K、2 路或并发矩阵；生产已恢复 A2。见
+  [result](work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
+- 当前项：AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT（只读）。先证明 554-token chunk 的
+  top-k routing 在 copy 前何时可用、当前 15-expert lookahead 的等待来自哪里，以及只
+  预取本 chunk 选中专家能否在 596/94K 上给出 wall `>=1%` 且绝对 `>=0.05 s` 的整请求
+  保守上界。必须同时说明最坏路由密度、额外 bookkeeping、bitwise/数值影响和 env
+  回滚；未过源码与上界门不构建、不重启。若 routing 无法提前或上界不足，转向检查
+  `dequant 106 ms` 是否存在可证明的重复工作，不扫描更多 prefetch 参数。
 - 降级项：`AGENT-HISTORY-STATE-RESIDENCY` 仍保留为低频 p99 可行性。34 个有效会话只有
   1 个超过 24 小时间隔、2 个超过 12 小时，不得排在普通热续轮之前；检查双卡 layer split、
   六 batch slots、prompt cache 下多 stage 状态格式、223K 容量、恢复时间、写放大、
@@ -122,7 +129,7 @@
   上三次真实 Codex compaction 已复用约 `99.1%`，不能再写成 Strata 缺陷。精确 pin
   可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
   中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
-- 当前运行：server/vision/engine `165253/165255/165260`。server cwd 为
+- 当前运行：server/vision/engine `166198/166200/166205`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`，cwd 为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z`。监听 `127.0.0.1:8080`；
