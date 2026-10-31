@@ -3818,6 +3818,7 @@ class Service:
         self.codex_compaction_cache = False           # #924 (opt-in): a Codex compaction is rendered with its conversation's tools
         self.codex_thread_titles = False              # #923 (opt-in): answer Codex's thread-title turns without the engine
         self.codex_system_before_tools = False        # opt-in: shared Codex instructions precede the per-thread tool list
+        self.codex_auto_prefix_pin = False            # opt-in: pin the system/tool boundary for sibling-prefix reuse
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
         self.model_arch = None                        # the config's architecture ("qwen4exp"): None = no model-card defaults
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
@@ -7570,6 +7571,12 @@ def make_handler(svc: Service):
                 messages, validator = prepare_format(responses_api.text_format(req), messages, with_tools=bool(tools))
             except ValueError as e:
                 raise ResponsesError(str(e).replace("response_format", "text.format"), "text.format") from None
+            if (svc.codex_auto_prefix_pin and svc.codex_system_before_tools and tools and
+                    req.get("strata_prefix") is None and messages and
+                    messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str)):
+                # Keep the shared system through the end of its turn; the engine pins the exact token
+                # boundary rendered before the tool boilerplate instead of restoring an earlier checkpoint.
+                req = {**req, "strata_prefix": {"message": 0, "chars": len(messages[0]["content"])}}
             noted = svc.__dict__.setdefault("hosted_tools_noted", set())   # said once per tool, not per request
             if set(skipped) - noted:
                 print(f"[strata] /v1/responses: left out the hosted tools {', '.join(sorted(set(skipped) - noted))} "
@@ -8658,6 +8665,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default
     svc.codex_system_before_tools = cfg.get("codex_system_before_tools") is True
+    svc.codex_auto_prefix_pin = cfg.get("codex_auto_prefix_pin") is True
     try:
         svc.set_aliases(cfg.get("aliases"))             # #297: other names the model answers to
     except ValueError as e:

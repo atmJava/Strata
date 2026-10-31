@@ -551,6 +551,55 @@ class OverHttp(Server):
         self.assertIn("/v1/responses", self.svc.v1_status()["dialects"])
 
 
+class AutoPrefixPin(Server):
+    def setUp(self):
+        super().setUp()
+        self.svc.codex_system_before_tools = True
+        self.samplings = []
+        self.ids = []
+        run = self.svc.run
+
+        def recorded(ids, thinking, tools, max_new, sampling, *rest):
+            self.ids.append(list(ids))
+            self.samplings.append(dict(sampling))
+            return run(ids, thinking, tools, max_new, sampling, *rest)
+        self.svc.run = recorded
+
+    def request(self, **extra):
+        body = {"model": "m", "input": "hi", "instructions": "You are a coding agent.",
+                "tools": TOOLS, **extra}
+        code, r = self.post(body)
+        self.assertEqual(code, 200, r)
+        return body
+
+    def test_off_by_default_and_enabled_pin_the_rendered_system_boundary(self):
+        self.request()
+        self.assertNotIn("strata_prefix", self.samplings[-1])
+        before = self.ids[-1]
+
+        self.svc.codex_auto_prefix_pin = True
+        self.request()
+        after = self.ids[-1]
+        pin = self.samplings[-1]["strata_prefix"]["tokens"]
+        self.assertEqual(after, before)                 # the pin changes cache policy, not the prompt
+        self.assertGreater(pin, 0)
+        self.assertLess(pin, len(after) - 1)
+        self.assertTrue(self.tok.decode(after[:pin]).endswith("You are a coding agent."))
+        self.assertTrue(self.tok.decode(after[pin:]).startswith("\n\n# Tools"))
+
+    def test_an_explicit_prefix_is_not_overwritten(self):
+        self.svc.codex_auto_prefix_pin = True
+        self.request(strata_prefix={"tokens": 40})
+        self.assertEqual(self.samplings[-1]["strata_prefix"], {"tokens": 40})
+
+    def test_no_tools_or_no_system_message_is_not_pinned(self):
+        self.svc.codex_auto_prefix_pin = True
+        self.request(tools=[])
+        self.assertNotIn("strata_prefix", self.samplings[-1])
+        self.request(instructions=None)
+        self.assertNotIn("strata_prefix", self.samplings[-1])
+
+
 class ToolRoundTrip(Server):
     script = [CALL, ANSWER]
 
