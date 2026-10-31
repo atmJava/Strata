@@ -1,7 +1,8 @@
 # UTIL-BATCH-FAIR-SERVE contract
 
-Status: pending. This file is committed before the candidate source change or server
-measurement.
+Status: rejected at the server throughput gates. Result:
+[`UTIL_BATCH_FAIR_SERVE_RESULT-20261031.md`](UTIL_BATCH_FAIR_SERVE_RESULT-20261031.md).
+This file was committed before the candidate source change or server measurement.
 
 ## Question
 

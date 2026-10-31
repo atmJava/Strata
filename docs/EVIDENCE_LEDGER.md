@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-123，按编号）
+## 台账索引（L-000…L-124，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -137,6 +137,7 @@
 | L-121 | 10-31 10:4x | 修正到真实 18 GDN + 6 QSA 层序后，T=2 的 24 层 graph 两卡均 7/7 胜、全 bitwise，中位节省 `177.0208/191.7025 us`；B 三组 greedy 各两轮逐字一致并命中真实 T=2 capture | **GPU 预筛/B parity 通过；A1 6 路 GPU runtime 故障阻断 A-B-A；后由 L-122 完成** |
 | L-122 | 10-31 11:1x | 重启后同 boot A1-B-A2 的 2/4/6/8 路为 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`；只有 8 路过双门，2/4 路回退超过 1%，2 路 A 漂移 `-7.067%` | **UTIL-BATCH-SIDE-MIXER 吞吐/漂移门否决；A2 已恢复；三臂 36 波零错误、零外来请求** |
 | L-123 | 10-31 11:2x | Q5 head IL grid 全 parity；有效 `screen2-gpu0-*` 中 T=2 的 capped grid 全慢于默认，T=3 最佳 grid `2560` 仅比默认快 `0.182` 个百分点，远低于 18.5% head 门槛 | **UTIL-Q5-HEAD-IL-GRID 性能筛选门否决；源码已移除；未构建 server、未重启** |
+| L-124 | 10-31 12:0x | Fair stage service 在 B 真实命中 8 个多行 batch capture，A1/B1/B2/A2 greedy 全逐字；2/4/6/8 路 `+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`，2 路 A 漂移 `-7.067%` | **UTIL-BATCH-FAIR-SERVE 吞吐/漂移门否决；A2 已恢复；三臂 180 请求零错误、零外来请求** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3918,6 +3919,52 @@ graph 路径没有提供可复现收益，部分行反而回退。
 `batch_poll -> verdict -> stage hand-off -> batch_launch`，以及 `conc_serving` 的 doorbell
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
+
+## L-124 UTIL-BATCH-FAIR-SERVE：跨 stage 公平服务通过路径与 parity，但 4/8 路回退
+
+**判定**：**否决。** 候选成功让另一 pipeline stage 在 callback 顺序上获得机会，但完整
+并发曲线没有通过非回退与漂移门。2 路增益不能抵消 4/8 路回退和 6 路弱胜率。
+
+**实现**：默认关闭的 `STRATA_BATCH_FAIR_SERVE=1` 在 `Verifier::batch_serve()` 服务一个
+真实 ring 后，若当前 stage 还有 layer，则返回 `0` 给 `pump()`。单窗口路径、一层内的
+callback 顺序、row 算术、plan、GPU launch、event、commit、sampling 与 finish 不变。
+
+**构建与启动**：候选 engine sha256
+`0099f11a08fa3e8a5a58783e0fdc1e2c4fdb60cebb288c6044d3b7e31b3002b7`，
+`verify.cpp` sha256
+`b5a9a170d899f7af2ca947ccd3831685d864abf22c5884434cfde5ca4b5dafce`。
+构建 option 与 A 一致；`batch_read_test`、`batch_telemetry_test` 2/2 通过。B 启动约
+148 秒，6 slots / 2 groups、health loaded，运行 env 有候选开关，两个 stage 标记存在。
+六路探针捕获 12 个 batch window，其中 4 个两行、4 个三行，证明生产路径真实命中。
+
+**正确性**：A1、B1、B2、A2 各跑三组冻结 greedy 两次；所有文本、采样与 `finish=stop`
+归一化后完全相等。无 HTTP、执行、CUDA、never-rang 或 timeout 错误。
+
+**吞吐**：A1/A2 基线在同一 boot、停止 A 前由相同 harness 采集。B 跑同一
+2/4/6/8 路、每级 3 波、400-token 矩阵。
+
+| streams | A1 | B | A2 | A1/A2 combined | B delta | paired wins | A drift |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 76.809 | 80.451 | 71.381 | 73.876 | `+8.901%` | 5/6 | `-7.067%` |
+| 4 | 115.342 | 109.691 | 115.882 | 115.612 | `-5.121%` | 3/6 | `+0.468%` |
+| 6 | 125.511 | 129.836 | 128.785 | 127.148 | `+2.114%` | 4/6 | `+2.609%` |
+| 8 | 114.787 | 111.750 | 111.930 | 114.747 | `-2.612%` | 2/6 | `-2.489%` |
+
+4/8 路回退超过 1%；没有一级同时满足 1% 与 5/6 胜。三臂各 60 请求、12 波，零请求错误和
+零外来请求，finish 仅 `length/stop`。
+
+**恢复**：B 停止约 9 秒，A2 装载约 198 秒。A2 server/engine/vision PID
+`26243/26252/26247`，engine `105a4171...`、config `88de996a...`，6 slots / 2 groups、
+health loaded，A2 parity 通过；运行 env 无 `STRATA_BATCH_FAIR_SERVE`。systemd inactive/dead，
+RAM 约 14 GiB available、swap 0。
+
+**证据**：`/opt/ai/logs/util-batch-fair-serve-20261031T0355UTC/`。B sweep sha256
+`1f9939df89bb909ae155c2d7255a8bdc5c5397c46766037eb214521af822c85b`，A/B summary
+`baceff8ae3840dda27a42309f0d2a0d723fe971cf8e92ad656b13abdb2dd1563`，startup gates
+`19b8d4a6c3d33fc1f1a52eb28592acdab19ad6c4fd59b5e47718b9696b9dbc0b`。
+
+**没测什么**：没有长上下文、混合长 prefill 流量、自然语言质量套件、其他模型或非 CUDA
+后端。该否决只覆盖当前 2×2080 Ti 生产形状上的跨 stage fair-service 调度。
 
 ## L-123 UTIL-Q5-HEAD-IL-GRID：persistent CTA grid 的收益远低于 head 门槛
 

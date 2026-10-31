@@ -140,6 +140,13 @@
     `T=2` 每个 capped grid 都慢于默认路径，`T=3` 最佳 grid `2560` 也只比默认快
     `0.182` 个百分点，远低于预注册 18.5% head / 约 `0.192 ms` 整 stage 门槛。临时源码
     已移除，没有构建 server、重启或 A-B-A；下一项只读拆解 `waitA`。
+37. **UTIL-BATCH-FAIR-SERVE 在端到端并发门否决**：默认关闭的候选让每个 stage 每轮最多
+    服务一个已到达的 layer，随后让 `pump()` 访问另一 stage。B 通过 6/2 启动、两个 stage
+    标记、12 个 captured batch window（其中 8 个多行）和 A1/B1/B2/A2 冻结 greedy
+    parity。2/4/6/8 路相对 A1/A2 合并中位为
+    `+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`；4/8 回退超过 1%，
+    2 路 A 漂移 `-7.067%`，6 路不足 5/6。A2 已恢复，下一项继续拆 `waitA` 的 host 计算、
+    发布/spin 与 GPU consume，不再改跨 stage 服务顺序。
 
 ## 候选
 
@@ -182,6 +189,7 @@
 | UTIL-SIDE-MIXER | 用现有 `STRATA_SIDE_MIXER=2` 重叠 GDN qkv/gate 与 QSA q/k/v 投影 | 两卡 `T=1..8` 全输出逐字；至少一个生产宽度 ≥`0.183 ms` 且 5/7 胜；源码证明生产 route 命中后才允许 server A-B-A | 否决 | L-120：14 进程、560 个 buffer 全相等；T=3/4 整窗上界 `1.10–1.29%`，但 `side_proj/sidem` 含 `!batch_rec_`，生产的 `capture_batch()` 全部不会命中 | 未构建、未重启；不把现有 env 直接用于 A-B-A |
 | UTIL-BATCH-SIDE-MIXER | 为生产两行 batch window 的 GDN qkv/gate 与 QSA q/K/V 实现窄范围 side stream | 先证明 graph capture、slot-local state、row order 与全部输出 bitwise；production-shaped batch harness 两卡均 7/7 胜且过 `0.183 ms`；随后 env-only A1-B-A2 过 2/4/6/8 的 1%、5/6、非回退、漂移和零错误门 | 否决 | L-121/L-122：24 层 mixed graph 两卡 7/7 胜、全 bitwise，B/A2 parity 全过；A1-B-A2 的 2/4/6/8 路 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`；2 路漂移 `-7.067%` | 只有 8 路过双门但其他级失败；A2 已恢复，不扫描 T=2 邻近窗口或按并发级开条件分支 |
 | UTIL-Q5-HEAD-IL-GRID | 只限制生产 Q5_K head 的 persistent CTA grid，保留现有精确 IL 算术 | `T=1..8` 全部 bitwise；head 中位至少改善 18.5% 或约 `0.192 ms`，两卡同向且 5/7 胜，之后才允许 server A-B-A | 否决 | L-123：性能筛选门；全 parity，`T=2` 所有 capped grid 慢于默认，`T=3` 最佳只比默认快 `0.182` 个百分点，最佳 capped gain `1.272%` | 源码已移除；不扫描邻近 grid 或改写 IL row/reduction |
+| UTIL-BATCH-FAIR-SERVE | 跨两个流水 stage 公平服务已到达的 CPU expert doorbell | B 真实命中多行 batch capture；A1/B1/B2/A2 greedy 逐字；A1-B-A2 的 2/4/6/8 至少一级 `+1%` 且 5/6 胜，其他级不回退 >1%，漂移 ≤3%，零 HTTP/执行错误和外来请求 | 否决 | L-124：2 路 `+8.901%`/5/6 但 A 漂移 `-7.067%`；4/8 路回退 `5.121%/2.612%`，6 路仅 4/6 胜；三臂 180 请求零错误 | A2 已恢复；不重试跨 stage 公平服务或无 ring 快返回，下一项拆 `waitA` 内部组成 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |

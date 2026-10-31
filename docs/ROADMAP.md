@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T11:15+08:00。
+> 最后更新：2026-10-31T12:10+08:00。
 
 ## 用户目标
 
@@ -71,8 +71,12 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
 名义过 1%，未过 5/6 胜，A 漂移还达 `+4.053%`。2/4/6 回退超过 1%，因此否决并恢复 A2。
 `UTIL-Q5-HEAD-IL-GRID` 随后只限制生产 Q5_K head 的 persistent CTA grid；全部
 `T=1..8`/rows `1/2/4` parity 通过，但 `T=2` 的 capped grid 均不如默认，`T=3` 最佳
-只比默认快 `0.182` 个百分点，已在性能筛选门否决。下一项回到末级约 `8.5%` 的 `waitA`
-真实来源：CPU expert-plan 计算/发布、GPU 完成后的 host poll/hand-off、普通调度等待。
+只比默认快 `0.182` 个百分点，已在性能筛选门否决。`UTIL-BATCH-FAIR-SERVE` 随后验证跨
+两个 stage 公平服务 doorbell：启动、路径、parity 与零错误全过，但 2/4/6/8 路相对 A
+合并中位为 `+8.901%/-5.121%/+2.114%/-2.612%`，4/8 回退超过 1%，2 路 A 漂移
+`-7.067%`，6 路仅 4/6 胜，因此否决并恢复 A2。下一项继续拆末级约 `8.5%` 的 `waitA`
+内部组成：host expert-plan 计算、flag 发布后的 spin，以及 GPU consume；不再尝试改变
+跨 stage 服务顺序。
 P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
 
 ## 候选路线
@@ -117,6 +121,7 @@ P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须�
 | UTIL-SIDE-MIXER | M14 | 用 side stream 重叠 qkv/gate 与 QSA q/k/v | 已证伪（生产可达性） | 低；两卡独立 harness，未重启 | **否决**：T=3/4 整窗上界 `+1.10–1.29%`，560 个 buffer 全 bitwise；但生产 batch window 含 `!batch_rec_` 排除，命中率为零 |
 | UTIL-BATCH-SIDE-MIXER | M14 | 只对 `batch_rec_ && T==2` 重叠 GDN qkv/gate 与 QSA q/K/V | production graph 两卡 7/7 胜、全 bitwise；服务端至少一级 `+1%`、5/6 胜、其他级不回退 >1%、漂移 ≤3% | 中；两卡 GPU 预筛、B parity、三次同 boot sweep | **否决**：2/4/6/8 路 `-2.755%/-6.766%/+0.378%/+4.969%`，只有 8 路过双门；2 路漂移 `-7.067%`，A2 已恢复 |
 | UTIL-Q5-HEAD-IL-GRID | M14 | 只限制生产 Q5_K output head 的 persistent CTA grid | 全 `T=1..8`/rows `1/2/4` bitwise；head 改善至少 18.5% 或约 `0.192 ms`，两卡同向、5/7 胜后才进入 server | 低；独立构建与 kernel screening，未重启 | **否决（performance screening）**：全 parity；`T=2` 所有 capped grid 慢于默认，`T=3` 最佳只比默认快 `0.182` 个百分点，源码已移除 |
+| UTIL-BATCH-FAIR-SERVE | M14 | 每个 stage 每轮只服务一个已到达 layer，让另一 stage 先发布 plan | B 多行 window 真实命中、冻结 greedy 等于 A；A1-B-A2 至少一级 `+1%`/5-of-6，其他级不回退 >1%，漂移 ≤3%，零错误/外来请求 | 中；一次候选启动和一次恢复，约 6 分钟加载成本 | **否决**：2 路 `+8.901%`/5-of-6 但 A 漂移 `-7.067%`；4/8 路 `-5.121%/-2.612%`，6 路仅 4/6 胜；A2 已恢复 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -254,6 +259,13 @@ P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须�
     相对 plain 为 `+1.272%`，仅比默认高 `0.182` 个百分点，距 18.5% head/约
     `0.192 ms` 整 stage 门槛超过 15 个百分点。未跑七进程确认或 server A-B-A，源码已移除。
     下一项只读审计 `waitA`，与已否决的 poll 无 ring 快返回严格区分。
+
+41. **UTIL-BATCH-FAIR-SERVE 在端到端并发门否决**：候选在每个 stage 服务一个真实 ring 后
+    返回 `pump()`，避免同 stage 连续消费 doorbell 而饿死另一 stage。B 的 12 个 captured
+    window 中 8 个为多行，启动/parity 与零错误均通过；但 A1-B-A2 的 2/4/6/8 路为
+    `+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`。4/8 回退超过 1%，
+    2 路 A 漂移 `-7.067%`，6 路不足 5/6。A2 已恢复；下一步只读区分 `pool()` 的 host
+    plan 计算、发布后的 spin 和 GPU consume，不重试跨 stage 公平服务。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

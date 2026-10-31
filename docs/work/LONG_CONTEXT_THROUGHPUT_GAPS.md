@@ -8,6 +8,13 @@ T=1/2/3 有 `+1.31–2.67%`，但每次只省 `0.44–0.79 us`；每个 24 层 s
 整窗投影为 `0.11–0.20%`，已在 server 重启前否决。后续候选必须直接报告整窗绝对节省，
 不能把局部 launch/path 的百分比当成端到端收益。
 
+**2026-10-31 fair-service addendum**：`UTIL-BATCH-FAIR-SERVE` 让每个 stage 每轮最多
+服务一个真实 ring，再返回给 `pump()` 访问另一 stage。候选真实命中多行 batch window，
+A1/B1/B2/A2 冻结 greedy 全逐字，但同 boot 2/4/6/8 路为
+`+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`。2 路 A 漂移
+`-7.067%`，4/8 回退超过 1%，因此否决并恢复 A2。下一步必须拆 `waitA` 内部的 host
+expert-plan 计算、发布后的 spin 与 GPU consume，不能再用跨 stage 轮转顺序解释或重试。
+
 **2026-10-31 side-mixer addendum**：普通窗口的 `STRATA_SIDE_MIXER=2` 在两卡
 `T=1..8` 保持 560 个输出 buffer 全 bitwise，T=3/4 按每 stage 18 GDN + 6 QSA 换算的乐观
 整窗上界为 `+1.10–1.29%`。但生产 decode 由 `capture_batch()` 设置 `batch_rec_=true`，

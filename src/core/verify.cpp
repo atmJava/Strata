@@ -902,6 +902,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         std::fprintf(stderr, "strata verify trace (#649): on\n");
     }
     prof_on_ = std::getenv("STRATA_VERIFY_PROFILE") != nullptr;
+    static const bool fair_batch_serve = [] {
+        const char* v = std::getenv("STRATA_BATCH_FAIR_SERVE");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    if (fair_batch_serve)
+        std::fprintf(stderr, "strata verify: batch doorbells serve at most one layer per stage turn "
+                             "(STRATA_BATCH_FAIR_SERVE)\n");
     if (const char* rs = std::getenv("STRATA_ROUTE_STATS"); rs != nullptr && rs[0] == '1') {
         const size_t nrs = (size_t) 9 * (size_t) g.n_layers * 8;
         if (cudaMalloc((void**) &rs_dev_, nrs * 8) == cudaSuccess) {
@@ -4201,6 +4208,10 @@ bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_
 
 int Verifier::batch_serve(PoolMultiFn pool, void* user) {
     if (!b_running_.load(std::memory_order_acquire)) return 1;
+    static const bool fair = [] {
+        const char* v = std::getenv("STRATA_BATCH_FAIR_SERVE");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
     volatile uint32_t* const seq = h_seq_;
     // #646: an all-resident stage's graph raises no host doorbells (see run_slot_rows): nothing to serve per layer,
     // except the PLE flag, which the graph's first wait reads and only the host can raise (the same raise
@@ -4242,6 +4253,10 @@ int Verifier::batch_serve(PoolMultiFn pool, void* user) {
         ms_pool += ms_since(b);
         ring_now();
         b_k_.fetch_add(1, std::memory_order_release);
+        // Let pump visit the other pipeline stage before this one takes its next ring. The
+        // next stage's GPU may already be waiting for a plan this callback would otherwise
+        // starve behind the rest of this stage's CPU expert work.
+        if (fair && b_k_.load(std::memory_order_acquire) < b_steps_) return 0;
     }
     return 1;
 }

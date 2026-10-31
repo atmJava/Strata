@@ -3,6 +3,38 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-97 · Fair batch service 通过路径与 parity，但在 4/8 路回退和漂移门否决
+
+- 目标 / 指标：验证每个 stage 每轮只服务一个已到达 layer，能否让 `pump()` 先访问另一
+  stage，从而降低末级 `waitA`，并让 2/4/6/8 路至少一级稳定提升 1%。
+- 假设与预期：stage 1 的 callback 在 CPU expert 工作中可能连续消耗新 ring，使 stage 2
+  GPU 已等待但 plan 尚未发布；每轮只服务一层应把公平性交还给 `pump()`。
+- 为什么选这条路线：它改变真实 ring 出现后的跨 stage 服务顺序，不同于已否决的无 ring
+  快返回 `UTIL-POLL-TURNOVER`，也不改变算子、row、事件或 commit。
+- 改动与实验：默认关闭的 `STRATA_BATCH_FAIR_SERVE=1` 在 `batch_serve()` 服务一层真实
+  ring 后返回 `0`，仅在当前 stage 还有待服务 layer 时生效。B 使用 A 配置的完整深拷贝，
+  只替换 engine 和增加该 env；冻结 2/4/6/8 路、每级 3 波、400 tokens。
+- 结果：B 启动约 148 秒，6 slots / 2 groups、health loaded，两个 stage 标记和 8 个多行
+  batch capture 真实命中。A1/B1/B2/A2 的冻结 greedy 全部逐字一致。相对 A1/A2 合并中位，
+  2/4/6/8 路为 `+8.901%/-5.121%/+2.114%/-2.612%`，胜场
+  `5/6, 3/6, 4/6, 2/6`；2 路 A 漂移 `-7.067%`。
+- 判决：**UTIL-BATCH-FAIR-SERVE 否决。** 4/8 路回退超过 1%，6 路只有 4/6 胜，2 路虽
+  有 5/6 胜和 8.901% 中位但未过基线漂移门；没有一级通过全部硬门。
+- 预期为何落空：把服务顺序均匀化降低了 2 路等待，却增加了更高并发下重复跨 stage 轮转
+  和 callback 返回成本；局部 `waitA` 下降不足以覆盖完整窗口的额外切换。
+- 生产状态与回滚：A2 server/engine/vision PID `26243/26252/26247`，health loaded，
+  6 slots / 2 groups，engine `105a4171...`、config `88de996a...`；运行环境没有
+  `STRATA_BATCH_FAIR_SERVE`。A2 parity 通过，RAM 约 14 GiB available、swap 0，
+  systemd inactive/dead。
+- 证据：台账 L-124、`UTIL_BATCH_FAIR_SERVE_RESULT-20261031.md`；目录
+  `/opt/ai/logs/util-batch-fair-serve-20261031T0355UTC/`，B sweep sha256
+  `1f9939df89bb909ae155c2d7255a8bdc5c5397c46766037eb214521af822c85b`。
+- 学到什么：真实 ring 与多行 window 命中仍只是必要性；端到端门必须在所有并发级同时看
+  中位、配对胜场和同 boot 漂移，不能因 2 路的显著正向结果局部采纳。
+- 下一步与理由：回到 `waitA` 内部组成，不再改服务顺序。先用现有源码和持续计时区分
+  `pool()` 的 host expert-plan 计算、发布 flag 后的 spin 及 GPU consume，证明保守整窗
+  绝对收益 ≥1% 后再预注册新机制。
+
 ## I-20261031-96 · Q5 head persistent grid 在性能筛选门否决
 
 - 目标 / 指标：验证只限制生产 `2560 -> 248320` Q5_K output-head 的 persistent CTA grid，

@@ -71,6 +71,12 @@
   grid `2560` 只比默认快 `0.182` 个百分点，远低于 18.5% head 或约 `0.192 ms` 的整
   stage 门槛，因此在性能筛选门否决；没有七进程确认、server 构建、重启或 A-B-A。临时源码
   已移除，A2 环境无 `STRATA_MMVQ_IL_HEAD_GRID`。
+  `UTIL-BATCH-FAIR-SERVE` 随后让每个 stage 每轮最多服务一个已到达的 layer。B 以
+  `STRATA_BATCH_FAIR_SERVE=1` 启动，6 slots / 2 groups、health loaded，两个 stage 标记
+  与 8 个多行 batch capture 证明路径真实命中；A1/B1/B2/A2 冻结 greedy 全部逐字一致。
+  但同 boot 的 2/4/6/8 路相对 A 合并中位为
+  `+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`；4/8 路回退超过 1%，
+  2 路 A 漂移 `-7.067%`，6 路仅 4/6 胜。候选已在吞吐门否决，A2 已恢复。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -102,8 +108,9 @@
   vocabulary-row head split、Q8 write/mixer fusion 与 batch poll 快返回都已否决。
   B6 kernel/reach 门也已否决；batch side mixer 虽然过了 production-shaped GPU 门和真实
   T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决；Q5 head grid 也在
-  性能筛选门否决。当前候选为空，下一步审计末级约 `8.5%` 的 `waitA` 到底来自 CPU
-  expert-plan 计算/发布、GPU 完成后的 host poll/hand-off，还是普通调度等待。
+  性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
+  因此也已否决。当前候选为空，下一步继续审计末级约 `8.5%` 的 `waitA` 中 CPU expert-plan
+  计算/发布与 host spin 的绝对组成，不再改变跨 stage 服务顺序。
 
 ## 3. 当前生产
 
@@ -112,10 +119,10 @@
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=0` |
-| server/engine/vision | `13890/13906/13901`，health loaded |
+| server/engine/vision | `26243/26252/26247`，health loaded |
 | A2 baseline | engine `105a4171...`，config `88de996a...`，parity 通过 |
-| latest rejected candidate | Q5 head grid；未构建 server，源码已移除 |
-| GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；约 `1006/1074 MiB` free |
+| latest rejected candidate | fair batch service；A1-B-A2 在 4/8 路回退，A2 已恢复 |
+| GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；约 `956/1022 MiB` free |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -135,13 +142,14 @@ STRATA_SHARED_SLOT_ROPE=1
 STRATA_SM75_PERF=1
 ```
 
-已停止的 batch-side B 只比 A 多了 `STRATA_BATCH_SIDE_MIXER=1`；A2 运行环境没有
+已停止的 fair-service B 只比 A 多了 `STRATA_BATCH_FAIR_SERVE=1`；A2 运行环境没有
 `STRATA_PF_WMMA`、`STRATA_PA_V2T`、`STRATA_SEL_OVERLAP`、
 `STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING`、`STRATA_PA_GROUP3`、
 `STRATA_IQ3_GRID_REPL`、`STRATA_IQ3_ACT_RELOAD`、`STRATA_IQ3_WEIGHT_REUSE`、
 `STRATA_IQ3_GRID_PAD`、`STRATA_IQ3_WEIGHT_RO`、`STRATA_BATCH_MTP`、
 `STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、`STRATA_FUSE_HEAD_GR`、`STRATA_LFUSE`、
-`STRATA_MMVF_ROWS`、`STRATA_MMVQ_IL_HEAD_GRID`、`STRATA_PROFILE_*` 或
+`STRATA_MMVF_ROWS`、`STRATA_MMVQ_IL_HEAD_GRID`、`STRATA_BATCH_FAIR_SERVE`、
+`STRATA_PROFILE_*` 或
 `STRATA_NCU_*`；`STRATA_POLL_FAST` 已随否决移除。
 `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
 引擎子进程，不能替代 service drop-in。

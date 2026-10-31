@@ -6,11 +6,21 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-Q5-HEAD-IL-GRID 已在性能筛选门否决。候选只限制生产
+- 当前项：UTIL-BATCH-FAIR-SERVE 已在同 boot A1-B-A2 吞吐门否决。默认关闭的候选在每个
+  stage 每轮最多服务一个已到达的 layer，以让 `pump()` 先访问另一 stage。B 通过构建、
+  6 slots / 2 groups、启动标记、8 个多行 batch capture、A1/B1/B2/A2 冻结 greedy 逐字
+  parity 和零请求错误门，但 2/4/6/8 路相对 A1/A2 合并中位为
+  `+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`；4/8 路回退超过 1%，
+  2 路 A 漂移 `-7.067%`，6 路仅 4/6 胜。
+- 当前项证据：B 启动约 `148 s`、恢复 A2 约 `198 s`，B 停止释放端口约 `9 s`；A2 已恢复且
+  parity 通过。证据目录
+  `/opt/ai/logs/util-batch-fair-serve-20261031T0355UTC/`，结果见
+  [UTIL_BATCH_FAIR_SERVE_RESULT](work/UTIL_BATCH_FAIR_SERVE_RESULT-20261031.md)、台账 L-124。
+- 上一项：UTIL-Q5-HEAD-IL-GRID 已在性能筛选门否决。候选只限制生产
   `2560 -> 248320` Q5_K head 的 persistent CTA grid，不改变每行算术、reduction、
   dispatch、token 选择或 finish 语义。所有 parity 逐字相等，但 `T=2` 的每个 capped
   grid 都慢于默认路径；`T=3` 最好的 grid `2560` 只比默认快 `0.182` 个百分点。
-- 当前项证据：有效计时来自 `screen2-gpu0-*`；`T=2/3/4` 最佳 capped gain 为
+- 上一项证据：有效计时来自 `screen2-gpu0-*`；`T=2/3/4` 最佳 capped gain 为
   `+0.847%/+1.272%/+1.377%`，远低于预注册的 18.5% head 或约 `0.192 ms` 整 stage
   门槛，因此没有跑七进程确认和 server A-B-A，没有构建 server、没有重启。临时源码已移除，
   A2 环境没有 `STRATA_MMVQ_IL_HEAD_GRID`。
@@ -105,7 +115,7 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前迭代：UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
+- 当前迭代：UTIL-BATCH-FAIR-SERVE、UTIL-PIPED-MTP、cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
   调度、EXPDEC、checkpoint move、GDN recurrence 合并、跨 group head 延迟合并、
   vocabulary-row head split、Q8 head write/mixer fusion 和 batch poll 快返回均已否决；
   window profile 已完成。
@@ -113,13 +123,13 @@
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：只读审计末级窗口约 `8.5%` 的 `waitA`，区分 CPU expert-plan 计算与发布、
-  GPU 完成后的 host poll/hand-off、以及普通调度等待。只有真实触发率、保守整窗绝对节省
-  ≥1%、数值影响和回滚都明确时才预注册候选。该审计与已否决的 `UTIL-POLL-TURNOVER`
-  分开处理，不重试无 ring 快返回。
+- 下一动作：继续只读审计末级约 `8.5%` 的 `waitA`，但不再改变跨 stage 服务顺序。重点区分
+  host 在 `pool()` 中计算 expert plan 的时间、发布 flag 后的 GPU consume 时间，以及 GPU
+  早于 host 到达时的 spin；只有真实触发率、保守整窗绝对节省 ≥1%、数值影响和回滚都明确
+  时才预注册下一候选。该审计与已否决的 `UTIL-POLL-TURNOVER`、本轮公平服务严格分开。
 - 当前候选：没有候选。A2 以 baseline engine `105a4171...`、config `88de996a...` 运行，
   6 slots / 2 groups、health loaded；`STRATA_BATCH_SIDE_MIXER` 和
-  `STRATA_MMVQ_IL_HEAD_GRID` 都不在环境中。
+  `STRATA_MMVQ_IL_HEAD_GRID`、`STRATA_BATCH_FAIR_SERVE` 都不在环境中。
   EXPDEC 未启动；P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
@@ -132,14 +142,14 @@
 ## 生产
 
 - 最近核对时 `strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=0`。A2 手动实例
-  server/engine/vision PID `13890/13906/13901`，health loaded，host uptime 自
+  server/engine/vision PID `26243/26252/26247`，health loaded，host uptime 自
   `2026-10-31 02:43:50 UTC`，两张 2080 Ti 均可联合 initialize。
 - A2 baseline engine/config hash 为
   `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
   `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`，frozen greedy
-  parity 通过，运行 env 无候选开关。已停候选 B engine/config hash 为
-  `49e1e84cf805ea72b949c08c436575d089fb7b8a6073eff1ec9399ecf9c540ed` /
-  `c0e3bc9be6145cb36b4f46bfd72c23dc028cbd436f29cf0d7b9c30f79b20d0cb`，仅供证据复现。
+  parity 通过，运行 env 无候选开关。已停 fair-service B engine/config hash 为
+  `0099f11a08fa3e8a5a58783e0fdc1e2c4fdb60cebb288c6044d3b7e31b3002b7` /
+  `c68b9e81ae2c28a654700218a3155be37464c8044db8b7aa0fe362b6818c3c31`，仅供证据复现。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
