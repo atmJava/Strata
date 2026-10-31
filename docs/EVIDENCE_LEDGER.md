@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-159，按编号）
+## 台账索引（L-000…L-166，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -174,9 +174,180 @@
 | L-158 | 10-31 15:2xZ | group 级 `512 experts / 32 groups`：MMQ `11.671 ms/layer`、native direct `7.848 ms/layer`，`1.49x`，48 层乐观上界 `183.5 ms`；596 A1/B/A2 1 路 wall `1.522684/1.490017/1.513878 s`，合并基线改善 `1.862%`，相对 A1 `2.145%`、`32.667 ms`，3/3 胜；2 路 hot-long `+0.705%`、2/3 胜；94K B/A2 wall `1.401311/1.438884 s` 但 prompt `1251.2/1251.5 ms`；固定 greedy 三臂全等 | **RESIDENT-PATH 正向但暂停验收，未采纳**；用户的 1% 原则认可方向，原 `0.05 s` 绝对门未过，94K 不归因；4 路在 `1:44` 后用户暂停，6/8 未跑；候选默认关闭，恢复 A1 后不继续实验 |
 | L-159 | 11-01 00:2x–00:5x | Codex 模型目录缺失使工具面 `14→9` 且省略 `apply_patch`；服务日志累计 6 次未声明工具；Schema 1/2 旧结果：Qwen high 基础严格 5/6、测试 6/6，DeepSeek 直连参考 6/6，目录后 7/7；`apply_patch` 合并 3/4；medium 严格 2/4、约快 7% | **schema 1/2 历史证据，已被 L-160 取代**；目录与工具面诊断仍有效，不归因 GPU 引擎；不用旧 7/7、3/4 作为当前通过率 |
 | L-160 | 11-01 00:5x–01:x | Schema 3：Qwen/Strata 基础严格 `5/6`、测试 `6/6`、测试字节 `6/6`、wall `159.777 s`；`apply_patch` 独立重复 `3/3`、wall `17.499/16.598/11.840 s`；DSH `0.2.1-rc.3` + DeepSeek 直连基础 `6/6`、测试 `6/6`、wall `71.391 s` | **当前基线**：目录供给已产品化；剩余失败是 final-message 收口，不是代码/测试；DSH 与 Qwen 混有模型/provider/hosting，不能归因引擎 |
+| L-161 | 11-01 01:x–01:5x | DSH 最终 Responses `input=15,419`、31 tools、76 reasoning token 后失败；GPU0 同秒 8×Xid 13（含 ESR `0x4c1eb72`）+ Xid 43 pid `172641`。约 60 次精确重放、30 个最终请求全 HTTP 200，无新 Xid。GPU0 另有 2026-09-25 Xid 62/154 历史；上游 #4190 同型号改装卡同 ESR，降显存频率后缓解 | **GPU-XID13-STABILITY 低频硬件/驱动故障已确认**：固定请求必然错误被否定，芯片损坏与修复均未证明；只读 Xid/GPU 探针已固化，未改 GPU/engine/config |
+| L-162 | 11-01 02:x | 第二十七次目标修订：新 Xid 立即抢占，但无复现时不空等；主动项转 `AGENT-TERMINAL-QUALITY-COMPARISON`。探针改为 `--boot` 读取整个 boot、同一 PCI 默认 5 秒事故聚类、时间缺失不合并；专项 `7 passed`，server 全量 `352 passed / 510 subtests`，offline preflight PASS | **方法纠偏完成**：无 Xid 窗口只记录“未观测”，不能宣称修复；上游 offset 表因负载/风扇混杂不可横比；未重启、未改生产 |
+| L-163 | 11-01 18:0x–18:2xZ | DSH `web` 当前为 `atm -> qwen3.8... -> :8888`，旧 `headless` 基准是 `deepseek-official -> deepseek-flash`；显式 overlay 对齐 Qwen/Strata 后，7 项测试全过，基础严格 `3/6`，基础耗时合计 `243.865 s`，事件/工具错误 `0/0`，新增 Xid `0` | **Provider/profile 混淆排除**：旧 DSH/DeepSeek `6/6` 不能作当前路径基线；DSH 无 `apply_patch`，该 fixture 须与 6 个基础项分开；代码和测试本身未退化 |
+| L-164 | 11-01 18:1x–18:2xZ | 同一 `transaction-rollback` 当前 prompt `4/5`、明确最终消息契约 `5/5`；完整 6 个基础 fixture 严格 `3/6 -> 6/6`，测试 `6/6`，受保护测试未改，事件/工具错误 `0/0`，新增 Xid `0` | **AGENT-STRICT-RESPONSE-CONTRACT 通过**：不得静默改写回复；真实客户端应明确最终消息只能是什么；未改用户 DSH、engine 或生产 config |
+| L-165 | 11-01 18:2xZ–19:0xZ | 7 个基础/fixture 会话 runner `197.776 s`：模型 `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联，7 个未关联请求正好是每会话一次的标题。短任务关闭标题 runner `16.854→14.901 s`、主 turn `14.929→13.001 s`，`5/6` 胜；长任务 `0/2` 胜，cache 有跨臂污染 | **AGENT-DSH-REAL-PATH-COST 完成；DSH-TITLE-INTERFERENCE 当前**：不能关闭标题产品化；保留语义并延后到主任务结束，ABBA + 标题质量门；runner wall 与 `task_wall_s` 分开，代理必须真实流式 |
+| L-166 | 11-01 18:47Z–19:05Z | 标题延后 ABBA：短任务 6 对 `task_wall` 合并中位 `17.637→15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 质量与 provider 标题；长任务 B `37.943/41.297 s` 对 A `46.411/82.438 s`，B 不回退，但 A 臂 8→11 step 漂移，只作非回退；16/16 无错误、无新增 Xid | **代理候选通过**：主任务结束前不生成标题仍保留标题质量；进入默认关闭的 server admission 产品候选，随后做生产 A/B |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-166 · 保留语义的标题延后在 ABBA 中通过代理验证
+
+**判定：代理候选通过；进入默认关闭的 Strata admission 产品候选。**
+
+短任务按 `A B B A A B B A A B B A` 运行，统一最终消息契约。主任务 `task_wall_s` 合并
+中位为 A `17.637 s`、B `15.238 s`，B 改善 `13.602%`；配对改善中位 `13.465%`，`5/6`
+胜。12/12 代码、测试、受保护测试和 sentinel 全过，12/12 最终标题来源为 provider 模型，
+没有只留 fallback。B 标题实际等待 `2.5–6.3 s` 后进入，且最终标题正常生成。
+
+长任务按 `A B B A`：A 为 `46.411/82.438 s`（8/11 个模型 step），B 为
+`37.943/41.297 s`（均 7 个模型 step）。B 没有明显回退，4/4 质量与 provider 标题通过；
+A 臂自身漂移大，因此更大名义差值不用于收益归因。
+
+本轮共 16 个 runner 报告，无 HTTP/事件/工具错误，窗口新增 NVRM Xid 为零。一次探索运行
+因最终消息多写解释而作废，未混入性能数据。原始、隐私安全证据保存在
+`/opt/ai/logs/dsh-title-defer-abba-20261101/`。产品契约见
+[`DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md`](work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
+
+## L-165 · DSH 模型等待占 93.2%；标题请求需保留语义但与主请求隔离
+
+**判定：AGENT-DSH-REAL-PATH-COST 完成；DSH-TITLE-INTERFERENCE 成为当前主动项。**
+
+7 个基础/fixture 会话合计 runner 墙钟 `197.776 s`。95 个模型 step 中，40 个主模型
+step 全部通过 token 数和开始时间关联到服务端请求。时间分解：
+
+| 项 | 秒 | 占 runner |
+|---|---:|---:|
+| 模型 step | 184.332 | 93.202% |
+| 工具区间并集 | 10.505 | 5.312% |
+| residual | 2.890 | 1.462% |
+
+另有 7 个未关联请求，正好等于 7 个新 DSH 会话各一次的隐藏标题请求。它们约
+266 prompt token、118 output token，`max_output_tokens=4096`、零工具，单次中位
+`9.8 s`；请求与主任务并发，会争用 GPU 和 prompt cache。
+
+同一 `single-file` fixture 的旧 A/B：
+
+| 口径 | 有标题 | 无标题 | 无标题节省 | 胜场 |
+|---|---:|---:|---:|---:|
+| runner 进程 wall | `16.854 s` | `14.901 s` | `10.647%` | 5/6 |
+| 主任务 turn wall | `14.929 s` | `13.001 s` | `11.843%` | 5/6 |
+
+长任务无标题为 `0/2` 胜（`45.202/46.201 s` 对 `43.083/44.140 s`）。首组 prompt cache
+也有跨臂污染：A 首步通常只复用 `582` token，B 首组复用 `5,463` token。因此现有结果只支持
+继续做隔离实验，不能支持关闭标题或产品化。
+
+测试方法同时修正：`bench-agent-quality.py` 的 runner `wall_s` 明确包含 turn 后辅助工作；
+`probe-dsh-session-cost.py` 新增 `task_wall_s`、`turn_union_s`、`post_turn_s`，主任务
+判决使用首个 turn start 到最后一个 turn end；`agent-shape-proxy.py` 改为逐块流式转发，
+避免缓冲整个 SSE 后破坏 TTFT。标题实验只识别 `max_output_tokens=4096` 且无工具的形状，
+不读取 prompt 文本猜测。完整记录见
+[`AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md`](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
+
+原始报告：
+
+- `/opt/ai/logs/dsh-session-cost-contract-20261101.json`
+  SHA-256 `06e1efccc673c558dac697819c8f5e9a859ad7cea3c8761b9364730156f952a0`
+- `/opt/ai/logs/strata-title-ab-a-cost-final.json`
+  SHA-256 `7867f78798ca05293d52c689ac2dce5199e967d2ea7f7bd6e8aacd1f52aa000d`
+- `/opt/ai/logs/strata-title-ab-b-cost-final.json`
+  SHA-256 `0a22caa10144e9725e42e52a53909469e1e08776411fa5671fefaa2c1448527b`
+
+## L-164 · 明确最终消息契约消除 Qwen/Strata 的随机附加说明
+
+**判定：AGENT-STRICT-RESPONSE-CONTRACT 通过；这是指令遵循修复，不是引擎修复。**
+
+同一 DSH headless + Qwen/Strata relay 路径、同一 `transaction-rollback` fixture 连续
+运行五次：当前 prompt 严格 `4/5`，追加明确最终消息契约后 `5/5`。两次臂的代码测试均
+`5/5`、受保护测试未改、工具错误为零。
+
+随后跑完整 fixture，6 个基础任务从严格 `3/6` 提升到 `6/6`；7 个任务测试全部通过，
+新增事件/工具错误为零。`apply-patch` task 仍失败，因为 DSH 暴露 `edit/write` 而不是
+Codex 的 `apply_patch`，这是 runner 工具面差异，不是模型没编辑文件。测试窗口开始于
+`2026-10-31T18:18:43Z`，新增 NVRM Xid 为零，但按稳定性合同只记录“未观测”。
+
+测试后缀为“所有工具和测试完成后，最终 assistant message 必须恰好只有单行
+`RESULT=PASS`，不能包含摘要、解释、Markdown 或进度报告”，SHA-256
+`fd794e1a9d678526c14c8ef66560309f713c4ffce50e5d87b81615643f8ff321`。不从客户端
+静默裁剪或改写输出。完整记录见
+[`AGENT_DSH_WEB_QUALITY_RESULT-20261101.md`](work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
+
+## L-163 · DSH Web 与旧 benchmark 不是同一 provider/model 路径
+
+**判定：AGENT-TERMINAL-QUALITY-COMPARISON 完成；旧“DSH/DeepSeek 直连 6/6”不作当前
+Qwen/Strata 对照。**
+
+只读 `dsh --profile web --dump-config` 显示用户当前路径为 provider `atm`、
+`qwen3.8-flash-next-iq3_xxs-abliterated`、`http://129.28.27.137:8888/v1`；旧 benchmark
+的 `dsh headless` 为 `deepseek-official` / `deepseek-flash`。runner profile、provider、
+model 和 hosting 全部不同，不能混用。
+
+新增显式 `--dsh-patch` 与 `tools/server/dsh-strata-headless.patch.yml`，只对 benchmark
+子进程叠加 provider/model，不修改用户的 DSH profile。对齐后完整测试：7 项代码/测试
+`7/7`、受保护测试未改 `7/7`、基础严格 `3/6`、事件/工具错误 `0/0`，合计 wall
+`243.865 s`，新增 Xid `0`。三个基础失败均已完成正确修改和测试，只是在最终 sentinel 前
+多写解释；`apply-patch` 专用项因 DSH 工具面不含该工具而失败。
+
+这证明用户反馈的“没检查”不能覆盖本轮 6 个基础任务：模型实际读取、编辑、运行测试，
+且测试全过。剩余可复现缺口集中在最终消息收口和 runner 工具协议。
+
+## L-162 · 低频故障改为时间窗口证据；无复现时不空等
+
+**判定：GPU-XID13-STABILITY 保持 P0 抢占权，但当前主动项转到
+AGENT-TERMINAL-QUALITY-COMPARISON。**
+
+第二十六版计划把“等待下一次 Xid”放在所有执行之前，实际上不可完成：当前只有一个低频事故，
+约 60 次精确重放仍未复现，继续同形重放既不能估计硬件 fault 率，也不能推进用户每天遇到的
+质量和等待问题。第二十七版改为：
+
+- 新 Xid、engine 非预期退出或错误结果风险出现时立即抢占，停止质量和性能实验；
+- 没有新事故时，保留只读 Xid 监测，同时执行真实终端质量对照；
+- 每个测试窗口记录 UTC 起点，结束时用同一时间作 `--since` 只读新增事件；
+- `--boot` 读取整个 boot，不再叠加默认 24 小时窗口；
+- 同一 PCI 默认 5 秒内的事件聚为一次事故，同时保留原始事件数；无时间事件不互相合并；
+- 无 Xid 只表示窗口内未观测到故障。短窗口、固定请求 soak 或一次 94 请求样本都不能宣称修复。
+
+探针专项现为 `7 passed`。新增测试覆盖跨秒聚簇、远隔故障拆分、无时间事件不合并和
+`--boot` 不暗含 `--since`。本修订未重启、未改 DSH、GPU 时钟、驱动、engine 或生产 config。
+
+## L-161 · GPU0 Xid 13 是低频设备事故，固定请求重放不能证明硬件稳定
+
+**判定：低频 GPU/显存稳定性风险成立；问题未复现、未修复。**
+
+DSH 的最终 Responses 请求在产出 76 个 reasoning token 后失败，错误为
+`verify: layer 11 never rang (an illegal instruction was encountered)`。不是结果检查失败，
+而是 CUDA 前置操作先失败。同秒内核记录 GPU0 `0000:03:00` 的 8 条 Xid 13 和 1 条 Xid 43：
+
+```text
+Xid 13: Graphics SM Warp Exception / Illegal Instruction Encoding
+ESR ... 0x50c728=0x4c1eb72 ...
+Xid 43: pid=172641, name=strata, channel 0x0000000b
+```
+
+引擎随后退出并由 server 自动重启。相同请求从 DSH 导出精确重建后，服务端同样计为
+`input_tokens=15,419`。完成 1 次首次重放、20 次连续最终请求、6 路并发最终请求、3 次
+完整五回合会话和标题并发：约 60 个流式请求，30 个最终回答请求全部 HTTP 200，所有会话
+正常结束；重放后 `/health loaded=true`、6 slots / 2 groups，无新 Xid。因此固定 prompt、
+工具面、reasoning 档位、单路/6 路并发都不是充分触发条件。
+
+同一 GPU0 在 2026-09-25 的 vLLM + `595.91.07` 栈上记录过 Xid 62/154 和
+`GPU Reset Required`。两次软件不同、Xid 不同，不能证明同一根因；但也不能再把
+`595.71.05` 写成 GPU fault 的免疫条件。上游 #4190 的同型号改装 22 GB 卡报告相同 Xid 13
+与 ESR，换驱动、Strata 版本和配置仍出现，干净 llama.cpp 也可触发，最终在降低显存频率后
+消失。这是外部强证据，不是本机损坏结论。
+
+新增只读探针 `tools/server/probe-gpu-stability.py` 从 journal 解析 NVRM Xid，关联 PCI、
+PID/process，并采集当前 clocks/temp/power/VRAM/throttle。当前 boot 快照为
+`/opt/ai/logs/gpu-stability-current-20261101.json`；它把 9 条 Xid 行汇总为 1 次同时间/
+同设备事故，避免把内核重复行误数成 9 次事故。4 个探针单测通过，部署副本 SHA-256
+`d80a34fb686edf0639831c2e0423e6d3cff5bfcff09ee1ab7a25985fad51e5b9`。
+
+用户可见诊断也已修正：明确的 CUDA `never rang` / illegal instruction 会说明是 GPU
+执行失败而非 prompt 校验失败，并提示查 `NVRM: Xid`。不改变错误类型或自动重试。
+`serve/test_server.py` 全量 `352 passed / 510 subtests passed`；修改尚未部署，留待下次
+必要重启。
+
+测试方法已纠正：固定 prompt 重放只用于验证代码路径，不能再写成硬件稳定；后续在任何真实
+或混合负载前后保存 Xid 游标，并把请求时间与 GPU 状态关联。只有再出现 Xid 才进入单卡隔离
+或显存降频；降频是独立候选，必须记录吞吐影响和回滚。不能用一次性 60 请求无故障宣称修复。
+
+生产状态：旧 engine PID `172641` 已因 Xid 退出，当前 server/vision/engine
+`172634/172636/193790`；health loaded、262144、6 slots / 2 groups，`strata.service`
+inactive。本轮未改 GPU 时钟、驱动、engine 或 config，未重启。完整记录见
+[`GPU_XID13_INCIDENT_RESULT-20261101.md`](work/GPU_XID13_INCIDENT_RESULT-20261101.md)。
 
 ## L-159 · Codex 模型目录缺失造成工具面缩减；质量门先于速度
 

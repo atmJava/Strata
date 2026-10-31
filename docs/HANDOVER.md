@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-11-01（代码质量与 Codex 工具面审计后）。
+> 整理时间：2026-11-01（DSH 实际路径成本与标题争用复盘后）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,30 +12,59 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-160。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-166。
 
 ## 2. 当前断点
 
-- **全局目标已第二十五次修订并继续执行**：用户反馈 Strata 显著更快，但主观质量下降。
-  当前先修复可验证的 Codex 模型目录/工具面、建立代表性任务质量门，再恢复普通单代理
-  编辑—测试循环的性能优化。质量、任务成功率、测试正确性和工具协议是硬门，不能用约 7%
-  的速度收益交换严格收口失败。真实 AI vibe coding 的最终目标仍是任务完成时间、首个可
-  执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
-  峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
-  触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
-  可按 p99 体验单独立项。完整计划在
+- **全局目标已第三十一次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+  Xid、engine 非预期退出或错误结果风险时，立即暂停性能实验并保存事故。没有新事故时，
+  不空等低频故障，继续建立代表性任务质量门，再恢复普通单代理编辑—测试循环的性能优化。
+  质量、任务成功率、测试正确性和工具协议都是硬门，不能用速度交换失败或严格收口缺失。
+  真实 AI vibe coding 的最终目标仍是任务完成时间、首个可执行结果、严重尾部和成功率，
+  而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、峰值 1 主 3 子代理；1/2 路为主，
+  4 路非回退，6/8 只做安全回归。任何局部候选先算真实触发率后的整任务 1% 上界；没有进入
+  用户实际路径的能力只算机制收益。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十五版更新后该接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十五版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第三十一版更新后该接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第三十一版计划
   为权威，不要回到平台旧目标的状态快照。
-- **当前质量断点**：模型 slug 不在 Codex 本地目录时，请求只有 9 个工具且没有
-  `apply_patch`；加入目录条目后变为 14 个工具，`apply_patch` 为 `custom`。生产服务日志
-  累计有 6 次未声明 `apply_patch` 后退回文本。目录供给已产品化为
-  `strata codex catalog [--apply]`。Schema 3 的 Qwen/Strata 基础 fixture 严格 `5/6`、
-  测试 `6/6`；`apply_patch` 独立重复 `3/3`。唯一基础失败是代码和测试正确、最终回复
-  多写了说明。DSH/DeepSeek 直连在同一组 6 fixture 为 `6/6`，但同时改变模型、
-  provider 和 hosting。下一步是正式终端质量对照，并查 DSH 能否经 Strata endpoint 运行。
-  结果见
+- **DSH 真实路径成本已拆清**：7 个基础/fixture 会话 runner 总墙钟 `197.776 s`，模型
+  step `184.332 s`（`93.202%`），工具区间并集 `10.505 s`（`5.312%`）；40/40 个主
+  step 关联成功，7 个未关联请求正好是每个新会话一次的隐藏标题请求。标题约 266 prompt
+  token、118 output token、零工具，中位 `9.8 s`，会与主请求争用 GPU/cache。
+- **当前主动项是 `DSH-TITLE-INTERFERENCE`**：保留标题语义，验证主任务结束后再异步生成。
+  代理 ABBA 已通过：短任务 `task_wall` 合并中位 `17.637→15.238 s`（`13.602%`），
+  配对中位 `13.465%`、`5/6` 胜；12/12 质量与 provider 标题通过。长任务 B
+  `37.943/41.297 s` 对 A `46.411/82.438 s`，B 不明显回退，但 A 臂 8→11 step
+  漂移，只作非回退判断。见
+  [结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
+- **产品候选已实现**：默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission
+  层只识别 DSH 精确 wire shape；另一个普通 inference admission 存在时等待，主请求释放
+  即继续，60 s fail-open，不读 prompt 正文。活跃标题单独计数，两个会话同时启动时标题
+  不互等；专项连续 5 轮通过。见
+  [产品契约](work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
+- **测试口径已修正**：`bench-agent-quality.py` 的 `wall_s` 是完整 runner 进程，包含
+  turn 后辅助工作；`probe-dsh-session-cost.py` 同时报告主任务、turn union 和 post-turn
+  时间。`agent-shape-proxy.py` 已逐块流式转发，不能再用“先读完 SSE”的代理测 TTFT。
+- **GPU0 是当前抢占风险**：DSH 最终 Responses 请求在 76 个 reasoning token 后
+  因 `verify: layer 11 never rang` 失败；GPU0 `0000:03:00` 同秒记录 8 条 Xid 13 和
+  1 条 Xid 43。精确重建成同一 `input_tokens=15,419` 请求后，约 60 次重放、30 个最终
+  请求全 HTTP 200，未再触发。GPU0 还在 2026-09-25 的另一套 vLLM/驱动栈上发生过
+  Xid 62/154；上游同类改装 22GB 卡报告相同 Xid 13/ESR 并在显存降频后消失。当前高度
+  怀疑显存时序/板级稳定性，但未证明芯片损坏，也未完成修复。测试方法已改为按 UTC 窗口
+  记录新 Xid 与 workload/GPU 状态关联；`--boot` 读取整个 boot，跨秒同设备事件默认聚为
+  一次事故；固定 prompt 不再用于宣称硬件稳定。见
+  [事件结果](work/GPU_XID13_INCIDENT_RESULT-20261101.md)。只读探针为
+  `tools/server/probe-gpu-stability.py`。
+- **质量对照与最终收口已完成**：用户实际 DSH Web 是
+  `atm -> qwen3.8-flash-next-iq3_xxs-abliterated -> 129.28.27.137:8888`；旧
+  `dsh headless` 基准是 DeepSeek 官方，不能归因当前 Qwen/Strata。显式 overlay 对齐后，
+  6 个基础 fixture 代码/测试 `6/6`，当前 prompt 严格 `3/6`，明确最终消息契约后严格
+  `6/6`；连续失败 fixture 的基线/候选为 `4/5` 对 `5/5`。DSH 使用 `edit/write`，没有
+  Codex 专用 `apply_patch`。事件/工具错误 `0/0`，窗口新增 Xid `0`。见
+  [AGENT_DSH_WEB_QUALITY_RESULT](work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
+- **Codex 工具面历史**：模型 slug 不在目录时只有 9 个工具且没有 `apply_patch`；目录供给
+  已产品化为 `strata codex catalog [--apply]`。详见
   [AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
 - **暂停的历史候选**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的 native
   direct-pointer 路径真实命中，group 级 `11.671 → 7.848 ms/layer`（`1.49x`）。
@@ -56,7 +85,8 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `172634/172636/172641`。server cwd 为
+- **当前运行**：server/vision/engine `172634/172636/193790`。engine `172641` 已在
+  Xid 后退出并由 server 自动重启。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
   `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`

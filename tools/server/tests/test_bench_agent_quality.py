@@ -53,10 +53,12 @@ def test_event_summary_counts_tools_without_exposing_bodies(tmp_path):
         "event_errors",
         "event_warnings",
         "final",
+        "session_id",
     }
     assert summary["event_errors"] == 0
     assert summary["tool_errors"] == 0
     assert summary["event_warnings"] == 2
+    assert summary["session_id"] is None
 
 
 def test_dsh_event_summary_counts_calls_errors_and_final(tmp_path):
@@ -64,6 +66,7 @@ def test_dsh_event_summary_counts_calls_errors_and_final(tmp_path):
     events.write_text(
         "\n".join(
             [
+                '{"type":"session","sessionId":"session-example"}',
                 '{"type":"tool_call","tool":"bash","input":{"command":"pytest"}}',
                 '{"type":"tool_result","status":"completed","result":"ok"}',
                 '{"type":"tool_result","status":"error","result":"recoverable"}',
@@ -80,6 +83,7 @@ def test_dsh_event_summary_counts_calls_errors_and_final(tmp_path):
     assert summary["tool_errors"] == 1
     assert summary["event_errors"] == 0
     assert summary["final"] == "RESULT=PASS"
+    assert summary["session_id"] == "session-example"
 
 
 def test_every_task_has_a_machine_checkable_prompt():
@@ -101,6 +105,7 @@ def test_dsh_model_is_unset_unless_an_explicit_label_is_given(tmp_path, monkeypa
         return {
             "task": task.name,
             "wall_s": 0.0,
+                "wall_scope": "runner_process; includes client-side post-turn auxiliary work",
             "returncode": 0,
             "timed_out": False,
             "tests_pass": True,
@@ -132,7 +137,12 @@ def test_dsh_model_is_unset_unless_an_explicit_label_is_given(tmp_path, monkeypa
     ) == 0
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["model"] is None
+    assert report["runner_profile"] == "dsh-headless"
+    assert report["dsh_patch"] is None
+    assert report["wall_scope"].startswith("runner_process")
+    assert report["rows"][0]["wall_scope"].startswith("runner_process")
     assert calls[0][1]["model"] == BENCH.DEFAULT_MODEL
+    assert calls[0][1]["dsh_patch"] is None
 
     assert BENCH.main(
         [
@@ -150,3 +160,43 @@ def test_dsh_model_is_unset_unless_an_explicit_label_is_given(tmp_path, monkeypa
     ) == 0
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["model"] == "DeepSeek via DSH"
+
+
+def test_dsh_patch_is_an_explicit_launcher_overlay_not_a_profile_edit():
+    command = BENCH.dsh_command("dsh", BENCH.TASKS["single-file"], pathlib.Path("overlay.yml"))
+
+    assert command[:5] == [
+        "dsh",
+        "--profile",
+        "headless",
+        "--patch",
+        str(pathlib.Path("overlay.yml").resolve()),
+    ]
+    assert command[-2:] == ["--json", BENCH.TASKS["single-file"].prompt]
+
+
+def test_prompt_suffix_is_appended_without_rewriting_the_fixture():
+    task = BENCH.TASKS["transaction-rollback"]
+
+    assert BENCH.task_prompt(task) == task.prompt
+    assert BENCH.task_prompt(task, "FINAL RULE").endswith("\n\nFINAL RULE")
+
+
+def test_missing_dsh_patch_is_rejected_before_any_task(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        BENCH,
+        "run_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("task must not run")),
+    )
+
+    try:
+        BENCH.main([
+            "--runner", "dsh",
+            "--dsh-patch", str(tmp_path / "missing.yml"),
+            "--tasks", "single-file",
+        ])
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("missing overlay should stop the benchmark")
+    assert "does not exist" in capsys.readouterr().err

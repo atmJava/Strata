@@ -3,6 +3,8 @@ import json
 import os
 import pathlib
 import tempfile
+import threading
+import time
 import unittest
 
 
@@ -217,6 +219,144 @@ class AgentShapeProxyTest(unittest.TestCase):
             result, summary = diet.transform(req)
             self.assertIs(result, req)
             self.assertEqual(summary["replaced"], 0)
+
+    def test_auxiliary_gate_waits_for_main_request_and_leaves_ordinary_alone(self):
+        gate = MODULE.AuxiliaryGate(max_output_tokens=4096, grace_s=1.0)
+        main = {"max_output_tokens": 32000, "tools": [{"type": "function"}]}
+        auxiliary = {"max_output_tokens": 4096, "tools": []}
+
+        self.assertEqual(gate.enter(main), (False, True, 0.0))
+        auxiliary_result = []
+        thread = threading.Thread(
+            target=lambda: auxiliary_result.append(gate.enter(auxiliary)),
+            daemon=True,
+        )
+        thread.start()
+        time.sleep(0.02)
+        self.assertFalse(auxiliary_result)
+
+        gate.leave(True)
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+
+        self.assertTrue(auxiliary_result)
+        is_auxiliary, ordinary, deferred_s = auxiliary_result[0]
+        self.assertTrue(is_auxiliary)
+        self.assertFalse(ordinary)
+        self.assertGreaterEqual(deferred_s, 0.02)
+
+    def test_auxiliary_gate_is_disabled_without_an_explicit_token_cap(self):
+        gate = MODULE.AuxiliaryGate()
+        self.assertEqual(
+            gate.enter({"max_output_tokens": 4096, "tools": []}),
+            (False, False, 0.0),
+        )
+
+    def test_chunked_response_is_relayed_before_upstream_finishes(self):
+        class Response:
+            status = 200
+            reason = "OK"
+            version = 11
+
+            def __init__(self):
+                self.chunks = [b"data: one\n\n", b"data: two\n\n"]
+                self.read_called = False
+
+            def getheader(self, name):
+                return {
+                    "Content-Length": None,
+                    "Content-Type": "text/event-stream",
+                }.get(name)
+
+            def getheaders(self):
+                return [("Content-Type", "text/event-stream")]
+
+            def read1(self, size):
+                del size
+                return self.chunks.pop(0) if self.chunks else b""
+
+            def read(self, size=-1):
+                del size
+                self.read_called = True
+                raise AssertionError("chunked SSE must use read1, not buffered read")
+
+        class Writer:
+            def __init__(self):
+                self.value = bytearray()
+                self.flushes = 0
+
+            def write(self, value):
+                self.value.extend(value)
+
+            def flush(self):
+                self.flushes += 1
+
+        proxy = object.__new__(MODULE.ShapeProxy)
+        proxy.request_version = "HTTP/1.1"
+        proxy.close_connection = False
+        proxy.wfile = Writer()
+        headers = []
+        proxy.send_response = lambda status, reason: None
+        proxy.send_header = lambda key, value: headers.append((key, value))
+        proxy.end_headers = lambda: None
+
+        raw = proxy._relay_response(Response())
+
+        self.assertEqual(raw, b"data: one\n\ndata: two\n\n")
+        self.assertIn(("Transfer-Encoding", "chunked"), headers)
+        self.assertEqual(
+            bytes(proxy.wfile.value),
+            b"B\r\ndata: one\n\n\r\nB\r\ndata: two\n\n\r\n0\r\n\r\n",
+        )
+        self.assertEqual(proxy.wfile.flushes, 3)
+
+    def test_content_length_response_is_not_rechunked(self):
+        class Response:
+            status = 200
+            reason = "OK"
+
+            def getheader(self, name):
+                return {"Content-Length": "5", "Content-Type": "application/json"}.get(name)
+
+            def getheaders(self):
+                return [
+                    ("Content-Length", "5"),
+                    ("Content-Type", "application/json"),
+                ]
+
+            def read1(self, size):
+                del size
+                if hasattr(self, "sent"):
+                    return b""
+                self.sent = True
+                return b"hello"
+
+        class Writer:
+            def __init__(self):
+                self.value = bytearray()
+                self.flushes = 0
+
+            def write(self, value):
+                self.value.extend(value)
+
+            def flush(self):
+                self.flushes += 1
+
+        proxy = object.__new__(MODULE.ShapeProxy)
+        proxy.request_version = "HTTP/1.1"
+        proxy.close_connection = False
+        proxy.wfile = Writer()
+        headers = []
+        proxy.send_response = lambda status, reason: None
+        proxy.send_header = lambda key, value: headers.append((key, value))
+        proxy.end_headers = lambda: None
+
+        raw = proxy._relay_response(Response())
+
+        self.assertEqual(raw, b"hello")
+        self.assertIn(("Content-Length", "5"), headers)
+        self.assertNotIn(("Transfer-Encoding", "chunked"), headers)
+        self.assertEqual(bytes(proxy.wfile.value), b"hello")
 
 
 if __name__ == "__main__":

@@ -4,30 +4,72 @@
 > 当前断点写在前；后面的“近期判决索引”只用于防重复，不驱动当前任务。完整证据见
 > `WORK_QUEUE.md` 和 `EVIDENCE_LEDGER.md`。
 
-- 全局目标：针对真实 AI vibe coding 负载，同时提高任务成功率、指令遵循、工具协议和
-  代码正确性，再缩短任务完成时间、首个可执行结果时间和严重尾部。用户通常 1 个主代理、
-  偶尔 2 个、峰值 1 主 3 子代理；1/2 路是主要性能场景，4 路非回退，6/8 只做安全回归。
-- **继续执行**：用户明确要求继续计划。旧的 resident-path 局部性能项降为暂停历史候选；
-  当前先把“速度快但质量感觉下降”拆成可验证的客户端工具面、模型/采样和真实任务成功问题。
-- 当前项：AGENT-TERMINAL-QUALITY-COMPARISON
-- 当前诊断：模型目录缺失会让 Codex 从 14 个工具降到 9 个并省略
-  `apply_patch`；服务日志累计记录 6 次模型写未声明 `apply_patch` 后退回文本。目录供给
-  已产品化为 `strata codex catalog [--apply]`，幂等、先备份、模板缺 freeform
-  `apply_patch` 时拒绝写入。Schema 3 的当前 Qwen/Strata 结果是 6 个基础 fixture
-  严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；唯一基础失败是代码/测试正确、
-  最终回复多写了说明后再给 sentinel。DSH/DeepSeek 直连在同一 Schema 3 为 `6/6`，
-  但模型、provider 和 hosting 同时不同，不能归因 Strata 引擎。下一步把 DSH 作为正式
-  终端对照，消除报告中的模型标签歧义，并检查 DSH 能否经 Strata endpoint 运行。
-  见 [结果](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
+- 全局目标：严重 GPU/运行时故障有最高抢占权，出现新 Xid、engine 非预期退出或错误结果
+  风险时立即暂停性能实验并保存事故。没有新事故时，继续提高任务成功率、指令遵循、工具
+  协议和代码正确性，再缩短任务完成时间、首个可执行结果时间和严重尾部。速度优化只有在
+  可靠性、质量与工具门通过后才有效。用户通常 1 个主代理、偶尔 2 个、峰值 1 主 3 子
+  代理；1/2 路是主要场景，4 路非回退，6/8 只做安全回归。
+- **继续执行**：平台里的旧“2/4/6/8 路引擎”全局目标仍是 paused，且当前接口不能改写或
+  恢复它；本文件与仓库总计划是当前权威目标。用户已明确放弃“鹈鹕 SVG”问题。
+- 当前项：DSH-TITLE-INTERFERENCE
+- 当前项说明：保留标题语义，验证主任务结束后再异步生成，避免与主请求争用 GPU/cache；
+  不得修改用户本地 DSH profile。代理 ABBA 已通过，当前验证默认关闭的 server admission
+  产品候选。专项回归已覆盖两个会话同时启动：标题之间不互等，只等普通主请求。
+- GPU 抢占项：GPU-XID13-STABILITY。任何新 Xid 立即抢占质量/性能工作。
+- GPU 诊断：原请求在 76 个 reasoning token 后得到
+  `verify: layer 11 never rang (an illegal instruction was encountered)`；同秒内核记录
+  GPU0 `0000:03:00` 的 8 条 Xid 13 和 1 条 Xid 43。精确请求约 60 次重放、30 个最终
+  请求全部 HTTP 200，未再触发 Xid，因此不是固定 prompt/请求结构必然错误。GPU0 在
+  2026-09-25 的另一套 vLLM/驱动栈上还出现过 Xid 62/154；上游同型号改装 22 GB 卡报告
+  相同 Xid 13/ESR；该报告最终以 GDDR6 时序余量/板级问题关闭，但 offset 与风扇条件
+  随板卡不同，且报告中的负载不可横向比较。当前保留 GPU/显存稳定性风险，尚未证明本机
+  芯片损坏，也未完成缓解。见
+  [结果](work/GPU_XID13_INCIDENT_RESULT-20261101.md)。
+- 可靠性测试方法已改为：每个真实测试窗口记录 UTC 开始时间、workload、server/engine PID、
+  GPU 状态，并用该开始时间作 `--since` 只读统计新增 NVRM Xid；默认把同一 PCI 上 5 秒内
+  的事件聚为一次事故，同时保留原始事件数。`--boot` 读取整个 boot，不静默截成 24 小时。
+  固定 prompt 只用于代码路径回归，不再被当作硬件稳定性证明。只读探针为
+  `tools/server/probe-gpu-stability.py`。
+- 用户可见诊断已修正但尚未部署：明确的 CUDA `never rang`/illegal instruction 现在会说明
+  是 GPU 未完成请求、不是 prompt 校验错误，并提示检查 `NVRM: Xid`。服务端全量
+  `352 passed / 510 subtests passed`，探针 `7 passed`；等下一次必要重启一并生效，不为此
+  单独重启。
+- 质量对照与严格收口已完成：用户实际 DSH Web 是
+  `atm -> qwen3.8-flash-next-iq3_xxs-abliterated -> 129.28.27.137:8888`；旧
+  `dsh headless` 基准是 `deepseek-official -> deepseek-flash`，不能混用。用不改用户
+  profile 的显式 overlay 对齐 Qwen/Strata 后，6 个基础 coding fixture 代码/测试 `6/6`，
+  当前 prompt 严格 `3/6`；明确最终消息契约后严格 `6/6`。DSH 工具面是 `edit/write`，
+  不含 Codex 专用 `apply_patch`。窗口内事件/工具错误 `0/0`、新增 Xid `0`。
+  见 [结果](work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
+- Codex 侧历史质量门仍为：模型目录缺失会让工具面从 14 降到 9 并省略 `apply_patch`；
+  目录供给已产品化为 `strata codex catalog [--apply]`。该结果继续记录在
+  [AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第二十五次修订并继续执行。质量、任务成功率和工具协议是硬门；局部优化必须先给出
+  已完成第三十一次修订并继续执行。可靠性、质量、任务成功率和工具协议是硬门；局部优化必须先给出
   真实触发率后的整任务 1% 上界；低频但
   单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。没有接入用户实际路径的能力
   只算机制收益，不能写成体验已改善；重启成本必须计入当轮。
-  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第二十五版更新后仍受旧 unfinished goal
+  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第三十一版更新后仍受旧 unfinished goal
   限制，当前工具不能改写目标文本或恢复它。本仓库计划是当前执行的权威目标，不能把平台
   旧目标当作已更新。
-- 当前阶段：先收口 Codex/DSH 终端工具面和代表性质量回归，再恢复速度优化。此前真实
+- 真实 DSH 成本已拆清：7 个基础/fixture 会话 runner 总墙钟 `197.776 s`，模型 step
+  `184.332 s`（`93.202%`），工具区间并集 `10.505 s`（`5.312%`）；40/40 个主 step
+  关联成功，7 个未关联请求正好是每个新会话一次的隐藏标题请求。标题约 266 prompt token、
+  118 output token、零工具，中位 `9.8 s`，会与主请求争用 GPU/cache。
+- 当前阶段：GPU0 低频故障保持被动观测和抢占权；没有新事故时，优先验证
+  `DSH-TITLE-INTERFERENCE`，即保留标题但让它等当前主模型请求结束后生成。代理 ABBA
+  短任务 `task_wall` 合并中位 `17.637→15.238 s`（`13.602%`），配对中位 `13.465%`，
+  `5/6` 胜；12/12 质量与 provider 标题通过。长任务 B `37.943/41.297 s` 对 A
+  `46.411/82.438 s`，B 不明显回退，但 A 臂 8→11 step 漂移，只作非回退判断。见
+  [结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
+- 产品候选已实现为默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1`：只匹配 DSH 精确 header/
+  body 形状，主请求释放 admission 后继续；60 s fail-open，不改 profile/prompt/engine。
+  活跃标题单独计数，两个会话同时启动时只等主请求、不互等；专项连续 5 轮通过。
+  契约见 [产品契约](work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
+- 测试口径已修正：`bench-agent-quality.py` 的 `wall_s` 明确是完整 runner 进程，包含
+  turn 后辅助工作；成本探针同时记录 `task_wall_s`、`turn_union_s` 和 `post_turn_s`，
+  主任务判决以 `task_wall_s` 为准。`agent-shape-proxy.py` 已改为逐块流式转发，避免代理
+  先读完 SSE 破坏 TTFT 实验。此前真实
   Agent 请求级优化已采纳 title、线程级 compaction LRU（在对应测试请求
   形状上有效）、共享 system 前缀顺序、自动 boundary pin 和两路串行准入。B4 后三个兄弟
   请求复用 `97.34%`，后三墙钟 `5.001 → 1.335 s`（`-73.31%`）。
@@ -163,7 +205,8 @@
   上三次真实 Codex compaction 已复用约 `99.1%`，不能再写成 Strata 缺陷。精确 pin
   可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
   中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
-- 当前运行：server/vision/engine `172634/172636/172641`。server cwd 为
+- 当前运行：server/vision/engine `172634/172636/193790`。engine `172641` 已在本次
+  Xid 后退出并由 server 自动重启。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`，cwd 为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z`。监听 `127.0.0.1:8080`；
@@ -171,7 +214,8 @@
   262144 context、6 slots / 2 groups、expert slots `17274`；实际核对到 `--ple-inflight 1024`、
   `STRATA_BATCH_SERIAL_TWO=1`、
   `STRATA_ADMIT_MERGE_FIRST=1` 和 `STRATA_PIPE_BYIELD_NODRAIN=1`；engine env 不含
-  `STRATA_DECODE_TIMING`/`STRATA_VERIFY_PROFILE`。
+  `STRATA_DECODE_TIMING`/`STRATA_VERIFY_PROFILE`。GPU0 已有两次不同软件栈下的 Xid
+  记录；当前 `nvidia-smi` 温度、功耗和 6 slots 均正常，但不能据此排除低频 fault。
   `strata.service` 仍 inactive/dead、`MainPID=0`、`NRestarts=8`；engine env 不含
   `STRATA_PREFILL_STAGED_AHEAD`。回滚为同一源码目录 +
   direct-256 config
@@ -572,7 +616,8 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-11-01（第二十五版计划；质量与工具协议为硬门。Codex 目录供给已产品化；
+- 最后更新：2026-11-01（第三十一版计划；GPU0 稳定性、质量与工具协议为硬门。
+  Codex 目录供给已产品化；
   Schema 3 当前 Qwen/Strata 基础严格 `5/6`、测试 `6/6`、`apply_patch` 重复 `3/3`，
-  DSH/DeepSeek 直连 `6/6`。生产未重启，health loaded、6 slots / 2 groups、
-  systemd inactive）
+  DSH 同 Qwen/Strata 路径明确最终契约后基础严格 `6/6`。GPU0 在 DSH 请求末尾发生
+  Xid 13 后已重启；当前 health loaded、6 slots / 2 groups、systemd inactive）

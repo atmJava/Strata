@@ -2,23 +2,50 @@
 
 日期：2026-10-31
 
-状态：第二十五次修订后继续执行。用户反馈 Strata 显著更快，但主观质量下降；当前先以
-Codex 模型目录、真实工具面、任务成功率和严格收口为硬门，再恢复速度优化。
+状态：第三十一次修订后继续执行。用户实际 DSH Web 路径已对齐到 Qwen/Strata relay；
+6 个基础 coding fixture 的代码/测试全过，明确最终消息契约后严格通过从 `3/6` 提到
+`6/6`。真实路径成本已拆清：模型 step 占 `93.202%`，工具并集只占 `5.312%`；当前主动
+项转为“保留标题语义但避免与主请求争用”。GPU0 Xid 13 仍是随时抢占的 P0 风险，固定重放
+无法复现时不空等。
 
 ## 全局目标
 
-除非用户明确停止，持续提高真实 AI vibe coding 的任务成功率、指令遵循、工具协议和
-代码正确性，再缩短任务从提交到产生可用代码、测试结果或明确阻塞的时间，并减少重复模型
-工作。质量不是主观附加项：测试必须通过、受保护测试不能改写、最终回复必须收口、工具调用
-必须真实声明，否则速度收益无效。当前执行主轴是通常 1 个主代理、偶尔 2 个的编辑—测试
-循环；只有质量硬门通过后，才优先消除每一轮都会发生的 prompt/read 与 decode 等待。
+除非用户明确停止，持续提高真实 AI vibe coding 的任务成功率、指令遵循、工具协议和代码
+正确性，再缩短任务从提交到产生可用代码、测试结果或明确阻塞的时间，并减少重复模型工作。
+严重运行时/GPU 故障有最高抢占权：新增 Xid、engine 退出或错误答案可能被误当成功时，暂停
+性能实验、保存事故并优先处理。没有新事故时，不把“等待下一次低频故障”当作主线，而是
+继续做可验证的质量和用户等待优化。当前执行主轴仍是通常 1 个主代理、偶尔 2 个的编辑—
+测试循环。
 
-当前 frontier 是 `AGENT-TERMINAL-QUALITY-COMPARISON`。已复现 Codex 模型 slug 缺失会让
-工具面从 14 个降到 9 个并省略 `apply_patch`，服务日志累计有 6 次未声明工具后退回文本；
-目录供给已产品化为 `strata codex catalog [--apply]`。Schema 3 的 Qwen/Strata 基础
-fixture 严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；DSH/DeepSeek 直连同组
-基础 fixture 为 `6/6`。先消除终端报告的 model/provider 混淆并检查 DSH 能否经 Strata
-endpoint 运行，不能把客户端或混合 hosting 问题继续留给 GPU kernel 优化。
+质量对照和严格收口已完成。用户当前 DSH Web 是
+`atm -> qwen3.8-flash-next-iq3_xxs-abliterated -> 129.28.27.137:8888`；旧
+`dsh headless` 的 DeepSeek 官方 `6/6` 是另一条路径，已从当前结论剔除。通过显式 overlay
+对齐 Qwen/Strata 后，6 个基础 coding fixture 代码/测试 `6/6`，严格回复从 `3/6` 提升到
+`6/6`；DSH 使用 `edit/write` 而不是 Codex 专用 `apply_patch`。详见
+[`AGENT_DSH_WEB_QUALITY_RESULT-20261101.md`](../../work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
+
+`AGENT-DSH-REAL-PATH-COST` 已完成。7 个基础/fixture 会话的 runner 总墙钟为
+`197.776 s`，模型 step `184.332 s`（`93.202%`），工具区间并集 `10.505 s`（`5.312%`）；
+40/40 个主模型 step 关联成功，7 个未关联请求正好是 7 个新会话各一次的隐藏标题请求。
+标题请求约 266 prompt token、118 output token、零工具，中位 `9.8 s`，并与主请求争用
+GPU/cache。`DSH-TITLE-INTERFERENCE` 的代理 ABBA 已通过：短任务主任务中位
+`17.637 → 15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 标题仍由
+provider 模型生成，长任务 `A B B A` 中 B 不明显回退。当前在验证默认关闭的 server
+admission 产品候选，不关闭标题。部署前复盘补齐了 1/2 会话并发：活跃标题独立计数，
+两个会话同时启动时只等普通主请求、不互等。
+
+短任务关闭标题的旧 A/B 为：runner wall `16.854 → 14.901 s`（`-10.647%`），主任务
+turn wall `14.929 → 13.001 s`（`-11.843%`），均 `5/6` 胜；长任务无标题 `0/2` 胜，
+首组 cache 存在跨臂污染。因此不能通用关闭标题，也不能把关闭臂收益直接产品化。下一步
+必须 ABBA 平衡、先修真实流式代理，并同时报告标题质量和长任务非回退。不能再把 Codex
+`apply_patch`、另一 provider 或局部 kernel 结果当成 DSH Web 的基线。
+
+`GPU-XID13-STABILITY` 继续作为 P0 监测项。DSH 的 15,419-token Responses 请求在 76 个
+reasoning token 后因 `layer 11 never rang` 失败，GPU0 同秒记录 8 条 Xid 13 和 1 条
+Xid 43。约 60 次精确重放、30 个最终请求全 HTTP 200，没有再次触发；GPU0 另有不同软件栈
+下的 Xid 62/154 历史。上游同型号改装 22GB 卡报告相同 Xid 13/ESR，最终按 GDDR6 时序
+余量/板级问题关闭。当前高度怀疑 GPU/显存稳定性，但没有证明本机芯片损坏，也没有完成修复。
+任何新 Xid 都立即恢复为当前项并抢占质量和性能实验。
 
 resident direct-pointer 仍是暂停历史候选：group 级 `1.49x`、596 的 1 路 wall
 `1.862%`，但绝对只省 `32.667 ms`，94K prompt 无对应改善，4/6/8 未完成。质量门通过前
@@ -26,7 +53,7 @@ resident direct-pointer 仍是暂停历史候选：group 级 `1.49x`、596 的 1
 
 优先级按用户实际感受到的结果排列：
 
-1. 正确、安全、可恢复；速度不能以错误修改、遗漏测试或工具结果为代价。
+1. 正确、安全、可恢复；GPU/运行时事故、错误修改、遗漏测试或错误工具结果都优先于速度。
 2. 普通单代理编辑—测试循环中占主导的模型请求等待，包括热缓存 prompt/read 与真实
    decode；工具执行和轮询先算清边界，不冒充满意收益。
 3. 从任务提交到首次代码修改、首个工具结果和首次测试结果的时间。
@@ -65,13 +92,18 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 解码、解锁和 initramfs 不再研究或修改。核实记录见
 [`TU102_UNLOCK_VERIFY-20261031.md`](../../work/TU102_UNLOCK_VERIFY-20261031.md)。
 
+GPU0 的稳定性是独立的硬件/驱动问题，不是解锁问题。2026-10-31 发生 Xid 13；同一
+`0000:03:00` 在 2026-09-25 的另一套 vLLM + `595.91.07` 栈上发生过 Xid 62/154。
+驱动固定 `595.71.05` 只能防止已知的驱动版本漂移，不代表不会 Xid。当前机器和上游同类
+改装 22GB 卡的证据都要求先做事故关联和可回滚的稳定性实验，而不是继续改局部内核。
+
 当前 B4 是手动实例，`strata.service` 为 inactive。server cwd 与 engine 路径不同：
 
 - server cwd：`/opt/ai/src/strata-two-stream-serial-20261031`
 - engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
 - engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
 - config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
-- 当前 PID：server / vision / engine `172634 / 172636 / 172641`
+- 当前 PID：server / vision / engine `172634 / 172636 / 193790`
 - 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
 
 生产启动与恢复约需 2–3 分钟。每次重启必须说明预期节省能否覆盖加载、缓存丢失和不可用
@@ -138,26 +170,115 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 
 ## 当前优先级
 
-### P0：正确性与真实路径
+### P0 抢占条件：`GPU-XID13-STABILITY`
 
-当前主项 `AGENT-TERMINAL-QUALITY-COMPARISON`：
+该低频 GPU 故障保持最高风险，不把固定 prompt 重放当成硬件稳定性测试：
+
+- 每次事故保存请求时间/并发/尺寸、GPU/PCI、Xid 原始行、PID/process、clocks/temp/power/
+  VRAM/throttle、health 和 engine PID；
+- 原生 `NVRM Xid` 行数与同时间/同设备事故簇分开报告；
+- 固定 prompt、单路、6 路和完整 DSH 回合只用于证明代码路径是否必然触发；
+- 只有再次出现 Xid，才进入维护窗口逐级实验：先单变量验证 `STRATA_HC_SPLIT=1` 是否
+  只把 crash 变成静默 wedge；再测可回滚显存降频，最后考虑 GPU0 单卡隔离；
+- 不一次性关闭多个 `STRATA_*` pipeline 开关；每次只改变一个变量并保留精确回滚；
+- 不换 DSH，不通过修改客户端掩盖服务端事故。
+
+没有新 Xid 时，只保留只读监测和下一步实验准备，不等待而不推进其他工作；任何新 Xid、
+engine 非预期退出或 GPU 从总线掉落都立即抢占当前质量/性能项。
+
+当前证据：原请求 `input_tokens=15,419`、31 tools、24 input items，76 reasoning token 后
+失败；GPU0 `0000:03:00` 同秒 8×Xid 13（ESR 含 `0x4c1eb72`）+ 1×Xid 43，
+`pid=172641 name=strata`。约 60 次精确重放、30 个最终请求全 HTTP 200，无新 Xid；
+health loaded、6 slots / 2 groups。GPU0 在 2026-09-25 的另一套 vLLM/驱动栈上还发生过
+Xid 62/154；上游 #4190 的同型号改装卡相同 Xid 13/ESR 在降低显存频率后消失。当前只能
+说低频 GPU/显存风险优先，不能说器件损坏或问题已修复。
+
+只读工装为 `tools/server/probe-gpu-stability.py`；当前快照
+`/opt/ai/logs/gpu-stability-current-20261101.json`，探针专项 7 个单测通过。完整事件记录见
+[`GPU_XID13_INCIDENT_RESULT-20261101.md`](../../work/GPU_XID13_INCIDENT_RESULT-20261101.md)。
+
+可靠性测试按窗口执行，不按“跑过多少次固定请求”执行：
+
+1. 开始代表性真实负载前保存完整 boot 基线；`--boot` 必须读取整个 boot，不能暗中只取最近
+   24 小时。
+2. 记录本轮 UTC 开始时间、client/runner、并发、请求形状、server/engine PID、health 和
+   GPU 状态；正常使用时周期采集，事故后保存至少前后各 60 秒。
+3. 窗口结束时用该 UTC 开始时间作为 `--since` 读取新增 NVRM Xid；默认把同一 PCI 上
+   5 秒内的事件聚为一次事故，同时仍报告原始事件数和每个事故簇。
+4. 新 Xid 立即判失败，不把同期性能数字用作收益；没有新 Xid 只表示本窗口未观测到故障，
+   不表示已修复。
+5. 未复现的固定 prompt 不再继续加次数。只有新事故或独立压力实验提供重复性后，才测试
+   `STRATA_HC_SPLIT=1`、单变量显存降频和 GPU0 隔离；每臂必须有精确回滚和真实推理质量门。
+
+### 已完成：`AGENT-TERMINAL-QUALITY-COMPARISON`
+
+已确认 DSH Web 与旧 benchmark 的 provider/profile 不同，并用显式 overlay 完成同
+Qwen/Strata 路径对照：
 
 - 保持生产健康、工具结果完整、测试正确和长输出不被静默截断；
 - 保持 Codex 目录供给幂等、可备份、可回滚，真实请求声明 `apply_patch`；
-- 以同一 Schema 3 的确定性 coding fixture 对照 Codex/Strata 与 DSH，验证测试、测试字节、最终 sentinel、
-  工具协议和任务成功；
-- 报告必须写清 runner、model、provider 和 hosting，不能把 DSH/DeepSeek 直连写成 Strata 引擎；
+- 报告必须写清 runner、model、provider 和 hosting；
 - 查找 DSH 的 provider 配置能力；只有真实经 Strata endpoint 运行后才能做同引擎归因；
-- 不改变 engine、pack、量化、GPU、上下文或 6 slots / 2 groups；
-- 任何候选先证明能进入真实客户端路径，再讨论性能收益。
+- 不改变 engine、pack、量化、GPU、上下文或 6 slots / 2 groups。
 
-当前证据：无目录 9 个工具、有目录 14 个且 `apply_patch` 为 `custom`；Qwen high 基础
-严格 `5/6`、测试 `6/6`、wall `159.777 s`，`apply_patch` 独立重复 `3/3`。
-DSH/DeepSeek 直连 `6/6`、wall `71.391 s`，但同时改变模型、provider 和 hosting，
-不能归因 GPU 引擎。旧 Schema 1/2 的 `7/7`、`3/4` 不再作为当前通过率。见
+当前证据：同 Qwen/Strata relay 的 6 个基础 fixture 代码/测试 `6/6`，“当前 prompt”
+严格 `3/6`；DSH 没有 `apply_patch`，使用 `edit/write`。旧 DSH/DeepSeek `6/6` 只保留为
+另一 provider 参考。见
+[`AGENT_DSH_WEB_QUALITY_RESULT-20261101.md`](../../work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)；
+Codex 目录结果仍见
 [`AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md`](../../work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
 
-### P1：`AGENT-HOT-TURN-FIXED-COST`（已否决）
+### 已完成：`AGENT-STRICT-RESPONSE-CONTRACT`
+
+同一 `transaction-rollback` 连续五次：当前 prompt 严格 `4/5`，追加明确最终消息契约后
+`5/5`；完整 6 个基础 fixture 从严格 `3/6` 提升到 `6/6`。7 项测试全过、受保护测试未改、
+事件/工具错误为零，新增 Xid 为零。真实客户端应明确“最终 assistant message 只能是什么”，
+不得静默裁剪模型输出。见
+[结果](../../work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
+
+### 已完成：`AGENT-DSH-REAL-PATH-COST`
+
+只读拆 DSH 真实工具循环，不改 profile、engine、GPU 或生产 config：
+
+- 至少覆盖本轮 6 个基础 fixture 和一次多工具长上下文任务；
+- 每个模型 step 记录 input/cached/fresh、output/reasoning、prompt/decode、finish、工具
+  名称和工具结果回流大小；客户端 wall 与 server timing 分开；
+- 找出最大可归因成本，给出真实触发率、整任务绝对秒数和 >=1% 保守上界；
+- 低于 1%、只改局部 kernel 或无法进入 DSH 实际路径的方向不进入实现；
+- 期间出现新 Xid 立即暂停并转 `GPU-XID13-STABILITY`。
+
+结果：模型占 `93.202%`、工具并集占 `5.312%`；40/40 主 step 关联成功；7 个隐藏标题请求
+每个新会话一次，中位 `9.8 s`，会与主请求争用 GPU/cache。短任务关闭标题中位节省
+`1.78 s`（主 turn口径 `11.843%`、`5/6` 胜），但长任务 `0/2` 胜，且 cache 有跨臂污染。
+见
+[`AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md`](../../work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
+
+### P1：`DSH-TITLE-INTERFERENCE`（代理通过，产品验证中）
+
+保留 DSH 标题语义，验证标题在主任务完成后异步生成，避免同时争用模型执行和 prompt
+cache。测试只使用显式 overlay/proxy，不修改用户本地 profile：
+
+- 至少 6 对短任务，采用 ABBA 平衡；至少 2 对长任务；
+- 主指标使用首个 `turn/start` 到最后一个 `turn/end` 的 `task_wall_s`，runner 进程 wall
+  只作次指标；
+- 短任务配对中位至少改善 1%；长任务不得明显回退；标题文本不得退化或 fallback；
+- 同时记录模型 prompt/decode、cache 复用、工具时间、finish 和零错误；
+- 代理必须真实逐块流式转发，不能用先读完 SSE 的测量路径冒充 TTFT；
+- 任何新 Xid、engine 意外退出立即抢占。
+
+代理结果：短任务主任务合并中位 `17.637 → 15.238 s`（`13.602%`），配对中位
+`13.465%`、`5/6` 胜；12/12 质量与 provider 标题通过。长任务 B `37.943/41.297 s`，
+A `46.411/82.438 s`；B 不明显回退，但 A 臂 8→11 step 漂移，只作非回退判断。
+16/16 无 HTTP/事件/工具错误，新增 Xid 为零。见
+[`AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md`](../../work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
+
+当前产品候选：默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission 层只识别
+DSH 的精确标题形状；活跃标题单独计数，若普通 inference admission 存在，最多等 `60 s`，
+主请求释放即继续；两个会话的标题不互等。匹配不看 prompt 文本；disabled、不匹配、超时
+和 drain 都 fail open。契约见
+[`DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md`](../../work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
+
+### P1 历史：`AGENT-HOT-TURN-FIXED-COST`（已否决）
 
 目标：拆普通 Agent 热续轮约 `1.4–1.5 s` 的 prompt 成本，并验证短读窗口阈值是否让最后
 几十个新 token 支付了不必要的固定等待。
@@ -462,11 +583,16 @@ prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零�
 
 ## 当前断点
 
-**2026-11-01 继续执行。** 用户反馈 Strata 快但质量下降，目录供给已经产品化；当前从
-`AGENT-TERMINAL-QUALITY-COMPARISON` 开始，先完成 Codex/Strata 与 DSH 的同口径对照，
-再处理最终回复未严格收口，之后才决定是否恢复
-`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的覆盖审计。生产仍是
-server/vision/engine `172634/172636/172641`，未因本轮客户端配置问题重启。
+**2026-11-01 第三十一次修订后继续执行。** 用户已放弃“鹈鹕 SVG”问题；原 DSH 请求在
+76 个 reasoning token 后触发 GPU0 Xid 13，约 60 次精确重放未复现。当前不空等低频事故：
+只读探针持续记录下一次 Xid，任何新事故立即抢占。质量侧已确认用户 DSH Web 走
+Qwen/Strata relay；同一路径 6 个基础 fixture 代码/测试全过，明确最终消息契约后严格
+`3/6 -> 6/6`。真实路径成本已拆清：模型 `93.202%`、工具并集 `5.312%`，标题请求是
+已识别的额外并发源。`DSH-TITLE-INTERFERENCE` 的代理 ABBA 已通过：短任务主任务中位
+`13.602%`、`5/6` 胜，标题 12/12 由 provider 生成，长任务不明显回退。当前验证默认关闭
+的 server admission 产品候选，再决定是否部署；不再用局部工具或内核噪声代替用户等待。
+生产 server/vision/engine 为 `172634/172636/193790`，旧 engine `172641` 已由 Xid 退出并
+自动重启，health loaded、六 slots / 两 groups。
 
 `AGENT-CONTEXT-DIET-REAL-YIELD` 已否决产品化；`AGENT-HISTORY-STATE-RESIDENCY` 降为
 低频 p99 可行性项。
@@ -481,8 +607,8 @@ server/vision/engine `172634/172636/172641`，未因本轮客户端配置问题�
 `AGENT-HOT-TURN-PHASE-MAP` 已完成：596/94K 热长轮都只约有 554 个 fresh token；
 stage 2 的 `wait copy 173 ms` 是最大可移动相位。`AGENT-HOT-TURN-STREAM-RING` 已否决：
 full ring 让 596 wall 慢 `25.714%`，没有把 stage 2 copy 等待转成用户收益。当前生产为
-server/vision/engine `172634/172636/172641`，health loaded、六 slots / 两 groups，
-`strata.service` inactive。
+server/vision/engine `172634/172636/193790`，health loaded、六 slots / 两 groups，
+`strata.service` inactive。旧 engine `172641` 已由 GPU0 Xid 13 退出并自动重启。
 
 只读 routing 审计已完成：当前层 selected-only staged copy 已是生产路径，跨层推测 routing
 没有源码支持；full-ring 还切换了多个调度机制。`AGENT-HOT-TURN-STAGED-PREFETCH` 随后把

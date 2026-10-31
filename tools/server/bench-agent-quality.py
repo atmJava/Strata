@@ -342,6 +342,7 @@ def event_summary(path: pathlib.Path, runner: str = "codex") -> dict[str, Any]:
     tool_errors = 0
     warnings = 0
     final = None
+    session_id = None
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             row = json.loads(raw)
@@ -353,7 +354,9 @@ def event_summary(path: pathlib.Path, runner: str = "codex") -> dict[str, Any]:
         if isinstance(kind, str):
             events[kind] += 1
         if runner == "dsh":
-            if kind == "final" and isinstance(row.get("text"), str):
+            if kind == "session" and isinstance(row.get("sessionId"), str):
+                session_id = row["sessionId"]
+            elif kind == "final" and isinstance(row.get("text"), str):
                 final = row["text"]
             elif kind == "tool_call":
                 name = row.get("tool")
@@ -405,7 +408,19 @@ def event_summary(path: pathlib.Path, runner: str = "codex") -> dict[str, Any]:
         "event_errors": errors,
         "event_warnings": warnings,
         "final": final,
+        "session_id": session_id,
     }
+
+
+def dsh_command(dsh: str, task: Task, patch: pathlib.Path | None = None) -> list[str]:
+    command = [dsh, "--profile", "headless"]
+    if patch:
+        command += ["--patch", str(patch.resolve())]
+    return command + ["--json", task.prompt]
+
+
+def task_prompt(task: Task, suffix: str | None = None) -> str:
+    return task.prompt + (f"\n\n{suffix}" if suffix else "")
 
 
 def run_task(
@@ -414,11 +429,13 @@ def run_task(
     runner: str,
     codex: str,
     dsh: str,
+    dsh_patch: pathlib.Path | None,
     model: str,
     provider_url: str | None,
     model_catalog: pathlib.Path | None,
     api_key_env: str,
     reasoning_effort: str,
+    prompt_suffix: str | None,
     work_root: pathlib.Path,
     raw_root: pathlib.Path,
     timeout_s: int,
@@ -428,8 +445,10 @@ def run_task(
     raw_root.mkdir(parents=True, exist_ok=True)
     events_path = raw_root / f"{task.name}.jsonl"
     final_path = raw_root / f"{task.name}-last.txt"
+    prompt = task_prompt(task, prompt_suffix)
     if runner == "dsh":
-        command = [dsh, "headless", "--json", task.prompt]
+        command = dsh_command(dsh, task, dsh_patch)
+        command[-1] = prompt
     else:
         command = [
             codex,
@@ -455,7 +474,7 @@ def run_task(
             'approval_policy="never"',
             "-c",
             'sandbox_mode="danger-full-access"',
-            task.prompt,
+            prompt,
         ]
         if provider_url:
             command[2:2] = ["--ignore-user-config"]
@@ -514,7 +533,12 @@ def run_task(
     final_pass = isinstance(final, str) and final.strip() == "RESULT=PASS"
     return {
         "task": task.name,
+        "runner_profile": "dsh-headless" if runner == "dsh" else "codex-exec",
+        "runner_session_id": event["session_id"],
+        "dsh_patch": str(dsh_patch) if runner == "dsh" and dsh_patch else None,
+        "prompt_suffix_sha256": sha256(prompt_suffix.encode("utf-8")) if prompt_suffix else None,
         "wall_s": round(wall_s, 3),
+        "wall_scope": "runner_process; includes client-side post-turn auxiliary work",
         "returncode": returncode,
         "timed_out": timed_out,
         "tests_pass": tests_pass,
@@ -549,6 +573,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--dsh", default="dsh")
     parser.add_argument(
+        "--dsh-patch",
+        type=pathlib.Path,
+        help="explicit DSH profile overlay used by the headless runner; does not edit the user's profile",
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help=f"Codex model slug (default: {DEFAULT_MODEL})",
@@ -570,6 +599,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Codex model catalog to load; needed for real apply_patch and model metadata",
     )
     parser.add_argument("--reasoning-effort", choices=("low", "medium", "high"), default="high")
+    parser.add_argument(
+        "--prompt-suffix",
+        help="test-only instruction appended to every fixture prompt; its bytes are hashed in the report",
+    )
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--tasks", default=",".join(TASKS))
     parser.add_argument(
@@ -584,6 +617,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     options = parser.parse_args(argv)
     model = options.model or DEFAULT_MODEL
+    if options.dsh_patch and not options.dsh_patch.is_file():
+        parser.error(f"--dsh-patch does not exist: {options.dsh_patch}")
     if (
         options.runner == "codex"
         and options.provider_url
@@ -603,11 +638,13 @@ def main(argv: list[str] | None = None) -> int:
             runner=options.runner,
             codex=options.codex,
             dsh=options.dsh,
+            dsh_patch=options.dsh_patch,
             model=model,
             provider_url=options.provider_url,
             model_catalog=options.model_catalog,
             api_key_env=options.api_key_env,
             reasoning_effort=options.reasoning_effort,
+            prompt_suffix=options.prompt_suffix,
             work_root=options.work_root,
             raw_root=raw_root,
             timeout_s=options.timeout,
@@ -623,9 +660,16 @@ def main(argv: list[str] | None = None) -> int:
         "schema": 3,
         "scope": (
             "deterministic coding fixtures through an agent CLI; "
-            "no prompt or response text retained"
+            "no prompt or response text retained; wall_s is the full runner process"
         ),
+        "wall_scope": "runner_process; includes client-side post-turn auxiliary work",
         "runner": options.runner,
+        "runner_profile": "dsh-headless" if options.runner == "dsh" else "codex-exec",
+        "dsh_patch": (
+            str(options.dsh_patch)
+            if options.runner == "dsh" and options.dsh_patch
+            else None
+        ),
         "model": options.model_label
         or (model if options.runner == "codex" else None),
         "reasoning_effort": options.reasoning_effort,

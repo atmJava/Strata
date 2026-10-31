@@ -24,7 +24,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
 from serve.server import (ANSWER_RESERVE_MIN, CTX_SLACK, ByteTokenizer, EngineDied, EngineNonFinite, GpuBusy, MockEngine,  # noqa: E402
-                          PP_DONE_TAIL, Service,
+                          PP_DONE_TAIL, Service, is_dsh_title_request,
                           StrataEngine, api_key_of, engine_args, key_matches, layer_split_value, prompt_progress,
                           prompt_tokens_seen,
                           request_stats, request_timings, serve, start_failure_hint)
@@ -40,6 +40,178 @@ class RecordingEngine(MockEngine):
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.last_max_new = max_new
         yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+
+class DeferredTitleAdmission(unittest.TestCase):
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.svc = Service(
+            MockEngine(self.tok, "ok", max_context=CTX),
+            self.tok,
+            ChatTemplate(ROOT / "serve/chat_template.jinja"),
+        )
+
+    @staticmethod
+    def title(**changes):
+        req = {
+            "model": "qwen",
+            "stream": True,
+            "max_output_tokens": 4096,
+            "input": [
+                {"role": "developer", "content": "Name the session."},
+                {"role": "user", "content": "Fix the calculator."},
+            ],
+        }
+        req.update(changes)
+        return req
+
+    def test_only_the_exact_dsh_title_shape_matches(self):
+        self.assertTrue(is_dsh_title_request(self.title()))
+        for change in (
+            {"max_output_tokens": 32000},
+            {"tools": [{"type": "function", "name": "read"}]},
+            {"stream": False},
+            {"instructions": "different path"},
+            {"client_metadata": {"x-codex-turn-metadata": "{}"}},
+            {"input": [{"role": "user", "content": "one item"}]},
+        ):
+            with self.subTest(change=change):
+                self.assertFalse(is_dsh_title_request(self.title(**change)))
+
+    def test_title_waits_for_the_admitted_main_and_then_continues(self):
+        self.svc.defer_title_requests = True
+        self.svc.defer_title_grace_s = 0.01
+        self.svc.defer_title_max_wait_s = 1.0
+        self.assertIs(self.svc.reserve_inference(), True)
+        self.assertIs(self.svc.reserve_inference(), True)
+
+        result = []
+        thread = threading.Thread(
+            target=lambda: result.append(self.svc.wait_for_title_turn(self.title())),
+            daemon=True,
+        )
+        thread.start()
+        time.sleep(0.05)
+        self.assertFalse(result)
+        self.svc.release_inference()
+        thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [True])
+        self.assertEqual(self.svc.title_requests_deferred, 1)
+        self.assertGreaterEqual(self.svc.title_defer_s, 0.04)
+        self.svc.release_inference(title=True)
+
+    def test_title_alone_fails_open_after_grace(self):
+        self.svc.defer_title_requests = True
+        self.svc.defer_title_grace_s = 0.02
+        self.svc.defer_title_max_wait_s = 1.0
+        self.assertIs(self.svc.reserve_inference(), True)
+        started = time.monotonic()
+        self.assertTrue(self.svc.wait_for_title_turn(self.title()))
+        self.assertGreaterEqual(time.monotonic() - started, 0.015)
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(self.svc.title_requests_matched, 1)
+        self.assertEqual(self.svc.title_requests_deferred, 0)
+        self.svc.release_inference(title=True)
+
+    def test_default_off_does_not_wait(self):
+        self.assertIs(self.svc.reserve_inference(), True)
+        started = time.monotonic()
+        self.assertFalse(self.svc.wait_for_title_turn(self.title()))
+        self.assertLess(time.monotonic() - started, 0.05)
+        self.assertEqual(self.svc.title_requests_matched, 0)
+        self.assertEqual(self.svc.active_title_requests, 0)
+        self.svc.release_inference()
+
+    def test_two_titles_do_not_wait_for_each_other(self):
+        self.svc.defer_title_requests = True
+        self.svc.defer_title_grace_s = 0.03
+        self.svc.defer_title_max_wait_s = 1.0
+        self.assertIs(self.svc.reserve_inference(), True)
+        self.assertIs(self.svc.reserve_inference(), True)
+        results = []
+
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(self.svc.wait_for_title_turn(self.title())),
+                daemon=True,
+            )
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=0.5)
+
+        self.assertEqual(results, [True, True])
+        self.assertEqual(self.svc.title_requests_deferred, 0)
+        self.assertEqual(self.svc.active_title_requests, 2)
+        self.svc.release_inference(title=True)
+        self.svc.release_inference(title=True)
+        self.assertEqual(self.svc.active_title_requests, 0)
+
+    def test_titles_wait_for_main_not_for_each_other(self):
+        self.svc.defer_title_requests = True
+        self.svc.defer_title_grace_s = 0.03
+        self.svc.defer_title_max_wait_s = 1.0
+        self.assertIs(self.svc.reserve_inference(), True)
+        self.assertIs(self.svc.reserve_inference(), True)
+        self.assertIs(self.svc.reserve_inference(), True)
+        results = []
+
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(self.svc.wait_for_title_turn(self.title())),
+                daemon=True,
+            )
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        time.sleep(0.06)
+        self.assertEqual(results, [])
+
+        self.svc.release_inference()
+        for thread in threads:
+            thread.join(timeout=0.5)
+        self.assertEqual(results, [True, True])
+        self.assertEqual(self.svc.title_requests_deferred, 2)
+        self.svc.release_inference(title=True)
+        self.svc.release_inference(title=True)
+        self.assertEqual(self.svc.active_title_requests, 0)
+
+    def test_http_responses_path_waits_then_completes(self):
+        self.svc.defer_title_requests = True
+        self.svc.defer_title_grace_s = 0.02
+        self.svc.defer_title_max_wait_s = 2.0
+        httpd = serve(self.svc, port=0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        self.assertIs(self.svc.reserve_inference(), True)
+        result = []
+
+        def post():
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{httpd.server_address[1]}/v1/responses",
+                data=json.dumps(self.title()).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                result.append((response.status, response.read()))
+
+        thread = threading.Thread(target=post, daemon=True)
+        thread.start()
+        time.sleep(0.05)
+        self.assertTrue(thread.is_alive())
+        self.svc.release_inference()
+        thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0][0], 200)
+        self.assertIn(b"response.completed", result[0][1])
+        self.assertEqual(self.svc.title_requests_deferred, 1)
+        self.assertEqual(self.svc.active_title_requests, 0)
+        self.assertEqual(self.svc.admission_reserved, 0)
 
 
 class MaxTokens(unittest.TestCase):
@@ -2143,6 +2315,8 @@ class EngineDeath(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=30) as r:
                     text = r.read().decode()
                 self.assertIn("illegal memory access", text, path)
+                self.assertIn("NVRM: Xid", text, path)
+                self.assertIn("not a prompt or request-validation failure", text, path)
                 self.assertNotIn("HTTP/1", text, path)
                 self.assertEqual(svc.metrics()["requests"][0]["finish"], "error")
         finally:
@@ -2663,6 +2837,16 @@ class StartCrashReported(unittest.TestCase):
         import signal
         for sig in (signal.SIGILL, signal.SIGSEGV, signal.SIGBUS, signal.SIGKILL):
             self.assertFalse(transient_start_failure(str(p), 0, 3.0, -int(sig)), sig)
+
+    def test_gpu_execution_errors_are_not_called_bad_requests(self):
+        from serve.server import request_failure_message
+        gpu = request_failure_message(
+            "verify: layer 11 never rang (an illegal instruction was encountered)")
+        self.assertIn("verify: layer 11 never rang", gpu)
+        self.assertIn("NVRM: Xid", gpu)
+        self.assertIn("not a prompt or request-validation failure", gpu)
+        self.assertEqual(request_failure_message("max_tokens must be positive"),
+                         "max_tokens must be positive")
 
     def test_sigill_is_reported_not_retried(self):
         text, said = self.run_fake("import os, signal\nos.kill(os.getpid(), signal.SIGILL)\n")

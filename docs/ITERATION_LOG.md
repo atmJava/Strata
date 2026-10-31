@@ -3,6 +3,186 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-138 · 产品候选补齐 2 会话标题并发，避免标题互相等待
+
+- 目标 / 指标：在部署前验证标题 admission gate 对用户常见的 1/2 会话都成立，而不只是
+  “一个主请求加一个标题”的理想顺序。
+- 假设与预期：标题请求已先占一个 admission；若只比较总 admission 数，两个同时启动的
+  会话标题会把彼此当成普通请求，最坏互等到 60 s fail-open。
+- 为什么选这条路线：用户通常 1 个会话、偶尔 2 个；单会话 A/B 已通过，但并发分类错误会
+  直接伤害第二会话，属于部署前必须关闭的正确性缺口。
+- 改动与实验：admission 现在单独跟踪活跃标题数，只用“总 admission - 活跃标题”判断是否
+  还有主请求；标题之间不互等，释放 admission 与标题计数原子完成。新增“双标题无主请求
+  同时过 grace”和“一个主请求 + 双标题只等主请求”回归。
+- 结果：标题专项 `7 passed / 6 subtests`，连续 5 轮稳定；期间还修正了“另一标题已 reservation
+  但尚未完成 body 分类”造成的毫秒级虚报，现在只有等待后仍存在普通请求才计为 defer。
+- 判决：**产品候选并发语义修正通过专项测试；尚未部署。** 这不是新的性能收益，不能替代
+  生产 A/B。
+- 预期被推翻：只测主请求+单标题不足以覆盖实际 2 会话；聚合 admission 计数不能安全表达
+  请求类型。
+- 生产状态与回滚：生产 server/engine/config/GPU 未改，未重启；本地只改 opt-in 候选。
+- 证据：`serve/test_server.py::DeferredTitleAdmission`、
+  [产品契约](work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
+- 下一步与理由：跑全量测试、offline preflight 和文档检查，提交推送后只部署
+  `serve/server.py`；生产 A/B 同时增加 2 会话标题非互等检查。
+
+## I-20261101-137 · 标题延后在 ABBA 中改善 13.6%，转 server admission 产品候选
+
+- 目标 / 指标：保留 DSH 标题语义，验证标题等当前主模型请求结束后再运行，是否能改善
+  用户主任务完成时间且不退化长任务或标题质量。
+- 假设与预期：隐藏标题与首步主请求争用 GPU/cache；若只改变排队顺序，短任务应减少等待，
+  长任务和标题生成仍正常。
+- 为什么选这条路线：真实路径成本中模型占 `93.202%`，工具只占 `5.312%`；标题是已识别的
+  并发源，且关闭标题在短任务有收益但会让长任务和标题质量退化。
+- 改动与实验：修正 shape proxy 为真实逐块流式转发，加入精确 4096-cap 无工具请求 gate；
+  短任务 6 对采用 ABBA，长任务 2 对采用 ABBA；主指标用 session `task_wall_s`，同时检查
+  provider 标题、代码/测试/sentinel 和 Xid。
+- 结果：短任务 `17.637→15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；
+  12/12 质量与 provider 标题通过。长任务 B `37.943/41.297 s` 对 A
+  `46.411/82.438 s`，B 不明显回退，但 A 臂自身 8→11 step 漂移，只作非回退判断。
+  16/16 无 HTTP/事件/工具错误，新增 Xid 为零。
+- 判决：**代理候选通过。** 不关闭标题；在 Strata HTTP admission 层实现默认关闭的
+  `STRATA_DEFER_TITLE_REQUESTS=1`，只匹配精确 shape，主请求释放后继续，60 s fail-open。
+- 预期被推翻：标题不是 turn 后无关尾部，而是首步并发源；直接关闭会牺牲长任务和标题。
+- 生产状态与回滚：用户 profile、engine、GPU 和 config 未改；当前只有实验代理和本地
+  opt-in 源码。生产启用前需重启并再跑真实 A/B，失败移除 env。
+- 证据：L-166、[结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)、
+  [产品契约](work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
+- 下一步与理由：验证 server admission 实现和全量测试，再部署到现网路径；只有生产
+  ABBA 复现短任务 >=1%、长任务非回退和标题质量，才保留。
+
+## I-20261101-136 · 模型等待占 93.2%；下一项隔离标题请求而不关闭标题
+
+- 目标 / 指标：拆清用户 DSH 实际路径的主要等待，判断是否继续工具执行或局部内核优化；
+  同时修正会把 turn 后标题生成算进主任务的测试口径。
+- 假设与预期：如果工具和轮询占比很高，应先处理工具；如果模型 step 占绝对多数，则继续
+  拆工具和局部 kernel 不会解决用户最大等待。
+- 为什么选这条路线：此前只有 6 个 fixture 总墙钟，没有逐 step 归因；DSH 又存在隐藏标题
+  请求，若口径不分离很容易把辅助工作误判为任务主体。
+- 改动与实验：新增隐私安全的 DSH 会话成本探针和单测；关联 DSH 事件、token 使用与 server
+  metrics；新增 `task_wall_s`、`turn_union_s`、`post_turn_s`；对标题做精确 HTTP 形状
+  抓取与短/长任务 A/B。修掉代理先读完 SSE 的问题，改为逐块流式转发。
+- 结果：7 会话 runner `197.776 s`，模型 `184.332 s`（`93.202%`），工具并集
+  `10.505 s`（`5.312%`）；40/40 主 step 关联，7 个未关联请求正好是每个新会话一次的
+  标题，中位 `9.8 s`。短任务关闭标题 runner/main turn `5/6` 胜，`-10.647%/-11.843%`；
+  长任务无标题 `0/2` 胜，cache 首组还有跨臂污染。
+- 判决：**成本归因完成；关闭标题否决为通用产品策略，标题隔离实验进入当前项。**
+  `DSH-TITLE-INTERFERENCE` 保留标题语义，但先等主任务结束；使用 ABBA、`task_wall_s`
+  主指标、标题质量门和长任务非回退门。
+- 预期被推翻：工具不是这组真实 DSH 会话的大头；标题也不只是“turn 后无关噪声”，它会与
+  主请求争用，但直接关闭会降低长任务表现并可能退化标题。
+- 生产状态与回滚：未修改用户本地 DSH profile、生产 engine/config/GPU，未重启。代理和
+  overlay 仅为实验路径；任何新 Xid 立即抢占。
+- 证据：L-165、[结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
+- 下一步与理由：用已修正的真实流式代理做 ABBA 标题延后实验。只有短任务中位 >=1%、
+  长任务不明显回退、标题不退化且零错误，才考虑产品化。
+
+## I-20261101-135 · 明确最终消息契约把基础严格通过从 3/6 提到 6/6
+
+- 目标 / 指标：修复同一 Qwen/Strata DSH 路径中“代码和测试正确，但最终回复多写说明”的
+  instruction-following 缺口，不能靠客户端裁剪冒充模型服从。
+- 假设与预期：现有 prompt 已写“Reply exactly”，但工具循环结束后模型仍会先总结；如果
+  把最终 assistant message 的格式、唯一内容和禁止项写成独立契约，应减少歧义。
+- 为什么选这条路线：完整同路径测试中 6 个基础任务代码/测试 `6/6`，严格只有 `3/6`；
+  这是可重复、可直接测量、且不影响 GPU 的当前最大质量缺口。
+- 改动与实验：benchmark 增加显式 `--prompt-suffix`，只用于候选 prompt 并在报告记录
+  SHA-256。同一 `transaction-rollback` 当前 prompt 连续 5 次为 `4/5`，明确契约
+  `5/5`；随后完整 6 个基础 fixture 从严格 `3/6` 到 `6/6`。
+- 结果：候选完整 7 项测试 `7/7`、受保护测试未改 `7/7`、事件/工具错误 `0/0`；基础
+  严格 `6/6`，总严格 `6/7`。唯一剩余失败是 DSH 工具面不含 Codex 专用 `apply_patch`。
+  测试窗口新增 NVRM Xid `0`。
+- 判决：**通过。** 最终消息契约必须明确“最终 assistant message 恰好只有单行 sentinel，
+  无摘要/解释/Markdown/进度”，不能只笼统写 `Reply exactly`；不能静默改写模型输出。
+- 预期被推翻：问题不是代码生成或测试执行；三个失败样本都正确修改并运行了测试。也不该把
+  DSH 的 `edit/write` 冒充 `apply_patch`。
+- 生产状态与回滚：未修改用户本地 DSH profile、engine、GPU 或生产 config；overlay 和
+  suffix 都只用于 benchmark。
+- 证据：L-164、[结果](work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
+- 下一步与理由：质量门已有可验证修复。下一目标回到用户最大痛点等待时间，先按 DSH 实际
+  工具循环拆模型请求固定成本和工具回流，避免继续扫已否决的内核小项。
+
+## I-20261101-134 · DSH Web 与旧 headless 基准是不同 provider，先消除归因错误
+
+- 目标 / 指标：确认 DSH 实际使用的 provider/model/profile，并用同一 Qwen/Strata relay
+  重测 Schema 3；不修改用户 DSH。
+- 假设与预期：如果用户从 DSH Web 看到问题，但 benchmark 跑的是另一 profile/provider，
+  旧质量数字不能解释真实体验。
+- 为什么选这条路线：此前文档把 `dsh headless` 的结果写成当前 DSH/Strata 对照；profile
+  和 hosting 混淆会直接误导后续优化。
+- 改动与实验：只读 `--dump-config` 核实 Web 为 `atm/qwen3.8.../:8888`，headless 为
+  `deepseek-official/deepseek-flash`。新增不改用户 profile 的
+  `dsh-strata-headless.patch.yml` 与 `bench-agent-quality.py --dsh-patch`，显式记录
+  runner profile 和 overlay。
+- 结果：同模型/同 relay 的 7 项代码/测试 `7/7`、受保护测试未改 `7/7`；6 个基础任务
+  严格 `3/6`，事件/工具错误 `0/0`，合计 wall `243.865 s`，新增 Xid `0`。三个失败都在
+  最终回复多写解释；DSH 不声明 `apply_patch`，使用 `edit/write`。
+- 判决：**对照修正完成。** 旧 DSH/DeepSeek `6/6` 只保留为另一终端路径；不能归因给当前
+  Qwen/Strata 或 GPU 引擎。用户说的“不做检查”不能覆盖本轮：6 个基础任务均读取、编辑、
+  跑测试且测试全过。
+- 预期被推翻：当前剩余可复现质量缺口不是代码/测试，而是最终消息收口和 runner 工具面。
+- 生产状态与回滚：未重启、未改生产；只读配置和临时 benchmark overlay。
+- 证据：L-163、[结果](work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
+- 下一步与理由：直接进入 `AGENT-STRICT-RESPONSE-CONTRACT`，使用同一失败 fixture 连续
+  重复，验证明确最终消息契约。
+
+## I-20261101-133 · 低频故障不空等；主动项转真实终端质量对照
+
+- 目标 / 指标：复核第二十六版“GPU 稳定性优先”的执行顺序，确认它没有把不可复现的低频事故
+  变成阻塞，并修正 Xid 测试窗口和事故计数方法。
+- 假设与预期：新 Xid 必须立即抢占，但只有一个低频事故、约 60 次精确重放未复现时，继续
+  重放不能提高硬件故障率结论，也会拖住用户每天经历的质量和等待问题。
+- 为什么选这条路线：用户要求不要陷在局部，当前 DSH 的最终回答失败已证明严重；同时终端
+  质量对照有可执行的下一步，GPU 只读监测可以并行，不需要重启或修改生产。
+- 改动与实验：把全局目标改为“新事故抢占、无复现不空等”，主动项转
+  `AGENT-TERMINAL-QUALITY-COMPARISON`。修正探针 `--boot` 会暗中叠加默认 24 小时窗口的问题；
+  同一 PCI 默认 5 秒聚类，仍保留原始事件数；无时间事件不合并。修正上游 offset 表的表述：
+  负载和风扇混杂，不能当作可直接横比的单调剂量曲线或本机参数。
+- 结果：探针专项 `7 passed`；`serve/test_server.py` 为 `352 passed / 510 subtests passed`；
+  offline preflight PASS；`git diff --check` PASS。当前没有新 Xid，生产仍 health loaded、
+  6 slots / 2 groups。
+- 判决：**测试方法纠偏完成；GPU 风险保留但不再阻塞主动工作。** 无 Xid 只表示窗口内未观测，
+  不能写成修复；新 Xid 立即恢复为当前项。
+- 预期被推翻：只读探针不一定能直接证明根因，也不应要求先等到下一次偶发事故才继续其他
+  工作。稳定性证据必须按曝光窗口和负载解释，单次短 soak 没有足够说服力。
+- 生产状态与回滚：未重启、未改 DSH、GPU 时钟、驱动、engine 或 config；探针部署副本仍是
+  只读。
+- 证据：L-162、[事件结果](work/GPU_XID13_INCIDENT_RESULT-20261101.md)、
+  `tools/server/tests/test_probe_gpu_stability.py`。
+- 下一步与理由：开始真实终端质量对照。只读查清 DSH provider 配置和 bench 的标签来源，再用
+  同一 Schema 3 fixture 比较；若期间出现新 Xid，立即停止并转事故处理。
+
+## I-20261101-132 · GPU0 Xid 13 将主线切到可靠性；固定请求重放不再冒充硬件稳定性
+
+- 目标 / 指标：阻止真实 DSH vibe coding 任务在最终回答阶段变成 `server_error`，并给低频
+  GPU0 故障建立可关联、可回滚的测试方法。
+- 假设与预期：如果同一条 15,419-token 请求每次必崩，应先查请求结构、工具面或固定推理
+  路径；如果多轮精确重放通过而内核同时记录 Xid，则低频 GPU 执行故障的优先级更高。
+- 为什么选这条路线：用户明确表示该故障非常严重，且“鹈鹕 SVG”不再处理。搜索失败会把
+  整项编码/检查任务作废，严重性高于继续优化 1% 的局部首字时间。
+- 改动与实验：从 DSH 导出精确重建 Responses 请求，完成 1 次首次重放、20 次连续最终请求、
+  6 路并发最终请求、3 次完整五回合会话和标题并发；约 60 个流式请求。新增只读
+  `probe-gpu-stability.py`，解析 NVRM Xid、同秒事故簇、PCI/PID，并采集当前 GPU 状态；
+  加 4 个单测。修正用户可见的 CUDA 错误说明，保留错误类型、不增加自动重试。审阅同一
+  机器历史事故和上游同类改装卡报告；`serve/test_server.py` 全量 `352 passed / 510
+  subtests passed`。
+- 结果：原请求在 76 个 reasoning token 后失败；GPU0 `0000:03:00` 同秒记录 8 条 Xid 13
+  （ESR 含 `0x4c1eb72`）和 1 条 Xid 43，PID `172641`。约 60 次重放、30 个最终请求全部
+  HTTP 200，无新 Xid；当前 health loaded、6 slots / 2 groups。GPU0 在 2026-09-25
+  的不同软件栈上还记录过 Xid 62/154。
+- 判决：**低频 GPU/驱动/硬件故障成立，固定请求必然错误被否定；根因未确认，修复未完成。**
+  当前排序高度怀疑改装 22GB 卡显存时序/板级稳定性，但不能写成芯片已损坏。
+- 预期被推翻：固定 prompt 和 6 路并发都不必然复现；“60 次通过”不能证明硬件稳定。
+  同样，`595.71.05` 只能证明当前版本固定，不能证明不会 Xid。
+- 生产状态与回滚：未改 DSH、GPU 时钟、驱动、engine 或 config。旧 engine `172641` 已由
+  Xid 退出并自动重启为 `193790`；server/vision 仍 `172634/172636`。只读探针未要求重启。
+- 证据：L-161、[事件结果](work/GPU_XID13_INCIDENT_RESULT-20261101.md)、
+  `/opt/ai/logs/gpu-stability-current-20261101.json`、
+  `/opt/ai/logs/incident-gpu0-xid62-20260925-054029.txt`。
+- 学到什么：服务器故障与模型质量必须分开。固定请求适合排除代码/内核确定性错误，不适合
+  估计低频硬件 fault 率；事故数应按同时间、同 PCI 事件簇统计并保留原始 Xid 行。
+- 下一步与理由：`GPU-XID13-STABILITY`。先在正常真实使用中被动采集并关联下一次 Xid；
+  重复出现后才进入 GPU0 单卡隔离和显存降频剂量实验。固定请求不再增加同形重放次数。
+
 ## I-20261101-131 · Schema 3 拆清代码正确性与最终收口；DSH 纳入终端对照
 
 - 目标 / 指标：用当前工具协议重测 Codex/Strata，并把用户本地 DSH 纳入同一组 coding

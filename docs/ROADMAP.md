@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-11-01（恢复执行；质量与工具协议为硬门）。
+> 最后更新：2026-11-01（第二十七次目标修订；严重可靠性抢占、质量与工具协议为硬门）。
 
 ## 用户目标
 
@@ -61,20 +61,28 @@
 | M46 | grouped staged expert lookahead | 当前 grouped staged path 保持 8 个实际传输在前；32-slot ring 与 16-expert gather 的安全上限为 15；stage 2 `wait copy` 中位 `173 ms` | 默认 8 不变，B 只设 `STRATA_PREFILL_STAGED_AHEAD=15`；质量/路径门全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3% | **否决**：路径/质量全过；596 wall `1.510583→1.505333 s`，只快 `0.3475%`、绝对 `5.25 ms`；prompt 慢 `0.5996%`；未跑 94K/并发，A2 已恢复 |
 | M47 | 热续轮 dequant 重复工作审计 | stage 2 `dequant 106 ms`；production 为 native IQ3_XXS、554 fresh token、grouped staged path | 只读证明同一 expert/layout 是否重复转换、真实触发率和生产路径；单一可移除部分须给整请求 wall >=1% 且绝对 >=0.05 s 上界、数值/回滚边界；未过门不构建不重启 | **否决重复假设**：该 phase 实为 native gather 字节搬运；每层只处理唯一 selected expert，每 16 个一次 gather；stage 1/2 不同层，无重复转换；MMQ 固定 stride 不能直读任意 cache slot。未改源码/未重启，不扫参数 |
 | M48 | resident expert 绕开 MMQ gather | stage 1/2 gather 合计约 `183 ms`；group 级 direct path `7.848` 对 MMQ `11.671 ms/layer`（`1.49x`）；596 1 路 wall 改善 `1.862%`（相对 A1 `2.145%`、`32.667 ms`），三波全胜 | group 级上界、路径命中、greedy 和 1/2 路测量已完成；原契约绝对 `0.05 s` 未过，94K prompt 无对应改善，4/6/8 未完成 | **暂停验收，未采纳**：用户的 1% 价值原则记录为正向信号，但不静默放宽契约；候选默认关闭，已恢复 A1 生产。恢复后先审计 48 层 direct-path 覆盖/fallback，而非重跑同形 A-B-A |
-| M49 | Codex 模型目录与 coding 质量 | 无目录时 9 工具且无 `apply_patch`；目录后 14 工具且为 `custom`。Schema 3 Qwen/Strata 基础严格 `5/6`、测试 `6/6`、`159.777 s`；`apply_patch` 独立重复 `3/3` | 产品化幂等目录供给；真实工具面无错；基础 fixture 测试不变、最终 sentinel、无事件错误；不改变引擎和量化 | **目录供给完成，质量门仍开放**：`strata codex catalog [--apply]` 已产品化；唯一基础失败是最终回复多写说明。Schema 1/2 的 `7/7`、`3/4` 已被取代 |
-| M50 | Codex/Strata 与 DSH 终端质量对照 | DSH `0.2.1-rc.3`；Schema 3 同为 6 个基础 fixture，DSH/DeepSeek 直连 `6/6`、测试 `6/6`、`71.391 s`；Qwen/Strata `5/6`、`159.777 s` | 报告不混淆 runner/model/provider；判断 DSH 能否经 Strata endpoint 运行；至少重复一次并保留失败类型 | **基础对照完成，配置路径待查**：当前 DSH 是 DeepSeek 直连；串行耗时不可归因 Strata 引擎 |
+| M49 | Codex 模型目录与 coding 质量 | 无目录时 9 工具且无 `apply_patch`；目录后 14 工具且为 `custom`。Codex/Strata 基础严格 `5/6`、测试 `6/6`、`159.777 s`；`apply_patch` 独立重复 `3/3` | 产品化幂等目录供给；真实工具面无错；基础 fixture 测试不变、最终 sentinel、无事件错误；不改变引擎和量化 | **目录供给完成**：`strata codex catalog [--apply]` 已产品化；Codex 专用 `apply_patch` 与 DSH `edit/write` 分开统计 |
+| M50 | DSH Web 与 terminal 质量对照 | 用户 DSH Web 为 `atm/qwen3.8.../:8888`；旧 `dsh headless` 为 `deepseek-official/deepseek-flash`。显式 overlay 对齐 Qwen/Strata 后，6 个基础测试 `6/6`、严格 `3/6`，事件/工具错误 `0/0`，wall `243.865 s` | 报告不混淆 runner/profile/provider/model；至少重复一次并保留失败类型；不能把另一 hosting 归因当前引擎 | **完成**：旧 DeepSeek `6/6` 剔除；DSH 实际工具面为 `edit/write`，不声明 `apply_patch`；新增 Xid `0` |
+| M51 | GPU0 低频 Xid 稳定性 | DSH 最终 Responses `input=15,419`、31 tools、76 reasoning token 后因 `layer 11 never rang` 失败；GPU0 同秒 8×Xid 13 + Xid 43。约 60 次精确重放、30 个最终请求全 200，无新 Xid；GPU0 另有 Xid 62/154 历史；上游同类板需板卡特异 offset，报告负载不可横比 | 每个真实窗口从 UTC 起点读取新增 NVRM Xid；同一 PCI 5 秒内事件聚簇但保留原始事件数；`--boot` 覆盖整个 boot；固定 prompt 不作硬件稳定性证明；重复事故后先单变量验证 `STRATA_HC_SPLIT=1`，再测可回滚显存降频，最后单卡隔离；无新事故时不空等 | **P0 抢占项**：高度怀疑改装 22GB 卡显存/板级稳定性，未证明本机芯片损坏；只读探针已固化，未改 GPU/engine/config。当前主动项为 M54 |
+| M52 | 严格最终回复契约 | 同 Qwen/Strata DSH 路径，当前 prompt 的基础严格 `3/6`；3 个失败均代码/测试正确但最终多写解释。`transaction-rollback` 当前 prompt `4/5` | 同一失败 fixture 至少 5 次；明确最终 assistant message 的唯一内容与禁止项；代码/测试不退化，其他基础 fixture 不下降；不静默改写输出 | **通过**：候选 `5/5`；完整基础严格 `3/6 -> 6/6`，测试 `6/6`、受保护测试未改、事件/工具错误 `0/0`，新增 Xid `0` |
+| M53 | DSH 实际工具循环成本 | 7 个基础/fixture 会话 runner `197.776 s`；模型 step `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联，7 个隐藏标题请求 | 只读关联 DSH 事件与 server metrics；分开 runner 进程、主任务 turn、模型、工具和 turn 后工作；给出真实触发率与绝对秒数 | **已完成**：标题请求约 266 prompt/118 output token、中位 `9.8 s`，与主请求争用 GPU/cache；转 M54 |
+| M54 | DSH 标题争用 | 短任务关闭标题 runner `16.854→14.901 s`（`-10.647%`）、主 turn `14.929→13.001 s`（`-11.843%`），`5/6` 胜；长任务 `0/2` 胜；首组 cache 跨臂污染 | 保留标题，主任务结束后异步生成；6 对短任务 ABBA、2 对长任务；`task_wall_s` 主指标 >=1%，长任务不明显回退，标题不退化；真实流式代理、零错误；1/2 会话标题不互等 | **代理通过，产品验证中**：延后标题短任务 `17.637→15.238 s`（`13.602%`）、配对中位 `13.465%`、`5/6` 胜，12/12 质量/provider 标题；长任务非回退；双标题专项连续 5 轮通过。默认关闭 server admission gate，不改 profile；新 Xid 抢占 |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 
 ## 当前主要矛盾
 
-用户反馈的“明显更快、质量略降”先按质量事故处理，而不是继续追局部 1%：Codex 模型目录
-缺失是已复现的确定性协议问题，但不是完整解释。目录供给已经进入产品命令；Schema 3
-Qwen/Strata 的代码和测试都是 `6/6`，剩余基础失败集中为“任务正确但没有严格只回复
-sentinel”。DSH/DeepSeek 直连为 `6/6`，但模型、量化、provider 和 hosting 同时改变，
-只能作为终端路径对照。当前目标是把 DSH 正式纳入同口径、消除报告标签歧义，再处理严格
-指令遵循；只有质量门收口后才恢复速度候选。`medium` 只快约 7% 却把严格通过从 4/4 降到
-2/4，因此继续使用 `high`。
+当前不是继续追局部 1%，也不是把一次 GPU failure 说成模型质量。DSH 的最终请求在
+GPU0 触发 8 条 Xid 13 和 1 条 Xid 43；同一精确请求约 60 次重放没有复现，说明固定
+prompt 不是充分条件。GPU0 在另一套软件栈上还有 Xid 62/154 历史，上游同型号改装
+22GB 卡也报告相同 Xid 13/ESR 并在显存降频后缓解。该故障是最高抢占风险，但低频且没有
+复现器，不能通过无限重放或空等推进；现在保持按时间窗口采集 Xid，同时继续 M54 的标题
+争用隔离。单次无 Xid soak 不能写成修复。
+
+质量门已收口：DSH Web 的 provider 歧义已消除，同一 Qwen/Strata 路径代码和测试都是
+`6/6`，明确最终消息契约后严格从 `3/6` 提到 `6/6`。DSH/DeepSeek 直连 `6/6` 只作为
+另一 hosting 参考。当前矛盾已转到真实路径等待：7 个基础/fixture 会话中模型 step 占
+`93.202%`，工具并集只占 `5.312%`；隐藏标题请求每个新会话一次，并与主请求争用。
 
 第十八次复盘修正了优先级。整任务 trace 的工具 union `123,693 s` 是 35 文件快照的根任务
 主体，普通单路模型 union `66,228 s` 是第二大块；恰好两路只有 `171 s`。普通热续轮

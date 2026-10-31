@@ -7,42 +7,29 @@
 
 ## 当前决策前沿
 
-0. **全局目标已第二十五次修订并继续执行**：先把真实 AI vibe coding 的质量、任务成功率、
-   指令遵循和工具协议设为硬门，再优化任务墙钟、首个可执行结果和严重尾部；没有进入用户
-   实际路径的能力只算机制收益。当前项 `AGENT-TERMINAL-QUALITY-COMPARISON` 要把
-   Codex/Strata 与 DSH 作为两个终端路径测量；模型、provider、hosting 不同必须显式标注。
-   Codex 模型目录缺失已确认会把工具面从 14 降到 9 并省略 `apply_patch`，目录供给已通过
-   `strata codex catalog [--apply]` 产品化并由预检/单测覆盖。Schema 3 当前 Qwen/Strata
-   基础严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；唯一失败是最终回复未严格
-   只给 sentinel。DSH/DeepSeek 直连同条件 `6/6`、串行合计 `71.391 s`，只作带标签的
-   终端参考，不能归因 GPU 引擎。普通热续轮固定成本项
-   `AGENT-HOT-TURN-FIXED-COST` 已否决：`short_read=0` 在所有热续轮尺寸都未取得
-   1% 收益，1 路短热续 prompt/wall 反而慢 `13.75%/8.14%`，因此保留默认 64，
-   不扫描邻近阈值。`AGENT-EDIT-TEST-LOOP-TRACE` 已完成：576 次测试的 178 次命令签名
-   重复中，173 次之间有新编辑；无编辑重复只有 5 次且状态不可判定，成功/失败后立即
-   重复都为 0。重复测试、测试缓存和自动跳过从队列剔除。
-   `AGENT-SPLIT-MTP-BATCH` 已完成并否决：启动日志证明 batched 路径真实命中，94K
-   prompt 改善 `2.359%`，但 wall 反向 `0.046%`，未过 `0.05 s` 绝对门，因此停止
-   189K/全矩阵并恢复生产。`ENGINE-0.1.55-EVAL` 已完成并否决：官方 CLI 不支持
-   `--prompt-cache-long`；移除该 128K-only 选项后 parity/smoke 全过，但 596/94K
-   hot-long wall 相对 A 参考中位慢 `5.853%/4.259%`。`GDN-CONVL2` 随后完成并否决：
-   质量门全过，但 596/94K wall 只改善 `0.8245%/0.2051%`，绝对
-   `0.012476/0.002898 s`，未过 `1%` 和 `0.05 s` 双门；A2 已恢复。当前转为
-   `AGENT-HOT-TURN-PHASE-MAP`：同口径 596/94K 热长轮都约有 554 个 fresh token；
-   stage 2 的最大 phase 为 `wait copy 173 ms`。`AGENT-HOT-TURN-STREAM-RING` 随后
-   完成并否决：full ring 真实命中且质量全过，但 596 hot-long wall 从 `1.509808 s`
-   升到 `1.898041 s`，慢 `25.714%`；该分支同时切换 whole-chunk stream、shared-expert
-   defer 和 cross-layer issuer，不能把回退单独归因给 ring 深度。只读审计随后确认
-   staged 路径本来就在每层 router 后按实际选中专家建序，后续层 routing 无法提前获知，
-   因此跨层推测预取关闭。当前转为 `AGENT-HOT-TURN-STAGED-PREFETCH`：只把 grouped
-   staged walk 的实际传输在前数从默认 8 提到安全上限 15，验证能否转化 stage 2 的
-   `wait copy 173 ms`。
-   真实 trace 中，工具 union `123,693 s` 是 35 文件快照的根任务主体，普通单路模型
-   union `66,228 s` 是第二大块；恰好两路仅 `171 s`。编辑—测试 36 文件快照中，19 个
-   root 同时含编辑和测试，首修改前模型/工具 `3,235.782/6,365.546 s`，首修改到首测试
-   `4,072.900/8,241.516 s`。223K 隔天旧会话 `113.014 s`、
-   cached `0` 仍是 p99 尾部，但 34 个有效会话只有 1 个超过 24h，已降为
-   `AGENT-HISTORY-STATE-RESIDENCY` 低频可行性项，不能排在普通热续轮之前。
+0. **全局目标已第三十一次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+   Xid、engine 非预期退出或错误结果风险时，暂停性能实验并保存事故。没有新事故时，不把
+   “等待低频故障”当作主线，继续处理真实用户的质量与等待。
+   - `AGENT-DSH-REAL-PATH-COST` 已完成：模型 step 占 `93.202%`，工具并集占 `5.312%`；
+     40/40 个主 step 关联成功，7 个未关联请求正好是每个新会话一次的标题请求。
+   - 当前主动项：`DSH-TITLE-INTERFERENCE`。保留标题语义，验证主任务结束后再异步生成，
+     避免与主请求争用 GPU/cache；代理 ABBA 已通过，当前验证默认关闭的 server admission
+     产品候选；不改用户本地 profile。
+   - 测试口径：runner 进程 wall 和主任务 `task_wall_s` 分开；代理必须逐块流式转发；
+     ABBA 平衡并保留标题质量/长任务非回退门。
+   - 质量项已完成：用户 DSH Web 实际走 Qwen/Strata relay；旧 headless 是 DeepSeek
+     官方，不能混用。同一 Qwen/Strata 路径 6 个基础 fixture 代码/测试 `6/6`，当前
+     prompt 严格 `3/6`，明确最终消息契约后严格 `6/6`；连续 fixture `4/5 -> 5/5`。
+     DSH 工具面为 `edit/write`，不含 Codex 专用 `apply_patch`。
+   - 当前抢占项：`GPU-XID13-STABILITY`。DSH 最终 Responses 在 GPU0 触发 8 条 Xid 13 和
+     1 条 Xid 43；约 60 次精确重放未复现。固定 prompt 不是硬件稳定性证据；工作按时间
+     窗口保存 workload、PID、GPU 状态和新增 NVRM Xid。任何新 Xid 立即抢占；重复事故后
+     才做单变量 `STRATA_HC_SPLIT=1`、显存降频或 GPU0 隔离。
+   - 速度候选仍排在质量和可靠性门之后。1% 以上改善计入，但必须进入真实 1/2 路路径、
+     报告绝对秒数和第二请求 TTFT，并覆盖 4 路非回退、6/8 路安全。
+
+> 下面的编号 1–37 是历史决策索引，只用于防止重跑；当前执行顺序只以本段、候选表和
+> `ROADMAP.md` 为准。旧条目里的“当前转为”均已过时，完整数字见 `EVIDENCE_LEDGER.md`。
 1. **P4 已采纳**：同一新引擎 boot 上，代码由 A 合并中位 41.1875 s 降到 5.074 s（−87.681%）；
    96K by_kind +2.761%、wave +2.202%，短 JSON 3.980 s，三臂零错误且 needle 全对。
 2. **余量风险**：短 JSON 距 4 s 约 20 ms，96K 距 3% 约 0.24 个百分点；生产指标靠近边界时
@@ -188,10 +175,13 @@
 
 | ID | 项 | 验收条件 | 状态 | 证据 | 备注 |
 |---|---|---|---|---|---|
-| AGENT-CODEX-MODEL-CATALOG-QUALITY | 修复 Codex 缺失模型目录造成的工具面缩减 | 真实请求声明 `apply_patch`；服务无未声明工具；基础 coding fixture 测试/测试不变/最终 sentinel 全过；`apply_patch` 至少 3 次独立稳定；目录幂等可回滚；不改生产引擎 | 进行中 | L-159/L-160：无目录 9 工具、有目录 14 工具；Schema 3 Qwen/Strata 基础严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；唯一失败为最终回复未严格收口 | 质量是硬门；不把混合模型/provider/hosting 差异归咎引擎；`medium` 更快约 7% 但严格 2/4，保留 high |
+| GPU-XID13-STABILITY | 定位并收敛会让真实 DSH 任务失败的低频 GPU0 Xid 13 | 每个真实窗口从 UTC 起点读取新增 NVRM Xid；同一 PCI 5 秒内事件聚簇但保留原始事件数；`--boot` 覆盖整个 boot；固定 prompt 只做代码路径回归；重复事故才进入单卡隔离或可回滚显存降频；不得用固定请求多次成功宣称硬件修复 | 进行中 | DSH 最终请求 input `15,419`、31 tools、76 reasoning token 后失败；GPU0 8×Xid 13 + Xid 43；约 60 次重放、30 个最终请求 HTTP 200，无新 Xid；GPU0 历史 Xid 62/154；上游同类改装卡降显存频率后缓解 | **P0 抢占项**：新 Xid 立即停下质量/性能实验；无新事故时不空等。只读探针已固化，当前未证明损坏、未完成缓解；不能归为模型质量 |
+| AGENT-CODEX-MODEL-CATALOG-QUALITY | 修复 Codex 缺失模型目录造成的工具面缩减 | 真实请求声明 `apply_patch`；服务无未声明工具；基础 coding fixture 测试/测试不变/最终 sentinel 全过；`apply_patch` 至少 3 次独立稳定；目录幂等可回滚；不改生产引擎 | 进行中 | L-159/L-160：无目录 9 工具、有目录 14 工具；Codex/Strata 基础严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；最终回复契约在 DSH L-164 已验证 | 质量是硬门；Codex 与 DSH 工具面分开；不把 DeepSeek 官方或其他 hosting 归咎当前引擎 |
 | AGENT-CODEX-CATALOG-PROVISION | 让产品安装/连接流程幂等供给 Codex 模型目录 | 不覆盖用户配置；目录匹配实际模型 slug；重复运行不重复添加；失败可恢复；模板缺 freeform `apply_patch` 时拒绝；检查和写入分离 | 已完成 | `strata codex catalog` 默认只检查，`--apply` 原子写入并先备份；重复运行 `unchanged`；Terminal/catalog/bench tests 通过 | 不改 GPU、engine 或生产 config；文档改为产品命令；Codex 修改目录后需重启客户端 |
-| AGENT-TERMINAL-QUALITY-COMPARISON | 用同一 Schema 3 fixture 对照 Codex/Strata 与 DSH，并消除模型/provider 混淆 | 报告明确 runner/model/provider 标签；6 个基础 fixture 均保留测试、测试字节、最终 sentinel、工具错误和 wall；DSH 至少可重复一次；判断 DSH 能否配置到 Strata endpoint；不能用混合 hosting 结果归因引擎 | 进行中 | Qwen/Strata `5/6`、`159.777 s`；DSH/DeepSeek 直连 `6/6`、`71.391 s`；两者模型、provider、hosting 不同 | 串行耗时只记录，不作通用速度结论；下一步先让 bench 的 DSH 报告不再写假 Qwen slug |
-| AGENT-STRICT-RESPONSE-CONTRACT | 缩小 Qwen/Strata 在完全正确后仍多写说明的最终收口缺口 | 同一失败 fixture 至少重复 5 次；比较当前配置、更明确的 final-message contract 和可行的 messages 配置；代码/测试不退化，严格 sentinel 通过率提高且其他 fixture 不下降 | 待做 | Schema 3 `transaction-rollback` 代码/测试正确但最终回复未只含 `RESULT=PASS`；旧 Schema 1/2 的 7/7、3/4 不作为当前基线 | 优先验证客户端可表达的最终消息约束；不能靠放宽 sentinel 检查掩盖问题 |
+| AGENT-TERMINAL-QUALITY-COMPARISON | 用同一 Schema 3 fixture 对照 Codex/Strata 与 DSH，并消除模型/provider 混淆 | 报告明确 runner/model/provider 标签；6 个基础 fixture 均保留测试、测试字节、最终 sentinel、工具错误和 wall；DSH 至少可重复一次；判断 DSH 能否配置到 Strata endpoint；不能用混合 hosting 结果归因引擎 | 已完成 | L-163：DSH Web `atm/qwen.../:8888`；旧 headless 为 DeepSeek 官方。显式 overlay 后 6 个基础测试 `6/6`、严格 `3/6`，事件/工具错误 `0/0`，wall `243.865 s` | **完成**；旧 DSH/DeepSeek `6/6` 不再作当前路径基线；不改用户 profile |
+| AGENT-STRICT-RESPONSE-CONTRACT | 缩小 Qwen/Strata 在完全正确后仍多写说明的最终收口缺口 | 同一失败 fixture 至少重复 5 次；比较当前配置、更明确的 final-message contract 和可行的 messages 配置；代码/测试不退化，严格 sentinel 通过率提高且其他 fixture 不下降 | 已完成 | L-164：`transaction-rollback` 当前 prompt `4/5`、明确契约 `5/5`；6 个基础 fixture 严格 `3/6 -> 6/6`，测试 `6/6`、受保护测试未改、错误 `0/0` | **完成**；调用方明确最终 assistant message 只能是什么，不静默裁剪；未改用户 DSH |
+| AGENT-DSH-REAL-PATH-COST | 拆 DSH 实际工具循环并找整任务 >=1% 的下一机制 | 只读覆盖基础 fixture 和长任务；记录每 step input/cached/fresh、output/reasoning、prompt/decode、finish、工具类别/回流、客户端 wall；给出真实触发率与绝对秒数；低于 1% 或无法进入实际路径不实现 | 已完成 | L-165：7 会话 runner `197.776 s`，模型 `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联；7 个未关联标题请求，中位 `9.8 s`；短任务关闭标题主 turn `5/6`、`-11.843%`，长任务 `0/2` 胜 | **完成**；关闭标题不能通用产品化；转 `DSH-TITLE-INTERFERENCE` |
+| DSH-TITLE-INTERFERENCE | 保留 DSH 标题语义但避免与主请求争用 | 显式 overlay/proxy，不改用户 profile；至少 6 对短任务 ABBA、2 对长任务；主指标 `task_wall_s`，runner wall 次之；短任务中位 >=1%，长任务无明显回退，标题不退化/fallback；记录 prompt/decode/cache/零错误；代理真实流式；1/2 会话标题不互等 | 进行中 | L-166：短任务 `17.637→15.238 s`（`13.602%`）、配对中位 `13.465%`、`5/6` 胜；12/12 质量/provider 标题；长任务 B 不明显回退；16/16 无错误。专项双标题回归连续 5 轮通过 | **代理通过，产品验证中**；默认关闭 server admission gate；新 Xid 抢占 |
 | AGENT-CODEX-TITLE | Codex thread-title 请求不进入引擎 | 三个 title 请求返回合法标题且 engine request/prompt/output 增量均为 0；普通 Responses 请求仍进入引擎；健康与配置可回滚 | 已完成 | L-126：B `1.8–2.1 ms`、零引擎请求/token；普通请求 +1；A2 基线 `1.978–10.292 s` | **已采纳并保持运行**；配置可回滚，无引擎重建 |
 | AGENT-CODEX-COMPACTION-LRU | 多线程 compaction 保留各自工具前缀 | 1 主 3 子代理交错时每个线程的 compaction 均用自己的工具集合；并发安全、有界 LRU 和淘汰测试通过；无效 metadata/title 不污染缓存；默认关闭路径字节不变 | 已完成 | L-127：8.3K prompt 复用量 `99.52–99.64%`，墙钟 `0.69–0.89 s`；45 tests OK，title 仍零引擎 | **已采纳并保持运行**；B2 配置/源码可回滚 |
 | AGENT-STATIC-SYSTEM-PREFIX | 让兄弟 agent 复用共享 system 前缀 | deterministic 渲染证明新顺序增加共享字节，同时 tool/system 内容集合不变；真实模型仍按声明工具调用；1/2 路端到端改善 ≥1%，4 路不退 >1%；默认关闭 byte-identical | 已完成 | L-128：共同前缀 `320 → 54,366` 字节；后续兄弟复用 `5,120` token，平均墙钟 `24.56%`，后三 `33.34%`；四次并发工具隔离通过 | **已采纳并保持运行**；B3a 6/2、engine hash 不变；需同步 pack 模板 |

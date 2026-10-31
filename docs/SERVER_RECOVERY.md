@@ -12,6 +12,7 @@
 ssh atm@192.168.3.14 'systemctl is-active strata; \
   nvidia-smi --query-gpu=index,memory.free,temperature.gpu --format=csv,noheader; \
   curl -s -m 5 -o /dev/null -w "http=%{http_code} t=%{time_total}s\n" http://127.0.0.1:8080/health; \
+  python3 /opt/ai/bin/probe-gpu-stability.py --boot; \
   grep -c "MiB of VRAM free" /opt/ai/src/strata-0.2.2/strata-022.log'
 ```
 
@@ -23,6 +24,7 @@ ssh atm@192.168.3.14 'systemctl is-active strata; \
 | `only N MiB of VRAM free ... (#2065)` 且 N < 512 | 驱动可能把显存换页到 RAM，decode 掉到几 tok/s，**一个窗口可能永远跑不完** | 提高 `--vram-reserve-mib` 或降低 `--max-context` / `--batch`（见台账） |
 | `is-active` 不是 active | 服务死了 | §2 恢复 |
 | 请求挂住 >60 s 且 GPU 利用率 100% 不动 | 窗口卡死 | §2 恢复（重启是唯一已知手段） |
+| `NVRM: Xid`、`never rang` 或 engine PID 已变 | 可能是 GPU/驱动执行故障，不是请求参数错误 | 保存整次事故和请求时间；先查 `probe-gpu-stability.py`，不要只重试同一 prompt |
 
 ## 2. 恢复顺序（从轻到重，一步不行再下一步）
 
@@ -54,7 +56,9 @@ ssh atm@192.168.3.14 'systemctl is-active strata; \
 
 ## 4. 禁令（不可谈判）
 
-- 不换驱动：钉在 `595.71.05`（apt 包固定，禁止自动升回 `595.91.07`——那次产生 Xid 62/154）。
+- 不换驱动：钉在 `595.71.05`（apt 包固定，禁止自动升回 `595.91.07`——那套栈有 Xid
+  62/154 历史）。但 `595.71.05` 在 2026-10-31 也发生过 GPU0 Xid 13；固定版本不等于不会
+  Xid，不能再把它写成硬件稳定性的保证。
 - 不 `-lgc` 锁频（本机扫描全负：1700 MHz −4.8%，1600 MHz −8.8%）。
 - 不动 ggml pin `3cf03257`，除非同时给出本机 A/B。
 - 不在生产 boot 里跑需要 >2 分钟停机的实验，除非已获批准。
@@ -65,6 +69,9 @@ ssh atm@192.168.3.14 'systemctl is-active strata; \
 
 - 显存只被一个进程占：Strata 引擎本体（GPU0 21.4 GiB / GPU1 21.0 GiB）。**余量问题是我们自己造成的**，
   不是外部进程抢的。
+- GPU0 `0000:03:00` 有两次跨软件栈事故：2026-09-25 Xid 62/154，2026-10-31 Xid 13/43。
+  2026-10-31 的固定请求约 60 次重放未复现；上游同型号改装 22GB 卡在降低显存频率后不再
+  出现同 Xid。当前按低频硬件风险处理，尚未证明器件损坏。
 - 定时器 `nvlink-crc-sample.timer` 每小时在跑，最新读数两卡两 link 的 `crc/replay/recovery` 全 0。
 - 无残留实验进程，磁盘剩 162 G。**用户 crontab 现在有一条**（2026-10-24 加的）：
   `*/5 * * * * /opt/ai/bin/vram-perf-sample.sh` → `/opt/ai/logs/vram-perf.csv`，零负载被动采样，

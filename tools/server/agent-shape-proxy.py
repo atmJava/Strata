@@ -300,6 +300,63 @@ def request_shape(req: dict) -> dict:
     }
 
 
+class AuxiliaryGate:
+    """Delay one explicitly matched auxiliary request while a main request runs.
+
+    DSH's title request currently has no purpose field on the HTTP wire.  The
+    caller therefore supplies the exact output-token cap observed on that
+    request; this experiment refuses to infer from prompt text.  A short grace
+    window lets the main request that starts the title win a scheduling race.
+    """
+
+    def __init__(self, max_output_tokens: int | None = None, grace_s: float = 0.05):
+        if max_output_tokens is not None and max_output_tokens <= 0:
+            raise ValueError("auxiliary max_output_tokens must be positive")
+        if grace_s < 0:
+            raise ValueError("auxiliary grace must not be negative")
+        self.max_output_tokens = max_output_tokens
+        self.grace_s = grace_s
+        self.active_main = 0
+        self.condition = threading.Condition()
+
+    def is_auxiliary(self, req: dict) -> bool:
+        return (
+            self.max_output_tokens is not None
+            and req.get("max_output_tokens") == self.max_output_tokens
+            and not req.get("tools")
+        )
+
+    def enter(self, req: dict) -> tuple[bool, bool, float]:
+        """Return (auxiliary, ordinary, deferred_seconds)."""
+        if self.max_output_tokens is None:
+            return False, False, 0.0
+        auxiliary = self.is_auxiliary(req)
+        if not auxiliary:
+            with self.condition:
+                self.active_main += 1
+            return False, True, 0.0
+
+        started = time.monotonic()
+        with self.condition:
+            grace_end = started + self.grace_s
+            while self.active_main == 0:
+                remaining = grace_end - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.condition.wait(remaining)
+            while self.active_main > 0:
+                self.condition.wait()
+        return True, False, round(time.monotonic() - started, 3)
+
+    def leave(self, ordinary: bool):
+        if not ordinary:
+            return
+        with self.condition:
+            self.active_main -= 1
+            if self.active_main == 0:
+                self.condition.notify_all()
+
+
 def first_divergence(previous: dict, current: dict) -> dict:
     """Compare request fields in model-rendering order without exposing content."""
     previous_tools = previous.get("tools") or {}
@@ -429,6 +486,7 @@ class ShapeProxy(BaseHTTPRequestHandler):
     recorder: ShapeRecorder
     upstream: urllib.parse.SplitResult
     diet: ContextDiet | None = None
+    auxiliary_gate: AuxiliaryGate
 
     def log_message(self, fmt, *args):
         return
@@ -440,6 +498,42 @@ class ShapeProxy(BaseHTTPRequestHandler):
             else http.client.HTTPConnection
         )
         return cls(self.upstream.hostname, self.upstream.port, timeout=900)
+
+    def _relay_response(self, response: http.client.HTTPResponse) -> bytes:
+        """Relay a response as it arrives while retaining bytes for usage extraction."""
+        content_length = response.getheader("Content-Length")
+        use_chunked = content_length is None and self.request_version == "HTTP/1.1"
+        self.send_response(response.status, response.reason)
+        for key, value in response.getheaders():
+            if key.lower() not in HOP_BY_HOP and key.lower() != "content-length":
+                self.send_header(key, value)
+        if content_length is not None:
+            self.send_header("Content-Length", content_length)
+        elif use_chunked:
+            self.send_header("Transfer-Encoding", "chunked")
+        else:
+            self.send_header("Connection", "close")
+            self.close_connection = True
+        self.end_headers()
+
+        raw = bytearray()
+        reader = response.read1 if hasattr(response, "read1") else response.read
+        while True:
+            chunk = reader(65_536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if use_chunked:
+                self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+            else:
+                self.wfile.write(chunk)
+            self.wfile.flush()
+        if use_chunked:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        return bytes(raw)
 
     def _forward(self, method: str):
         length = int(self.headers.get("Content-Length") or 0)
@@ -465,6 +559,16 @@ class ShapeProxy(BaseHTTPRequestHandler):
                 else:
                     shape = request_shape(req)
 
+        auxiliary = False
+        ordinary = False
+        deferred_s = 0.0
+        if isinstance(req, dict):
+            auxiliary, ordinary, deferred_s = self.auxiliary_gate.enter(req)
+            if shape is not None:
+                shape["auxiliary"] = auxiliary
+                if deferred_s:
+                    shape["deferred_s"] = deferred_s
+
         base_path = self.upstream.path.rstrip("/")
         target = base_path + self.path
         headers = forward_headers(
@@ -472,19 +576,12 @@ class ShapeProxy(BaseHTTPRequestHandler):
         )
         connection = self._upstream_connection()
         started = time.monotonic()
+        response_started = False
         try:
             connection.request(method, target, body=body, headers=headers)
             response = connection.getresponse()
-            raw = response.read()
-            self.send_response(response.status, response.reason)
-            for key, value in response.getheaders():
-                if key.lower() not in HOP_BY_HOP:
-                    self.send_header(key, value)
-            if response.getheader("Content-Length") is None:
-                self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
-            self.wfile.flush()
+            response_started = True
+            raw = self._relay_response(response)
             if shape is not None:
                 summary = response_summary(raw, response.getheader("Content-Type") or "")
                 summary["duration_s"] = round(time.monotonic() - started, 3)
@@ -500,11 +597,13 @@ class ShapeProxy(BaseHTTPRequestHandler):
                         "duration_s": round(time.monotonic() - started, 3),
                     },
                 )
-            try:
-                self.send_error(502, "upstream request failed")
-            except OSError:
-                pass
+            if not response_started:
+                try:
+                    self.send_error(502, "upstream request failed")
+                except OSError:
+                    pass
         finally:
+            self.auxiliary_gate.leave(ordinary)
             connection.close()
 
     def do_GET(self):
@@ -532,6 +631,17 @@ def main() -> int:
         default=DIET_KEEP_RECENT,
         help="keep this many newest outputs verbatim; 0 folds all eligible outputs",
     )
+    parser.add_argument(
+        "--defer-auxiliary-max-output-tokens",
+        type=int,
+        help="test-only: delay no-tools requests with exactly this output cap until main requests finish",
+    )
+    parser.add_argument(
+        "--defer-auxiliary-grace",
+        type=float,
+        default=0.05,
+        help="wait this long for a main request before allowing a lone auxiliary request through",
+    )
     args = parser.parse_args()
 
     upstream = urllib.parse.urlsplit(args.upstream)
@@ -543,6 +653,13 @@ def main() -> int:
         parser.error("--context-diet-keep-recent must be non-negative")
     ShapeProxy.upstream = upstream
     ShapeProxy.recorder = ShapeRecorder(args.log)
+    try:
+        ShapeProxy.auxiliary_gate = AuxiliaryGate(
+            args.defer_auxiliary_max_output_tokens,
+            args.defer_auxiliary_grace,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     try:
         ShapeProxy.diet = (
             ContextDiet(

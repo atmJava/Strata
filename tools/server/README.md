@@ -60,12 +60,14 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `parity_window.py` | bitwise gate for a kernel or layout change | exit code + hashes |
 | `probe_determinism.py` | is run-to-run spread sampling or the engine | `/opt/ai/runs/probe-determinism.json` |
 | `probe-gpu-utilization.py` | what the GPU hardware counters show during a controlled short decode and cold long prefill; separates SM activity, issue, Tensor, warps and DRAM | `/opt/ai/logs/gpu-util-*/probe.json`, `.nsys-rep` and `.sqlite`; `--check-only` validates the collection path without inference |
+| `probe-gpu-stability.py` | recent NVIDIA `NVRM: Xid` kernel events joined with current clocks, temperatures, power, memory, throttle reasons and owning process; read-only and no restart | JSON named by `--output`; `--require-clean` exits 2 when any Xid is present |
+| `probe-dsh-session-cost.py` | joins privacy-safe DSH session timings and token metadata with Strata `/metrics?requests=all`; separates `task_wall_s`, `turn_union_s`, model prompt/decode, tools, `post_turn_s` and unmatched title requests | JSON named by `--output` or stdout; never prints prompt, reasoning or tool bodies |
 | `agent_budget_ab.py` | agent-shaped A/B with a real tool loop, self-scoring tasks | `/opt/ai/runs/agent-budget-ab-*.json` |
 | `probe-agent-sessions.py` | metadata-only 1/2/4-conversation A/A for shared prompts, continuation turns, latency and cache reuse; no restart | JSON named by `--output` |
 | `probe-codex-sessions.py` | real Codex session token shape: totals, root turns, compaction cache gaps and top uncached events; never prints prompt text or server timing as attribution | JSON named by `--output` or stdout |
-| `agent-shape-proxy.py` | privacy-safe request shape between Codex and Strata: model, declared tool names/types, context sizes and response metadata; no prompt or response bodies | JSONL named by `--log` |
+| `agent-shape-proxy.py` | privacy-safe request shape between Codex/DSH and Strata: model, declared tool names/types, context sizes and response metadata; no prompt or response bodies; streams upstream chunks without buffering the whole response; an opt-in test gate can defer no-tools requests with one exact output cap while main requests run | JSONL named by `--log` |
 | `codex-model-catalog.py` | compatibility entry point for `strata codex catalog`; adds or refreshes the current Strata model slug with an atomic write and timestamped backup | JSON status on stdout |
-| `bench-agent-quality.py` | deterministic fresh-repository coding tasks through Codex or DSH (`--runner codex|dsh`); records explicit model labels and scores tests, protected test bytes, final sentinel and tool protocol without retaining prompt or response text | JSON named by `--output` |
+| `bench-agent-quality.py` | deterministic fresh-repository coding tasks through Codex or DSH (`--runner codex|dsh`); records explicit model/profile labels, optional `--dsh-patch` and test-only `--prompt-suffix`, and scores tests, protected test bytes, final sentinel and tool protocol without retaining prompt or response text; `wall_s` is explicitly the full runner process, not DSH main-turn time | JSON named by `--output`; session ids are retained for cost-probe joins |
 | `quality_eval.py`, `quality_eval_budget.py` | small self-scoring quality eval (the quality gate) | stdout |
 | `effort-cost.py`, `effort_lang_ab.py`, `replay_effort_ab.py` | what a thinking budget costs and changes | jsonl / stdout |
 | `conv_cache_ab.py` | two long conversations alternating: parking and restore costs | stdout |
@@ -151,6 +153,8 @@ Tensor pipe 和 warp stall 的逐内核归因。
 ```
 probe-version-stamp.py [--host H | --local] [--out FILE] [--expect-env-file FILE]   # measured hashes + required env
 probe-gpu-utilization.py [--profile short|long|mixed] [--long-tokens N] [--check-only]
+probe-gpu-stability.py [--boot | --since TIME] [--cluster-seconds N] [--journal FILE] [--json] [--output FILE] [--require-clean]
+probe-dsh-session-cost.py SESSION... [--metrics FILE] [--match-window S] [--output FILE]
 run-matrix.py --batch V1 [--src DIR] [--only ID] [--skip ID] # one batch, one matrix run
 check_assert_lock.py <source-tree> <build-dir>   # the 64/256 shape is locked by static_assert
 use-config.sh <config.json>                      # the only install/restore entry, ~156 s

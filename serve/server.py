@@ -556,6 +556,52 @@ def engine_crashed(rc: int | None) -> bool:
     return False
 
 
+GPU_EXECUTION_MARKERS = (
+    "never rang (an illegal instruction was encountered)",
+    "never rang (an illegal memory access was encountered)",
+    "gpu has fallen off the bus",
+    "uncorrectable ecc",
+)
+
+
+def request_failure_message(error) -> str:
+    """Keep the engine's words, and say when they describe a GPU execution failure.
+
+    A verifier saying a layer ``never rang`` with a CUDA error is not a malformed prompt.  The
+    distinction matters to clients and to the kernel log it sends people looking for.
+    """
+    text = str(error)
+    lowered = text.lower()
+    if not any(marker in lowered for marker in GPU_EXECUTION_MARKERS):
+        return text
+    return (text + "\n  The GPU did not complete this request. Save the time; wait for engine recovery "
+            "to report loaded, then retry. On Linux, also check the kernel log for `NVRM: Xid`. "
+            "This is not a prompt or request-validation failure.")
+
+
+def is_dsh_title_request(req: dict) -> bool:
+    """The exact HTTP shape DSH uses for its first-prompt title request.
+
+    DSH marks the request as a session title internally, but its HTTP adapter
+    does not forward that purpose. This matcher uses the complete wire shape and
+    never inspects or guesses from prompt text.
+    """
+    items = req.get("input")
+    return (
+        req.get("stream") is True
+        and req.get("max_output_tokens") == 4096
+        and not req.get("tools")
+        and not req.get("instructions")
+        and not req.get("client_metadata")
+        and isinstance(items, list)
+        and len(items) == 2
+        and isinstance(items[0], dict)
+        and items[0].get("role") == "developer"
+        and isinstance(items[1], dict)
+        and items[1].get("role") == "user"
+    )
+
+
 def cpu_isa_words() -> tuple:
     """(text, missing): the CPU's model and which of AVX / AVX2 / FMA / F16C it reports (Linux: /proc/cpuinfo), and the
     ones of those it lacks.  ("", []) where it cannot be read."""
@@ -3870,6 +3916,18 @@ class Service:
         self.queue_timeouts = 0
         self.client_disconnect_cancels = 0
         self.draining = False
+        # DSH emits its title request beside the first main request. The wire
+        # shape is exact, but has no purpose field. This opt-in lets the main
+        # call finish before the title competes for the GPU and prompt cache.
+        self.defer_title_requests = os.environ.get("STRATA_DEFER_TITLE_REQUESTS") == "1"
+        grace_ms = _timeout_env("STRATA_DEFER_TITLE_GRACE_MS", 250.0) or 0.0
+        max_wait_s = _timeout_env("STRATA_DEFER_TITLE_MAX_WAIT_S", 60.0) or 60.0
+        self.defer_title_grace_s = grace_ms / 1000.0
+        self.defer_title_max_wait_s = max_wait_s
+        self.title_requests_matched = 0
+        self.title_requests_deferred = 0
+        self.title_defer_s = 0.0
+        self.active_title_requests = 0
         self.active_cancels: set[threading.Event] = set()
         # #332: the API request monitor (/api-monitor) keeps the last 100 requests' prompts and answers in memory,
         # so it is off unless the config's "api_monitor" (or --api-monitor) turns it on
@@ -3964,10 +4022,60 @@ class Service:
                 self.admission_rejected += 1
                 return False
             self.admission_reserved += 1
+            self.admission_changed.notify_all()
             return True
 
-    def release_inference(self) -> None:
+    def wait_for_title_turn(self, req: dict) -> bool:
+        """Wait for ordinary inference to finish when this is DSH's title request.
+
+        The current request already owns one admission. A grace period lets a
+        main request that reached the server first register; after that, wait
+        until no ordinary request remains or the bounded fail-open deadline.
+        Other title requests do not block each other, so two new sessions can
+        start their titles together.
+        """
+        if not self.defer_title_requests or not is_dsh_title_request(req):
+            return False
+        started = time.monotonic()
+        grace_end = started + self.defer_title_grace_s
+        deadline = started + self.defer_title_max_wait_s
+        saw_other = False
         with self.admission_changed:
+            self.active_title_requests += 1
+            self.admission_changed.notify_all()
+            # An admission that has not sent its body yet is still unclassified.
+            # Give it the grace window to become a title, but do not keep a title
+            # waiting for the full window after ordinary work has already gone.
+            while self.admission_reserved > self.active_title_requests and not self.draining:
+                left = grace_end - time.monotonic()
+                if left <= 0:
+                    break
+                self.admission_changed.wait(left)
+            if self.admission_reserved <= self.active_title_requests:
+                while not self.draining:
+                    left = grace_end - time.monotonic()
+                    if left <= 0:
+                        break
+                    self.admission_changed.wait(left)
+            while self.admission_reserved > self.active_title_requests and not self.draining:
+                saw_other = True
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                self.admission_changed.wait(left)
+            elapsed = time.monotonic() - started
+            self.title_requests_matched += 1
+            if saw_other:
+                self.title_requests_deferred += 1
+                self.title_defer_s += elapsed
+        if saw_other:
+            print(f"[strata] deferred DSH title request for {elapsed:.3f} s", flush=True)
+        return True
+
+    def release_inference(self, *, title: bool = False) -> None:
+        with self.admission_changed:
+            if title:
+                self.active_title_requests -= 1
             self.admission_reserved -= 1
             self.admission_changed.notify_all()
 
@@ -6987,6 +7095,7 @@ def make_handler(svc: Service):
                                headers={"Retry-After": int(ra)} if ra else None)
                 return
             reserved = False
+            title_request = False
             try:
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
                     reserved = svc.reserve_inference()
@@ -7007,6 +7116,8 @@ def make_handler(svc: Service):
                 req = json.loads(self._body() or b"{}")
                 if not isinstance(req, dict):
                     raise ValueError("send a JSON object")
+                if path == "/v1/responses":
+                    title_request = svc.wait_for_title_turn(req)
                 if path.startswith("/v1/responses/"):        # retrieve/delete/cancel/compact: nothing is stored
                     self._json(404, responses_error_body("this server keeps no responses (stateless); send the "
                                                          "whole conversation to POST /v1/responses", code="not_found"))
@@ -7119,7 +7230,7 @@ def make_handler(svc: Service):
                 raise                                        # as before #332: the server's own handling
             finally:
                 if reserved:
-                    svc.release_inference()
+                    svc.release_inference(title=title_request)
                 svc.drop_embeddings()                        # the images' file of a request that never got to run()
                 if self.watch_done is not None:
                     self.watch_done.set()
@@ -7447,7 +7558,8 @@ def make_handler(svc: Service):
                 self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
             except ValueError as e:                          # the engine's ERR after the stream started: the
-                err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now
+                err = {"error": {"type": "server_error",
+                                 "message": request_failure_message(e)}}   # headers are sent, so no 400 now
                 self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
@@ -7519,7 +7631,8 @@ def make_handler(svc: Service):
                 except EngineNonFinite as e:                 # #879, twice: not the request's fault
                     return self._json(503, responses_error_body(str(e), "server_error", code="server_error"))
                 except ValueError as e:                      # the engine's ERR line
-                    return self._json(500, responses_error_body(str(e), "server_error", code="server_error"))
+                    return self._json(500, responses_error_body(request_failure_message(e), "server_error",
+                                                                code="server_error"))
                 return self._json(200, result)
             self._sse()
             last = time.monotonic()
@@ -7553,7 +7666,7 @@ def make_handler(svc: Service):
             except StructuredOutputError as e:
                 self._responses_failed(asm, str(e), "structured_output_failed", send)
             except ValueError as e:                          # the engine's ERR after the stream started
-                self._responses_failed(asm, str(e), "server_error", send)
+                self._responses_failed(asm, request_failure_message(e), "server_error", send)
 
         def _responses_failed(self, asm, message, code, send):
             e = asm.failed(message, code)
@@ -7684,7 +7797,7 @@ def make_handler(svc: Service):
                 self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
             except ValueError as e:                          # the engine's ERR after the stream started
-                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
+                err = {"type": "error", "error": {"type": "api_error", "message": request_failure_message(e)}}
                 self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
