@@ -3,6 +3,33 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-139 · 生产双会话暴露标题 fallback，gate 改为多主请求 fail open
+
+- 目标 / 指标：生产复现单会话收益，同时保证用户偶尔开的两个会话仍生成 provider 标题，
+  不因标题 gate 退化为 fallback。
+- 假设与预期：第一版把两个标题都等到所有主请求结束后，会损害双会话标题；应在无法安全
+  配对 session 时 fail open。
+- 为什么选这条路线：用户通常 1 会话、偶尔 2 会话。wire shape 没有 session id；等待两个
+  主请求只能保证不争用，却无法保证标题在短命 headless 客户端退出前完成。
+- 改动与实验：生产单会话 A 3 次、B 6 次；B 先 warmup。随后并发两个 DSH 会话。第一版
+  双会话的主任务与测试全过，但两个标题各等 `26.6 s`，客户端在标题完成前退出，最终只留
+  fallback；server 日志在 4 秒后记录 `cancel=True`。
+- 修正：只有“总 admission - 活跃标题 = 1”时延后；普通请求达到 2 个立即 fail open，
+  回到原并发。新增双 main + 双 title 回归；标题专项 `8 passed / 6 subtests` 连续 5 轮，
+  server 全量 `360 passed / 516 subtests`，工具专项 `38 passed`，preflight PASS。
+- 结果：单会话生产主 turn A `19.629 s`、B `15.529 s`，改善 `20.887%`（绝对 `4.100 s`）；
+  runner wall 改善 `18.602%`。6/6 单会话质量与 provider 标题通过。双会话修正版尚待重启
+  复测，第一版不能采纳。
+- 判决：**第一版生产候选因双会话标题 fallback 否决；多主请求 fail open 修正进入复测。**
+  不删除已测数据，也不把失败归因 GPU 或随机噪声。
+- 生产状态与回滚：当前生产仍是第一版候选，PID `219280`、engine `219312`；已确认根因，
+  下一次重启加载修正版。备份在 `/opt/ai/backups/prod-title-defer-20261031T191327Z`。
+- 证据：`/tmp/strata-prod-title-20261031T191130Z-a/`、
+  `/tmp/strata-prod-title-20261031T191327Z-b/`、
+  `/tmp/strata-prod-title-20261031T191327Z-b-dual/`、对应 server log。
+- 下一步与理由：提交修正、重启并重跑双会话；只有 provider 标题恢复、主任务零错误和
+  单会话收益保留，才采纳该 opt-in。
+
 ## I-20261101-138 · 产品候选补齐 2 会话标题并发，避免标题互相等待
 
 - 目标 / 指标：在部署前验证标题 admission gate 对用户常见的 1/2 会话都成立，而不只是

@@ -11,9 +11,9 @@ input item（developer 后接 user）。它与主模型请求并发，会在首�
 ## 候选
 
 在 Strata HTTP admission 层增加默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1`。请求仍由模型
-生成，标题语义不变；只有普通 inference admission 已占用时才等待。当前主请求结束释放
-admission 后，标题立即进入正常路径。多个标题请求不互相阻塞，覆盖两个会话同时新建的
-常见场景。
+生成，标题语义不变；只有恰好一个普通 inference admission 已占用时才等待。当前主请求
+结束释放 admission 后，标题立即进入正常路径。两个会话同时新建时标题 fail open，因为
+HTTP 形状没有 session id，无法安全判断哪个标题属于哪个主请求。
 
 该候选只改变排队顺序，不改 profile、prompt、engine、GPU、量化或标题 fallback。
 
@@ -37,7 +37,9 @@ admission 后，标题立即进入正常路径。多个标题请求不互相阻�
 - 等待 250 ms 让同时到达的主请求先登记 admission。
 - 单独跟踪活跃标题 admission；用“总 admission - 活跃标题”计算普通请求，避免两个标题
   互等。
-- 普通 admission 存在时最多等待，直到主请求释放或 60 s 保护上限。
+- 恰好一个普通 admission 存在时最多等待，直到主请求释放或 60 s 保护上限。
+- 两个或更多普通 admission 存在时立即 fail open，恢复原有并发；否则短命 headless
+  客户端可能在标题完成前退出并只留下 fallback。
 - 只有标题请求时，250 ms 后正常执行。
 - 失败、超时或不匹配时 fail open，不关闭标题，不伪造标题。
 - 日志只记录延迟秒数和匹配计数，不记录 prompt、标题或请求正文。
@@ -51,6 +53,7 @@ admission 后，标题立即进入正常路径。多个标题请求不互相阻�
 - 只有 auxiliary 时在 grace 内继续；
 - 两个 auxiliary 同时启动时不互相等待；
 - 一个 main 加两个 auxiliary 时，两个 auxiliary 只等 main，不等彼此；
+- 两个 main 加两个 auxiliary 时两组都 fail open，不等待到主任务结束；
 - disabled 时无等待；
 - HTTP `/v1/responses` 真实入口触发，普通请求不触发；
 - 全量 `serve/test_server.py` 与 offline preflight 通过。

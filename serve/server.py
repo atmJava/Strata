@@ -4030,9 +4030,9 @@ class Service:
 
         The current request already owns one admission. A grace period lets a
         main request that reached the server first register; after that, wait
-        until no ordinary request remains or the bounded fail-open deadline.
-        Other title requests do not block each other, so two new sessions can
-        start their titles together.
+        only when exactly one ordinary request remains. Two active sessions
+        fail open, because the wire shape carries no session id and waiting for
+        both could delay each title until its short-lived client exits.
         """
         if not self.defer_title_requests or not is_dsh_title_request(req):
             return False
@@ -4043,26 +4043,20 @@ class Service:
         with self.admission_changed:
             self.active_title_requests += 1
             self.admission_changed.notify_all()
-            # An admission that has not sent its body yet is still unclassified.
-            # Give it the grace window to become a title, but do not keep a title
-            # waiting for the full window after ordinary work has already gone.
-            while self.admission_reserved > self.active_title_requests and not self.draining:
+            while not self.draining:
                 left = grace_end - time.monotonic()
                 if left <= 0:
                     break
                 self.admission_changed.wait(left)
-            if self.admission_reserved <= self.active_title_requests:
-                while not self.draining:
-                    left = grace_end - time.monotonic()
+            ordinary = self.admission_reserved - self.active_title_requests
+            if ordinary == 1:
+                saw_other = True
+                while ordinary == 1 and not self.draining:
+                    left = deadline - time.monotonic()
                     if left <= 0:
                         break
                     self.admission_changed.wait(left)
-            while self.admission_reserved > self.active_title_requests and not self.draining:
-                saw_other = True
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    break
-                self.admission_changed.wait(left)
+                    ordinary = self.admission_reserved - self.active_title_requests
             elapsed = time.monotonic() - started
             self.title_requests_matched += 1
             if saw_other:

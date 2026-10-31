@@ -14,7 +14,8 @@
 - 当前项：DSH-TITLE-INTERFERENCE
 - 当前项说明：保留标题语义，验证主任务结束后再异步生成，避免与主请求争用 GPU/cache；
   不得修改用户本地 DSH profile。代理 ABBA 已通过，当前验证默认关闭的 server admission
-  产品候选。专项回归已覆盖两个会话同时启动：标题之间不互等，只等普通主请求。
+  产品候选。专项回归已覆盖两个会话同时启动：无法安全配对的标题 fail open，避免短命
+  headless 客户端在主任务结束时取消标题。
 - GPU 抢占项：GPU-XID13-STABILITY。任何新 Xid 立即抢占质量/性能工作。
 - GPU 诊断：原请求在 76 个 reasoning token 后得到
   `verify: layer 11 never rang (an illegal instruction was encountered)`；同秒内核记录
@@ -64,7 +65,8 @@
   [结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
 - 产品候选已实现为默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1`：只匹配 DSH 精确 header/
   body 形状，主请求释放 admission 后继续；60 s fail-open，不改 profile/prompt/engine。
-  活跃标题单独计数，两个会话同时启动时只等主请求、不互等；专项连续 5 轮通过。
+  活跃标题单独计数；恰好一个普通请求时才延后，两个会话同时启动时立即 fail open，
+  避免标题只留 fallback；专项连续 5 轮通过。
   契约见 [产品契约](work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
 - 测试口径已修正：`bench-agent-quality.py` 的 `wall_s` 明确是完整 runner 进程，包含
   turn 后辅助工作；成本探针同时记录 `task_wall_s`、`turn_union_s` 和 `post_turn_s`，

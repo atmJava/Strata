@@ -181,6 +181,37 @@ class DeferredTitleAdmission(unittest.TestCase):
         self.svc.release_inference(title=True)
         self.assertEqual(self.svc.active_title_requests, 0)
 
+    def test_two_sessions_fail_open_instead_of_delaying_both_titles(self):
+        self.svc.defer_title_requests = True
+        self.svc.defer_title_grace_s = 0.03
+        self.svc.defer_title_max_wait_s = 1.0
+        for _ in range(4):
+            self.assertIs(self.svc.reserve_inference(), True)
+        results = []
+
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(self.svc.wait_for_title_turn(self.title())),
+                daemon=True,
+            )
+            for _ in range(2)
+        ]
+        started = time.monotonic()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=0.5)
+
+        self.assertEqual(results, [True, True])
+        self.assertLess(time.monotonic() - started, 0.3)
+        self.assertEqual(self.svc.title_requests_deferred, 0)
+        self.assertEqual(self.svc.active_title_requests, 2)
+        self.svc.release_inference()
+        self.svc.release_inference()
+        self.svc.release_inference(title=True)
+        self.svc.release_inference(title=True)
+        self.assertEqual(self.svc.admission_reserved, 0)
+
     def test_http_responses_path_waits_then_completes(self):
         self.svc.defer_title_requests = True
         self.svc.defer_title_grace_s = 0.02

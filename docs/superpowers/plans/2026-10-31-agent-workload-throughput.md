@@ -31,8 +31,8 @@
 GPU/cache。`DSH-TITLE-INTERFERENCE` 的代理 ABBA 已通过：短任务主任务中位
 `17.637 → 15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 标题仍由
 provider 模型生成，长任务 `A B B A` 中 B 不明显回退。当前在验证默认关闭的 server
-admission 产品候选，不关闭标题。部署前复盘补齐了 1/2 会话并发：活跃标题独立计数，
-两个会话同时启动时只等普通主请求、不互等。
+admission 产品候选，不关闭标题。部署前复盘补齐了 1/2 会话并发：活跃标题独立计数；
+恰好一个普通请求时才延后，两个会话同时启动时 fail open，避免短命客户端取消标题。
 
 短任务关闭标题的旧 A/B 为：runner wall `16.854 → 14.901 s`（`-10.647%`），主任务
 turn wall `14.929 → 13.001 s`（`-11.843%`），均 `5/6` 胜；长任务无标题 `0/2` 胜，
@@ -273,9 +273,10 @@ A `46.411/82.438 s`；B 不明显回退，但 A 臂 8→11 step 漂移，只作�
 [`AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md`](../../work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
 
 当前产品候选：默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission 层只识别
-DSH 的精确标题形状；活跃标题单独计数，若普通 inference admission 存在，最多等 `60 s`，
-主请求释放即继续；两个会话的标题不互等。匹配不看 prompt 文本；disabled、不匹配、超时
-和 drain 都 fail open。契约见
+DSH 的精确标题形状；活跃标题单独计数。恰好一个普通 inference admission 存在时最多等
+`60 s`，主请求释放即继续；两个或更多普通请求存在时立即 fail open，因为 wire shape
+没有 session id，无法安全配对。匹配不看 prompt 文本；disabled、不匹配、超时和 drain
+都 fail open。契约见
 [`DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md`](../../work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
 
 ### P1 历史：`AGENT-HOT-TURN-FIXED-COST`（已否决）

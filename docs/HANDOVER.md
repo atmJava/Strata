@@ -39,9 +39,9 @@
   漂移，只作非回退判断。见
   [结果](work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
 - **产品候选已实现**：默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission
-  层只识别 DSH 精确 wire shape；另一个普通 inference admission 存在时等待，主请求释放
-  即继续，60 s fail-open，不读 prompt 正文。活跃标题单独计数，两个会话同时启动时标题
-  不互等；专项连续 5 轮通过。见
+  层只识别 DSH 精确 wire shape；恰好一个普通 inference admission 存在时等待，主请求
+  释放即继续，60 s fail-open，不读 prompt 正文。两个会话同时启动时立即 fail open，
+  避免短命客户端只留 fallback；专项连续 5 轮通过。见
   [产品契约](work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
 - **测试口径已修正**：`bench-agent-quality.py` 的 `wall_s` 是完整 runner 进程，包含
   turn 后辅助工作；`probe-dsh-session-cost.py` 同时报告主任务、turn union 和 post-turn
