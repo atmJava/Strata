@@ -155,6 +155,12 @@ inline int g_side_mixer() {
     static const int mode = [] { const char* v = std::getenv("STRATA_SIDE_MIXER"); return v ? std::max(0, std::min(2, std::atoi(v))) : 0; }();
     return mode;
 }
+// STRATA_BATCH_SIDE_MIXER=1: the GDN qkv/gate and QSA query/K/V projections on two streams only for
+// two-row production batch windows; every other row count keeps the original serial order.
+inline bool g_batch_side_mixer() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_BATCH_SIDE_MIXER"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
 inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
@@ -993,7 +999,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             all_resident_ = all_ok;
         }
     }
-    if (g_side_mixer() > 0 &&
+    if ((g_side_mixer() > 0 || g_batch_side_mixer()) &&
         (cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking) != cudaSuccess ||
         cudaEventCreateWithFlags(&mfork_, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&mjoin_, cudaEventDisableTiming) != cudaSuccess ||
@@ -1072,6 +1078,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     const int side_mixer_mode = g_side_mixer();
     const bool side_mixer = side_mixer_mode >= 1;
     const bool side_proj = side_mixer_mode >= 2 && !batch_rec_;   // fork b063c13: the GDN gate projection, the QSA queries
+    const bool batch_side = g_batch_side_mixer() && batch_rec_ && T == 2 && !prof_on_;
+    const bool gdn_side_proj = side_proj || batch_side;
+    const bool qsa_side_proj = side_proj || batch_side;
     auto branch = [&](cudaEvent_t e, cudaStream_t from, cudaStream_t to, const char* what) {
         if (cudaEventRecord(e, from) == cudaSuccess && cudaStreamWaitEvent(to, e, 0) == cudaSuccess) return true;
         err = std::string("verify: the mixer branch could not ") + what;
@@ -1368,7 +1377,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     if (cudaEventRecord(mjoin_, side_) != cudaSuccess) { err = "verify: the GDN gates' branch could not join"; return false; }
                 }
                 if (!q8_attn) quant_in(xm, (int) N);
-                if (side_proj) {   // the gate projection (compute-bound for i-quants) beside qkv and the conv
+                if (gdn_side_proj) {   // the gate projection (compute-bound for i-quants) beside qkv and the conv
                     // the branch reads F4's interleaved copy too (written on cs before the fork; bitwise native_mmvq's
                     // output), and qkv is recorded before the branch's launch, so its grid is dispatched first and the
                     // conv / recurrence that wait for it start sooner (z is read only after the recurrence)
@@ -1394,7 +1403,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                 df_side_[1]);
                 }
                 const bool fuse_ab = fuse_convab_on() && !br && !batch_rec_ && !prof_on_ && !sidem;   // the side mixer computes the gates on its branch
-                if (!side_proj) mm(wqkv, qkv + (size_t) tb * C, (int) N, (int) C);   // with side_proj: above, first
+                if (!gdn_side_proj) mm(wqkv, qkv + (size_t) tb * C, (int) N, (int) C);   // with side_proj: above, first
                 stamp(l, 2, grp);
                 if (batch_rec_) {   // contiguous rows may be proposals for the same slot
                     for (int t = tb; t < te;) {
@@ -1427,9 +1436,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                              (const float*) wsa->data, gate + (size_t) tb * HV, beta + (size_t) tb * HV, (int) N, (int) HV,
                              n, cs);
                 stamp(l, 4, grp);
-                if (!side_proj) mm(wg, z_ + (size_t) tb * ZV, (int) N, (int) ZV);
+                if (!gdn_side_proj) mm(wg, z_ + (size_t) tb * ZV, (int) N, (int) ZV);
                 stamp(l, 5, grp);
-                if (side_proj && cudaStreamWaitEvent(cs, pjoin_, 0) != cudaSuccess) {
+                if (gdn_side_proj && cudaStreamWaitEvent(cs, pjoin_, 0) != cudaSuccess) {
                     err = "verify: the gate projection's branch could not join";
                     return false;
                 }
@@ -1604,7 +1613,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 // the attention's queries: the projection (mm on cs, which may read F4's interleaved copy; on a branch
                 // F4's kernel too, its copy written on cs before the fork - bitwise the same), the q/gate
                 // split with norm and RoPE, the rotation
-                const bool q_il = side_proj && g_mmvq_il() &&
+                const bool q_il = qsa_side_proj && g_mmvq_il() &&
                                   strata::kernels::native_mmvq_il_supported(wq->native_type, n, (int) (NH * 2 * HD));
                 auto q_chain = [&](cudaStream_t ns) -> bool {
                     if (ns == cs) mm(wq, qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD));
@@ -1650,7 +1659,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     idx_select(side_);
                     if (cudaEventRecord(mjoin_, side_) != cudaSuccess) { err = "verify: the indexer's branch could not join"; return false; }
                 }
-                if (side_proj) {   // the queries beside the keys and values (fork b063c13)
+                if (qsa_side_proj) {   // the queries beside the keys and values (fork b063c13)
                     if (q_il && !il_ready && n >= 2) {   // the copy before the fork (mm(wk) / mm(wv) on cs reuse it)
                         strata::kernels::native_q8_1_interleave(xq_, xil_, (int) N, n, cs);
                         il_ready = true;
@@ -1724,10 +1733,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 if (qbr) {
                     join(1);   // the indexer query, for the block scores
                 } else {
-                    if (!side_proj && !q_chain(cs)) return false;
+                    if (!qsa_side_proj && !q_chain(cs)) return false;
                     if (!sidem) idx_query(cs);
                 }
                 stamp(l, 10, grp);
+                if (batch_side && cudaStreamWaitEvent(cs, pjoin_, 0) != cudaSuccess) {
+                    err = "verify: the batch queries' branch could not join";
+                    return false;
+                }
                 bool streamed = false;   // a streamed KV cache keeps the per-row resolve-then-attend order
                 if (batch_rec_ && g_qsa_slots)
                     for (int t = tb; t < te; ++t) streamed = streamed || slot_ss(t).qsa_states[qi].kv_mode == 1;

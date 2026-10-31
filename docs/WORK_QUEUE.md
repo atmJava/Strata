@@ -127,6 +127,13 @@
     `1/6, 1/6, 2/6, 4/6`；只有 8 路名义过 1%，未过 5/6 胜，A 漂移 `+4.053%`，2/4/6
     回退超过 1%。A2 已恢复。下一项做源码/阶段成本审计，避开已否决的 launch/head/group
     和 LFUSE 同形设计。
+35. **UTIL-BATCH-SIDE-MIXER 已过 GPU 预筛和 B parity，端到端矩阵被 GPU runtime 故障阻塞**：
+    修正后 24 层 mixed graph 在两卡各 7/7 胜、全 bitwise，中位节省 GPU0
+    `177.0208 us`、GPU1 `191.7025 us`。B 以 6 slots / 2 groups、health loaded 启动，
+    三组冻结 greedy 各两轮逐字一致；双槽探针证明真实 `T=2` batch capture 命中。A1
+    baseline 在 6 路第 2 波报 `dequant launch: unspecified launch failure`，之后 CUDA
+    只枚举 1 张卡，host 仍停在 2026-10-29 的 boot。当前没有 server/engine；恢复需用户
+    手工 reboot，随后停 `strata.service`、确认双 UUID、从 A1 重跑同一 A1-B-A2 矩阵。
 
 ## 候选
 
@@ -167,7 +174,7 @@
 | UTIL-LFUSE-SHARED | 共享专家标量门并入 router、sigmoid+scale 并入 resident combine | 独立 BF16 row/aux 与 fusion parity 逐字；B 只加 `STRATA_LFUSE=1`/`STRATA_MMVF_ROWS=1`；冻结 greedy 两轮等于 A；A1-B-A2 的 4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不退 >1%，2 路不变，漂移 ≤3% | 否决（吞吐/漂移） | L-118：parity 与 greedy 全过；2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`，8 路仅 4/6 胜且 A 漂移 `+4.053%` | A2 已恢复；不改源码、不扫描 LFUSE/MMVF env，不重试同形 shared fusion |
 | UTIL-QFUSE-HC | 生产 HC Q8 up read 同读写出 consumer q8_1，省掉独立量化 | 两卡 `T=1..8` 全输出和 q8 image 逐字；完整 read+quantize 路径至少一个生产宽度 ≥1% 且 5/7 胜；再乘真实每 stage 48 次读后仍有 ≥1% 整窗保守上界，才允许 server A-B-A | 否决 | L-119：完整局部路径 T=1/2/3 为 `+1.31–2.67%`，全 bitwise；但仅省 `0.44–0.79 us/read`，每 stage 投影只有 `0.11–0.20%` | 未构建、未重启；不再试 HC q8 image fusion 或 atomic-tail 同形近似 |
 | UTIL-SIDE-MIXER | 用现有 `STRATA_SIDE_MIXER=2` 重叠 GDN qkv/gate 与 QSA q/k/v 投影 | 两卡 `T=1..8` 全输出逐字；至少一个生产宽度 ≥`0.183 ms` 且 5/7 胜；源码证明生产 route 命中后才允许 server A-B-A | 否决 | L-120：14 进程、560 个 buffer 全相等；T=3/4 整窗上界 `1.10–1.29%`，但 `side_proj/sidem` 含 `!batch_rec_`，生产的 `capture_batch()` 全部不会命中 | 未构建、未重启；不把现有 env 直接用于 A-B-A |
-| UTIL-BATCH-SIDE-MIXER | 为生产 batch window 的三/四行 qkv/gate 实现窄范围 side stream | 先证明 graph capture、slot-local state、row order 与全部输出 bitwise；production-shaped batch harness 至少一个宽度节省 ≥`0.183 ms`；随后 env-only A1-B-A2 过 2/4/6/8 的 1%、5/6、非回退、漂移和零错误门 | 进行中 | L-120：串行普通窗口的 T=3/4 上界为 `1.10–1.29%`，T=1 回退、T=2 GPU1 仅 `0.924%` | 只启用 S=3/4；不改一行/二行路径，不用普通窗口结果替代 batch harness |
+| UTIL-BATCH-SIDE-MIXER | 为生产两行 batch window 的 GDN qkv/gate 与 QSA q/K/V 实现窄范围 side stream | 先证明 graph capture、slot-local state、row order 与全部输出 bitwise；production-shaped batch harness 两卡均 7/7 胜且过 `0.183 ms`；随后 env-only A1-B-A2 过 2/4/6/8 的 1%、5/6、非回退、漂移和零错误门 | 进行中（服务器阻塞） | L-121：24 层 mixed graph GPU0/1 中位节省 `177.0208/191.7025 us`，两卡 7/7 胜、全 bitwise；B 三组 greedy 各两轮逐字一致并命中真实 T=2 capture；A1 6 路故障后 CUDA 只剩 1 卡 | 只启用 `batch_rec_ && T==2`；一/三至八行保持原串行；需用户 reboot 后从 A1 重跑，不放宽矩阵 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |

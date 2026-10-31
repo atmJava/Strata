@@ -12,8 +12,17 @@ T=1/2/3 有 `+1.31–2.67%`，但每次只省 `0.44–0.79 us`；每个 24 层 s
 `T=1..8` 保持 560 个输出 buffer 全 bitwise，T=3/4 按每 stage 18 GDN + 6 QSA 换算的乐观
 整窗上界为 `+1.10–1.29%`。但生产 decode 由 `capture_batch()` 设置 `batch_rec_=true`，
 源码的 `side_proj/sidem` 都要求 `!batch_rec_`，所以这个 env 在 2/4/6/8 路命中率为零。
-现有机制已否决；下一项只给三/四行 batch window 实现窄范围 GDN qkv/gate 侧分支，一/二行
-保持串行，并要求 production-shaped graph parity 与 batch harness 先复现至少 `0.183 ms`。
+现有机制已否决；batch-only 候选最初按三/四行设计，但第一次 production-shape harness 错误地
+在全部 18 层重复 GDN+QSA 工作，数据作废。修正为 18 GDN + 6 QSA 的真实层序后，只有 `T=2`
+在两卡都 7/7 胜且每个进程过 `182.7 us`，因此契约收窄到两行；一/三至八行保持串行。
+
+**2026-10-31 batch-side checkpoint**：`UTIL-BATCH-SIDE-MIXER` 的 24 层 mixed graph 中位节省
+GPU0 `177.0208 us`（stage 的 `0.9689%`）、GPU1 `191.7025 us`（`1.0493%`），direct 与
+captured graph 全 bitwise。B 以 6 slots / 2 groups、health loaded 启动，三组冻结 greedy
+各两轮逐字一致；双槽探针显示 `busy=2, decoding=2` 并触发两次两行 batch capture，证明生产
+路径真实命中。A1 baseline 在 6 路第 2 波报 `dequant launch: unspecified launch failure`，
+随后 CUDA 只枚举一张卡，host 仍未重启，因此 A1-B-A2 及其 6/8 路结果不存在。候选默认关闭、
+未采纳；恢复后必须先从 A1 完整重跑，不能用单卡或 2/4 路趋势替代。
 
 本文审查 `freeze/server-adapt-0.2.7` 在真实服务器和长上下文负载下仍未被主线覆盖的吞吐
 优化方向。逐项实现和已经测得的局部收益见

@@ -3,6 +3,46 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-94 · Batch side mixer 已过 GPU 与 parity 门，A1 GPU runtime 故障阻断吞吐矩阵
+
+- 目标 / 指标：验证默认关闭的 `STRATA_BATCH_SIDE_MIXER=1` 能否只对生产两行 batch window
+  重叠 GDN qkv/gate 与 QSA q/K/V，并在同 boot A1-B-A2 的至少一个 2/4/6/8 路并发级提高 1%，
+  其他级不回退超过 1%，同时保持输出、finish、健康与资源门。
+- 假设与预期：生产 `capture_batch()` 确实设置 `batch_rec_=true`；新分支只允许 `T==2`。
+  一/三至八行保持原串行。18 GDN + 6 QSA 的真实层序应在两卡都有至少 `0.183 ms` 的
+  captured-graph 节省，若真实节点命中则值得一次完整 A-B-A。
+- 为什么选这条路线：上一项已经证明普通窗口 `STRATA_SIDE_MIXER=2` 因 `!batch_rec_`
+  在生产命中率为零。新候选直接修复生产可达性，并且不重试已否决的 head/group/checkpoint/
+  IL/LFUSE/poll 机制。
+- 改动与实验：新增默认关闭的 batch 分支和 `batch_side_mixer_bench`；GDN 中 qkv 走主
+  stream、gate 走 side stream，QSA 中 q/chain 走 side stream、K/V 留主 stream，join 分别
+  在 recurrence 读 `z` 和 attention 读 query 前。两卡各跑 7 个独立进程，覆盖 direct、
+  18 GDN-only、6 QSA-only 和真实 GDN/GDN/GDN/QSA 24 层 captured graph；B 随后以
+  A 的深拷贝配置启动，三组冻结 greedy 各跑两轮，并用双槽请求验证生产 capture。
+- 结果：预筛全部 bitwise、零 CUDA/graph 错误。24 层中位节省 GPU0 `177.0208 us`
+  （stage 的 `0.9689%`）、GPU1 `191.7025 us`（`1.0493%`）；两卡均 7/7 胜且每个进程都
+  过 `182.7 us`。18 GDN 与 6 QSA 组成图也全部 7/7 胜。B 以 6 slots / 2 groups、
+  health loaded 启动，六条冻结结果逐字一致且 `finish=stop`；双槽探针显示
+  `busy=2, decoding=2`，日志出现两次两行窗口 capture。
+- 阻塞：A1 baseline 已 loaded、parity 通过，但 6 路第 2 波报
+  `dequant launch: unspecified launch failure`。随后自动重启失败，`nvidia-smi` 仍见两张卡
+  且均约 1 MiB，CUDA `cuDeviceGetCount=1`；同 A 配置重试又在加载前报
+  `conversation parking does not support a layer split on one GPU`。
+- 判决：**未定，候选默认关闭且未采纳。** 这不是候选回归；A1 是 baseline 引擎，且 B/A2、
+  6/8 路都尚未跑。不能把 2/4 路趋势当作吞吐结论，也不能放宽到单卡或跳过 A-B-A。
+- 预期部分成立：T=2 的生产形状收益、captured graph exactness 和真实 route hit 均已证明；
+  端到端 1%、5/6、非回退与漂移仍未验证。
+- 生产状态与回滚：`strata.service` inactive/dead、`MainPID=0`、`NRestarts=23`，没有
+  server/engine 进程；host uptime 仍为 `2026-10-29 01:52:32`。免密 sudo 不可用，禁止猜测
+  密码。重启后先停 service、确认双卡 UUID 联合 initialize 与无残留进程，再从 A1 重跑；
+  失败则移除 `STRATA_BATCH_SIDE_MIXER` 并恢复 A。
+- 证据：台账 L-121、`UTIL_BATCH_SIDE_MIXER_RESULT-20261031.md`；预筛 manifest
+  `7140ae4f...`，B 候选 manifest `b0fa4752...`。
+- 学到什么：修正错误的生产层序后，T=2 从“GPU1 不足”变为两卡稳定过预筛；真实 route-hit
+  仍必须单独证明。基础设施故障发生在 baseline，应保留未定状态和恢复步骤，不能污染候选判决。
+- 下一步与理由：当前第一动作是恢复 CUDA 双卡并完成原 A1-B-A2；在等待用户提权重启期间，
+  继续做不依赖 GPU 的源码审计并寻找下一项不同机制，避免空等。
+
 ## I-20261031-93 · Side-mixer 微基准达到 1% 上界，但生产 batch window 不可达
 
 - 目标 / 指标：验证现有 `STRATA_SIDE_MIXER=2` 能否在双 RTX 2080 Ti 的真实 decode window

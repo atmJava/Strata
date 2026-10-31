@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（119 条：L-000…L-118，按编号）
+## 台账索引（L-000…L-121，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -134,6 +134,7 @@
 | L-117 | 10-31 09:1xZ | B6 两卡全部 parity；相对生产 IL 选择，T=2 中位 `-5.868%`、0/22 胜，Q6_K/Q5_K 单点回退 `16-39%`；真实张量代理投影无生产宽度稳定 ≥1% | **UTIL-B6-ROWS kernel screening/reach 门否决；未构建、未重启；转不同生产路径源码审计** |
 | L-118 | 10-31 10:0x | LFUSE 两卡 parity 与 B/A2 greedy 全过；2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`；8 路的 A 漂移 `+4.053%` | **UTIL-LFUSE-SHARED 吞吐/漂移门否决；A2 已恢复；转不同源码/阶段成本审计** |
 | L-120 | 10-31 10:1xZ | SIDE-MIXER 两卡 14 进程、196 条结果行、560 个 buffer 全 bitwise；T=3/4 整窗上界 `+1.10–1.29%`，但 `side_proj/sidem` 含 `!batch_rec_`，生产 `capture_batch()` 命中率为零 | **UTIL-SIDE-MIXER server 可达性门否决；未构建、未重启；转 batch-only 三/四行候选** |
+| L-121 | 10-31 10:4x | 修正到真实 18 GDN + 6 QSA 层序后，T=2 的 24 层 graph 两卡均 7/7 胜、全 bitwise，中位节省 `177.0208/191.7025 us`；B 三组 greedy 各两轮逐字一致并命中真实 T=2 capture | **GPU 预筛/B parity 通过；A1 6 路 baseline 的 GPU runtime 掉线阻断 A-B-A；候选未定、默认关闭，等待 reboot** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3915,6 +3916,58 @@ graph 路径没有提供可复现收益，部分行反而回退。
 `batch_poll -> verdict -> stage hand-off -> batch_launch`，以及 `conc_serving` 的 doorbell
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
+
+## L-121 UTIL-BATCH-SIDE-MIXER：T=2 预筛/B parity 通过，baseline GPU runtime 故障阻断矩阵
+
+**判定**：**未定，候选默认关闭且未采纳。** 这不是候选吞吐判决。GPU 预筛、captured graph
+exactness、B parity 与真实生产 route-hit 已通过；A1-B-A2 的 6/8 路和 B/A2 尚未运行。
+
+**可达性与实现**：`capture_batch()` 设置 `batch_rec_=true`，现有普通 side mixer 因此不可达。
+候选新增默认关闭的 `STRATA_BATCH_SIDE_MIXER=1`，仅在 `batch_rec_ && T==2 && !prof_on_`
+启用。GDN 的 qkv 在主 stream、gate 在 `side2_`；QSA 的 q 及其 split/norm/RoPE/rotation 在
+`side2_`，K/V 在主 stream。GDN join 在 recurrence 读 `z` 前，QSA join 在 attention 前；
+一行和三至八行保持原串行。
+
+**修正后的 GPU 预筛**：第一次 production-shape harness 错误地让 18 个 GDN layer 每层都跑
+GDN+QSA，数据已作废。修正为 18 GDN-only、6 QSA-only 和实际
+GDN/GDN/GDN/QSA 的 24 层混合图后，两卡各跑 7 个独立进程，所有 direct/captured output
+逐字相等，零 CUDA/graph 错误。24 层中位为 GPU0 `177.0208 us`（stage 的 `0.9689%`）、
+GPU1 `191.7025 us`（`1.0493%`）；两卡均 7/7 胜且 7/7 过 `182.7 us`。GPU0 的 18 GDN
+为 `120.4607 us`、6 QSA 为 `36.1760 us`；GPU1 为 `120.8416 us`、`33.0240 us`。两个
+组成图也都是 7/7 胜和全 bitwise。
+
+**B parity / 生产命中**：B 使用 A 的深拷贝 config，仅增加候选 env；6 slots / 2 groups、
+health loaded。三组 frozen greedy 各两轮共六个结果全部逐字等于期望值且
+`finish=stop`。双槽请求时 `/metrics` 为 `busy=2, decoding=2`，日志出现两次
+`captured the batch window over slots 0,1`，证明生产 `batch_rec_ && T==2` 分支真实执行。
+
+**A1 故障**：A1 baseline 完成加载与 parity，2 路和 4 路 sweep 完成；第 2 个 6 路波次在
+baseline engine 报 `dequant launch: unspecified launch failure`，自动重启耗尽。之后
+`nvidia-smi` 仍列出两张 2080 Ti、各约 1 MiB，CUDA `cuInit=0` 但
+`cuDeviceGetCount=1`；按 GPU1 单独选择可运行，两卡 UUID 联合 `cuInit=100`。同 A 配置
+重试在加载前报 `conversation parking does not support a layer split on one GPU
+(--split-device 0)`。host uptime 仍为 `2026-10-29 01:52:32`，免密 sudo 不可用；
+`strata.service` inactive/dead、`MainPID=0`、`NRestarts=23`，没有 server/engine 进程。
+
+**恢复**：用户以现有提权会话执行 `sudo reboot`；启动后立即停止 `strata.service`，确认
+`cuDeviceGetCount=2`、两卡 UUID 联合 initialize、无残留进程，再用原 A1 config 从头完成
+2/4/6/8 路 ×3 waves ×400 tokens 的 A1-B-A2。任何失败必须移除候选 env 并恢复 A；不得放宽
+到单卡或把未跑级别写成通过。
+
+**证据**：
+
+- `/opt/ai/logs/util-batch-side-mixer-prodshape-20261031T0225UTC/`
+  （binary sha256 `6e9c92e7d3bdf3f4015ae154309bd12d719aeb51b03b8ed4b9d26c8655bbe027`；
+  manifest sha256 `7140ae4f977c7e6a70192cfc2420d371802ad4f72fe54d4c9c6337a0c3bbe684`）
+- `/opt/ai/logs/util-batch-side-mixer2-candidate-20261031T0300UTC/`
+  （engine sha256 `49e1e84cf805ea72b949c08c436575d089fb7b8a6073eff1ec9399ecf9c540ed`；
+  B config `c0e3bc9be6145cb36b4f46bfd72c23dc028cbd436f29cf0d7b9c30f79b20d0cb`；
+  B parity `55c1f02225d57a9abb1f1601b02679b48004bad6558ccf92c45dd43c4cdce151`；
+  manifest `b0fa4752742ff6f2fb14d36e1e6f06b7c62f08e60a0bc4b654762bbacc468f64`）
+- 完整记录：[`UTIL_BATCH_SIDE_MIXER_RESULT-20261031.md`](work/UTIL_BATCH_SIDE_MIXER_RESULT-20261031.md)
+
+**没测什么**：没有 A1-B-A2、6/8 路、A2 漂移、混合流量、长上下文、真实输出质量或候选资源
+稳定性。预筛的 0.9689%/1.0493% 是固定 stage 代理占比，不是端到端吞吐收益。
 
 ## L-120 UTIL-SIDE-MIXER：三/四行上界超过 1%，但现有开关不进入生产 batch window
 

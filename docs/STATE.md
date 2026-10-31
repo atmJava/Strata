@@ -6,9 +6,13 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-BATCH-SIDE-MIXER 已预注册；只对生产 `batch_rec_` 的三/四行窗口实现 GDN
-  qkv/gate 侧分支，先过 graph parity 和 batch-window 绝对时间门。现有普通窗口
-  `STRATA_SIDE_MIXER=2` 已在可达性门否决，不能直接用于服务 A-B-A。
+- 当前项：UTIL-BATCH-SIDE-MIXER（预筛与 B parity 已过，A1-B-A2 被 GPU runtime 故障阻塞）。
+  候选只在生产 `batch_rec_ && T==2` 时把 GDN qkv/gate 与 QSA q/K/V 放到侧分支；
+  一行和三至八行保持原串行。候选默认关闭、未采纳也未否决。
+- 当前项证据：修正后的 24 层 mixed graph 在两卡各 7/7 胜且全 bitwise，中位节省为
+  GPU0 `177.0208 us`（stage 的 `0.9689%`）、GPU1 `191.7025 us`（`1.0493%`）。B 以
+  6 slots / 2 groups、health loaded 启动；三组冻结 greedy 各两轮逐字一致，双槽请求出现
+  `busy=2, decoding=2` 和两次 2 行 batch capture，证明生产路径真实命中。
 - 上一项：UTIL-SIDE-MIXER 在 server 可达性门否决。两卡 14 个独立进程、196 条结果行和
   560 个 device buffer 全逐字相等；T=3/4 的理想整窗上界达到 `1.10–1.29%`。但生产
   `capture_batch()` 设置 `batch_rec_=true`，而 `side_proj/sidem` 都要求 `!batch_rec_`，
@@ -107,27 +111,33 @@
   co-residency 两条 QSA 路线都已否决。
 - 下一动作：从真实 stage 成本和源码选择下一项不同机制；先只读审计生产可达性、触发率、
   固定/临界路径和保守 ≥1% 依据，再预注册 contract。未过源码门不重启。
-- 当前候选：无运行中 server 候选。A2 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
-  仅 `0.04%`。
+- 当前候选：没有运行中的 server 或 engine。A1 baseline 在第 2 个 6 路波次报
+  `dequant launch: unspecified launch failure`，随后自动重启失败；`nvidia-smi` 仍见两卡，
+  但 CUDA `cuDeviceGetCount=1`，同 A 配置重试又被单卡 conversation parking 拒绝。
+  因此 6/8 路和 B/A2 吞吐均未取得，不能把当前候选写成有端到端收益。EXPDEC 未启动；
+  P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
   Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
 - 未完成采纳项：20。
-- 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
-  该测量路线不阻塞主线。
+- 阻塞：服务器需要用户现有提权会话执行一次 `sudo reboot`；本 agent 的免密 sudo 不可用，
+  不猜测密码。重启后必须立即 `sudo systemctl stop strata.service`，核对 CUDA 两卡联合
+  initialize、无残留 server/engine/bench，再从 A1 重跑。DFlash2 drafter 权重仍缺失；代码、
+  服务接线和工具已保留，该路线不阻塞主线。
 
 ## 生产
 
-- 截至 2026-10-31，`strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`；
-  这是保留的运行状态，不以本轮候选操作改变它。候选 8080 由手动进程提供，health 200、
-  `loaded=true`；LFUSE 判决后恢复的 server/engine/vision PID 为
-  `604897/604926/604905`，engine 为 `105a4171...`，6 slots / 2 groups，没有
-  `STRATA_VERIFY_PROFILE`、`STRATA_BATCH_TELEMETRY`、`STRATA_BATCH_GDN_GROUPS`、
-  `STRATA_SLOT_CKPT_MOVE`、`STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、
-  `STRATA_FUSE_HEAD_GR`、`STRATA_POLL_FAST`、`--expert-cache-cpu-order` 或其它实验
-  profiler/QSA/kernel env，也没有 `STRATA_LFUSE` 或 `STRATA_MMVF_ROWS`。B 加载约 155 秒，
-  B→A2 加载约 198 秒。
+- 最近核对时 `strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=23`，没有手动
+  server/engine 进程，也没有候选端口在服务。host uptime 仍为 `2026-10-29 01:52:32`；
+  `nvidia-smi` 列出两张 2080 Ti 且各约 1 MiB，但 CUDA runtime 只枚举 1 张。这是待重启恢复
+  的基础设施状态，不是候选吞吐结果。
+- 故障前 A1 baseline engine/config hash 为
+  `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
+  `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`，frozen greedy
+  parity 通过；候选 B engine/config hash 为
+  `49e1e84cf805ea72b949c08c436575d089fb7b8a6073eff1ec9399ecf9c540ed` /
+  `c0e3bc9be6145cb36b4f46bfd72c23dc028cbd436f29cf0d7b9c30f79b20d0cb`。两者当前都未运行。
 - **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
@@ -321,4 +331,5 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-31T10:15+08:00（UTIL-SIDE-MIXER reach 否决；batch side branch 已预注册）
+- 最后更新：2026-10-31T10:40+08:00（batch side T=2 预筛/B parity 通过；A1 GPU runtime
+  故障，服务器待用户重启）
