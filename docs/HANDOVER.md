@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-11-01（DSH 实际路径成本与标题争用复盘后）。
+> 整理时间：2026-11-01（DSH 标题生命周期否决与 resident 覆盖审计恢复后）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -16,7 +16,7 @@
 
 ## 2. 当前断点
 
-- **全局目标已第三十五次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+- **全局目标已第三十六次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
   Xid、engine 非预期退出或错误结果风险时，立即暂停性能实验并保存事故。没有新事故时，
   不空等低频故障，继续建立代表性任务质量门，再恢复普通单代理编辑—测试循环的性能优化。
   质量、任务成功率、测试正确性和工具协议都是硬门，不能用速度交换失败或严格收口缺失。
@@ -25,8 +25,8 @@
   4 路非回退，6/8 只做安全回归。任何局部候选先算真实触发率后的整任务 1% 上界；没有进入
   用户实际路径的能力只算机制收益。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第三十五版更新后该接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第三十五版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第三十六版更新后该接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第三十六版计划
   为权威，不要回到平台旧目标的状态快照。
 - **DSH 真实路径成本已拆清**：7 个基础/fixture 会话 runner 总墙钟 `197.776 s`，模型
   step `184.332 s`（`93.202%`），工具区间并集 `10.505 s`（`5.312%`）；40/40 个主
@@ -43,12 +43,12 @@
   `6.2–6.4→2.7–3.0 s`。6 个 fixture、双会话 provider 标题、健康和 Xid 门通过。原先
   同 boot ABBA 被 conversation-cache checkpoint 污染，已作废。见
   [结果](work/DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md)。
-- **当前主动项是 `DSH-TITLE-END-OF-TURN`**：`AGENT-DSH-REQUEST-PATH-MAP` 已完成并判
-  null。生产 tokenizer/template 的 6K/94K/189K 热 `Service.prepare` 中位仅
-  `6.439/11.527/18.345 ms`；真实 6-step fixture 中普通 step 首 token 只比 engine
-  prompt 多约 `25–26 ms`。现有标题门只等第一个主请求，随后标题与 step 2 重叠，使该步
-  首 token 前达到 `2.681 s`。下一项跟踪完整 DSH 工具 turn，在 terminal no-tool
-  assistant response 后放行标题，并以多 step 真实验收。
+- **`DSH-TITLE-END-OF-TURN` 已否决**：DSH 在最终主回复完成时取消仍等待的标题客户端。
+  真实代理等待 `9.421 s` 后记录 `BrokenPipeError/502`，提前 SSE 与合法 chunked
+  心跳无效；该轮 task wall `9.598 s`、runner wall `11.628 s`。128/64 输出上限仍跨
+  两个主 step，固定首消息前缀两次 `cached=0`。服务端不能安全改变 DSH 的标题生命周期；
+  不再扫描邻近等待、额度或提示词。见
+  [结果](work/DSH_TITLE_SCHEDULING_RESULT-20261101.md)。
 - **产品候选已部署为 opt-in**：`STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission
   层只识别 DSH 精确 wire shape；恰好一个普通 inference admission 存在时等待，主请求
   释放即继续，60 s fail-open，不读 prompt 正文。两个会话同时启动时立即 fail open，
@@ -77,13 +77,15 @@
 - **Codex 工具面历史**：模型 slug 不在目录时只有 9 个工具且没有 `apply_patch`；目录供给
   已产品化为 `strata codex catalog [--apply]`。详见
   [AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
-- **暂停的历史候选**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的 native
+- **当前主动项**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的 native
   direct-pointer 路径真实命中，group 级 `11.671 → 7.848 ms/layer`（`1.49x`）。
   596 fresh、1 路 wall 相对 A1/A2 合并基线改善 `1.862%`，相对 A1 改善 `2.145%`、
   `32.667 ms`，三波全胜；这符合用户“1% 多也算”的原则，但未过预注册的绝对
   `0.05 s` 门。94K wall 名义改善 `2.612%` 但 prompt 基本不变，不能归因给 prefill；
-  4 路 A2 在约 `1:44` 后被用户暂停，没有结果，6/8 未跑。候选保持默认关闭，未采纳。
-  见 [result](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
+  4 路 A2 在约 `1:44` 后被用户暂停，没有结果，6/8 未跑。候选保持默认关闭，生产仍是
+  A1。当前先只读审计 48 层 `fused_staged` 覆盖和 fallback；没有新增整请求 1% 就关闭，
+  有才补 4/6/8。见
+  [result](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
   `handoff_safe=1`，DKMS 与 initramfs 自动路径固定，功耗墙各为 `280 W`。当前慢不是
@@ -336,7 +338,7 @@
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
   因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线。
   普通热续轮 `short_read`、编辑—测试重复测试和 MTP 批量 draft K/V 也已分别否决。
-当前入口是 `DSH-TITLE-END-OF-TURN`；223K 旧会话仅为低频 p99。
+当前入口是 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`；223K 旧会话仅为低频 p99。
 
 ## 3. 当前生产
 

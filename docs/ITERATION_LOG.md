@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-143 · 标题生命周期不可由服务端延后；转回 resident 覆盖审计
+
+- 目标 / 指标：确认 DSH 隐藏标题能否安全延后到完整主 turn 结束，再决定是否值得用生产
+  重启换取标题隔离收益；主指标仍是 `task_wall_s`，runner wall 只作次指标。
+- 假设与预期：若 terminal no-tool assistant response 后仍有标题客户端存活，延后即可让
+  标题退出后续工具 step，并保留 provider 标题语义。
+- 为什么选这条路线：真实 DSH step 2 的首 token 比 engine prompt 多约 `1.533 s`，标题
+  是已进入实际路径的并发源；Host prepare 已判 null，继续抠毫秒级 CPU 不符合用户最大痛点。
+- 改动与实验：实现并测试默认关闭的 end-of-turn 状态机，再用 no-restart proxy 跑真实
+  多 step DSH。随后验证提前 SSE 头、合法 chunked 心跳、标题输出上限 128/64 和固定首消息
+  前缀；所有失败代码均已从工作树移除。
+- 结果：真实代理让标题等待 `9.421 s`，释放后客户端已断开并记录
+  `BrokenPipeError/502`。该轮 `task_wall_s=9.598 s`、runner wall `11.628 s`；五个普通
+  model step 和代码/测试/严格 sentinel 全过。128/64 上限的 task wall 为
+  `12.004/11.490 s`，provider 均完成但标题仍跨两个主 step。固定前缀两次
+  `cached=0`，task wall `14.161/12.221 s`。
+- 判决：**`DSH-TITLE-END-OF-TURN` 否决。** DSH 在最终主回复完成时取消标题客户端；
+  扣住最终回复等标题只会串行增加数秒，不能证明保守 1% 收益。生产未重启、未改变。
+- 预期被推翻：原先认为“turn 结束”是服务端可观测的释放点；实际这是 DSH 取消辅助请求的
+  生命周期终点。服务端保持 HTTP 连接和发送心跳不能延长该客户端的逻辑寿命。
+- 测试方法修正：辅助请求必须同时记录到达、代理释放、上游开始/完成、turn 结束、客户端
+  取消、provider token/cache，以及与每个主 step 的重叠；只比较 task wall 无法识别
+  “标题已取消”的假成功。runner wall 与 `task_wall_s` 不得混写。
+- 生产状态与回滚：server/vision/engine 仍为 `232891/232893/232899`，health loaded、
+  262144、6 slots / 2 groups；未重启，候选代码不存在，无需回滚。
+- 证据：L-170、[结果](work/DSH_TITLE_SCHEDULING_RESULT-20261101.md)、
+  [契约](work/DSH_TITLE_END_OF_TURN_CONTRACT-20261101.md)。
+- 下一步与理由：恢复 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`。它已有 group 级
+  `1.49x` 和 596 fresh 热长轮 `1.862%` 的真实信号；先做 48 层覆盖/fallback 审计，
+  避免在没有证明覆盖缺口前重跑同形 A-B-A。没有新增整请求 1% 就关闭该路线。
+
 ## I-20261101-142 · host 请求路径判 null；标题跨后续工具 step 仍抢资源
 
 - 目标 / 指标：确认普通热续轮的模板、Responses 转换、PromptEncoder、`prepare` 和

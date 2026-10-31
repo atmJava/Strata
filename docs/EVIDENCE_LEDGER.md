@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-169，按编号）
+## 台账索引（L-000…L-170，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -183,9 +183,52 @@
 | L-167 | 11-01 19:1xZ–19:3xZ | 生产 A/B2 单会话主 turn `19.629→16.078 s`（`18.091%`），runner wall `21.484→18.065 s`（`15.914%`）；3/3 质量/provider 标题。第一版双会话各等 `26.6 s` 后只留 fallback，否决；多普通请求 fail-open 修正后双会话 2/2 质量/provider，defer 增量 0。两个长任务完成，其中一个保留 `tool_error=1` 后恢复。最终 PID `222685/222690/222697`、六 slots / 两 groups、重启 `136 s`、新增 Xid `0` | **DSH-TITLE-INTERFERENCE opt-in 采纳**：单会话真实收益成立，双会话保留原并发；不能默认开启或宣称双会话加速。下一项 `DSH-FIRST-TURN-PREFIX-REUSE` |
 | L-168 | 11-01 19:4xZ–20:0xZ | 首轮 checkpoint `582→5,463`；干净 boot 顺序 A→B，A2/A3 task 中位 `11.3715 s`、B2/B3 `7.3165 s`（`35.66%`、`4.055 s`）；首步 model wall `6.2–6.4→2.7–3.0 s`。6 fixture、双会话 provider 标题、健康全过；一次可恢复工具参数错误单列并重跑 `1/1` 零错误。最终 PID `232891/232893/232899`、server `bd3e4289...`、重启约 `190 s`、新增 Xid `0` | **DSH-FIRST-TURN-PREFIX-REUSE opt-in 采纳**：精确 DSH shape 固定 system+tools；同 boot ABBA 被持久 checkpoint 污染，正式方法改为干净 boot A→B 且冷启动单列。下一项 `AGENT-DSH-REQUEST-PATH-MAP` |
 | L-169 | 11-01 04:2xZ–05:0xZ | 生产 tokenizer/template 的 6K/94K/189K 热 `Service.prepare` 中位 `6.439/11.527/18.345 ms`；real 6-step DSH 任务 `13.261 s`、模型 `12.112 s`（`91.287%`）、工具并集 `0.991 s`。普通 step 首 token 只比 prompt 多约 `25–26 ms`；标题与 step 2 重叠，首 token 前 `2.681 s` 对 prompt `1.148 s`，额外 `1.533 s` 约占任务 `11.6%`。DSH v4 `data.stream/chunk.time` timing bug 已修复并回归 | **host null result**：关闭 `AGENT-DSH-REQUEST-PATH-MAP`，不修改 server/engine、不重启；下一项 `DSH-TITLE-END-OF-TURN`，按完整多 step turn 做标题隔离 |
+| L-170 | 11-01 05:xZ–06:xZ | 真实 DSH turn 结束时取消仍在等待的标题；标题等待 `9.421 s` 后 `BrokenPipeError/502`。提前 SSE 头与合法 chunked 心跳无效。该轮 task wall `9.598 s`、runner wall `11.628 s`，代码/测试/sentinel 与五个 model step 全过。128/64 cap task wall `12.004/11.490 s` 仍跨两个主 step；固定前缀 D1/D2 `14.161/12.221 s` 且均 `cached=0` | **DSH-TITLE-END-OF-TURN 否决**：标题生命周期归 DSH，服务端不能安全延后；不扫邻近等待、token cap 或 prompt。候选代码已移除，生产未重启；下一项恢复 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-170 · DSH 的标题生命周期在最终主回复结束；服务端延后会被取消
+
+**判定：`DSH-TITLE-END-OF-TURN` 否决；下一项恢复
+`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`。**
+
+真实严格 `single-file` 运行使用当前 DSH shape、显式代理和 provider 标题。标题等待
+`9.421 s`；代理在最后一个主 model response 后释放时，客户端已经断开，代理记录
+`BrokenPipeError` 和 HTTP 502。提前发送 SSE headers 并发送合法 chunked 心跳没有改变
+结果，排除了传输 framing 实现错误。
+
+该轮任务的 `task_wall_s` 为 `9.598 s`，runner 进程 wall 为 `11.628 s`。后者包含 turn
+后的客户端辅助工作，不能写成主任务墙。代码、仓库测试、受保护测试、严格 final sentinel
+和五个普通 model step 全部通过。
+
+三个邻近实验同样不成立：
+
+| 实验 | 结果 | 判决 |
+|---|---|---|
+| 标题 cap 128 | provider 完成、89 output token、`4.679 s`；task wall `12.004 s`；仍跨 step 2/3 | 否决 |
+| 标题 cap 64 | provider 完成、56 output token、`4.324 s`；task wall `11.490 s`；仍跨后续主 step | 否决 |
+| 固定首消息前缀 | 两次完全相同前缀均 `cached=0`，task wall `14.161/12.221 s` | 否决 |
+
+cap 128/64 的 runner wall 分别为 `13.942/13.541 s`，与 task wall 分开记录。扣住最终主
+回复直到标题完成会把标题串行化，至少增加数秒；无法形成保守 1% 加速结论。
+
+测试方法因此要求辅助请求记录 request arrival、gate release、upstream start/finish、
+main turn end、client cancellation、provider token/cache 和逐主 step 重叠。只比较
+runner wall 或只看一次 task wall 会把“标题已被取消”误判成契约成功。
+
+证据：
+
+- `/tmp/dsh-title-end-b2r-20261101/report.json`
+- `/tmp/dsh-title-end-b2-proxy-20261101.jsonl`
+- `/home/kali/.dsh/sessions/--tmp-dsh-title-end-b2r-20261101-single-file--/session-00c2cf7b-8aa0-4681-bdf9-9983dfbe2c4f/session.v4.jsonl.zstd`
+- `/tmp/dsh-title-cap128-c1-20261101/report.json`
+- `/tmp/dsh-title-cap64-c1-20261101/report.json`
+- `/tmp/dsh-title-prefix-d1-20261101/report.json`
+- `/tmp/dsh-title-prefix-d2-20261101/report.json`
+
+完整结果见
+[`DSH_TITLE_SCHEDULING_RESULT-20261101.md`](work/DSH_TITLE_SCHEDULING_RESULT-20261101.md)。
 
 ## L-169 · host 热路径只有毫秒级；标题跨 step 2 仍造成 1.533 秒争用
 

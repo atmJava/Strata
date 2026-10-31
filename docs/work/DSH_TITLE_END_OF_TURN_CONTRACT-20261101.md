@@ -2,8 +2,9 @@
 
 Date: 2026-11-01
 
-Status: active. This is a server scheduling candidate. It does not change the
-model, prompt ids, sampling, tools, output parsing or engine.
+Status: rejected on 2026-11-01. The candidate cannot coexist with DSH's title
+lifecycle. It did not change the model, prompt ids, sampling, tools, output
+parsing or engine.
 
 ## Problem
 
@@ -81,6 +82,26 @@ Performance:
 If the gate merely moves the title to another main step or leaves a title-only
 client waiting until fallback, record the candidate as failed. Do not call the
 first-step-only improvement sufficient.
+
+## Rejection
+
+The local state machine and HTTP ordering tests passed, but the real DSH client
+cancels the hidden title request when the main turn ends. A strict `single-file`
+run kept the title waiting `9.421 s`; once the proxy released it after the final
+main response, the client was already gone and the proxy recorded
+`BrokenPipeError` / HTTP 502. Sending SSE headers early and writing valid chunked
+heartbeats did not extend the title's logical lifetime.
+
+Holding the final main response until the title completes would make the title
+sequential. The observed title takes about `4.3 s` while competing with later
+main steps, and standalone title samples are about `2 s`; that cannot establish
+a conservative 1% task gain and may make the task slower. The implementation was
+removed after the rejection.
+
+The test method must therefore record title request arrival, release, upstream
+start/finish, main turn end, and client cancellation. A task-wall comparison
+alone cannot distinguish a successful isolation from a title that was silently
+cancelled.
 
 ## Cost
 

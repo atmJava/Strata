@@ -1,708 +1,182 @@
 # 真实 AI vibe coding 优化计划
 
-日期：2026-10-31
+日期：2026-10-31（2026-11-01 第三十六次修订）
 
-状态：第三十五次修订后继续执行。用户实际 DSH Web 路径已对齐到 Qwen/Strata relay；
-6 个基础 coding fixture 的代码/测试全过，明确最终消息契约后严格通过从 `3/6` 提到
-`6/6`。真实路径成本已拆清：模型 step 占 `93.202%`，工具并集只占 `5.312%`；当前主动
-项已从 host 请求路径关闭为 null，转“完整 DSH turn 的标题隔离”。标题争用和连续新会话首轮共享前缀已分别进入
-真实生产路径并取得收益。GPU0 Xid 13 仍是随时抢占的 P0 风险，固定重放无法复现时不空等。
+状态：继续执行。当前断点从 DSH 标题调度转回已有正向证据的 resident direct-path。
+本轮先做 48 层覆盖/fallback 审计；只有新的整任务保守收益至少 1% 时，才补 4/6/8
+非回退和生产重启。标题延迟、标题输出上限和标题前缀 pin 已连续否决，不再换邻近参数。
 
 ## 全局目标
 
 除非用户明确停止，持续提高真实 AI vibe coding 的任务成功率、指令遵循、工具协议和代码
-正确性，再缩短任务从提交到产生可用代码、测试结果或明确阻塞的时间，并减少重复模型工作。
-严重运行时/GPU 故障有最高抢占权：新增 Xid、engine 退出或错误答案可能被误当成功时，暂停
-性能实验、保存事故并优先处理。没有新事故时，不把“等待下一次低频故障”当作主线，而是
-继续做可验证的质量和用户等待优化。当前执行主轴仍是通常 1 个主代理、偶尔 2 个的编辑—
-测试循环。每一轮必须按真实 1/2 会话加权成本选择当前最大可移动瓶颈；1% 也算收益，但必须
-有绝对秒数、真实触发率和保守整任务上界。先做便宜且能区分大假设的测量，再为候选付出
-重启成本；连续局部内核、参数扫描或无法进入用户路径的机制不算进展。
-
-质量对照和严格收口已完成。用户当前 DSH Web 是
-`atm -> qwen3.8-flash-next-iq3_xxs-abliterated -> 129.28.27.137:8888`；旧
-`dsh headless` 的 DeepSeek 官方 `6/6` 是另一条路径，已从当前结论剔除。通过显式 overlay
-对齐 Qwen/Strata 后，6 个基础 coding fixture 代码/测试 `6/6`，严格回复从 `3/6` 提升到
-`6/6`；DSH 使用 `edit/write` 而不是 Codex 专用 `apply_patch`。详见
-[`AGENT_DSH_WEB_QUALITY_RESULT-20261101.md`](../../work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
-
-`AGENT-DSH-REAL-PATH-COST` 已完成。7 个基础/fixture 会话的 runner 总墙钟为
-`197.776 s`，模型 step `184.332 s`（`93.202%`），工具区间并集 `10.505 s`（`5.312%`）；
-40/40 个主模型 step 关联成功，7 个未关联请求正好是 7 个新会话各一次的隐藏标题请求。
-标题请求约 266 prompt token、118 output token、零工具，中位 `9.8 s`，并与主请求争用
-GPU/cache。`DSH-TITLE-INTERFERENCE` 的代理 ABBA 已通过：短任务主任务中位
-`17.637 → 15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 标题仍由
-provider 模型生成，长任务 `A B B A` 中 B 不明显回退。生产 opt-in 验证已完成：单会话
-主 turn `19.629→16.078 s`（`18.091%`），双会话 fail-open 后 2/2 质量/provider 标题。
-`DSH-FIRST-TURN-PREFIX-REUSE` 随后完成：精确 DSH shape 把 checkpoint 从 system 后的
-`582` token 后移到 system+tools 的 `5,463` token；干净 boot 顺序 A→B 的稳态 task
-中位 `11.3715→7.3165 s`（`35.66%`、绝对 `4.055 s`），首步 model wall
-`6.2–6.4→2.7–3.0 s`。6 个 fixture、双会话 provider 标题、健康和 Xid 门通过。
-host 请求路径已判 null；当前主动项转为完整 DSH turn 的 end-of-turn 标题隔离。
-
-短任务关闭标题的旧 A/B 为：runner wall `16.854 → 14.901 s`（`-10.647%`），主任务
-turn wall `14.929 → 13.001 s`（`-11.843%`），均 `5/6` 胜；长任务无标题 `0/2` 胜，
-首组 cache 存在跨臂污染。因此不能通用关闭标题，也不能把关闭臂收益直接产品化。下一步
-标题阶段使用过 ABBA 并同时报告标题质量和长任务非回退。缓存 checkpoint 阶段证明同 boot
-ABBA 会被持久状态污染，因此后续凡会写跨请求 checkpoint 的实验必须独立 boot，或把
-不可逆顺序明确写成 A→B 并单列冷启动。不能再把 Codex
-`apply_patch`、另一 provider 或局部 kernel 结果当成 DSH Web 的基线。
-
-`GPU-XID13-STABILITY` 继续作为 P0 监测项。DSH 的 15,419-token Responses 请求在 76 个
-reasoning token 后因 `layer 11 never rang` 失败，GPU0 同秒记录 8 条 Xid 13 和 1 条
-Xid 43。约 60 次精确重放、30 个最终请求全 HTTP 200，没有再次触发；GPU0 另有不同软件栈
-下的 Xid 62/154 历史。上游同型号改装 22GB 卡报告相同 Xid 13/ESR，最终按 GDDR6 时序
-余量/板级问题关闭。当前高度怀疑 GPU/显存稳定性，但没有证明本机芯片损坏，也没有完成修复。
-任何新 Xid 都立即恢复为当前项并抢占质量和性能实验。
-
-resident direct-pointer 仍是暂停历史候选：group 级 `1.49x`、596 的 1 路 wall
-`1.862%`，但绝对只省 `32.667 ms`，94K prompt 无对应改善，4/6/8 未完成。质量门通过前
-不恢复其逐层覆盖审计，也不重跑同形 A-B-A。
-
-优先级按用户实际感受到的结果排列：
-
-1. 正确、安全、可恢复；GPU/运行时事故、错误修改、遗漏测试或错误工具结果都优先于速度。
-2. 普通单代理编辑—测试循环中占主导的模型请求等待，包括热缓存 prompt/read 与真实
-   decode；工具执行和轮询先算清边界，不冒充满意收益。
-3. 从任务提交到首次代码修改、首个工具结果和首次测试结果的时间。
-4. 真实根任务的 p50、p75、p90 完成时间，以及重复读取、重复测试和纠错轮次。
-5. 隔天旧会话恢复、长上下文 compaction、recovery、取消和长输出的 p90/p99 尾部。
-6. 1 主 3 子代理时的主线程首结果、第二条关键请求 TTFT 和总完成跨度。
-
-token/s、资源利用率和聚合吞吐只用于解释用户等待，不能替代用户任务时间。
-
-关键约束：**没有进入用户实际路径的能力不计作产品收益。** 合成请求、局部微基准和
-实验端口只能提供机制证据；要宣称体验改善，必须说明真实客户端、代理或配置的触发路径。
-
-## 真实负载
-
-用户通常运行 1 个主代理，偶尔 2 个，峰值 1 主 3 子代理。`2/4/6/8` 是同时进入模型
-服务的在途请求数，不是打开的会话数。
-
-- 1/2 路是主要优化场景。
-- 4 路只要求不明显回退。
-- 6/8 路只做健康、错误和安全回归。
-- 工具执行、用户思考、等待子代理和客户端组装期间可能没有模型请求。
-
-长上下文分成三个场景：
-
-1. 当前会话约 210K token 的 compaction。
-2. 放置超过一天后重新打开约 180K token 的旧会话。
-3. compaction 后立即回读压缩前分支；真实本地 rollout 的立即触发为 0/109，降为低频诊断。
-
-## 当前硬件与生产事实
-
-TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记录两张卡的 cuBLAS FP16
-性能从锁定参考 `62.40 TFLOPS` 提升到 `93.69/94.07 TFLOPS`，约 `1.51x`；当前 boot
-两份日志均为 `unlocked=1`、`result=0 handoff_safe=1`，DKMS 与 initramfs 自动路径已固定。
-满载时约 `278 W`，接近两张卡各自 `280 W` 的硬件上限，没有热降频。
-
-解码、解锁和 initramfs 不再研究或修改。核实记录见
-[`TU102_UNLOCK_VERIFY-20261031.md`](../../work/TU102_UNLOCK_VERIFY-20261031.md)。
-
-GPU0 的稳定性是独立的硬件/驱动问题，不是解锁问题。2026-10-31 发生 Xid 13；同一
-`0000:03:00` 在 2026-09-25 的另一套 vLLM + `595.91.07` 栈上发生过 Xid 62/154。
-驱动固定 `595.71.05` 只能防止已知的驱动版本漂移，不代表不会 Xid。当前机器和上游同类
-改装 22GB 卡的证据都要求先做事故关联和可回滚的稳定性实验，而不是继续改局部内核。
-
-当前 B4 是手动实例，`strata.service` 为 inactive。server cwd 与 engine 路径不同：
-
-- server cwd：`/opt/ai/src/strata-two-stream-serial-20261031`
-- engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
-- engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
-- config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
-- 当前 PID：server / vision / engine `232891 / 232893 / 232899`
-- 当前 server SHA-256：`bd3e428932c0b9bb645b2ae9f37924b2e440b590333a0322cdd00cd28dd4ed82`
-- 当前 server env：`STRATA_DEFER_TITLE_REQUESTS=1`、`STRATA_BATCH_SERIAL_TWO=1`、
-  `STRATA_PIN_DSH_TOOL_PREFIX=1`
-- 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
-
-生产启动与恢复到 ready 本轮实测约 `190 s`。每次重启必须说明预期节省能否覆盖加载、
-缓存丢失和不可用
-成本；能在一个 boot 内完成的动态 A/B 不重复重启。
-
-## 真实成本证据
-
-### 整任务
-
-冻结的 35 文件 Codex 快照包含 152 root、14,768 请求、`10,343,967` output 和
-`3,347,547` reasoning token：
-
-| 成本 | 秒数 |
-|---|---:|
-| 模型区间 union | 69,236 |
-| 工具区间 union | 123,693 |
-| root wall union | 184,604 |
-| 普通单路模型 | 66,228 / 14,653 请求 |
-| 恰好两路模型 | 171 |
-
-工具执行是根任务墙钟主体，无法由 Strata 直接消除；普通单路模型请求仍是第二大块。
-恰好两路只占很小一部分，不能作为总体第一目标。
-
-34 个有效会话中只有 1 个超过 24 小时间隔、2 个超过 12 小时。223K 旧会话是明显但低频
-的 p99 问题，不应排在每轮都会发生的热续轮之前。
-
-后续活动会话的 36 文件编辑—测试快照包含 170 root、34 thread、22,749 个工具调用、
-2,318 次编辑和 576 次测试。只有 19 个 root 同时含编辑和测试，占 `11.176%`。首次编辑
-前中位 9 个模型轮次、`71.280 s`；编辑到首次测试中位 19 个模型轮次、`137.529 s`。
-这些 root 内，首次编辑前模型/工具为 `3,235.782/6,365.546 s`，编辑到首次测试为
-`4,072.900/8,241.516 s`。工具仍是更大块，但约 `7.3k s` 的模型段仍直接属于 Strata
-可以改善的用户等待。
-
-### 热续轮
-
-同一 B4 服务的 Agent 形状测试：
-
-| 场景 | wall | prompt | decode |
-|---|---:|---:|---:|
-| 1 路冷首轮 | 7.382 s | 7.308 s | 0.054 s |
-| 1 路热续轮 | 1.610 s | 1.522 s | 0.073 s |
-| 2 路冷首轮 | 11.075 s | 7.304 s | 0.044 s |
-| 2 路热续轮 | 2.290 s | 1.409 s | 0.051 s |
-
-12K 左右上下文的普通热续轮已复用约 95%，短输出 decode 只有约 50–73 ms；用户等待绝大部分
-仍在 prompt 路径。真实日志还出现过 `11,857 reused + 596 read`、prompt `1.5 s` 的
-编辑—测试热续轮。
-
-静态控制流显示，服务默认用 decode windows 读取最后不超过 64 个新文本 token，代码注释
-记录该路径约 `16 ms/token`，而 batched prompt 路径即使很短也有约 `300 ms` 固定开销。
-两者交叉点可能在几十个 token，而不是固定 64；因此 `AGENT-HOT-TURN-FIXED-COST` 先验证
-同一引擎的 `short_read=64` 与 `short_read=0`，不先改内核。
-
-### 长上下文
-
-- 当前会话 210K compaction 的正常 prompt 为 `0.248–0.283 s`，缓存约 `99.987%`。
-- B4 上三次真实 Codex compaction 复用约 `99.1%`，没有新的高价值修复。
-- 真实 49 天旧会话为 223,114 prompt token、cached `0`、TTFT `113.014 s`。
-- `--ple-inflight 1024` 在真实旧会话三组配对中把 prompt/wall 中位改善
-  `2.87%/1.09%`，已作为显式配置保留。
-- 4M PLE row cache 使 prompt 慢 `16.23%`、host PLE 慢 `60.49%`，已否决，不扫邻近容量。
-- 现有 session file 不支持双卡 layer split、六 batch slots 和 prompt-cache 形状，
-  不能直接解决跨重启旧会话恢复。
-
-## 当前优先级
-
-### P0 抢占条件：`GPU-XID13-STABILITY`
-
-该低频 GPU 故障保持最高风险，不把固定 prompt 重放当成硬件稳定性测试：
-
-- 每次事故保存请求时间/并发/尺寸、GPU/PCI、Xid 原始行、PID/process、clocks/temp/power/
-  VRAM/throttle、health 和 engine PID；
-- 原生 `NVRM Xid` 行数与同时间/同设备事故簇分开报告；
-- 固定 prompt、单路、6 路和完整 DSH 回合只用于证明代码路径是否必然触发；
-- 只有再次出现 Xid，才进入维护窗口逐级实验：先单变量验证 `STRATA_HC_SPLIT=1` 是否
-  只把 crash 变成静默 wedge；再测可回滚显存降频，最后考虑 GPU0 单卡隔离；
-- 不一次性关闭多个 `STRATA_*` pipeline 开关；每次只改变一个变量并保留精确回滚；
-- 不换 DSH，不通过修改客户端掩盖服务端事故。
-
-没有新 Xid 时，只保留只读监测和下一步实验准备，不等待而不推进其他工作；任何新 Xid、
-engine 非预期退出或 GPU 从总线掉落都立即抢占当前质量/性能项。
-
-当前证据：原请求 `input_tokens=15,419`、31 tools、24 input items，76 reasoning token 后
-失败；GPU0 `0000:03:00` 同秒 8×Xid 13（ESR 含 `0x4c1eb72`）+ 1×Xid 43，
-`pid=172641 name=strata`。约 60 次精确重放、30 个最终请求全 HTTP 200，无新 Xid；
-health loaded、6 slots / 2 groups。GPU0 在 2026-09-25 的另一套 vLLM/驱动栈上还发生过
-Xid 62/154；上游 #4190 的同型号改装卡相同 Xid 13/ESR 在降低显存频率后消失。当前只能
-说低频 GPU/显存风险优先，不能说器件损坏或问题已修复。
-
-只读工装为 `tools/server/probe-gpu-stability.py`；当前快照
-`/opt/ai/logs/gpu-stability-current-20261101.json`，探针专项 7 个单测通过。完整事件记录见
-[`GPU_XID13_INCIDENT_RESULT-20261101.md`](../../work/GPU_XID13_INCIDENT_RESULT-20261101.md)。
-
-可靠性测试按窗口执行，不按“跑过多少次固定请求”执行：
-
-1. 开始代表性真实负载前保存完整 boot 基线；`--boot` 必须读取整个 boot，不能暗中只取最近
-   24 小时。
-2. 记录本轮 UTC 开始时间、client/runner、并发、请求形状、server/engine PID、health 和
-   GPU 状态；正常使用时周期采集，事故后保存至少前后各 60 秒。
-3. 窗口结束时用该 UTC 开始时间作为 `--since` 读取新增 NVRM Xid；默认把同一 PCI 上
-   5 秒内的事件聚为一次事故，同时仍报告原始事件数和每个事故簇。
-4. 新 Xid 立即判失败，不把同期性能数字用作收益；没有新 Xid 只表示本窗口未观测到故障，
-   不表示已修复。
-5. 未复现的固定 prompt 不再继续加次数。只有新事故或独立压力实验提供重复性后，才测试
-   `STRATA_HC_SPLIT=1`、单变量显存降频和 GPU0 隔离；每臂必须有精确回滚和真实推理质量门。
-
-### 已完成：`AGENT-TERMINAL-QUALITY-COMPARISON`
-
-已确认 DSH Web 与旧 benchmark 的 provider/profile 不同，并用显式 overlay 完成同
-Qwen/Strata 路径对照：
-
-- 保持生产健康、工具结果完整、测试正确和长输出不被静默截断；
-- 保持 Codex 目录供给幂等、可备份、可回滚，真实请求声明 `apply_patch`；
-- 报告必须写清 runner、model、provider 和 hosting；
-- 查找 DSH 的 provider 配置能力；只有真实经 Strata endpoint 运行后才能做同引擎归因；
-- 不改变 engine、pack、量化、GPU、上下文或 6 slots / 2 groups。
-
-当前证据：同 Qwen/Strata relay 的 6 个基础 fixture 代码/测试 `6/6`，“当前 prompt”
-严格 `3/6`；DSH 没有 `apply_patch`，使用 `edit/write`。旧 DSH/DeepSeek `6/6` 只保留为
-另一 provider 参考。见
-[`AGENT_DSH_WEB_QUALITY_RESULT-20261101.md`](../../work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)；
-Codex 目录结果仍见
-[`AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md`](../../work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
-
-### 已完成：`AGENT-STRICT-RESPONSE-CONTRACT`
-
-同一 `transaction-rollback` 连续五次：当前 prompt 严格 `4/5`，追加明确最终消息契约后
-`5/5`；完整 6 个基础 fixture 从严格 `3/6` 提升到 `6/6`。7 项测试全过、受保护测试未改、
-事件/工具错误为零，新增 Xid 为零。真实客户端应明确“最终 assistant message 只能是什么”，
-不得静默裁剪模型输出。见
-[结果](../../work/AGENT_DSH_WEB_QUALITY_RESULT-20261101.md)。
-
-### 已完成：`AGENT-DSH-REAL-PATH-COST`
-
-只读拆 DSH 真实工具循环，不改 profile、engine、GPU 或生产 config：
-
-- 至少覆盖本轮 6 个基础 fixture 和一次多工具长上下文任务；
-- 每个模型 step 记录 input/cached/fresh、output/reasoning、prompt/decode、finish、工具
-  名称和工具结果回流大小；客户端 wall 与 server timing 分开；
-- 找出最大可归因成本，给出真实触发率、整任务绝对秒数和 >=1% 保守上界；
-- 低于 1%、只改局部 kernel 或无法进入 DSH 实际路径的方向不进入实现；
-- 期间出现新 Xid 立即暂停并转 `GPU-XID13-STABILITY`。
-
-结果：模型占 `93.202%`、工具并集占 `5.312%`；40/40 主 step 关联成功；7 个隐藏标题请求
-每个新会话一次，中位 `9.8 s`，会与主请求争用 GPU/cache。短任务关闭标题中位节省
-`1.78 s`（主 turn口径 `11.843%`、`5/6` 胜），但长任务 `0/2` 胜，且 cache 有跨臂污染。
-见
-[`AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md`](../../work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
-
-### 已完成：`DSH-TITLE-INTERFERENCE`（opt-in 采纳）
-
-保留 DSH 标题语义，验证标题在主任务完成后异步生成，避免同时争用模型执行和 prompt
-cache。测试只使用显式 overlay/proxy，不修改用户本地 profile：
-
-- 至少 6 对短任务，采用 ABBA 平衡；至少 2 对长任务；
-- 主指标使用首个 `turn/start` 到最后一个 `turn/end` 的 `task_wall_s`，runner 进程 wall
-  只作次指标；
-- 短任务配对中位至少改善 1%；长任务不得明显回退；标题文本不得退化或 fallback；
-- 同时记录模型 prompt/decode、cache 复用、工具时间、finish 和零错误；
-- 代理必须真实逐块流式转发，不能用先读完 SSE 的测量路径冒充 TTFT；
-- 任何新 Xid、engine 意外退出立即抢占。
-
-代理结果：短任务主任务合并中位 `17.637 → 15.238 s`（`13.602%`），配对中位
-`13.465%`、`5/6` 胜；12/12 质量与 provider 标题通过。长任务 B `37.943/41.297 s`，
-A `46.411/82.438 s`；B 不明显回退，但 A 臂 8→11 step 漂移，只作非回退判断。
-16/16 无 HTTP/事件/工具错误，新增 Xid 为零。见
-[`AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md`](../../work/AGENT_DSH_TITLE_INTERFERENCE_RESULT-20261101.md)。
-
-当前产品候选：默认关闭的 `STRATA_DEFER_TITLE_REQUESTS=1` 在 HTTP admission 层只识别
-DSH 的精确标题形状；活跃标题单独计数。恰好一个普通 inference admission 存在时最多等
-`60 s`，主请求释放即继续；两个或更多普通请求存在时立即 fail open，因为 wire shape
-没有 session id，无法安全配对。匹配不看 prompt 文本；disabled、不匹配、超时和 drain
-都 fail open。契约见
-[`DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md`](../../work/DSH_TITLE_INTERFERENCE_PRODUCT_CONTRACT-20261101.md)。
-
-生产结果：单会话主 turn `19.629→16.078 s`（`18.091%`），runner wall
-`21.484→18.065 s`（`15.914%`），3/3 质量和 provider 标题；双会话 fail-open 后 2/2
-质量和 provider 标题。产品以 opt-in 保持运行，双会话不宣称提速。
-
-### 已完成：`DSH-FIRST-TURN-PREFIX-REUSE`
-
-原 checkpoint 只复用 system 后的 `582` token，system + 25 tools 的稳定前缀为 `5,463`
-token。默认关闭的 `STRATA_PIN_DSH_TOOL_PREFIX=1` 只匹配当前 DSH 主请求 wire shape，
-第一次接受后固定 system/tools/kwargs fingerprint；shape、工具描述、标题请求或显式
-`strata_prefix` 变化均 fail open。生产 opt-in 已启用。
-
-干净 boot 顺序 A→B 中，A2/A3 task 中位 `11.3715 s`，B2/B3 `7.3165 s`，改善
-`35.66%`、绝对 `4.055 s`；首步 cached `582→5,463`，model wall
-`6.215–6.399→2.711–2.995 s`。6 个 fixture、双会话 provider 标题、健康、6/2、零新增
-Xid 通过。一次 `parser-edge` 可恢复工具参数错误保留，单独重跑 `1/1` 零错误。
-
-原先的同 boot ABBA 因 B 写入更长 conversation-cache checkpoint 而污染后续 A，显式
-`tokens=582` 也不能可靠覆盖已有 checkpoint；该组作废。正式方法为干净 boot 顺序 A→B，
-冷启动单列。结果见
-[`DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md`](../../work/DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md)。
-
-### P1：`AGENT-DSH-REQUEST-PATH-MAP`（已完成，null result）
-
-普通热续轮即使有约 `95%+` cache 复用，94K/189K 的 prompt 仍约 `2.09/2.43 s`，而短输出
-decode 只有约 `50–73 ms`。但真实 6K DSH 会话不能把短输出外推到所有请求：两个稳态会话
-的 continuation step 2 有 `125/142` output token，decode `2460.9/2771.2 ms`，整步
-`3.879/4.178 s`；step 3 有 `46/50` output token，decode `598.7/662.6 ms`。标题请求在
-这两个窗口内持续延后 `2.749/2.401 s`，不是步骤间空档的解释。
-
-因此先在同一条真实 DSH step 和对应 server request 上建立边界：
-
-- 客户端：step start、请求发出、首 stream、step finish；
-- server：body parse、Responses input/tool/template preparation、`PromptEncoder` 与
-  cache lookup、admission / slot wait、engine request serialization；
-- engine：prompt phase、TTFT、decode、finish；
-- 任何不属于上述区间的首 token 前或最后 token 后时间必须单列，不能并入 decode；
-- 每段报告 prompt/context/cached/fresh、绝对秒数和典型 1/2 会话触发率；
-- 所有请求必须成功、finish 正确、无外来请求；诊断开关默认关闭且可完整移除；
-- 只有至少一个新的未关闭机制能在真实触发后保守改善整任务 >=1%，才预注册实现；
-- host preparation 合计上界低于 1% 时明确记录 null result，下一项在“热 prompt 后的
-  engine 首 token 前成本”和“真实长输出 decode/reasoning”之间按加权证据选择；
-- 不直接跳 kernel，不重扫 `short_read`、stream ring、staged lookahead、GDN、head split、
-  fair serve 等已否决项。
-
-**结果：** 生产 tokenizer/template 的 6K/94K/189K 热 `Service.prepare` 中位只有
-`6.439/11.527/18.345 ms`；JSON、Responses conversion 和 assembler 更小。真实 6-step
-DSH fixture 的模型 wall 为 `12.112 s`（任务 `13.261 s` 的 `91.287%`），普通 step 的
-首 token 只比 engine prompt 多约 `25–26 ms`。host 路径不满足 1% 门，本轮不修改
-server 或 engine。
-
-同一个 fixture 暴露了更重要的真实缺口：现有标题门只等标题到达时的第一个主请求。
-该请求一结束，标题立刻开始，而 DSH 同时提交 step 2。step 2 的首 token 前为
-`2.681 s`，其中 engine prompt 仅 `1.148 s`；额外 `1.533 s` 约占整任务 `11.6%`。
-
-### P2：`DSH-TITLE-END-OF-TURN`
-
-标题隔离必须覆盖完整多 step turn，而不是只避开第一请求。候选精确匹配现有 title
-shape，跟踪普通请求结果；只有最近一个 terminal assistant response 不含 tool call，
-且没有普通请求在途时才放行。两个主会话、title-only、取消、超时和 draining 都保持现有
-fail-open。先在本地状态机和无重启真实 DSH 路径验证，再做多 step A/B：
-
-- 主指标为 `task_wall_s`，同时报告逐 step first-stream、title overlap 和 token usage；
-- 至少 1%，5/6 配对胜，绝对秒数必须给出；
-- 候选不得让标题与任何主模型 step 重叠；
-- 标题仍由 provider 生成，质量/事件/工具/finish/health/Xid 全过；
-- 若标题只是从 step 1 推到 step 2、导致 title-only fallback 或没有任务级收益，判失败；
-- 修改 server 前先证明候选值得承担重启和约 3 分钟加载成本；不改 engine、profile 或 kernel。
-
-### P1 历史：`AGENT-HOT-TURN-FIXED-COST`（已否决）
-
-目标：拆普通 Agent 热续轮约 `1.4–1.5 s` 的 prompt 成本，并验证短读窗口阈值是否让最后
-几十个新 token 支付了不必要的固定等待。
-
-静态复核发现动态 `STRATA_PIPELINE_SWITCH` 只存在于 `pipeline-windows` 分支，而生产
-`--batch 6` 明确关闭该分支。因此本项改为同一 engine、同一 production config 的
-`A64 → B0 → A64r` 三次受控 boot；A64 使用当前进程，B0 和 A64r 各一次手动重载：
-
-- 控制：`short_read=64`
-- 候选：`short_read=0`
-- 1/2 路各至少 3 波，覆盖短续写和约 596 个新 token 的真实热续轮形状。
-
-通过条件：
-
-- 至少一个普通热续轮尺寸的 prompt 和 wall 配对中位改善至少 1%，绝对节省至少 `0.15 s`；
-- 其他 1/2 路尺寸不回退超过 1%；
-- 控制臂重复漂移不超过 3%；
-- greedy 输出、finish、缓存 token、health、6 slots 和工具路径全过；
-- 4 路只做非回退安全回归。
-
-判决：B0 在所有热续轮尺寸都未取得 1% 收益，1 路短热续 prompt/wall 反而慢
-`13.75%/8.14%`；保留默认 64，不扫描邻近阈值。见
-[`AGENT_HOT_TURN_FIXED_COST_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_FIXED_COST_RESULT-20261031.md)。
-
-契约：
-[`AGENT_HOT_TURN_FIXED_COST_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_FIXED_COST_CONTRACT-20261031.md)。
-
-### P2：`AGENT-EDIT-TEST-LOOP-TRACE`（已完成，重复测试方向否决）
-
-先只读拆真实 Codex 事件，不改服务、不重启、不输出正文：
-
-- 首个工具调用的额外模型轮次；
-- 首次代码修改前的读取和思考；
-- 同一测试的重复运行；
-- 失败结果回传后的纠错轮次。
-
-要求覆盖现有 35 文件真实 rollout，按会话和 root task 统计命令类别、重复次数、相邻模型
-轮次、prompt/cached/output、1/2 路并发和绝对秒数。产物必须给出触发率、最重的两类循环
-以及一个带真实触发依据的 >=1% 候选；如果最大成本在 Strata 之外，明确写边界，不把工具
-执行或用户思考伪装成模型收益。优先处理每次编辑—测试都会发生、每轮可省数百毫秒的路径。
-
-判决：576 次测试有 178 次命令签名重复，但 173 次之间有新编辑，5 次无编辑重复都落在
-成功/失败状态不可判定的调用里；成功或失败后立即无编辑重复均为 0。重复测试、测试缓存和
-自动跳过从优化队列剔除。失败回传后的 80 个模型请求共 `294.346 s`，属于正常纠错工作，
-可优化部分仍是普通请求延迟。见
-[`AGENT_EDIT_TEST_LOOP_RESULT-20261031.md`](../../work/AGENT_EDIT_TEST_LOOP_RESULT-20261031.md)。
-
-### P2b：`AGENT-SPLIT-MTP-BATCH`（已否决）
-
-当前双卡 layer split + MTP 默认由末级 drafter 自己逐 8 行填 prompt K/V。既有 opt-in
-`STRATA_SPLIT_MTP_BATCH=1` 可在末级 prompt path 批量完成同一工作；另一台双卡机器的
-prompt read 测量为 25K `+6.7%`、51K `+4.3%`、104K `+3.3%`。这与本机真实 94K/189K
-热续轮中约 `93%` 的 prompt 墙钟直接对应。
-
-先只读/启动日志确认 native、MTP、末级 drafter、paged/ring 和 scratch 条件真实命中；
-拒绝则不跑吞吐。命中后 A1/B/A2 覆盖 596 fresh、94K 和 189K 热续轮，1 路为判决，2 路
-报告第二 TTFT 与完成跨度，4 路非回退，6/8 只做安全回归。至少一个普通热续尺寸 prompt
-和 wall 改善 `>=1%`、绝对 wall 至少 `0.05 s`，其他级不退 `>1%`，A1/A2 漂移 `<=3%`，
-质量、finish、缓存、health 和资源门全过才采纳。
-
-契约：
-[`AGENT_SPLIT_MTP_BATCH_CONTRACT-20261031.md`](../../work/AGENT_SPLIT_MTP_BATCH_CONTRACT-20261031.md)。
-
-判决：batched 路径在启动日志中真实命中，94K 热续 prompt 从 `1271.5 ms` 降到
-`1241.5 ms`（`-2.359%`），但 wall 从 `1.433790 s` 升到 `1.434450 s`
-（慢 `0.046%`），没有达到预注册的 `0.05 s` 绝对收益。按停止门未跑 189K 与并发矩阵；
-生产已恢复 A2，进程环境不含该 env。见
-[`AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md`](../../work/AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md)。
-
-### P2c：`ENGINE-0.1.55-EVAL`（已否决）
-
-官方 `v0.2.9` 的 Linux CUDA 13 引擎为 `0.1.55`，build
-`99866a47a2b8+cuda13.0`，包含 `sm_75`，可能比当前 `0.1.51` 派生构建减少 GDN、批处理
-和固定 launch 成本。归档 SHA-256 为
-`ce86b23b26a4521a1871113057534b8a34c01df0ac7b916adccf9b1c8c068f92`；engine 和
-`libstrata_kq.so` 已与本地/远端逐字核对，远端 `--version` 为 `0.1.55`。
-
-先保持模型、pack、layer split、六 slots、两 groups、cache、采样和生产 env 不变，只把
-隔离 config 的 executable 从当前 engine 指向官方包路径。版本级候选先过启动、路径、
-health、三组固定 greedy 和 64-token smoke，再跑 A1/B0/A2 的 596 fresh 与 94K 热续轮。
-至少一个代表尺寸 wall 改善 `>=1%` 且绝对 `>=0.05 s`、两个尺寸不同向相反、A 漂移
-`<=3%` 才继续；94K 无 wall 方向收益立即停止，不跑 189K 或全矩阵。
-
-版本级默认没有收益时，才单独评估官方引擎的 `STRATA_GDN_TC=1` /
-`STRATA_GDN_CONVL2=2` Turing 路径；sm75 runtime gate 未命中的 env 不能算收益。契约：
-[`ENGINE_0155_EVAL_CONTRACT-20261031.md`](../../work/ENGINE_0155_EVAL_CONTRACT-20261031.md)。
-
-判决：官方 CLI 不接受本地 `--prompt-cache-long`，移除该 128K-only 选项后成功启动。
-正确性全过，但 596/94K hot-long wall 相对 A1/A2 参考中位分别慢
-`5.853%/4.259%`，绝对慢 `0.087835/0.059525 s`；A 漂移均在 3% 内。版本级候选否决，
-不进入官方引擎的 GDN env、189K 或并发矩阵。见
-[`ENGINE_0155_EVAL_RESULT-20261031.md`](../../work/ENGINE_0155_EVAL_RESULT-20261031.md)。
-
-### P2d：`GDN-CONVL2`（已否决）
-
-当前旧 engine 已包含 `STRATA_GDN_CONVL2`。在超过 64-token 的 GDN prompt chunk 中，
-它把 conv 与 Q/K L2 norm 融进一个 block，省一次 launch 和 `h` 中间写回；V 通道、
-recurrence、模型和 cache 不变。当前 `--prefill auto` 实际用 8192-token chunk，进程不含
-`STRATA_GDN_CONV_SERIAL`，目标分支可达。
-
-B 只在 A1 env 中增加 `"STRATA_GDN_CONVL2": "2"`。先过启动、实际 env、6/2、health、
-三组固定 greedy 和 smoke；随后 A1/B/A2 测 596 fresh 与 94K。至少一个 hot-long wall
-改善 `>=1%` 且绝对 `>=0.05 s`、两个尺寸不同向相反、A 漂移 `<=3%` 才继续；94K 无
-wall 方向收益立即停止。契约：
-[`GDN_CONVL2_CONTRACT-20261031.md`](../../work/GDN_CONVL2_CONTRACT-20261031.md)。
-
-判决：B 通过启动、真实 env、六 slots / 两 groups、health、三组 fixed greedy、smoke 和
-全部请求质量门；A2 prompt/wall 漂移为 596 `-0.2483%/-0.3875%`、94K
-`+0.2461%/+0.0359%`。但 B 相对 A1 的 596/94K wall 只改善
-`0.8245%/0.2051%`，绝对仅 `0.012476/0.002898 s`，没有达到任一性能门。候选否决，
-不跑 189K、并发矩阵或邻近 GDN 参数；生产已恢复原 engine/config。见
-[`GDN_CONVL2_RESULT-20261031.md`](../../work/GDN_CONVL2_RESULT-20261031.md)。
-
-### P2e：`AGENT-HOT-TURN-PHASE-MAP`（已完成）
-
-普通 596 fresh-token 与 94K 热续轮的 prompt 仍占 wall 约 `93%`，但连续四个局部候选
-只得到 prompt 改善或很小的 wall 变化。下一项不再猜 kernel，直接用当前生产 engine
-已有的 `STRATA_PREFILL_TIMING=1` 做一次 profiling boot，取得同口径 596/94K 的 21 个
-有序 prefill phase、host staging 与主/对端 GPU 数值。
-
-profiler 只用于定位，不计入性能收益。至少一个 phase 在代表请求中绝对成本
-`>=0.05 s`、且源码能证明一个不改变每行算术、token 选择、finish 与工具语义的可移除部分，
-并据其实测占比得到 wall `>=1%` 保守上界后，才预注册实现候选。若找不到这样的主相位，
-停止 kernel 邻域微调，转向 server admission/cache 或客户端请求结构的下一个证据支持项。
-契约：
-[`AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_PHASE_MAP_CONTRACT-20261031.md)。
-
-结果：同口径 596/94K 热长轮实际 fresh 读取都约 554 token。三波中位 stage 1 为
-GPU timeline `459 ms`、host staging `501 ms`；stage 2 为 `647/788 ms`。stage 2
-最大 phase 是 `wait copy 173 ms`，随后 `gemm gate/up 130 ms`、`dequant 106 ms`、
-`gemm down 68 ms`。因此下一候选直接验证更深的 streamed expert ring，而不是继续
-GDN/短读/版本邻域。
-
-### P2f：`AGENT-HOT-TURN-STREAM-RING`（已否决）
-
-554-token chunk 低于默认 `stream_all_min=1024`，当前走 32-slot staged walk，实际保持
-8 个在线传输在前，stage 2 的 copy 等待达到 `173 ms`。B 只设置现有 env
-`STRATA_PREFILL_STREAM_MIN=0`，让同一真实请求进入更大的 streamed ring。
-
-乐观上限是把 stage 2 copy 等待隐藏到 stage 1 的 `13 ms`，约 `11%` wall；即使只隐藏
-10%，仍超过 1%。A1/B/A2 必须覆盖同口径 596/94K、1 路三波；至少一个 wall 改善
-`>=1%` 且绝对 `>=0.05 s`，两个形状不反向，A 漂移 `<=3%`，质量/health/资源全过。
-1 路通过后测 2 路第二 TTFT 与完成跨度，4 路非回退，6/8 安全回归。失败立即恢复 A，
-不扫描 stream threshold、ring 容量或邻近参数。契约：
-[`AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_STREAM_RING_CONTRACT-20261031.md)。
-
-判决：B 通过路径、质量、健康与资源门，但 596 hot-long wall 从 A1 中位
-`1.509808 s` 升到 `1.898041 s`，慢 `25.714%`，绝对多 `0.388233 s`；prompt 中位从
-`1401.7 ms` 升到 `1787.9 ms`。该分支同时切换 whole-chunk stream、shared-expert defer
-和 cross-layer issuer，整体明确反向，但不能单独归因给 ring 深度。按门未跑 94K/并发
-矩阵，生产已恢复 A2。
-见
-[`AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
-
-### P2g：`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`（已完成，关闭跨层推测）
-
-phase map 仍显示 stage 2 有 `173 ms wait copy`，但 full-ring 已证明盲目加深预取会亏。
-审计检查了以下问题：
-
-- 554-token chunk 的 top-k routing 在 copy 开始前多早可用，是否完整；
-- 当前 staged walk 为什么实际只保持 8 个在线传输在前，哪些等待来自 ring 容量、routing 可见性或
-  host/GPU 同步；
-- 只预取本 chunk 实际选中专家能否减少 copy，最坏路由密度和额外 bookkeeping 是什么；
-- 以真实 596/94K 三波 phase 和绝对秒数计算，单次整请求保守上界能否同时达到
-  wall `>=1%` 与 `>=0.05 s`；
-- 改动是否保持每行算术、top-k 结果、token 选择、finish 和工具语义逐字不变，以及能否
-  用 env 精确关闭。
-
-审计结论：生产 staged walk 在每层 router 完成后读取该层 top-k，并按实际选中专家建序；
-它已经只拷贝本层 routed、非驻留专家。后续层 routing 依赖当前层输出，源码没有提前获得整
-chunk 所有层 top-k 的路径，因此“跨层只预取 selected experts”不是现有能力。554 x top-10
-有 `5,540` 个 routed pairs、每层 512 个专家，也不是少量专家形状。full-ring B 同时切换
-whole-chunk stream、shared-expert defer 和 cross-layer issuer，不能用它得出单一 ring
-深度结论。跨层推测 routing 关闭，不构建。
-
-### P2h：`AGENT-HOT-TURN-STAGED-PREFETCH`（已否决）
-
-审计保留的唯一直接可动项是 grouped staged walk 的实际 lookahead：当前保持 8 个传输在前，
-而 32-slot ring 与 16-expert gather 允许安全保持 15 个。候选只在默认 8 之外增加 env
-`STRATA_PREFILL_STAGED_AHEAD=15`，保留同一 routed 顺序、shared-expert defer、group、
-copy stream、release event 和 kernel 顺序。
-
-stage 2 `wait copy` 中位 `173 ms`；只需隐藏 `15.1 ms` 就达到 596 wall 的 1%，隐藏
-`50 ms` 达到绝对 `0.05 s`。A1/B/A2 覆盖同口径 596/94K；失败立即恢复 A2，不扫描邻近深度、
-stager thread/batch/ring 或 stream threshold。判决：B 通过路径、质量、健康与资源门，
-但 596 wall 只从 `1.510583 s` 变成 `1.505333 s`，改善 `0.3475%`、绝对 `5.25 ms`；
-prompt 从 `1384.3 ms` 变成 `1392.6 ms`，慢 `0.5996%`。按停止门未跑 94K 和并发矩阵，
-生产已恢复 A2。见
-[`AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_STAGED_PREFETCH_RESULT-20261031.md)。
-契约：
-[`AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md)。
-
-### P2i：`AGENT-HOT-TURN-DEQUANT-AUDIT`（已否决重复工作假设）
-
-phase map 中 stage 2 下一大可证伪相位是 `dequant 106 ms`。先只读追踪 native IQ3_XXS
-的热续轮 grouped staged path：同一 expert/layout 是否在 stage 1、stage 2 或 MMQ gather
-前后被重复转换；生产实际 `T=554`、每层 `5,540` 个 routed pairs 下命中率是多少；哪些写回
-是后续 kernel 必需，哪些只是中间格式重复。
-
-判决：生产 native IQ3_XXS 的 `dequant` phase 实际是
-`gather_native_group()` 原字节搬运，不是 FP16 反量化。每层 `order` 只含唯一 selected
-expert，每 16 个执行一次 gather；stage 1/2 是不同层，staged/streamed/fused/peer 路径
-互斥，未发现同一 expert/layout 被重复转换。resident cache blob 仍要转成 MMQ 的连续
-gate/up/down 布局，`Product` 只有固定 stride、没有 per-expert 指针表，因此不能安全地
-直接删除。没有形成可实现的重复工作候选；不构建、不重启，也不扫 dequant/group 参数。
-见
-[`AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_DEQUANT_AUDIT_RESULT-20261031.md)。
-
-### P2j：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`（暂停验收，未采纳）
-
-上面虽关闭“重复转换”，但 phase map 仍证明 stage 1/2 合计约 `183 ms` 花在
-gather；同时 hot-long expert-cache hit 为 596 约 `95.1–98.1%`、94K 约
-`98.4–98.8%`。真正的问题是大多数权重已在 VRAM，却还要复制成 MMQ 连续组布局。
-
-本项只审计已有 native direct-pointer/fused 机制是否能按生产形状替代 resident gather：
-
-1. 在 group 级 GPU harness 中比较 16-expert gather+MMQ 与
-   `fused::experts_native` direct-pointer 的单位 expert/行成本，避免再次分配完整 512-expert
-   层而 OOM；
-2. 从 representative 554-token routing 统计每层唯一 expert、group 数以及 resident/staged
-   比例；pair 命中率不能替代唯一权重命中率；
-3. 核算只把 resident experts 走 direct path、staged misses 仍走现路径时的整请求 wall
-   保守上界。全删 `183 ms` 是 10% 级上界，但必须扣除额外 launch、数值路径差异和分组开销；
-4. 复核 native fused 与 MMQ 的数值误差是否满足现有质量门，以及是否存在会破坏 token、
-   finish 或工具语义的顺序依赖。
-
-只有 group 级预筛显示至少一个真实 resident 比例的保守 wall 上界 `>=1%` 且绝对
-`>=0.05 s`，才预注册端到端实现候选。若 direct path 本身不更快或数值门不成立，关闭
-resident-gather 方向，不再改 group/dequant 参数，转向 `wait copy` 的宿主读取结构或其他
-有独立证据的主相位。该审计不改生产、不重启。
-
-后续实测：group 级 `512 experts / 32 groups` 的 MMQ 为 `11.671 ms/layer`，
-direct-pointer fused 为 `7.848 ms/layer`，`1.49x`，48 层乐观上界 `183.5 ms`；
-rel RMS `2.020e-4`、worst row `3.096e-3`。596 的 A1/B/A2 1 路 wall 为
-`1.522684/1.490017/1.513878 s`，B 相对合并基线改善 `1.862%`，相对 A1 改善
-`2.145%`、绝对 `32.667 ms`，三波全胜。2 路 hot-long 为 `+0.705%`、2/3 胜；
-2 路 hot-short 控制项 prompt 为 `-1.304%`。94K B/A2 wall 为
-`1.401311/1.438884 s`，但 prompt 为 `1251.2/1251.5 ms`，不能把 wall 差归给
-prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零错误、零外来请求。
-
-判决：机制方向为正，但按预注册绝对门未完整通过与；4 路 A2 在用户暂停时中止，没有
-结果文件，6/8 未运行。候选保持默认关闭并从未进入生产 env。完整结果见
-[`AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
-
-### P3：旧会话跨重启状态驻留（低频 p99）
-
-保留为独立可行性项：
-
-- 多 stage KV/checkpoint 的可序列化布局；
-- 180K/223K 状态大小、磁盘写放大、恢复时间和 RAM 峰值；
-- 会话标识、模型/配置指纹、失效和安全删除；
-- 只在空闲或淘汰时持久化，避免每轮写数 GB；
-- 同进程 RAM cache、磁盘状态和重新 prefill 的成本边界。
-
-只有真实旧会话等待减少至少 1%，且保存成本不转移到普通轮次，才允许实现。
-
-### P4：并发角色感知
-
-仅在真实 trace 显示 2 路触发率显著上升，或用户明确以并行子代理为主时继续。2 路串行
-当前把第二条 TTFT 推到约 5.1 秒，必须同时报告第二请求 TTFT、单请求 wall 和完成跨度。
-
-## 已否决与不再重复
-
-- 上下文饮食真实客户端配对：wall 中位慢 `41.276%`，input 中位多 `38.190%`，否决产品化。
-- 4M PLE row cache：prompt、host PLE、PLE phase 全部反向，否决并不扫邻近容量。
-- PLE `mmap`：wall 慢到 `182.157 s`，否决。
-- MTP draft-head 微调：全部消除的乐观 root 上界约 `0.8%`，关闭。
-- 两路聚合吞吐作为总体主目标：恰好两路模型 union 只有 `171 s`，降为角色场景。
-- compaction 后立即回读旧分支：真实触发 0/109，降为低频诊断。
-- 已关闭的 kernel、head split、poll、LFUSE、cache 参数和同形组合不得重开，除非出现
-  新的真实触发证据。
+正确性，再缩短任务从提交到可用代码、测试结果或明确阻塞的时间。用户最主要的痛点是慢；
+1% 也是收益，但必须给出绝对秒数、真实触发率、质量边界和可回滚路径。
+
+严重运行时问题有最高抢占权：新增 Xid、engine 非预期退出、静默错误或错误答案被当成
+成功时，立即暂停性能实验、保存事故并优先处理。没有新事故时，不空等低频故障。
+
+当前工作负载通常是 1 个主代理、偶尔 2 个，峰值 1 主 3 子代理。模型服务的 1/2 路是
+主要场景；4 路不退化；6/8 只做安全回归。`2/4/6/8` 表示同时在途请求，不是会话数。
+
+## 当前结论
+
+### 已采纳并保持
+
+- `DSH-TITLE-INTERFERENCE`：精确标题请求等当前主请求释放。生产单会话主 turn
+  `19.629→16.078 s`（`18.091%`），双会话 fail-open。
+- `DSH-FIRST-TURN-PREFIX-REUSE`：精确 DSH system+tools 前缀 pin。稳态 task 中位
+  `11.3715→7.3165 s`（`35.66%`、绝对 `4.055 s`），首步 cached `582→5,463`。
+- `UTIL-TWO-STREAM-SERIAL`：恰好两路串行走 solo，第三条恢复 batch。512-token 两路完成
+  跨度改善 `15.05%`；第二条 TTFT 约 `5.1 s` 是已接受取舍。
+- PLE `--ple-inflight 1024`：真实 223K 旧会话三组配对的 prompt/wall 中位改善
+  `2.87%/1.09%`。
+- 生产 decode 剖析器已移除；416/1490 token 的 decode wall 改善 `6.61%/5.38%`。
+
+### 当前成本结构
+
+真实 DSH 7 会话的 runner wall 为 `197.776 s`，模型 step `184.332 s`（`93.202%`），
+工具区间并集 `10.505 s`（`5.312%`）。40/40 个主 step 都成功关联到服务端；7 个额外
+请求正好是每个新会话一次的标题。
+
+普通 DSH step 的首 token 只比 engine prompt 多约 `25–26 ms`；生产 tokenizer/template
+在 6K/94K/189K 下的热 host prepare 中位为 `6.439/11.527/18.345 ms`。host 请求路径
+低于整任务 1%，已判 null。
+
+标题仍是新会话中可观的并发源：旧样本中位 `9.8 s`、约 118 output token。现有标题门
+只等首个主请求，标题会与 step 2（有时与 step 3）重叠。这个问题没有安全的“延后到 turn
+结束后”版本：DSH 在最终主回复完成时结束 turn，并取消仍在等待的标题客户端。
+
+### 标题方向已关闭
+
+| 实验 | 结果 | 判决 |
+|---|---|---|
+| end-of-turn gate | 标题等待 `9.421 s` 后客户端取消，代理记录 `BrokenPipeError/502`；即使提前 SSE + 心跳，DSH 仍在 turn 结束时关闭标题 | 否决：生命周期晚于客户端截止 |
+| 标题上限 `128` | provider 完成、输出 `89` token、耗时 `4.679 s`；跨 step 2/3，任务不更快 | 否决 |
+| 标题上限 `64` | provider 完成、输出 `56` token、耗时 `4.324 s`；仍跨后续主 step | 否决 |
+| 标题前缀 `messages=1` | 连续两次 title `cached=0`、耗时 `4.401/4.674 s` | 否决：没有命中 |
+
+不能把这些单次 wall 当作加速结论；拒绝依据是标题请求仍跨主 step，或客户端被取消。
+继续围绕标题只会进入局部参数循环。若要根本解决，需要 DSH 改变标题所有权，让标题在
+主 turn 结束后由独立生命周期生成；Strata 服务端不能伪造标题或安全关闭该请求。
+
+## 当前主动项
+
+### `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`（恢复）
+
+已有真实正向信号：
+
+- group 级 native direct-pointer `7.848 ms/layer` 对 MMQ gather `11.671 ms/layer`，
+  `1.49x`；
+- 596 fresh-token 热长轮 A1/B/A2 wall 中位
+  `1.522684/1.490017/1.513878 s`；
+- B 相对 A1/A2 合并基线改善 `1.862%`、绝对 `32.667 ms`，三波全胜；
+- 固定 greedy 逐字一致，finish 全为 `stop`；
+- 候选默认关闭，当前生产未包含它。
+
+之前因绝对 `0.05 s` 门暂停。用户已明确“1% 多也算”，所以本轮继续，但先回答：
+
+1. 48 层中多少层实际进入 `fused_staged`；
+2. 每层 fallback 的真实原因：pack 类型、非驻留 expert 数量、peer/CPU 分摊、段大小、
+   graph 条件或其他；
+3. 1.86% 与 group 级 12.1% 乐观上界之间，是否存在可安全覆盖的真实缺口；
+4. 新缺口能否给出整请求至少 1%、绝对秒数明确的保守收益。
+
+审计不改生产、不重启、不扫邻近 staging/cache 参数。若没有可覆盖缺口，关闭 resident
+direct 路线；若有，预注册一个源码或接线候选，再补 4/6/8 非回退。
+
+## 质量、可靠性与长上下文
+
+- DSH Web 当前走 Qwen/Strata relay；同一路径 6 个基础 fixture 代码/测试 `6/6`，
+  明确最终 assistant message 契约后严格 sentinel `3/6→6/6`。
+- GPU0 低频 Xid 13/43 仍是 P0 风险。原请求约 60 次重放未复现；固定 prompt 不能证明
+  硬件稳定性。每个真实窗口从 UTC 起点读取新增 NVRM Xid，并按 PCI、5 秒窗口聚簇。
+- 用户所说“180K 旧会话”是放置超过一天后重新打开约 180K token 的会话。真实 49 天
+  223K 样本 cached `0`、TTFT `113.014 s`，是低频 p99，不挤占普通热续轮。
+- 210K compaction 已高度缓存；真实 Codex compaction 复用约 `99.1%`。compaction 后立即
+  回读旧分支在 109 次中触发 0 次，只保留低频诊断。
+
+## 硬件与生产
+
+- 两张 RTX 2080 Ti 的算力解锁已固定：cuBLAS FP16 从 `62.40 TFLOPS` 提升到
+  `93.69/94.07 TFLOPS`，当前 boot 两份日志均为 `unlocked=1`。
+- 生产为手动实例，`strata.service` inactive；重启到 ready 约 3 分钟，必须证明收益能覆盖
+  加载、缓存丢失和不可用成本。
+- server/vision/engine：`232891/232893/232899`。
+- server cwd：`/opt/ai/src/strata-two-stream-serial-20261031`。
+- engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。
+- engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。
+- config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`。
+- server SHA-256：`bd3e428932c0b9bb645b2ae9f37924b2e440b590333a0322cdd00cd28dd4ed82`。
+- health loaded、262144 context、6 slots / 2 groups。
+- server env 含 `STRATA_DEFER_TITLE_REQUESTS=1`、`STRATA_BATCH_SERIAL_TWO=1`、
+  `STRATA_PIN_DSH_TOOL_PREFIX=1`。
+
+## 优先级
+
+1. 正确、安全、可恢复；GPU/运行时事故和错误结果优先。
+2. 普通单代理编辑—测试循环中的模型等待。
+3. 首次代码修改、首个工具结果和首次测试结果时间。
+4. 真实根任务 p50/p75/p90，以及重复读取、重复测试和纠错轮次。
+5. 隔天旧会话、长上下文 compaction、取消和长输出尾部。
+6. 1 主 3 子代理的角色场景。
+
+token/s 和资源利用率只用于解释等待，不替代用户任务时间。没有进入用户实际路径的能力
+不算产品收益。
 
 ## 验收门
 
-普通候选必须用真实触发率和单次绝对秒数证明：
+普通候选必须满足：
 
-```text
-预期任务收益 =
-  真实触发次数 x 单次关键路径节省
-  + 减少的后续轮次 / compaction / 工具回流收益
-  - 新增排队、TTFT、decode、磁盘或失败成本
-```
+- 真实触发率、单次绝对秒数和保守整任务收益至少 1%；
+- 1 路不退化；2 路同时报告第二请求 TTFT、单请求 wall 和完成跨度；
+- 4 路不回退超过 1%；6/8 零错误、health loaded、资源安全；
+- 输出、finish、工具调用、代码修改和测试结果全过；
+- 新能力默认关闭、可精确回滚；未采纳时默认路径保持不变；
+- 客户端 wall、server timing、静态阅读和推断值分开标注。
 
-- 1% 也算收益，但必须有绝对秒数和真实触发依据。
-- 1 路不退化；2 路同时报告第二请求 TTFT、单请求 wall 和完成跨度。
-- 4 路不得回退超过 1%；6/8 路零错误、health loaded、无严重资源退化。
-- 新能力默认关闭、可精确回滚；未采纳时默认路径保持字节相同。
-- 重启前证明收益能覆盖约 2–3 分钟加载、缓存丢失和不可用成本。
-- 客户端观察、服务器 timing、静态阅读和推断值必须分开标注。
-- 质量门至少覆盖输出、finish、工具调用、代码修改和测试结果。
+会写持久 cache checkpoint 的实验不能用未验证的同 boot ABBA。先用独立 boot，或明确写成
+不可逆顺序 A→B 并单列冷启动。任何新 Xid 立即作废性能结论。
 
-## 每轮强制复盘
+## 测试方法
 
-形成判决和选择下一项前，必须回答：
+- 主任务使用首个 `turn/start` 到最后一个 `turn/end` 的 `task_wall_s`；runner 进程 wall
+  只作次指标，并注明包含 turn 后辅助工作。
+- 流式代理必须逐块转发；不得先读完整 SSE 再冒充 TTFT。
+- 辅助请求实验必须同时记录客户端请求到达、代理释放、上游开始、上游完成、turn 结束和
+  客户端断开；只记录 task wall 不足以证明隔离成功。
+- 标题实验必须记录 provider 完成、输出 token、cached token、客户端状态，以及 title
+  区间与每个主 step 的重叠。
+- 多步 A/B 必须配对并有足够重复；工具数、模型输出量和质量不同时，不能把 wall 差归因给
+  候选。
+- 任何被拒代码在文档判决后从工作树移除；测试工装只保留能服务后续真实判定的部分。
 
-1. 是否命中最高频的用户等待，而不是低频局部现象？
-2. 是否改善真实 vibe coding 的编辑—测试路径？
-3. 预计收益是否至少 1%，绝对节省多少秒，触发频率依据是什么？
-4. 是否仍是在局部参数或已否决机制附近打转？
-5. 为什么高于另外两个候选？
-6. 重启成本是否值得，能否在同一 boot 内完成？
+## 已否决方向（不要重复）
+
+- 通用关闭标题；长任务 `0/2` 胜。
+- end-of-turn 标题延迟、128/64 输出上限、标题固定前缀 pin。
+- 标题之后继续尝试邻近等待时间、输出额度或提示词微调。
+- host JSON、Responses 转换、模板、PromptEncoder、assembler 微优化；总成本为毫秒级。
+- `short_read=64→0`；B0 无胜场，短热续反而慢。
+- 重复测试缓存/跳过；成功或失败后立即无编辑重复均为 0。
+- streamed expert ring、staged lookahead 8→15、GDN conv 融合、官方 `0.1.55` 版本替换。
+- 已否决的 head split/fusion、跨 stage fairness、LFUSE、checkpoint move、固定 groups、
+  piped MTP 同形组合。除非出现新的真实触发证据，不重开。
 
 ## 当前断点
 
-**2026-11-01 第三十五次修订后继续执行。** 用户已放弃“鹈鹕 SVG”问题；原 DSH 请求在
-76 个 reasoning token 后触发 GPU0 Xid 13，约 60 次精确重放未复现。当前不空等低频事故：
-只读探针持续记录下一次 Xid，任何新事故立即抢占。质量侧已确认用户 DSH Web 走
-Qwen/Strata relay；同一路径 6 个基础 fixture 代码/测试全过，明确最终消息契约后严格
-`3/6 -> 6/6`。真实路径成本已拆清：模型 `93.202%`、工具并集 `5.312%`，标题请求是
-已识别的额外并发源。`DSH-TITLE-INTERFERENCE` 已 opt-in 采纳：生产单会话主 turn
-`19.629→16.078 s`（`18.091%`），runner wall `15.914%`；双会话 fail-open 后质量和
-provider 标题通过。`DSH-FIRST-TURN-PREFIX-REUSE` 也已 opt-in 采纳：稳态 task 中位
-`11.3715→7.3165 s`（`35.66%`、`4.055 s`），首步 model wall
-`6.2–6.4→2.7–3.0 s`。`AGENT-DSH-REQUEST-PATH-MAP` 已关闭为 null：生产
-tokenizer/template 的热 host prepare 只有毫秒级，真实普通 step 的首 token 也只比 engine
-prompt 多约 `25–26 ms`。当前主动项改为 `DSH-TITLE-END-OF-TURN`：现有标题门让标题与后续
-工具 step 重叠，live step 2 的额外并发等待约 `1.533 s`。下一轮跟踪完整工具 turn，
-先做本地和 no-restart 真实路径，再决定是否重启部署。生产
-server/vision/engine 为 `232891/232893/232899`，server `bd3e4289...`、health loaded、
-六 slots / 两 groups，新增 Xid `0`。
+**2026-11-01 第三十六次修订。** 标题调度方向已关闭；生产仍为
+`232891/232893/232899`，环境、health、6 slots / 2 groups 未变，无新 Xid。当前主动项
+恢复为 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`：先只读统计 48 层 direct-path 覆盖和
+fallback。没有新的整请求 1% 缺口就关闭该路线；有则预注册 4/6/8 验证，再决定是否值得
+重启生产。
 
-`AGENT-CONTEXT-DIET-REAL-YIELD` 已否决产品化；`AGENT-HISTORY-STATE-RESIDENCY` 降为
-低频 p99 可行性项。
+## 每轮强制复盘
 
-`AGENT-HOT-TURN-FIXED-COST` 已否决并恢复 A64。`AGENT-EDIT-TEST-LOOP-TRACE` 已完成：
-没有可产品化的重复测试浪费，主要模型等待来自正常编辑—测试轮次。
-`AGENT-SPLIT-MTP-BATCH` 也已完成：路径真实命中，94K prompt 改善 `2.359%`，但 wall
-反向 `0.046%`，因此否决并恢复生产。`ENGINE-0.1.55-EVAL` 随后通过启动和正确性门，但
-596/94K wall 慢 `5.853%/4.259%`，版本级候选否决并恢复旧引擎。`GDN-CONVL2` 随后
-以真实 env、greedy 和质量门通过，但 596/94K wall 只改善 `0.8245%/0.2051%`，
-绝对节省 `0.012476/0.002898 s`，因此也已否决并恢复 A2。
-`AGENT-HOT-TURN-PHASE-MAP` 已完成：596/94K 热长轮都只约有 554 个 fresh token；
-stage 2 的 `wait copy 173 ms` 是最大可移动相位。`AGENT-HOT-TURN-STREAM-RING` 已否决：
-full ring 让 596 wall 慢 `25.714%`，没有把 stage 2 copy 等待转成用户收益。当前生产为
-server/vision/engine `232891/232893/232899`，health loaded、六 slots / 两 groups，
-`strata.service` inactive。
+形成判决和选择下一项前必须回答：
 
-只读 routing 审计已完成：当前层 selected-only staged copy 已是生产路径，跨层推测 routing
-没有源码支持；full-ring 还切换了多个调度机制。`AGENT-HOT-TURN-STAGED-PREFETCH` 随后把
-grouped staged walk 的实际传输在前数从 8 提到安全上限 15，但 596 wall 只改善
-`0.3475%`、绝对 `5.25 ms`，prompt 反慢 `0.5996%`，因此否决并关闭该参数轴。当前生产已
-恢复 A2。`AGENT-HOT-TURN-DEQUANT-AUDIT` 随后确认该 phase 实际是 native group gather，
-每层只处理唯一 selected experts，没有同一 expert/layout 的重复转换；MMQ 固定 stride
-要求使 resident cache slot 不能直接替代组 buffer。resident direct-path 随后在 group
-级和 596 端到端取得真实正向信号，但因绝对门与并发安全门未完整通过而保持默认关闭。
-当前不运行内核候选；先完成 Codex 模型目录、真实工具面和任务质量门。
+1. 是否命中最高频的用户等待，而不是低频局部现象？
+2. 是否改善真实 vibe coding 编辑—测试路径？
+3. 预计收益是否至少 1%，绝对节省多少秒，触发频率依据是什么？
+4. 是否仍在局部参数或已否决机制附近打转？
+5. 为什么高于另外两个候选？
+6. 重启成本是否值得，能否在同一 boot 内完成？
