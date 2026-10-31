@@ -62,9 +62,11 @@ head 已在源码门否决：末级每级只有一个 verifier 和一套 head �
 80 个 direct/graph 逐字比较全部失败，最大节省 `1.315 µs`，远低于 `182.7 µs` 的 1% 门槛；
 没有构建或重启。`UTIL-POLL-TURNOVER` 随后完成：首个 B1 因漏掉 A 的 MMQ/Q6K 编译开关而
 作废；同选项 B2 通过启动、路径和 greedy parity，但 6/8 路相对 A2/A3 合并中位回退
-`3.241%/6.122%`，2/4 路的增益没能保住其他并发级，因此否决并移除源码。当前转
-`UTIL-B6-ROWS`：先在本机验证已有精确 opt-in 的六列 kernel，未达 1% 不重启。P7 只有 NCU
-证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
+`3.241%/6.122%`，2/4 路的增益没能保住其他并发级，因此否决并移除源码。`UTIL-B6-ROWS`
+随后在 kernel screening/reach 门否决：两卡 exactness 全过，但相对生产 IL 的 T=2 中位慢
+`5.868%`、0/22 胜，Q5_K/Q6_K 单点回退 `15.96-38.63%`，而且 B6 不能替换当前 IL dispatch。
+下一项回到真实阶段成本，寻找不经 IL 替换的独立固定成本机制。P7 只有 NCU 证明 Tensor
+管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
 
 ## 候选路线
 
@@ -102,7 +104,7 @@ head 已在源码门否决：末级每级只有一个 verifier 和一套 head �
 | UTIL-HEAD-SPLIT | M14 | vocabulary rows 分到两张卡并并发各算一半 head | 已证伪（server 编排） | 高；双卡事件、单/batch window、最终 A1-B-A2 | **否决**：harness 与 server parity 全过，但 4/6 路端到端 `-1.305%/-8.659%`；默认关闭 |
 | UTIL-HEAD-Q8-FUSE | M14 | 在现有 Q8 mixer 中把末层 pending write 与最终 mixer 合并 | 已证伪（GPU/正确性） | 中；独立 harness 后可有一次 A1-B-A2 | **否决**：5 个交替进程的 80 个 direct/graph 逐字比较全失败；最大节省 `1.315 µs`，门槛 `182.7 µs`；未构建、未重启 |
 | UTIL-POLL-TURNOVER | M14 | 降低完成 poll、group hand-off 与下一 stage launch 的串行周转成本 | 已证伪（高并发） | 中；一次候选启动和恢复，附首次构建控制失败 | **否决**：同选项 B2 parity 全过，但 6/8 路回退 `3.241%/6.122%`，最佳级胜场也不足；源码已移除 |
-| UTIL-B6-ROWS | M13/M14 | Q4_K/Q5_K/IQ4_XS 多列 MMVQ 跨 rows 复用 activation fragment | 进行中（kernel 门） | 低；现有精确 opt-in，独立 GPU 后可决定是否 A-B-A | 本机 6-column 必须先达 ≥1%；不扫描 rows 模式或 kernel 几何 |
+| UTIL-B6-ROWS | M13/M14 | Q4_K/Q5_K/IQ4_XS 多列 MMVQ 跨 rows 复用 activation fragment | 已证伪（生产 reach） | 低；现有精确 opt-in，仅本机 kernel screening | **否决**：全 parity，但相对 IL T=2 中位 `-5.868%`、0/22 胜，Q5_K/Q6_K 回退最高 `38.63%`；未构建、未重启 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |

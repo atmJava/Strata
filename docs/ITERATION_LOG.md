@@ -3,6 +3,40 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-90 · B6 row reuse is exact but cannot replace the production IL path
+
+- 目标 / 指标：验证现有精确 `STRATA_B6_MMVQ_ROWS=1` 能否在真实 2080 Ti 六槽窗口把生产解码
+  至少提高 1%，且不牺牲其他并发档。
+- 假设与预期：每个 block 的两行复用已装入的 activation fragment，减少 repeated shared
+  loads；如果上游 sm_86 的 `+0.5%..+2%` 在本机成立，可在 Q4_K/Q5_K/IQ4_XS 多列路径跨过
+  1% 门槛。
+- 为什么选这条路线：B6 是源码已有、默认关闭且要求 bitwise 的独立 kernel layout，不需要
+  先重启；它不延迟 verdict、不改事件顺序，也不重复已关闭的 launch/head/group 机制。
+- 改动与实验：在冻结 `build75` 上构建 `b6_mmvq_bench`、`mmvq_il_parity` 和
+  `mmvf_rows_parity`。两卡先跑完整 exactness，再用 B6 与 sm_75 table 实际选择的 IL rows
+  逐 case 配对计时；从真实 GGUF 统计 tensor distribution 做 duration-weighted 投影。
+- 结果：所有 correctness 门通过，包括 `b6_mmvq_bench` 零 case/width 失败、
+  `mmvf_rows_parity` 432 cases/1,660,200 values 零 mismatch，以及 IL parity 全 bitwise。
+  相对生产 IL，T=2/3/4 的 B6 中位为 `-5.868%/0.000%/+0.586%`，胜场 `0/22, 7/28, 18/28`；
+  duration-weighted 为 `+2.215%/+0.496%/-1.000%`。Q6_K 与 Q5_K 出现 `15.96-38.63%` 的单点
+  回退。真实形状代理投影在 T=2/3/4 仅 CUDA1 T=4 为 `+0.535%`，其余 CUDA0/1 均低于 1% 或
+  为负；缺失部分 real shapes，因此作为反对证据而非完整生产预测。
+- 判决：**UTIL-B6-ROWS 在 kernel screening/reach 门否决。** 宽度 2 没有任何配对胜，
+  没有任何生产宽度给出保守 ≥1%；并且仅设置 env 不能越过正在使用的 IL dispatch。
+- 预期部分推翻：activation row reuse 确实保留输出，但 Turing IL 对 2-4 列已经处理得更好；
+  只有少数 4 列格有收益，分布不足以抵消 Q5_K/Q6_K 回退。
+- 生产状态与回滚：没有 source routing、server build 或 restart。A3 server/engine/vision
+  仍为 `593069/593112/593073`，engine `105a4171...`、config `88de996a...`、health loaded、
+  6 slots / 2 groups；systemd inactive/dead，运行环境没有 `STRATA_B6_MMVQ_ROWS`。
+- 证据：台账 L-117、`UTIL_B6_ROWS_RESULT-20261031.md`、远端
+  `/opt/ai/logs/util-b6-rows-20261031T091503CST/`；`all-sha256.txt` sha256
+  `24de9051306bb4bc5bc3699bd0a64e37d515f9e6c99710aba6d6b56c75dad6f4`。
+- 学到什么：环境开关“存在”不等于生产可达；必须先核实默认 dispatch 和真实 tensor shapes。
+  Parity 与局部正值都不能替代生产 width 的非回退要求。
+- 下一步与理由：关闭 B6，先做一次只读源码/阶段成本审计，寻找不经过 IL 替换的独立默认关闭
+  机制；候选必须基于现有 profile 的真实窗口成本给出 ≥1% 可测路径，再预注册 parity 与
+  A-B-A。只有预期收益高于约 3-7 分钟重启成本才切换服务器。
+
 ## I-20261031-89 · Poll fast path helps two and four streams but loses six and eight
 
 - 目标 / 指标：在真实六槽、两组服务窗口中减少 `batch_poll` 的 no-ring device 查询固定成本；

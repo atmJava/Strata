@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（117 条：L-000…L-116，按编号）
+## 台账索引（118 条：L-000…L-117，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -131,6 +131,7 @@
 | L-114 | 10-31 23:4xZ | HEAD-SPLIT server 正确性全过：`1..8` 行 peer graph 全命中、三组 greedy 两轮等于期望、6/2 与资源正常；A1-B-A2 2/4/6/8 路 `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 回退超 1% | **UTIL-HEAD-SPLIT 吞吐门否决；A2 已恢复；转 UTIL-HEAD-Q8-FUSE 源码/GPU 门** |
 | L-115 | 10-31 23:4xZ | Q8 head fusion 五交替进程各 `T=1..8` direct/graph：80 个逐字比较全失败；最大节省 `1.315 µs`，1% 窗口门槛 `182.7 µs`，graph `T=4..8` 慢约 `1–3 µs` | **UTIL-HEAD-Q8-FUSE GPU/正确性门否决；未构建、未重启；转 UTIL-POLL-TURNOVER 只读门** |
 | L-116 | 10-31 08:5xZ | poll fast B1 漏掉 A 编译开关而作废；同选项 B2 parity 全过，但相邻 A2/B2/A3 的 2/4/6/8 路为 `+9.129%/+7.885%/-3.241%/-6.122%`，胜场 `4/6, 5/6, 1/6, 0/6` | **UTIL-POLL-TURNOVER 吞吐/漂移门否决；源码已移除、A3 已恢复；转 UTIL-B6-ROWS kernel 门** |
+| L-117 | 10-31 09:1xZ | B6 两卡全部 parity；相对生产 IL 选择，T=2 中位 `-5.868%`、0/22 胜，Q6_K/Q5_K 单点回退 `16-39%`；真实张量代理投影无生产宽度稳定 ≥1% | **UTIL-B6-ROWS kernel screening/reach 门否决；未构建、未重启；转不同生产路径源码审计** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3912,6 +3913,45 @@ graph 路径没有提供可复现收益，部分行反而回退。
 `batch_poll -> verdict -> stage hand-off -> batch_launch`，以及 `conc_serving` 的 doorbell
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
+
+## L-117 UTIL-B6-ROWS：精确 row reuse 未胜过生产 IL，kernel screening 否决
+
+**判定**：**UTIL-B6-ROWS 在 kernel screening/reach 门否决。** 现有
+`STRATA_B6_MMVQ_ROWS=1` 路径在两卡每个 case/width 都与 default 和独立单列调用逐字相等；
+`mmvf_rows_parity` 的 432 cases、1,660,200 values 全部相同；`mmvq_il_parity --bench`
+覆盖 `T=1..8`、rows `1/2/4` 和 table choice 也全部 bitwise。失败在生产可达性与性能。
+
+**生产路径**：A3 设置 `STRATA_SM75_PERF=1`，2-4 列 Q4_K/Q5_K/Q6_K/IQ4_XS 由 sm_75 table
+选择 `native_mmvq_il`；B6 只从 `native_mmvq` 进入。仅打开 B6 env 不能替换实际 IL 选择，
+因此先把每个支持格与 IL 实际 rows 选择配对。汇总如下：
+
+| T | B6 相对 IL 中位 | duration-weighted | B6 胜场 |
+| ---: | ---: | ---: | ---: |
+| 2 | `-5.868%` | `+2.215%` | 0/22 |
+| 3 | `0.000%` | `+0.496%` | 7/28 |
+| 4 | `+0.586%` | `-1.000%` | 18/28 |
+
+T=2 的加权正值来自少数长时格，但一个配对格也没赢；Q6_K 单点从 `67.3` 到 `93.3 us`
+（`-38.63%`），另有 Q6_K `-37.89%/-27.44%` 与 Q5_K `-15.96%`。存在例如 Q5_K
+2560x12288/T=4 的 `+6.27%`，但混合结果不满足保守 ≥1% 或生产 width 非回退门。
+
+**真实形状投影**：从实际 GGUF 统计 gate/q/qkv 张量类型后，按 15 个 benchmark calls
+duration-weight 代理投影，T=2/3/4 为 CUDA0 `-0.240%/-0.134%/+0.093%`、CUDA1
+`-1.628%/-0.426%/+0.535%`。部分真实形状（如 Q4_K 2560x12288）未入 IL bench，所以该投影只作
+补充证据，不是完整生产估计。
+
+**控制与恢复**：没有加入 source routing，没有构建 server candidate，没有重启。A3
+server/engine/vision 仍为 `593069/593112/593073`，engine/config SHA-256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
+`88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`，health loaded、
+6 slots / 2 groups；systemd inactive/dead、`MainPID=0`、`NRestarts=23`，运行环境无
+`STRATA_B6_MMVQ_ROWS`。源码/二进制 hash 与原始 logs 见
+[`UTIL_B6_ROWS_RESULT-20261031.md`](work/UTIL_B6_ROWS_RESULT-20261031.md)。
+
+**证据**：`/opt/ai/logs/util-b6-rows-20261031T091503CST/`，清单 sha256
+`24de9051306bb4bc5bc3699bd0a64e37d515f9e6c99710aba6d6b56c75dad6f4`。**没测什么**：没有
+seven-process confirmation、server A-B-A、长 prompt、混合流量或自然语言 parity；这些门因
+生产路径 screening 失败而按契约不进入。
 
 ## L-116 UTIL-POLL-TURNOVER：2/4 路变快，但 6/8 路回退超过 1%
 

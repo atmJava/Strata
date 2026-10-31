@@ -109,10 +109,16 @@
     2/4/6/8 路相对 A2/A3 合并中位为 `+9.129%/+7.885%/-3.241%/-6.122%`，胜场
     `4/6, 5/6, 1/6, 0/6`；6/8 回退超过 1%，且 8 路对两个相邻 A 臂分别下降
     `8.195%/4.080%`。源码已移除，A3 已恢复。下一步验证现有精确 B6 row layout。
-32. **UTIL-B6-ROWS 进入本机 kernel 门**：`STRATA_B6_MMVQ_ROWS=1` 让 Q4_K/Q5_K/IQ4_XS
-    多列 MMVQ 复用每列 activation fragment。上游 sm86/A4000 记录为 `+0.5%..+2%`，
-    本机 2080 Ti 与六列窗口尚未测。先在独立 GPU 验证逐字相等，并测六列 kernel 的保守
-    窗口收益；未达 1% 不构建 server candidate，过门后才跑一次 A-B-A。
+32. **UTIL-B6-ROWS 已在 kernel screening/reach 门否决**：两卡 exactness 全过，但它只从
+    `native_mmvq` 进入，A3 的 2-4 列生产调用由 `STRATA_SM75_PERF=1` 选择
+    `native_mmvq_il`。相对实际 IL 选择，T=2 中位 `-5.868%`、0/22 胜；T=3/4 中位
+    `0.000%/+0.586%`，Q5_K/Q6_K 单点回退 `15.96-38.63%`。未加 routing、未构建、未重启。
+    下一项做只读阶段成本/源码审计，选择不经 IL 替换且尚未关闭的不同固定成本机制。
+33. **UTIL-COST-AUDIT 进入只读阶段成本/源码审计**：B6 不能替换 IL 后，不沿用同一
+    dispatch 假设。先对照现有 stage 2 成本（`waitA`、`shared+quant`、head）与 stage 1
+    成本（`q8+qkv`、`z`、`out-proj`），核查 shared-expert、quantization、event/launch
+    和 commit 路径的真实可达性与命中率。只有给出至少一个生产 width 的保守 ≥1% 临界路径、
+    bitwise/数值影响和回滚，才预注册新候选；审计本身不改源码、不重启。
 
 ## 候选
 
@@ -148,7 +154,8 @@
 | UTIL-HEAD-SPLIT | 两张卡并发计算 output projection 的两个 vocabulary 区间 | 无损拆分；半区 logits 与 full call `memcmp` 相等，greedy/fixed-seed/counter 不变；并发临界路径投影端到端 ≥1%；接 server 后 A1-B-A2 过 2/4/6/8 门 | 否决 | L-113/L-114：harness 与 server 正确性全过；A1-B-A2 的 2/4/6/8 路 `+3.99%/-1.31%/-8.66%/-0.09%`，4/6 回退超门 | 默认保持完整 head；不重试同一 peer graph 编排 |
 | UTIL-HEAD-Q8-FUSE | 把 `STRATA_HC_Q8=1` 末层 pending write 折入最终 mixer | 源码门先证明真实触发与重复工作；独立 GPU harness 对末层激活/logits bitwise 等于 `gr_write_multi + apply=false`；目标内核端到端或窗口临界路径有 ≥1% 依据；之后 A1-B-A2 至少一级 ≥1% 且 5/6 胜、其他级不退 >1%、漂移 ≤3%、零错误/外来请求 | 否决 | L-115：5 个交替进程、80 个 direct/graph 逐字失败；最大节省 `1.315 µs`，门槛 `182.7 µs`，graph `T=4..8` 更慢 | 未构建、未重启；不再尝试同形 Q8 write/mixer fusion |
 | UTIL-POLL-TURNOVER | 降低 `pump()` 完成检测、group hand-off 与下一 stage launch 之间的串行固定间隙 | 先只读审计并量化 `batch_poll -> verdict -> hand-off -> batch_launch`；必须有真实窗口命中、临界路径保守收益 ≥1%、不改变事件顺序/数值路径和明确回滚，才允许实现与 A1-B-A2 | 否决 | L-116：同选项 B2 parity 全过，但 6/8 路 `-3.241%/-6.122%`，最佳级 4 路胜场也只 5/6 且仍无其他级保障；B1 因编译开关缺失作废 | 源码已移除；不重试无 ring 快返回 |
-| UTIL-B6-ROWS | 在 Q4_K/Q5_K/IQ4_XS MMVQ 中跨 rows 复用 activation fragment | 独立 GPU 对 parity cases 逐字相等；生产 6-column kernel 中位 ≥1% 且 5/7 胜、保守窗口占比仍 ≥1%；之后 A-B-A 的 2/4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不回退 >1% | 进行中（kernel 门） | 源码已有 lab opt-in；上游 sm86/A4000 `+0.5%..+2%` | 只测环境值 `1`（2 rows/block）；不扫描 2/4/8 rows、几何或 cache |
+| UTIL-B6-ROWS | 在 Q4_K/Q5_K/IQ4_XS MMVQ 中跨 rows 复用 activation fragment | 独立 GPU 对 parity cases 逐字相等；生产 6-column kernel 中位 ≥1% 且 5/7 胜、保守窗口占比仍 ≥1%；之后 A-B-A 的 2/4/6/8 至少一级 ≥1% 且 5/6 胜，其他级不回退 >1% | 否决（reach/screening） | L-117：两卡全 parity，但相对 IL T=2 中位 `-5.868%`、0/22 胜；Q6_K/Q5_K 回退最高 `38.63%` | 未构建、未重启；B6 不能替换 production IL dispatch，不扫描 rows 或同形 routing |
+| UTIL-COST-AUDIT | 从真实 stage 成本与源码找 B6 后下一项不同机制 | 指明生产 dispatch、真实命中率/张量形状、每窗口绝对成本与 ≥1% 保守计算；排除已有否决项；输出可预注册的单一候选或明确停止理由 | 进行中（只读） | B6 L-117；stage 2 `waitA/shared+quant/head` 与 stage 1 `q8+qkv/z/out-proj` profile | 不改源码、不扫描参数、不重启；未过源码/阶段成本门不构建 |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |
@@ -172,7 +179,7 @@
 | F1F2 | 多路准入判据 | 由 S0b/S2 的证据决定可接受上界；不允许首 token 后静默数十秒 | 待做 | R11 旧提案 | AI 根据测量裁决，不等待用户 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀；有测试 | 待做 | | |
 
-未完成采纳项：18
+未完成采纳项：19
 
 ## 搁置
 

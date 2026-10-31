@@ -6,11 +6,14 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-B6-ROWS（本机 kernel 门）
-- 当前工作：验证现有、精确的 `STRATA_B6_MMVQ_ROWS=1` 路径在 2080 Ti 上是否能让
-  Q4_K/Q5_K/IQ4_XS 多列 MMVQ 复用 activation fragment。先跑
-  `b6_mmvq_bench`/`mmvf_rows_parity` 和真实单元估计，保守临界路径达到 ≥1% 才允许一次
-  A-B-A；不扫描 2/4/8 rows 参数，不重做已否决的多行 launch 聚合。
+- 当前项：UTIL-COST-AUDIT（只读阶段成本/源码审计）
+- 当前工作：`UTIL-B6-ROWS` 已完成并在生产路径 screening 门否决。下一步选择一条不依赖替换
+  `native_mmvq_il`、不重复已关闭 launch/head/group/checkpoint/GDN 聚合的独立机制；先用现有
+  profile 的真实窗口成本证明保守 ≥1% 可达，再预注册 contract。未形成候选前不重启。
+- 上一项：UTIL-B6-ROWS 在 kernel screening/reach 门否决。两卡全部 parity；但相对生产
+  `STRATA_SM75_PERF=1` 选择的 IL rows，T=2/3/4 中位为
+  `-5.868%/0.000%/+0.586%`，胜场 `0/22, 7/28, 18/28`，Q5_K/Q6_K 单点回退
+  `15.96-38.63%`。仅设置 `STRATA_B6_MMVQ_ROWS=1` 不能替换 IL dispatch；没有构建或重启。
 - 上一项：UTIL-POLL-TURNOVER 已完成并在端到端非回退门否决。首个 B1 漏掉 A 的 MMQ/Q6K
   编译开关，已作废；同选项 B2 通过启动、路径和多轮 greedy parity。相邻 A2/B2/A3 的
   2/4/6/8 路相对 A2/A3 合并中位为 `+9.129%/+7.885%/-3.241%/-6.122%`，胜场
@@ -90,17 +93,17 @@
   不要再次用
   `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
   co-residency 两条 QSA 路线都已否决。
-- 下一动作：执行 `UTIL-B6-ROWS` kernel 门。`STRATA_B6_MMVQ_ROWS=1` 只对已有精确
-  Q4_K/Q5_K/IQ4_XS 多列 MMVQ 改 row layout，复用每列 activation fragment。先在独立 GPU
-  上验证输出逐字相等，并测生产 6-column 形状相对默认的 kernel 时间和保守窗口占比；
-  未过 1% 就不构建 server candidate。过门后才跑一次 A-B-A。
+- 下一动作：B6 已否决，不构建其 server candidate。只读审计现有 stage profile 和源码中尚未
+  开启的 shared-expert/quantization 固定成本路径，优先选择能直接减少真实窗口 CUDA event 或
+  kernel launch 且保持 token/算术语义的机制；必须排除已否决的同形实现，并先写清命中率、
+  1% 临界路径计算、数值影响与回滚。
 - 当前候选：无运行中 server 候选。A3 已恢复；EXPDEC 未启动；P7 不恢复：实测 Tensor pipe
   仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
   Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
-- 未完成采纳项：18。
+- 未完成采纳项：19。
 - 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
   该测量路线不阻塞主线。
 
@@ -150,6 +153,9 @@
 - UTIL-POLL-TURNOVER 已否决：同编译选项 B2 通过启动、路径和 greedy parity，但相邻
   A2/A3 合并中位下 6/8 路回退 `3.241%/6.122%`，8 路对两个 A 臂分别回退
   `8.195%/4.080%`；2/4 路的 `+9.129%/+7.885%` 不能抵消其他级硬回退。
+- UTIL-B6-ROWS 已否决：两卡 exactness 全过，但 B6 相对生产 IL 的 T=2 中位慢 `5.868%`，
+  0/22 胜；仅有 4 列中位 `+0.586%` 且 duration-weighted 为 `-1.000%`。B6 也不在 IL 的
+  production dispatch 上，不能靠 env 替换。没有 server build、重启或 A-B-A。
 - UTIL-PIPED-MTP 已否决：A1/A2 合并中位 `78.3/108.55/125.7 tok/s`，B 为
   `93.9/104.4/113.4`；2 路 `+19.92%`、5/6 胜，但 4/6 路 `-3.82%/-9.79%`。固定 greedy
   文本 B 两次不同；B 的 CUDA1 cache 比 A 少 169 slots，下一项先做 cache-neutral 隔离。

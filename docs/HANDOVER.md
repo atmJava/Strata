@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T09:10+08:00。
+> 整理时间：2026-10-31T09:23+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -40,7 +40,11 @@
   没有重启。`UTIL-POLL-TURNOVER` 随后完成：首个 B1 因漏掉 A 的 MMQ/Q6K 编译开关而作废；
   同选项 B2 通过启动、路径和 greedy parity，但相邻 A2/B2/A3 的 2/4/6/8 路相对合并中位为
   `+9.129%/+7.885%/-3.241%/-6.122%`，胜场 `4/6, 5/6, 1/6, 0/6`。没有一级同时过 1% 与
-  5/6，6/8 回退超过 1%，因此否决，源码已移除。当前断点转为 `UTIL-B6-ROWS` kernel 门。
+  5/6，6/8 回退超过 1%，因此否决，源码已移除。`UTIL-B6-ROWS` 随后也完成：两卡所有
+  exactness 门通过，但相对生产 IL rows，T=2 中位慢 `5.868%`、0/22 胜；T=3/4 中位为
+  `0.000%/+0.586%`，duration-weighted 为 `+0.496%/-1.000%`，同时 Q5_K/Q6_K 有
+  `15.96-38.63%` 的单点回退。仅设置 B6 env 也不能替换 IL dispatch，所以没有构建或重启。
+  当前断点转为 B6 收口后的下一项不同机制源码/阶段成本审计。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -70,7 +74,9 @@
   EXPDEC 因 mode 8 控制流短路而不可达；checkpoint move 与 GDN recurrence 合并都没有越过
   多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；跨 group 延迟合并、
   vocabulary-row head split、Q8 write/mixer fusion 与 batch poll 快返回都已否决。下一步先
-  验证现有精确 `STRATA_B6_MMVQ_ROWS=1` 的本机 kernel 收益；不足 1% 即否决，不重启。
+  最新 B6 kernel/reach 门已经否决，不构建其 server candidate。下一项必须从现有 stage
+  profile 和源码中选出不同于 IL 替换、launch/head/group 聚合的固定成本路径，先证明生产
+  可达、保守 ≥1% 且不改 token/算术语义。
 
 ## 3. 当前生产
 
@@ -356,9 +362,8 @@ query 的 score、top-k、softmax 或输出算术。
    请求上，它会与 expert copy 流水、watchdog 和 profiler replay 冲突。
 5. 当前候选 8080 已恢复，health、PID、engine hash 与实验 env 已核对；生产 systemd 不变。
 6. `UTIL-EXPDEC-GU`、`UTIL-SLOT-CKPT-MOVE`、`UTIL-GDN-GROUPS`、`UTIL-HEAD-SPLIT`、
-   `UTIL-HEAD-Q8-FUSE` 和 `UTIL-POLL-TURNOVER` 均已否决，不再启动。当前只允许
-   `UTIL-B6-ROWS` 的现有精确 opt-in 先过本机 kernel parity/1% 门；未过门不构建服务器
-   候选。新实现必须用不同机制，先证明不会改变事件顺序、token 选择和数值路径，再预注册
+   `UTIL-HEAD-Q8-FUSE`、`UTIL-POLL-TURNOVER` 和 `UTIL-B6-ROWS` 均已否决，不再启动。
+   新实现必须用不同机制，先证明生产可达、不会改变事件顺序、token 选择和数值路径，再预注册
    冻结 greedy parity 与 2/4/6/8 路 A-B-A。1% 以上收益计入，但质量、并发回退和资源
    hard gate 不放宽。只有代码路径明确需要实测且预计收益高于约 3-7 分钟重启成本时才重启。
 

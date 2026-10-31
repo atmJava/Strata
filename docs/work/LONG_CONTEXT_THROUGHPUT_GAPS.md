@@ -927,7 +927,7 @@ stage 路径标记、6 slots / 2 groups、资源与三组两轮冻结 greedy par
 请求；完整证据见 [`UTIL_POLL_TURNOVER_RESULT-20261031.md`](UTIL_POLL_TURNOVER_RESULT-20261031.md)
 和台账 L-116。
 
-### 16.5.19 UTIL-B6-ROWS：现有多列 MMVQ row reuse 的本机 kernel 门
+### 16.5.19 UTIL-B6-ROWS：现有多列 MMVQ row reuse 未胜过生产 IL
 
 `STRATA_B6_MMVQ_ROWS=1` 已存在于实验源码。它只改变 Q4_K、Q5_K 与 IQ4_XS 的多列 MMVQ：
 每个 block 让两 rows 复用每列已经装入的 activation fragment，权重解码、乘积与归约次序
@@ -939,6 +939,27 @@ stage 路径标记、6 slots / 2 groups、资源与三组两轮冻结 greedy par
 真实六列 production formats/kernels 的交替 kernel 中位至少快 1%、至少 5/7 配对胜，并且按
 真实窗口占比保守投影仍至少 1%。未过 kernel 门直接否决，不构建 server candidate；过门后
 才做一次 A1-B-A2 的 2/4/6/8 端到端矩阵。
+
+结果：两卡全部 exactness 通过。`b6_mmvq_bench` 的每个 case/width 都等于 default 和独立单列
+调用；`mmvf_rows_parity` 为 `432 cases, 1660200 values, 0 mismatches`；
+`mmvq_il_parity --bench` 覆盖 `T=1..8`、rows `1/2/4` 和 table choice 也全 bitwise。但 A3
+的 `STRATA_SM75_PERF=1` 已让 2-4 列生产调用选择 `native_mmvq_il`，B6 只从
+`native_mmvq` 进入，环境开关本身不能替换生产 dispatch。
+
+把 B6 与 IL 的实际 rows choice 逐单元配对后：
+
+| T | B6 相对 IL 中位 | duration-weighted | B6 胜场 |
+| ---: | ---: | ---: | ---: |
+| 2 | `-5.868%` | `+2.215%` | 0/22 |
+| 3 | `0.000%` | `+0.496%` | 7/28 |
+| 4 | `+0.586%` | `-1.000%` | 18/28 |
+
+Q6_K 单点从 `67.3` 到 `93.3 us`（`-38.63%`），另有 Q6_K `-37.89%/-27.44%` 与 Q5_K
+`-15.96%`；Q5_K 2560x12288 的 T=4 有 `+6.27%`，但不足以形成稳定门。按实际 GGUF 张量
+分布做的 duration-weighted 代理投影在 T=2/3/4 为 CUDA0
+`-0.240%/-0.134%/+0.093%`、CUDA1 `-1.628%/-0.426%/+0.535%`；部分 real shapes 未入 bench，
+所以只作补充。候选在 screening/reach 门否决，未加 routing、未构建、未重启。完整证据见
+[`UTIL_B6_ROWS_RESULT-20261031.md`](UTIL_B6_ROWS_RESULT-20261031.md) 和台账 L-117。
 
 ### 16.6 并发和会话快照
 
