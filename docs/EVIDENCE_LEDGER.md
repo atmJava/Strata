@@ -172,14 +172,18 @@
 | L-156 | 10-31 14:4xZ | grouped staged lookahead 8→15 实际命中且 A1/B/A2 质量全过；596 wall `1.510583→1.505333 s`，只改善 `0.3475%`、绝对 `5.25 ms`；prompt `1384.3→1392.6 ms`，慢 `0.5996%` | **AGENT-HOT-TURN-STAGED-PREFETCH 否决**；双门未过，未跑 B 的 94K/并发；关闭 lookahead 参数轴；A2 已恢复；下一项 `AGENT-HOT-TURN-DEQUANT-AUDIT` |
 | L-157 | 10-31 15:0xZ | phase map 的 `dequant 106 ms` 在生产 native IQ3_XXS staged path 中是 `gather_native_group` 字节搬运；每层 order 唯一，每 16 个 gather 一次；stage 1/2 不同层，staged/streamed/fused/peer 互斥；hot-long cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`；MMQ 固定 stride 无法直读任意 cache slot；group 级 direct-path 预筛因现役占用下 full-layer harness OOM 尚未取得性能数据 | **AGENT-HOT-TURN-DEQUANT-AUDIT 否决重复工作假设**；不改源码、不重启、不扫 dequant/group/profiler 参数；下一项 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`，只做 group 级 |
 | L-158 | 10-31 15:2xZ | group 级 `512 experts / 32 groups`：MMQ `11.671 ms/layer`、native direct `7.848 ms/layer`，`1.49x`，48 层乐观上界 `183.5 ms`；596 A1/B/A2 1 路 wall `1.522684/1.490017/1.513878 s`，合并基线改善 `1.862%`，相对 A1 `2.145%`、`32.667 ms`，3/3 胜；2 路 hot-long `+0.705%`、2/3 胜；94K B/A2 wall `1.401311/1.438884 s` 但 prompt `1251.2/1251.5 ms`；固定 greedy 三臂全等 | **RESIDENT-PATH 正向但暂停验收，未采纳**；用户的 1% 原则认可方向，原 `0.05 s` 绝对门未过，94K 不归因；4 路在 `1:44` 后用户暂停，6/8 未跑；候选默认关闭，恢复 A1 后不继续实验 |
-| L-159 | 11-01 00:2x–00:5x | Codex 模型目录缺失使工具面 `14→9` 且省略 `apply_patch`；服务日志累计 6 次未声明工具；Qwen high 基础严格 5/6、测试 6/6，DeepSeek 直连参考 6/6，目录后 7/7；`apply_patch` 首次加三次重复 3/4；medium 严格 2/4、约快 7% | **质量硬门生效**；本地目录修复但未产品化，不归因 GPU 引擎；继续 `AGENT-CODEX-CATALOG-PROVISION`，质量通过前不恢复速度实验 |
+| L-159 | 11-01 00:2x–00:5x | Codex 模型目录缺失使工具面 `14→9` 且省略 `apply_patch`；服务日志累计 6 次未声明工具；Schema 1/2 旧结果：Qwen high 基础严格 5/6、测试 6/6，DeepSeek 直连参考 6/6，目录后 7/7；`apply_patch` 合并 3/4；medium 严格 2/4、约快 7% | **schema 1/2 历史证据，已被 L-160 取代**；目录与工具面诊断仍有效，不归因 GPU 引擎；不用旧 7/7、3/4 作为当前通过率 |
+| L-160 | 11-01 00:5x–01:x | Schema 3：Qwen/Strata 基础严格 `5/6`、测试 `6/6`、测试字节 `6/6`、wall `159.777 s`；`apply_patch` 独立重复 `3/3`、wall `17.499/16.598/11.840 s`；DSH `0.2.1-rc.3` + DeepSeek 直连基础 `6/6`、测试 `6/6`、wall `71.391 s` | **当前基线**：目录供给已产品化；剩余失败是 final-message 收口，不是代码/测试；DSH 与 Qwen 混有模型/provider/hosting，不能归因引擎 |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
 
 ## L-159 · Codex 模型目录缺失造成工具面缩减；质量门先于速度
 
-**判定：AGENT-CODEX-MODEL-CATALOG-QUALITY 诊断完成，本地修复未产品化。**
+**判定：AGENT-CODEX-MODEL-CATALOG-QUALITY 诊断完成。**
+
+> 规范提示：本节表格是 Schema 1/2 历史结果，`7/7` 和 `3/4` 不能作为当前质量基线。
+> 当前权威复测见 L-160。
 
 用户反馈 Strata 把十余分钟任务降到几分钟，但主观质量下降。先检查真实 Codex 请求面：
 模型 slug `qwen3.8-flash-next-iq3_xxs-abliterated` 不在本地模型目录时，请求只声明
@@ -222,6 +226,54 @@ Qwen 与 DeepSeek 同时改变模型、量化、provider 和 hosting，不能作
 用户已有 Codex 配置的前提下提供幂等、可恢复目录供给；然后用同一 Qwen high 条件重跑
 7 个 fixture 和至少一个真实编辑—测试任务。质量门通过前不恢复 resident-path 或其它
 速度候选。
+
+## L-160 · Schema 3 当前基线：代码正确性恢复，剩余差异是指令收口与终端路径
+
+**判定：目录供给完成；当前质量门仍因最终回复未严格收口而开放。**
+
+Codex 模型目录工具已提升为产品命令：
+
+```sh
+strata codex catalog
+strata codex catalog --apply
+strata codex catalog --json
+```
+
+默认只检查，`--apply` 才原子写入，写入前生成时间戳备份；重复运行幂等；目录内重复的
+目标 slug 会收敛为一条；模板没有 freeform `apply_patch` 时拒绝写入。真实本地目录检查为
+`ok=true`、`action=unchanged`、`applied=false`。
+
+当前 Schema 3 只使用“提供工具则正常使用”的 prompt，不再要求通过 shell 回避
+`apply_patch`：
+
+| runner / model | 基础严格 | 测试 | 测试字节 | wall |
+|---|---:|---:|---:|---:|
+| Codex + Qwen/Strata high | `5/6` | `6/6` | `6/6` | `159.777 s` |
+| DSH `0.2.1-rc.3` + DeepSeek 直连 | `6/6` | `6/6` | `6/6` | `71.391 s` |
+
+Qwen 唯一基础失败是 `transaction-rollback`：代码修改与测试均正确，最终回复在解释后追加
+`RESULT=PASS`，没有满足“只回复 sentinel”的严格检查。`apply-patch` 独立三次全部严格
+通过，每次都真实出现 `apply_patch`，wall 为 `17.499/16.598/11.840 s`。
+
+DSH 使用 `dsh headless --json`，事件解析覆盖 `tool_call`、`tool_result`、工具错误与
+`final`。DSH 的 `6/6` 是 DeepSeek 直连参考，不是 Strata 引擎质量；串行 wall 也没有
+随机化，不能据此得出通用速度倍数。当前只能记录 Qwen/Strata 在这组小 fixture 上约
+`2.24x` 串行耗时，并明确模型、provider 和 hosting 同时不同。
+
+证据：
+
+- `/tmp/strata-agent-quality-qwen-catalog-v3-20261101.json`
+  `6c2f8ba10ee658866e125e393b1ff88a40064484a2052d0d78b63e2ea195456b`
+- `/tmp/strata-agent-quality-apply-v3-1-20261101.json`、
+  `/tmp/strata-agent-quality-apply-v3-2-20261101.json`、
+  `/tmp/strata-agent-quality-apply-v3-3-20261101.json`
+- `/tmp/strata-dsh-quality-six-v3-20261101.json`
+  `32dc643292a3a41ae3788c0f9270e78ebd7e1c7a233b9617bdc33a0d8fa22c7d`
+
+下一项 `AGENT-TERMINAL-QUALITY-COMPARISON`：修正报告里的 DSH 模型标签，重复 DSH 对照，
+并检查 DSH 的 provider 配置能否指向 Strata endpoint。若不能，后续所有结果都必须保留
+“DeepSeek 直连”标签。随后 `AGENT-STRICT-RESPONSE-CONTRACT` 只针对最终收口缺口，不放宽
+测试或代码正确性。
 
 ## L-158 · resident direct path 有真实 1.86% 信号，但暂停验收
 

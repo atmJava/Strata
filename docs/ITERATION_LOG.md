@@ -3,6 +3,33 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-131 · Schema 3 拆清代码正确性与最终收口；DSH 纳入终端对照
+
+- 目标 / 指标：用当前工具协议重测 Codex/Strata，并把用户本地 DSH 纳入同一组 coding
+  fixture；只有代码、测试、测试字节、最终 sentinel、工具错误和 wall 都保留，才允许比较。
+- 假设与预期：旧 Schema 1/2 的 `7/7`、`3/4` 混合了已废弃 prompt 和重复口径；Schema 3
+  应能判断剩余失败是代码能力、工具协议还是最终回复收口。
+- 改动与实验：把 Codex 目录逻辑抽为 `strata codex catalog [--apply]` 产品命令；
+  benchmark 增加 Codex/DSH runner、`file_change`/DSH 事件解析和 `apply_patch` 必用门；
+  用 6 个基础 fixture 对照 Qwen/Strata 与本地 DSH，并单跑 `apply-patch` 三次。
+- 结果：Qwen/Strata 严格 `5/6`、测试 `6/6`、测试字节 `6/6`、wall `159.777 s`；
+  唯一失败是 `transaction-rollback` 代码/测试正确但最终回复没有只给 sentinel。
+  `apply-patch` 独立重复 `3/3`、wall `17.499/16.598/11.840 s`。DSH/DeepSeek 直连
+  同组 `6/6`、wall `71.391 s`。
+- 判决：**目录与工具面修复完成；质量门仍开放。** Schema 1/2 的 `7/7`、`3/4` 降为历史
+  噪声，不再作为当前基线。当前剩余问题是 final-message 指令遵循，不是代码/测试全面坏掉。
+- 预期被推翻：`DSH 6/6` 不能解释为 Strata 引擎更差，因为模型、provider、hosting 同时
+  改变；Qwen/Strata 的 `2.24x` 串行耗时也只是该小样本记录，不是通用速度结论。
+- 生产状态与回滚：未改生产 engine/config，未重启；server/vision/engine
+  `172634/172636/172641`，health loaded、262144、6/2。目录写入工具本身有备份。
+- 证据：L-160、Schema 3 报告和
+  [`AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT`](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
+- 学到什么：必须把“代码正确”“测试正确”“工具真实调用”“最终消息符合约束”分开统计；
+  一个总通过率会把不同原因混成“模型质量下降”。
+- 下一步与理由：`AGENT-TERMINAL-QUALITY-COMPARISON`。先修正 DSH 报告中默认 Qwen slug
+  的假标签，重复一次对照，并查 DSH 能否配置到 Strata endpoint；再进入
+  `AGENT-STRICT-RESPONSE-CONTRACT`，只针对最终收口。
+
 ## I-20261101-130 · 快速但质量下降先按工具面/任务成功处理；resident 内核项降级
 
 - 目标 / 指标：解释“Strata 从十余分钟降到几分钟，但主观质量下降”，并只在质量门通过后
@@ -16,7 +43,8 @@
   服务日志累计 6 次模型写未声明 `apply_patch` 后退回文本。Qwen high 基础严格 5/6、
   测试 6/6；DeepSeek 直连参考 6/6；目录后 7/7；`apply_patch` 首次加三次重复合计 3/4。
   Qwen medium 严格 2/4，速度只比 high 约 7%。
-- 判决：**AGENT-CODEX-MODEL-CATALOG-QUALITY 诊断完成，修复未产品化。** 不用 7% 的
+- 判决：**AGENT-CODEX-MODEL-CATALOG-QUALITY 诊断完成，修复当时未产品化。** 本条是
+  Schema 1/2 历史记录，`7/7`、`3/4` 已被 I-20261101-131 的 Schema 3 取代。不用 7% 的
   medium 速度换严格收口；不把混合模型/provider/hosting 小样本归因给 GPU 引擎。
 - 生产状态与回滚：未改生产。server/vision/engine `172634/172636/172641`，health
   loaded、262144、6/2；本地目录已有备份，Codex 侧可按备份恢复。

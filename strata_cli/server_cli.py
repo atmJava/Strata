@@ -13,7 +13,7 @@ from pathlib import Path
 
 from strata_cli import monitor_commands
 from strata_cli.client import ClientError
-from strata_cli.cli import _doctor, _error, _profile_command, _runtime, _serve
+from strata_cli.cli import _doctor, _error, _profile_command, _runtime, _serve, _success
 
 
 def _machine_options(parser: argparse.ArgumentParser) -> None:
@@ -104,6 +104,32 @@ def parser() -> argparse.ArgumentParser:
     )
     _machine_options(check)
 
+    codex = commands.add_parser(
+        "codex",
+        help="configure Codex for the model Strata serves",
+    )
+    codex_actions = codex.add_subparsers(dest="codex_command", required=True)
+    catalog = codex_actions.add_parser(
+        "catalog",
+        help="add or refresh this model in Codex's JSON model catalog",
+    )
+    catalog.add_argument(
+        "--catalog",
+        type=Path,
+        default=Path.home() / ".codex" / "models.json",
+    )
+    catalog.add_argument("--template", default=None)
+    catalog.add_argument("--slug", default=None)
+    catalog.add_argument("--display-name", default=None)
+    catalog.add_argument("--context-window", type=int, default=None)
+    catalog.add_argument("--auto-compact-token-limit", type=int, default=None)
+    catalog.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the catalog; without this flag, only report what would change",
+    )
+    _machine_options(catalog)
+
     runtime = commands.add_parser("runtime", help="manage a background server owned by this account")
     runtime_actions = runtime.add_subparsers(dest="runtime_command", required=True)
     start = runtime_actions.add_parser("start")
@@ -174,6 +200,59 @@ def _check_production(a: argparse.Namespace) -> int:
     return 0 if result["ok"] else 5
 
 
+def _codex_catalog(a: argparse.Namespace) -> int:
+    from strata_control import codex_catalog
+
+    path = a.catalog.expanduser().resolve()
+    catalog = codex_catalog.load_catalog(path)
+    slug = a.slug or codex_catalog.DEFAULT_SLUG
+    updated, action = codex_catalog.update_catalog(
+        catalog,
+        template_slug=a.template or codex_catalog.DEFAULT_TEMPLATE,
+        slug=slug,
+        display_name=a.display_name or codex_catalog.DEFAULT_DISPLAY_NAME,
+        context_window=(
+            a.context_window
+            if a.context_window is not None
+            else codex_catalog.DEFAULT_CONTEXT_WINDOW
+        ),
+        auto_compact_token_limit=(
+            a.auto_compact_token_limit
+            if a.auto_compact_token_limit is not None
+            else codex_catalog.DEFAULT_AUTO_COMPACT_TOKEN_LIMIT
+        ),
+    )
+    backup = (
+        codex_catalog.write_catalog(path, updated)
+        if a.apply and action != "unchanged"
+        else None
+    )
+    payload = {
+        "catalog": str(path),
+        "slug": slug,
+        "action": action,
+        "applied": bool(backup),
+        "backup": str(backup) if backup else None,
+    }
+    human = f"{action}: {path} ({slug})"
+    if backup:
+        human += f"; backup {backup}"
+    elif action != "unchanged" and not a.apply:
+        human += "; pass --apply to write"
+    return _success(
+        payload,
+        machine=a.output == "json",
+        human=human,
+        quiet=a.quiet,
+    )
+
+
+def _codex(a: argparse.Namespace) -> int:
+    if a.codex_command == "catalog":
+        return _codex_catalog(a)
+    raise ValueError(f"unknown codex command: {a.codex_command}")
+
+
 def _run(a: argparse.Namespace) -> int:
     if a.command in ("serve", "launch"):
         return _serve(a)
@@ -183,6 +262,8 @@ def _run(a: argparse.Namespace) -> int:
         return _doctor(a)
     if a.command == "check-production":
         return _check_production(a)
+    if a.command == "codex":
+        return _codex(a)
     if a.command == "runtime":
         return _runtime(a)
     return monitor_commands.run(a)

@@ -2,7 +2,7 @@
 
 日期：2026-11-01
 
-状态：诊断完成，已应用本地修复；尚未产品化，也没有宣称主观质量已完全恢复。
+状态：目录供给已产品化；质量门仍因最终回复未严格收口而开放。
 
 ## 结论
 
@@ -16,6 +16,24 @@
 （SHA-256 `c8b03dfb31e9de8d703f114ee9ac1f851ecdc6e580cb414f3e55c03036130d6b`）
 在已观察窗口内有 6 条“请求未声明 `apply_patch`，模型写了该工具而退回文本”的记录。
 该日志跨越目录修复前后的客户端请求，因此 6 是服务日志中的累计现象，不是修复后残留数。
+
+## Schema 3 当前基线
+
+Schema 3 使用真实声明工具，不再要求模型绕开 `apply_patch`。当前结果如下：
+
+| runner / model | 基础严格 | 测试 | 测试字节 | wall |
+|---|---:|---:|---:|---:|
+| Codex + Qwen/Strata high | `5/6` | `6/6` | `6/6` | `159.777 s` |
+| DSH `0.2.1-rc.3` + DeepSeek 直连 | `6/6` | `6/6` | `6/6` | `71.391 s` |
+
+Qwen 唯一基础失败是 `transaction-rollback`：代码和测试正确，最终回复在解释后追加
+`RESULT=PASS`，不满足严格 sentinel。`apply-patch` 独立重复 `3/3` 全部通过，wall 为
+`17.499/16.598/11.840 s`，每次都真实调用 `apply_patch`。DSH 的 `6/6` 是 DeepSeek
+直连参考，不能归因 Strata 引擎；串行 wall 也未随机化，不作通用速度结论。
+
+目录工具已是产品命令：`strata codex catalog` 默认只检查，`--apply` 原子写入并先备份，
+重复运行幂等，模板缺 freeform `apply_patch` 时拒绝。真实本地目录检查为
+`action=unchanged`。
 
 ## 工具面审计
 
@@ -38,7 +56,10 @@
 这不是官方模型能力声明；它是一个本地兼容条目。产品化前仍需验证安装/连接流程、
 Codex 升级兼容和幂等回滚。
 
-## 确定性 coding 基准
+## Schema 1/2 历史记录（不得作为当前通过率）
+
+> 下面的 `7/7`、`3/4` 来自已废弃 harness：早期 prompt 禁止 `apply_patch` 并要求用 shell
+> 编辑，后来又混入了不同的目录与重复口径。保留用于审计历史，不能与 Schema 3 合并。
 
 新增 `tools/server/bench-agent-quality.py`，从全新临时仓库运行 Codex，只保存任务名、
 工具计数、哈希、usage、测试和严格收口结果，不把 prompt、模型正文、reasoning 或完整
@@ -92,7 +113,6 @@ Codex 升级兼容和幂等回滚。
 
 ## 下一目标
 
-`AGENT-CODEX-CATALOG-PROVISION`：检查当前产品的安装、launch 和连接入口，在不覆盖用户
-已有 Codex 配置的前提下，提供可检测、幂等、可回滚的模型目录供给；然后在同一 Qwen
-high 条件下重跑 7 个 fixture 和至少一个真实编辑—测试任务。失败时保留现有手工步骤，
-不改引擎，不重启生产。
+`AGENT-TERMINAL-QUALITY-COMPARISON`：修正 DSH 报告的模型/provider 标签，重复 DSH
+对照，并检查 DSH 的 provider 配置能否指向 Strata endpoint；不能时永久标注“DeepSeek
+直连”。随后 `AGENT-STRICT-RESPONSE-CONTRACT` 只处理最终收口缺口。不改引擎，不重启生产。

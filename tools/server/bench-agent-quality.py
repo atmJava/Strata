@@ -23,9 +23,7 @@ from typing import Any
 
 DEFAULT_MODEL = "qwen3.8-flash-next-iq3_xxs-abliterated"
 TOOL_RULE = (
-    " Use the provided tools normally, but this exercise does not declare apply_patch: "
-    "edit through a shell command such as Python, perl or sed, and never print an XML "
-    "tool-call block."
+    " Use the provided tools normally and never print an XML tool-call block."
 )
 
 
@@ -46,6 +44,7 @@ class Task:
     prompt: str
     expected_files: tuple[str, ...]
     protected_files: tuple[str, ...]
+    required_tool: str | None = None
 
 
 TASKS: dict[str, Task] = {
@@ -135,6 +134,7 @@ TASKS: dict[str, Task] = {
         ),
         expected_files=("calculator.py",),
         protected_files=("tests/test_calculator.py",),
+        required_tool="apply_patch",
     ),
 }
 
@@ -335,10 +335,11 @@ def build_fixture(task: Task, root: pathlib.Path) -> dict[str, str]:
     }
 
 
-def event_summary(path: pathlib.Path) -> dict[str, Any]:
+def event_summary(path: pathlib.Path, runner: str = "codex") -> dict[str, Any]:
     events: collections.Counter[str] = collections.Counter()
     tools: collections.Counter[str] = collections.Counter()
     errors = 0
+    tool_errors = 0
     warnings = 0
     final = None
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -351,6 +352,21 @@ def event_summary(path: pathlib.Path) -> dict[str, Any]:
         kind = row.get("type")
         if isinstance(kind, str):
             events[kind] += 1
+        if runner == "dsh":
+            if kind == "final" and isinstance(row.get("text"), str):
+                final = row["text"]
+            elif kind == "tool_call":
+                name = row.get("tool")
+                tools[name if isinstance(name, str) else "tool"] += 1
+            elif kind == "tool_result" and row.get("status") == "error":
+                tool_errors += 1
+            elif kind == "error":
+                errors += 1
+            elif kind == "status" and row.get("phase") == "turn_end":
+                reason = row.get("reason")
+                if isinstance(reason, dict) and reason.get("kind") not in (None, "completed"):
+                    errors += 1
+            continue
         item = row.get("item")
         if kind != "item.completed" or not isinstance(item, dict):
             continue
@@ -360,8 +376,9 @@ def event_summary(path: pathlib.Path) -> dict[str, Any]:
             "custom_tool_call",
             "command_execution",
             "mcp_tool_call",
+            "file_change",
         }:
-            name = item.get("name")
+            name = "apply_patch" if item_type == "file_change" else item.get("name")
             tools[name if isinstance(name, str) else item_type] += 1
         elif item_type == "agent_message" and isinstance(item.get("text"), str):
             final = item["text"]
@@ -384,6 +401,7 @@ def event_summary(path: pathlib.Path) -> dict[str, Any]:
         "events": dict(sorted(events.items())),
         "tool_calls": dict(sorted(tools.items())),
         "tool_call_count": sum(tools.values()),
+        "tool_errors": tool_errors,
         "event_errors": errors,
         "event_warnings": warnings,
         "final": final,
@@ -393,7 +411,9 @@ def event_summary(path: pathlib.Path) -> dict[str, Any]:
 def run_task(
     task: Task,
     *,
+    runner: str,
     codex: str,
+    dsh: str,
     model: str,
     provider_url: str | None,
     model_catalog: pathlib.Path | None,
@@ -408,49 +428,52 @@ def run_task(
     raw_root.mkdir(parents=True, exist_ok=True)
     events_path = raw_root / f"{task.name}.jsonl"
     final_path = raw_root / f"{task.name}-last.txt"
-    command = [
-        codex,
-        "exec",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        "-C",
-        str(root),
-        "--json",
-        "--color",
-        "never",
-        "--output-last-message",
-        str(final_path),
-        "-c",
-        f'model="{model}"',
-        "-c",
-        "model_context_window=262144",
-        "-c",
-        "model_auto_compact_token_limit=210000",
-        "-c",
-        f'model_reasoning_effort="{reasoning_effort}"',
-        "-c",
-        'approval_policy="never"',
-        "-c",
-        'sandbox_mode="danger-full-access"',
-        task.prompt,
-    ]
-    if provider_url:
-        command[2:2] = ["--ignore-user-config"]
-        at = command.index(f'model="{model}"') - 1
-        command[at:at] = [
+    if runner == "dsh":
+        command = [dsh, "headless", "--json", task.prompt]
+    else:
+        command = [
+            codex,
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "-C",
+            str(root),
+            "--json",
+            "--color",
+            "never",
+            "--output-last-message",
+            str(final_path),
             "-c",
-            'model_provider="b4"',
+            f'model="{model}"',
             "-c",
-            'model_providers.b4.name="Strata agent quality"',
+            "model_context_window=262144",
             "-c",
-            f'model_providers.b4.base_url="{provider_url}"',
+            "model_auto_compact_token_limit=210000",
             "-c",
-            f'model_providers.b4.env_key="{api_key_env}"',
+            f'model_reasoning_effort="{reasoning_effort}"',
             "-c",
-            'model_providers.b4.wire_api="responses"',
+            'approval_policy="never"',
+            "-c",
+            'sandbox_mode="danger-full-access"',
+            task.prompt,
         ]
-    if model_catalog:
-        command[-1:-1] = ["-c", f'model_catalog_json="{model_catalog}"']
+        if provider_url:
+            command[2:2] = ["--ignore-user-config"]
+            at = command.index(f'model="{model}"') - 1
+            command[at:at] = [
+                "-c",
+                'model_provider="b4"',
+                "-c",
+                'model_providers.b4.name="Strata agent quality"',
+                "-c",
+                f'model_providers.b4.base_url="{provider_url}"',
+                "-c",
+                f'model_providers.b4.env_key="{api_key_env}"',
+                "-c",
+                'model_providers.b4.wire_api="responses"',
+            ]
+        if model_catalog:
+            command[-1:-1] = ["-c", f'model_catalog_json="{model_catalog}"']
     started = time.monotonic()
     with events_path.open("wb") as output:
         try:
@@ -469,7 +492,7 @@ def run_task(
             returncode = 124
             timed_out = True
     wall_s = time.monotonic() - started
-    event = event_summary(events_path)
+    event = event_summary(events_path, runner)
     final = event["final"]
     if not final and final_path.exists():
         final = final_path.read_text(encoding="utf-8").strip()
@@ -504,6 +527,7 @@ def run_task(
         "events": event["events"],
         "tool_calls": event["tool_calls"],
         "tool_call_count": event["tool_call_count"],
+        "tool_errors": event["tool_errors"],
         "quality_pass": (
             returncode == 0
             and not timed_out
@@ -511,14 +535,29 @@ def run_task(
             and tests_unchanged
             and final_pass
             and event["event_errors"] == 0
+            and (
+                task.required_tool is None
+                or event["tool_calls"].get(task.required_tool, 0) > 0
+            )
         ),
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runner", choices=("codex", "dsh"), default="codex")
     parser.add_argument("--codex", default="codex")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--dsh", default="dsh")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=f"Codex model slug (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--model-label",
+        default=None,
+        help="model/provider label recorded in the report; never changes the runner command",
+    )
     parser.add_argument(
         "--provider-url",
         default="http://127.0.0.1:18080/v1",
@@ -544,7 +583,12 @@ def main(argv: list[str] | None = None) -> int:
         default=pathlib.Path("/tmp/strata-agent-quality.json"),
     )
     options = parser.parse_args(argv)
-    if options.provider_url and not os.environ.get(options.api_key_env):
+    model = options.model or DEFAULT_MODEL
+    if (
+        options.runner == "codex"
+        and options.provider_url
+        and not os.environ.get(options.api_key_env)
+    ):
         parser.error(f"{options.api_key_env} is required")
     names = [name.strip() for name in options.tasks.split(",") if name.strip()]
     unknown = set(names) - set(TASKS)
@@ -556,8 +600,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"running {name}", flush=True)
         row = run_task(
             TASKS[name],
+            runner=options.runner,
             codex=options.codex,
-            model=options.model,
+            dsh=options.dsh,
+            model=model,
             provider_url=options.provider_url,
             model_catalog=options.model_catalog,
             api_key_env=options.api_key_env,
@@ -574,9 +620,14 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     result = {
-        "schema": 1,
-        "scope": "deterministic coding fixtures through Codex; no prompt or response text retained",
-        "model": options.model,
+        "schema": 3,
+        "scope": (
+            "deterministic coding fixtures through an agent CLI; "
+            "no prompt or response text retained"
+        ),
+        "runner": options.runner,
+        "model": options.model_label
+        or (model if options.runner == "codex" else None),
         "reasoning_effort": options.reasoning_effort,
         "tasks": names,
         "rows": rows,

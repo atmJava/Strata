@@ -61,17 +61,20 @@
 | M46 | grouped staged expert lookahead | 当前 grouped staged path 保持 8 个实际传输在前；32-slot ring 与 16-expert gather 的安全上限为 15；stage 2 `wait copy` 中位 `173 ms` | 默认 8 不变，B 只设 `STRATA_PREFILL_STAGED_AHEAD=15`；质量/路径门全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3% | **否决**：路径/质量全过；596 wall `1.510583→1.505333 s`，只快 `0.3475%`、绝对 `5.25 ms`；prompt 慢 `0.5996%`；未跑 94K/并发，A2 已恢复 |
 | M47 | 热续轮 dequant 重复工作审计 | stage 2 `dequant 106 ms`；production 为 native IQ3_XXS、554 fresh token、grouped staged path | 只读证明同一 expert/layout 是否重复转换、真实触发率和生产路径；单一可移除部分须给整请求 wall >=1% 且绝对 >=0.05 s 上界、数值/回滚边界；未过门不构建不重启 | **否决重复假设**：该 phase 实为 native gather 字节搬运；每层只处理唯一 selected expert，每 16 个一次 gather；stage 1/2 不同层，无重复转换；MMQ 固定 stride 不能直读任意 cache slot。未改源码/未重启，不扫参数 |
 | M48 | resident expert 绕开 MMQ gather | stage 1/2 gather 合计约 `183 ms`；group 级 direct path `7.848` 对 MMQ `11.671 ms/layer`（`1.49x`）；596 1 路 wall 改善 `1.862%`（相对 A1 `2.145%`、`32.667 ms`），三波全胜 | group 级上界、路径命中、greedy 和 1/2 路测量已完成；原契约绝对 `0.05 s` 未过，94K prompt 无对应改善，4/6/8 未完成 | **暂停验收，未采纳**：用户的 1% 价值原则记录为正向信号，但不静默放宽契约；候选默认关闭，已恢复 A1 生产。恢复后先审计 48 层 direct-path 覆盖/fallback，而非重跑同形 A-B-A |
-| M49 | Codex 模型目录与 coding 质量 | 无目录时 9 工具且无 `apply_patch`；目录后 14 工具且为 `custom`。服务日志累计 6 次未声明工具；Qwen high 基础 5/6 严格、测试 6/6；目录后 7/7；`apply_patch` 合并 3/4 | 产品化的幂等目录供给，真实工具面无错；7 个 fixture 连续全过，`apply_patch` 至少 3 次重复全过；测试不变、最终 sentinel、无事件错误；不改变引擎和量化 | **执行中**：本地修复已生效但未产品化；一个最终收口缺口仍开放。DeepSeek 直连 6/6 只作模型/hosting 混合参考，不作引擎归因 |
+| M49 | Codex 模型目录与 coding 质量 | 无目录时 9 工具且无 `apply_patch`；目录后 14 工具且为 `custom`。Schema 3 Qwen/Strata 基础严格 `5/6`、测试 `6/6`、`159.777 s`；`apply_patch` 独立重复 `3/3` | 产品化幂等目录供给；真实工具面无错；基础 fixture 测试不变、最终 sentinel、无事件错误；不改变引擎和量化 | **目录供给完成，质量门仍开放**：`strata codex catalog [--apply]` 已产品化；唯一基础失败是最终回复多写说明。Schema 1/2 的 `7/7`、`3/4` 已被取代 |
+| M50 | Codex/Strata 与 DSH 终端质量对照 | DSH `0.2.1-rc.3`；Schema 3 同为 6 个基础 fixture，DSH/DeepSeek 直连 `6/6`、测试 `6/6`、`71.391 s`；Qwen/Strata `5/6`、`159.777 s` | 报告不混淆 runner/model/provider；判断 DSH 能否经 Strata endpoint 运行；至少重复一次并保留失败类型 | **基础对照完成，配置路径待查**：当前 DSH 是 DeepSeek 直连；串行耗时不可归因 Strata 引擎 |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 
 ## 当前主要矛盾
 
 用户反馈的“明显更快、质量略降”先按质量事故处理，而不是继续追局部 1%：Codex 模型目录
-缺失是已复现的确定性协议问题，但不是完整解释。Qwen/Strata 与 DeepSeek 直连的小样本差异
-同时包含模型、量化、provider 和 hosting，不能归咎于 GPU 引擎。当前目标是先让产品级目录
-供给、真实工具声明、严格收口和代表性 coding 任务形成硬门；只有这些通过后才恢复速度候选。
-`medium` 只快约 7% 却把严格通过从 4/4 降到 2/4，因此继续使用 `high`。
+缺失是已复现的确定性协议问题，但不是完整解释。目录供给已经进入产品命令；Schema 3
+Qwen/Strata 的代码和测试都是 `6/6`，剩余基础失败集中为“任务正确但没有严格只回复
+sentinel”。DSH/DeepSeek 直连为 `6/6`，但模型、量化、provider 和 hosting 同时改变，
+只能作为终端路径对照。当前目标是把 DSH 正式纳入同口径、消除报告标签歧义，再处理严格
+指令遵循；只有质量门收口后才恢复速度候选。`medium` 只快约 7% 却把严格通过从 4/4 降到
+2/4，因此继续使用 `high`。
 
 第十八次复盘修正了优先级。整任务 trace 的工具 union `123,693 s` 是 35 文件快照的根任务
 主体，普通单路模型 union `66,228 s` 是第二大块；恰好两路只有 `171 s`。普通热续轮

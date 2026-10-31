@@ -2,7 +2,7 @@
 
 日期：2026-10-31
 
-状态：第二十四次修订后恢复执行。用户反馈 Strata 显著更快，但主观质量下降；当前先以
+状态：第二十五次修订后继续执行。用户反馈 Strata 显著更快，但主观质量下降；当前先以
 Codex 模型目录、真实工具面、任务成功率和严格收口为硬门，再恢复速度优化。
 
 ## 全局目标
@@ -13,10 +13,12 @@ Codex 模型目录、真实工具面、任务成功率和严格收口为硬门�
 必须真实声明，否则速度收益无效。当前执行主轴是通常 1 个主代理、偶尔 2 个的编辑—测试
 循环；只有质量硬门通过后，才优先消除每一轮都会发生的 prompt/read 与 decode 等待。
 
-当前 frontier 是 `AGENT-CODEX-MODEL-CATALOG-QUALITY`。已复现 Codex 模型 slug 缺失会让
+当前 frontier 是 `AGENT-TERMINAL-QUALITY-COMPARISON`。已复现 Codex 模型 slug 缺失会让
 工具面从 14 个降到 9 个并省略 `apply_patch`，服务日志累计有 6 次未声明工具后退回文本；
-目录修复后小 fixture 7/7，但 `apply_patch` 合并四次仍只有 3/4。先把目录供给产品化并用
-真实 Codex 路径复测，不能把客户端协议问题继续留给 GPU kernel 优化。
+目录供给已产品化为 `strata codex catalog [--apply]`。Schema 3 的 Qwen/Strata 基础
+fixture 严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；DSH/DeepSeek 直连同组
+基础 fixture 为 `6/6`。先消除终端报告的 model/provider 混淆并检查 DSH 能否经 Strata
+endpoint 运行，不能把客户端或混合 hosting 问题继续留给 GPU kernel 优化。
 
 resident direct-pointer 仍是暂停历史候选：group 级 `1.49x`、596 的 1 路 wall
 `1.862%`，但绝对只省 `32.667 ms`，94K prompt 无对应改善，4/6/8 未完成。质量门通过前
@@ -138,19 +140,21 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 
 ### P0：正确性与真实路径
 
-当前主项 `AGENT-CODEX-MODEL-CATALOG-QUALITY` / `AGENT-CODEX-CATALOG-PROVISION`：
+当前主项 `AGENT-TERMINAL-QUALITY-COMPARISON`：
 
 - 保持生产健康、工具结果完整、测试正确和长输出不被静默截断；
-- 让 Codex 模型 slug 有可识别元数据，真实请求声明 `apply_patch`；
-- 以 7 个确定性 coding fixture 和真实编辑—测试任务验证测试、测试字节、最终 sentinel、
+- 保持 Codex 目录供给幂等、可备份、可回滚，真实请求声明 `apply_patch`；
+- 以同一 Schema 3 的确定性 coding fixture 对照 Codex/Strata 与 DSH，验证测试、测试字节、最终 sentinel、
   工具协议和任务成功；
-- 模型目录更新必须幂等、有备份、可回滚，不覆盖用户已有 provider；
+- 报告必须写清 runner、model、provider 和 hosting，不能把 DSH/DeepSeek 直连写成 Strata 引擎；
+- 查找 DSH 的 provider 配置能力；只有真实经 Strata endpoint 运行后才能做同引擎归因；
 - 不改变 engine、pack、量化、GPU、上下文或 6 slots / 2 groups；
 - 任何候选先证明能进入真实客户端路径，再讨论性能收益。
 
 当前证据：无目录 9 个工具、有目录 14 个且 `apply_patch` 为 `custom`；Qwen high 基础
-严格 5/6，目录后 7/7，`apply_patch` 合并 3/4。DeepSeek 直连参考 6/6 但同时改变模型、
-provider 和 hosting，不能归因 GPU 引擎。见
+严格 `5/6`、测试 `6/6`、wall `159.777 s`，`apply_patch` 独立重复 `3/3`。
+DSH/DeepSeek 直连 `6/6`、wall `71.391 s`，但同时改变模型、provider 和 hosting，
+不能归因 GPU 引擎。旧 Schema 1/2 的 `7/7`、`3/4` 不再作为当前通过率。见
 [`AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md`](../../work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
 
 ### P1：`AGENT-HOT-TURN-FIXED-COST`（已否决）
@@ -458,9 +462,10 @@ prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零�
 
 ## 当前断点
 
-**2026-11-01 恢复执行。** 用户反馈 Strata 快但质量下降，当前从
-`AGENT-CODEX-MODEL-CATALOG-QUALITY` 开始；先完成产品级目录供给和真实工具面/任务成功
-验证，再决定是否恢复 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的覆盖审计。生产仍是
+**2026-11-01 继续执行。** 用户反馈 Strata 快但质量下降，目录供给已经产品化；当前从
+`AGENT-TERMINAL-QUALITY-COMPARISON` 开始，先完成 Codex/Strata 与 DSH 的同口径对照，
+再处理最终回复未严格收口，之后才决定是否恢复
+`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的覆盖审计。生产仍是
 server/vision/engine `172634/172636/172641`，未因本轮客户端配置问题重启。
 
 `AGENT-CONTEXT-DIET-REAL-YIELD` 已否决产品化；`AGENT-HISTORY-STATE-RESIDENCY` 降为

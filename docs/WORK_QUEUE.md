@@ -7,13 +7,15 @@
 
 ## 当前决策前沿
 
-0. **全局目标已第二十四次修订并继续执行**：先把真实 AI vibe coding 的质量、任务成功率、
+0. **全局目标已第二十五次修订并继续执行**：先把真实 AI vibe coding 的质量、任务成功率、
    指令遵循和工具协议设为硬门，再优化任务墙钟、首个可执行结果和严重尾部；没有进入用户
-   实际路径的能力只算机制收益。当前项 `AGENT-CODEX-MODEL-CATALOG-QUALITY` 已复现
-   Codex 模型目录缺失会从 14 个工具降到 9 个并省略 `apply_patch`；本地目录修复后
-   7/7 fixture 通过，但 `apply_patch` 四次合并仅 3/4 严格通过。下一步
-   `AGENT-CODEX-CATALOG-PROVISION` 先找产品级安装/连接入口并验证幂等回滚，不用速度
-   收益覆盖质量缺口。普通热续轮固定成本项
+   实际路径的能力只算机制收益。当前项 `AGENT-TERMINAL-QUALITY-COMPARISON` 要把
+   Codex/Strata 与 DSH 作为两个终端路径测量；模型、provider、hosting 不同必须显式标注。
+   Codex 模型目录缺失已确认会把工具面从 14 降到 9 并省略 `apply_patch`，目录供给已通过
+   `strata codex catalog [--apply]` 产品化并由预检/单测覆盖。Schema 3 当前 Qwen/Strata
+   基础严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；唯一失败是最终回复未严格
+   只给 sentinel。DSH/DeepSeek 直连同条件 `6/6`、串行合计 `71.391 s`，只作带标签的
+   终端参考，不能归因 GPU 引擎。普通热续轮固定成本项
    `AGENT-HOT-TURN-FIXED-COST` 已否决：`short_read=0` 在所有热续轮尺寸都未取得
    1% 收益，1 路短热续 prompt/wall 反而慢 `13.75%/8.14%`，因此保留默认 64，
    不扫描邻近阈值。`AGENT-EDIT-TEST-LOOP-TRACE` 已完成：576 次测试的 178 次命令签名
@@ -186,8 +188,10 @@
 
 | ID | 项 | 验收条件 | 状态 | 证据 | 备注 |
 |---|---|---|---|---|---|
-| AGENT-CODEX-MODEL-CATALOG-QUALITY | 修复 Codex 缺失模型目录造成的工具面缩减 | 真实请求声明 `apply_patch`；服务无未声明工具；7 个 coding fixture 测试/测试不变/最终 sentinel 全过；`apply_patch` 至少 3 次独立稳定；目录幂等可回滚；不改生产引擎 | 诊断完成，修复未产品化 | L-159：无目录 9 工具、有目录 14 工具；日志 6 次未声明；基础 Qwen high 5/6、DeepSeek 参考 6/6、目录后 7/7；`apply_patch` 合并 3/4 | 质量是硬门；不把混合模型/hosting 差异归咎引擎；`medium` 更快约 7% 但严格 2/4，保留 high |
-| AGENT-CODEX-CATALOG-PROVISION | 让产品安装/连接流程幂等供给 Codex 模型目录 | 找出现有 launch/install/connect 入口；不覆盖用户配置；目录匹配实际模型 slug；重复运行不重复添加；失败可恢复；陌生用户目录走通；真实 Codex 请求工具面和 7 fixture 复测通过 | 进行中 | `tools/server/codex-model-catalog.py` 与 3 tests 已通过；尚需嵌入产品路径和服务/客户端重启边界 | 不重启 GPU；若当前版本没有自动连接入口，先做最小文档/检查命令并明确手工步骤 |
+| AGENT-CODEX-MODEL-CATALOG-QUALITY | 修复 Codex 缺失模型目录造成的工具面缩减 | 真实请求声明 `apply_patch`；服务无未声明工具；基础 coding fixture 测试/测试不变/最终 sentinel 全过；`apply_patch` 至少 3 次独立稳定；目录幂等可回滚；不改生产引擎 | 进行中 | L-159/L-160：无目录 9 工具、有目录 14 工具；Schema 3 Qwen/Strata 基础严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；唯一失败为最终回复未严格收口 | 质量是硬门；不把混合模型/provider/hosting 差异归咎引擎；`medium` 更快约 7% 但严格 2/4，保留 high |
+| AGENT-CODEX-CATALOG-PROVISION | 让产品安装/连接流程幂等供给 Codex 模型目录 | 不覆盖用户配置；目录匹配实际模型 slug；重复运行不重复添加；失败可恢复；模板缺 freeform `apply_patch` 时拒绝；检查和写入分离 | 已完成 | `strata codex catalog` 默认只检查，`--apply` 原子写入并先备份；重复运行 `unchanged`；Terminal/catalog/bench tests 通过 | 不改 GPU、engine 或生产 config；文档改为产品命令；Codex 修改目录后需重启客户端 |
+| AGENT-TERMINAL-QUALITY-COMPARISON | 用同一 Schema 3 fixture 对照 Codex/Strata 与 DSH，并消除模型/provider 混淆 | 报告明确 runner/model/provider 标签；6 个基础 fixture 均保留测试、测试字节、最终 sentinel、工具错误和 wall；DSH 至少可重复一次；判断 DSH 能否配置到 Strata endpoint；不能用混合 hosting 结果归因引擎 | 进行中 | Qwen/Strata `5/6`、`159.777 s`；DSH/DeepSeek 直连 `6/6`、`71.391 s`；两者模型、provider、hosting 不同 | 串行耗时只记录，不作通用速度结论；下一步先让 bench 的 DSH 报告不再写假 Qwen slug |
+| AGENT-STRICT-RESPONSE-CONTRACT | 缩小 Qwen/Strata 在完全正确后仍多写说明的最终收口缺口 | 同一失败 fixture 至少重复 5 次；比较当前配置、更明确的 final-message contract 和可行的 messages 配置；代码/测试不退化，严格 sentinel 通过率提高且其他 fixture 不下降 | 待做 | Schema 3 `transaction-rollback` 代码/测试正确但最终回复未只含 `RESULT=PASS`；旧 Schema 1/2 的 7/7、3/4 不作为当前基线 | 优先验证客户端可表达的最终消息约束；不能靠放宽 sentinel 检查掩盖问题 |
 | AGENT-CODEX-TITLE | Codex thread-title 请求不进入引擎 | 三个 title 请求返回合法标题且 engine request/prompt/output 增量均为 0；普通 Responses 请求仍进入引擎；健康与配置可回滚 | 已完成 | L-126：B `1.8–2.1 ms`、零引擎请求/token；普通请求 +1；A2 基线 `1.978–10.292 s` | **已采纳并保持运行**；配置可回滚，无引擎重建 |
 | AGENT-CODEX-COMPACTION-LRU | 多线程 compaction 保留各自工具前缀 | 1 主 3 子代理交错时每个线程的 compaction 均用自己的工具集合；并发安全、有界 LRU 和淘汰测试通过；无效 metadata/title 不污染缓存；默认关闭路径字节不变 | 已完成 | L-127：8.3K prompt 复用量 `99.52–99.64%`，墙钟 `0.69–0.89 s`；45 tests OK，title 仍零引擎 | **已采纳并保持运行**；B2 配置/源码可回滚 |
 | AGENT-STATIC-SYSTEM-PREFIX | 让兄弟 agent 复用共享 system 前缀 | deterministic 渲染证明新顺序增加共享字节，同时 tool/system 内容集合不变；真实模型仍按声明工具调用；1/2 路端到端改善 ≥1%，4 路不退 >1%；默认关闭 byte-identical | 已完成 | L-128：共同前缀 `320 → 54,366` 字节；后续兄弟复用 `5,120` token，平均墙钟 `24.56%`，后三 `33.34%`；四次并发工具隔离通过 | **已采纳并保持运行**；B3a 6/2、engine hash 不变；需同步 pack 模板 |
@@ -283,7 +287,7 @@
 | F1F2 | 多路准入判据 | 由 S0b/S2 的证据决定可接受上界；不允许首 token 后静默数十秒 | 待做 | R11 旧提案 | AI 根据测量裁决，不等待用户 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀；有测试 | 待做 | | |
 
-未完成采纳项：21
+未完成采纳项：22
 
 ## 搁置
 

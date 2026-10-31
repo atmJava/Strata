@@ -9,21 +9,25 @@
   偶尔 2 个、峰值 1 主 3 子代理；1/2 路是主要性能场景，4 路非回退，6/8 只做安全回归。
 - **继续执行**：用户明确要求继续计划。旧的 resident-path 局部性能项降为暂停历史候选；
   当前先把“速度快但质量感觉下降”拆成可验证的客户端工具面、模型/采样和真实任务成功问题。
-- 当前项：AGENT-CODEX-MODEL-CATALOG-QUALITY
-- 当前诊断：模型目录缺失会让 Codex 从 14 个
-  工具降到 9 个并省略 `apply_patch`；服务日志累计记录 6 次模型写未声明
-  `apply_patch` 后退回文本。本地目录修复后 7/7 fixture 通过，但 `apply_patch` 四次合并
-  仅 3/4 严格通过，尚不能宣称主观质量已恢复。见
-  [结果](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
+- 当前项：AGENT-TERMINAL-QUALITY-COMPARISON
+- 当前诊断：模型目录缺失会让 Codex 从 14 个工具降到 9 个并省略
+  `apply_patch`；服务日志累计记录 6 次模型写未声明 `apply_patch` 后退回文本。目录供给
+  已产品化为 `strata codex catalog [--apply]`，幂等、先备份、模板缺 freeform
+  `apply_patch` 时拒绝写入。Schema 3 的当前 Qwen/Strata 结果是 6 个基础 fixture
+  严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；唯一基础失败是代码/测试正确、
+  最终回复多写了说明后再给 sentinel。DSH/DeepSeek 直连在同一 Schema 3 为 `6/6`，
+  但模型、provider 和 hosting 同时不同，不能归因 Strata 引擎。下一步把 DSH 作为正式
+  终端对照，消除报告中的模型标签歧义，并检查 DSH 能否经 Strata endpoint 运行。
+  见 [结果](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第二十四次修订并恢复执行。质量、任务成功率和工具协议是硬门；局部优化必须先给出
+  已完成第二十五次修订并继续执行。质量、任务成功率和工具协议是硬门；局部优化必须先给出
   真实触发率后的整任务 1% 上界；低频但
   单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。没有接入用户实际路径的能力
   只算机制收益，不能写成体验已改善；重启成本必须计入当轮。
-  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第二十四版更新后仍受旧 unfinished goal
+  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第二十五版更新后仍受旧 unfinished goal
   限制，当前工具不能改写目标文本或恢复它。本仓库计划是当前执行的权威目标，不能把平台
   旧目标当作已更新。
-- 当前阶段：先修复 Codex 模型目录/工具面并建立代表性质量回归，再恢复速度优化。此前真实
+- 当前阶段：先收口 Codex/DSH 终端工具面和代表性质量回归，再恢复速度优化。此前真实
   Agent 请求级优化已采纳 title、线程级 compaction LRU（在对应测试请求
   形状上有效）、共享 system 前缀顺序、自动 boundary pin 和两路串行准入。B4 后三个兄弟
   请求复用 `97.34%`，后三墙钟 `5.001 → 1.335 s`（`-73.31%`）。
@@ -344,7 +348,7 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前候选：`AGENT-EDIT-TEST-LOOP-TRACE`。现役 B4 是已采纳的
+- 当前候选：`AGENT-TERMINAL-QUALITY-COMPARISON`。现役 B4 是已采纳的
   两路串行版本，engine 仍为
   `105a4171...`；title、compaction LRU、共享 system、boundary pin 与两路串行均已通过
   各自安全门；PLE inflight 已按三组配对采纳，4M row-cache 已否决。上下文饮食真实
@@ -355,7 +359,7 @@
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
   已重写和评审，按请求级缓存、排队和工具路径优先，不再从低收益局部内核开始。
-- 未完成采纳项：21
+- 未完成采纳项：22
 - 阻塞：服务器已恢复到双卡可用，当前无基础设施阻塞。DFlash2 drafter 权重仍缺失；代码、
   服务接线和工具已保留，该路线不阻塞主线。
 
@@ -568,7 +572,7 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-11-01（第二十四版计划；质量与工具协议恢复为硬门。已复现 Codex
-  模型目录缺失把工具面从 14 降到 9 并省略 `apply_patch`，本地目录后 7/7 fixture；
-  `apply_patch` 合并仍 3/4。生产未重启，health loaded、6 slots / 2 groups、
+- 最后更新：2026-11-01（第二十五版计划；质量与工具协议为硬门。Codex 目录供给已产品化；
+  Schema 3 当前 Qwen/Strata 基础严格 `5/6`、测试 `6/6`、`apply_patch` 重复 `3/3`，
+  DSH/DeepSeek 直连 `6/6`。生产未重启，health loaded、6 slots / 2 groups、
   systemd inactive）

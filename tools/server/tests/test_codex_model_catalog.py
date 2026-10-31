@@ -1,15 +1,7 @@
-import importlib.util
 import json
 import pathlib
-import sys
 
-
-SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "codex-model-catalog.py"
-SPEC = importlib.util.spec_from_file_location("codex_model_catalog", SCRIPT)
-CATALOG = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-sys.modules[SPEC.name] = CATALOG
-SPEC.loader.exec_module(CATALOG)
+from strata_control import codex_catalog as CATALOG
 
 
 def catalog_with_template():
@@ -84,6 +76,31 @@ def test_rejects_missing_template_and_bad_context():
         assert "below" in str(exc)
     else:
         raise AssertionError("bad context was accepted")
+
+
+def test_rejects_template_without_freeform_apply_patch():
+    catalog = catalog_with_template()
+    del catalog["models"][0]["apply_patch_tool_type"]
+    try:
+        update(catalog)
+    except CATALOG.CatalogError as exc:
+        assert "freeform apply_patch" in str(exc)
+    else:
+        raise AssertionError("template without apply_patch was accepted")
+
+
+def test_collapses_duplicate_model_entries():
+    catalog = catalog_with_template()
+    first, _ = update(catalog)
+    duplicate = json.loads(json.dumps(first["models"][-1]))
+    duplicate["context_window"] = 8192
+    first["models"].append(duplicate)
+    updated, action = update(first)
+    assert action == "updated"
+    assert [
+        model for model in updated["models"]
+        if model.get("slug") == "qwen3.8-flash-next-iq3_xxs-abliterated"
+    ] == [updated["models"][-1]]
 
 
 def test_write_catalog_keeps_a_backup(tmp_path):

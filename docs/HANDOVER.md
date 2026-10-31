@@ -12,11 +12,11 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-157。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-160。
 
 ## 2. 当前断点
 
-- **全局目标已第二十四次修订并恢复执行**：用户反馈 Strata 显著更快，但主观质量下降。
+- **全局目标已第二十五次修订并继续执行**：用户反馈 Strata 显著更快，但主观质量下降。
   当前先修复可验证的 Codex 模型目录/工具面、建立代表性任务质量门，再恢复普通单代理
   编辑—测试循环的性能优化。质量、任务成功率、测试正确性和工具协议是硬门，不能用约 7%
   的速度收益交换严格收口失败。真实 AI vibe coding 的最终目标仍是任务完成时间、首个可
@@ -25,14 +25,17 @@
   触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
   可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十四版更新后该接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十四版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十五版更新后该接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十五版计划
   为权威，不要回到平台旧目标的状态快照。
 - **当前质量断点**：模型 slug 不在 Codex 本地目录时，请求只有 9 个工具且没有
   `apply_patch`；加入目录条目后变为 14 个工具，`apply_patch` 为 `custom`。生产服务日志
-  累计有 6 次未声明 `apply_patch` 后退回文本。Qwen high 的 6 个基础 fixture 严格
-  5/6、测试 6/6；DeepSeek 直连参考 6/6，但同时改变模型/provider/hosting。目录修复后
-  7 个 fixture 7/7，但 `apply_patch` 合并四次为 3/4，仍有最终收口缺口。结果见
+  累计有 6 次未声明 `apply_patch` 后退回文本。目录供给已产品化为
+  `strata codex catalog [--apply]`。Schema 3 的 Qwen/Strata 基础 fixture 严格 `5/6`、
+  测试 `6/6`；`apply_patch` 独立重复 `3/3`。唯一基础失败是代码和测试正确、最终回复
+  多写了说明。DSH/DeepSeek 直连在同一组 6 fixture 为 `6/6`，但同时改变模型、
+  provider 和 hosting。下一步是正式终端质量对照，并查 DSH 能否经 Strata endpoint 运行。
+  结果见
   [AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
 - **暂停的历史候选**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的 native
   direct-pointer 路径真实命中，group 级 `11.671 → 7.848 ms/layer`（`1.49x`）。

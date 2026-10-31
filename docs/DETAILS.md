@@ -781,9 +781,10 @@ stream_idle_timeout_ms = 600000         # a first, long prompt can take minutes 
 Run `codex` (or `codex exec "..."`). If Codex warns `Model metadata for ... not found`, it
 falls back to a reduced tool set that omits `apply_patch`; the model may then write the tool
 call as plain text and fail to edit the file. Add an entry for the model slug to
-`~/.codex/models.json` and point `model_catalog_json` at it. In a source checkout,
-`python3 tools/server/codex-model-catalog.py --apply` adds the current Qwen slug atomically
-and keeps a timestamped backup. Restart Codex after changing the catalog.
+`~/.codex/models.json` and point `model_catalog_json` at it. Run `strata codex catalog`
+to check the current Qwen slug, or `strata codex catalog --apply` to add or refresh it. The
+write is atomic, keeps a timestamped backup, and is idempotent. Restart Codex after changing
+the catalog.
 On Windows, Codex's own sandbox rejected shell commands until it was started with `-c 'windows.sandbox="unelevated"'` (a
 Codex setting, not Strata's).
 
