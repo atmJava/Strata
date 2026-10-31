@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-122，按编号）
+## 台账索引（L-000…L-123，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -136,6 +136,7 @@
 | L-120 | 10-31 10:1xZ | SIDE-MIXER 两卡 14 进程、196 条结果行、560 个 buffer 全 bitwise；T=3/4 整窗上界 `+1.10–1.29%`，但 `side_proj/sidem` 含 `!batch_rec_`，生产 `capture_batch()` 命中率为零 | **UTIL-SIDE-MIXER server 可达性门否决；未构建、未重启；转 batch-only 三/四行候选** |
 | L-121 | 10-31 10:4x | 修正到真实 18 GDN + 6 QSA 层序后，T=2 的 24 层 graph 两卡均 7/7 胜、全 bitwise，中位节省 `177.0208/191.7025 us`；B 三组 greedy 各两轮逐字一致并命中真实 T=2 capture | **GPU 预筛/B parity 通过；A1 6 路 GPU runtime 故障阻断 A-B-A；后由 L-122 完成** |
 | L-122 | 10-31 11:1x | 重启后同 boot A1-B-A2 的 2/4/6/8 路为 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`；只有 8 路过双门，2/4 路回退超过 1%，2 路 A 漂移 `-7.067%` | **UTIL-BATCH-SIDE-MIXER 吞吐/漂移门否决；A2 已恢复；三臂 36 波零错误、零外来请求** |
+| L-123 | 10-31 11:2x | Q5 head IL grid 全 parity；有效 `screen2-gpu0-*` 中 T=2 的 capped grid 全慢于默认，T=3 最佳 grid `2560` 仅比默认快 `0.182` 个百分点，远低于 18.5% head 门槛 | **UTIL-Q5-HEAD-IL-GRID 性能筛选门否决；源码已移除；未构建 server、未重启** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3917,6 +3918,43 @@ graph 路径没有提供可复现收益，部分行反而回退。
 `batch_poll -> verdict -> stage hand-off -> batch_launch`，以及 `conc_serving` 的 doorbell
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
+
+## L-123 UTIL-Q5-HEAD-IL-GRID：persistent CTA grid 的收益远低于 head 门槛
+
+**判定**：**否决。** 现有精确 IL kernel 在所有测试 case 上保持 bitwise，但限制 head CTA
+grid 没有产生足够的局部加速。`T=2` 的所有 capped grid 都慢于默认；`T=3` 最好的 grid
+`2560` 只比默认快 `0.182` 个百分点。离预注册的 18.5% head 或约 `0.192 ms` 整 stage
+门槛超过 15 个百分点，因此没有进入七进程确认或 server A-B-A。
+
+**执行**：候选只增加默认关闭的 `STRATA_MMVQ_IL_HEAD_GRID=N`，仅对
+`n_out > 100000` 生效。独立构建位于
+`/opt/ai/src/strata-q5-head-grid-20261031T1115CST`；配置复用
+`/opt/ai/src/llama.cpp-3cf03257`，`build75/mmvq_il_parity` 覆盖 `T=1..8`、rows `1/2/4`
+和真实 head table，全部与 plain/current-IL 参考逐字相等。候选源码在筛选后移除。
+
+有效计时记录是 `screen2-gpu0-*`。早先 `screen-gpu0-*` 因 `MMVQ_IL_ONLY` 过滤错误
+产生了相同 cell，不作为证据。顺序扫描的绝对时间随进程上移，故只比较同一进程内
+selected-IL/plain 的比率：
+
+| grid | T=2 rows/gain | T=3 rows/gain | T=4 rows/gain |
+| ---: | ---: | ---: | ---: |
+| 160 | 4 / `+0.007%` | 2 / `-0.057%` | 2 / `+0.671%` |
+| 320 | 4 / `+0.007%` | 2 / `-0.540%` | 2 / `0.000%` |
+| 640 | 4 / `-0.006%` | 2 / `+0.298%` | 2 / `+0.005%` |
+| 1280 | 4 / `+0.847%` | 2 / `0.000%` | 2 / `+1.377%` |
+| 2560 | 4 / `0.000%` | 2 / `+1.272%` | 2 / `-0.390%` |
+| 5120 | 4 / `+0.012%` | 2 / `0.000%` | 2 / `+0.128%` |
+| off | 4 / `+1.017%` | 2 / `+1.090%` | 2 / `+0.010%` |
+
+**恢复 / 证据**：A2 server/engine/vision PID `13890/13906/13901`，health loaded、
+6 slots / 2 groups、engine `105a4171...`、config `88de996a...`；运行环境无
+`STRATA_MMVQ_IL_HEAD_GRID`。systemd inactive/dead，RAM available 约 14 GiB、swap 0，
+GPU0/1 约 `1006/1074 MiB` free 且 idle。证据目录
+`/opt/ai/logs/util-q5-head-il-grid-20261031T1120CST/`，summary sha256
+`71163c81167a730c5b44aaae4a535db8b4900273c8dac918f984636a55ae2d43`。
+
+**没测什么**：没有七进程确认、server 构建/启动、2/4/6/8 A-B-A、长上下文或其他后端。
+该否决只覆盖现有 sm_75 Q5_K head kernel 的 persistent CTA cap。
 
 ## L-122 UTIL-BATCH-SIDE-MIXER：同 boot A-B-A 在 2/4 路回退并漂移超门
 

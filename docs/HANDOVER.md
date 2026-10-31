@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T11:15+08:00。
+> 整理时间：2026-10-31T11:30+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-122。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-123。
 
 ## 2. 当前断点
 
@@ -65,6 +65,12 @@
   相对 A 合并中位为 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场
   `4/6, 1/6, 2/6, 5/6`。只有 8 路同时过 1% 与 5/6，2/4 路回退超过 1%，2 路 A1/A2
   漂移 `-7.067%` 超过 3%。候选已否决，A2 已恢复，不进入 T=2 邻近窗口扫描。
+  `UTIL-Q5-HEAD-IL-GRID` 随后只改生产 Q5_K head 的 persistent CTA grid。真实
+  `mmvq_il_parity` 对 `T=1..8`、rows `1/2/4` 和 head table 全部 bitwise；但有效
+  `screen2-gpu0-*` 计时中，`T=2` 的每个 capped grid 都慢于默认 IL 路径。`T=3` 最佳
+  grid `2560` 只比默认快 `0.182` 个百分点，远低于 18.5% head 或约 `0.192 ms` 的整
+  stage 门槛，因此在性能筛选门否决；没有七进程确认、server 构建、重启或 A-B-A。临时源码
+  已移除，A2 环境无 `STRATA_MMVQ_IL_HEAD_GRID`。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
@@ -95,8 +101,9 @@
   多并发硬门。profile 已把尾部定位到六槽轮换后的 underfilled group；跨 group 延迟合并、
   vocabulary-row head split、Q8 write/mixer fusion 与 batch poll 快返回都已否决。
   B6 kernel/reach 门也已否决；batch side mixer 虽然过了 production-shaped GPU 门和真实
-  T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决。当前候选为空，下一步
-  回到 6 槽轮换后的 underfilled group 与新窗口准入之间的调度/状态成本审计。
+  T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决；Q5 head grid 也在
+  性能筛选门否决。当前候选为空，下一步审计末级约 `8.5%` 的 `waitA` 到底来自 CPU
+  expert-plan 计算/发布、GPU 完成后的 host poll/hand-off，还是普通调度等待。
 
 ## 3. 当前生产
 
@@ -105,10 +112,10 @@
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=0` |
-| server/engine/vision | `7724/7744/7739`，health loaded |
+| server/engine/vision | `13890/13906/13901`，health loaded |
 | A2 baseline | engine `105a4171...`，config `88de996a...`，parity 通过 |
-| B candidate | engine `49e1e84c...`，config `c0e3bc9b...`，已停止并否决 |
-| GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；约 `330/434 MiB` free |
+| latest rejected candidate | Q5 head grid；未构建 server，源码已移除 |
+| GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；约 `1006/1074 MiB` free |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
@@ -128,13 +135,14 @@ STRATA_SHARED_SLOT_ROPE=1
 STRATA_SM75_PERF=1
 ```
 
-候选 B 只比 A 多了 `STRATA_BATCH_SIDE_MIXER=1`；该进程已停止，A2 运行环境没有
+已停止的 batch-side B 只比 A 多了 `STRATA_BATCH_SIDE_MIXER=1`；A2 运行环境没有
 `STRATA_PF_WMMA`、`STRATA_PA_V2T`、`STRATA_SEL_OVERLAP`、
 `STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING`、`STRATA_PA_GROUP3`、
 `STRATA_IQ3_GRID_REPL`、`STRATA_IQ3_ACT_RELOAD`、`STRATA_IQ3_WEIGHT_REUSE`、
 `STRATA_IQ3_GRID_PAD`、`STRATA_IQ3_WEIGHT_RO`、`STRATA_BATCH_MTP`、
 `STRATA_PIPED_MTP`、`STRATA_HEAD_SPLIT`、`STRATA_FUSE_HEAD_GR`、`STRATA_LFUSE`、
-`STRATA_MMVF_ROWS`、`STRATA_PROFILE_*` 或 `STRATA_NCU_*`；`STRATA_POLL_FAST` 已随否决移除。
+`STRATA_MMVF_ROWS`、`STRATA_MMVQ_IL_HEAD_GRID`、`STRATA_PROFILE_*` 或
+`STRATA_NCU_*`；`STRATA_POLL_FAST` 已随否决移除。
 `STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
 引擎子进程，不能替代 service drop-in。
 

@@ -134,6 +134,12 @@
     A1-B-A2 在 2/4/6/8 路为 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场
     `4/6, 1/6, 2/6, 5/6`；只有 8 路过双门，2/4 路回退超过 1%，2 路 A 漂移 `-7.067%`。
     候选否决，A2 已恢复，零 HTTP/执行错误、零外来请求。
+36. **UTIL-Q5-HEAD-IL-GRID 在性能筛选门否决**：只限制生产 Q5_K output head 的
+    persistent CTA grid，现有 IL 每行算术和 reduction 不变。`mmvq_il_parity` 对
+    `T=1..8`、rows `1/2/4` 和 head table 全部 bitwise；有效 `screen2-gpu0-*` 中
+    `T=2` 每个 capped grid 都慢于默认路径，`T=3` 最佳 grid `2560` 也只比默认快
+    `0.182` 个百分点，远低于预注册 18.5% head / 约 `0.192 ms` 整 stage 门槛。临时源码
+    已移除，没有构建 server、重启或 A-B-A；下一项只读拆解 `waitA`。
 
 ## 候选
 
@@ -175,6 +181,7 @@
 | UTIL-QFUSE-HC | 生产 HC Q8 up read 同读写出 consumer q8_1，省掉独立量化 | 两卡 `T=1..8` 全输出和 q8 image 逐字；完整 read+quantize 路径至少一个生产宽度 ≥1% 且 5/7 胜；再乘真实每 stage 48 次读后仍有 ≥1% 整窗保守上界，才允许 server A-B-A | 否决 | L-119：完整局部路径 T=1/2/3 为 `+1.31–2.67%`，全 bitwise；但仅省 `0.44–0.79 us/read`，每 stage 投影只有 `0.11–0.20%` | 未构建、未重启；不再试 HC q8 image fusion 或 atomic-tail 同形近似 |
 | UTIL-SIDE-MIXER | 用现有 `STRATA_SIDE_MIXER=2` 重叠 GDN qkv/gate 与 QSA q/k/v 投影 | 两卡 `T=1..8` 全输出逐字；至少一个生产宽度 ≥`0.183 ms` 且 5/7 胜；源码证明生产 route 命中后才允许 server A-B-A | 否决 | L-120：14 进程、560 个 buffer 全相等；T=3/4 整窗上界 `1.10–1.29%`，但 `side_proj/sidem` 含 `!batch_rec_`，生产的 `capture_batch()` 全部不会命中 | 未构建、未重启；不把现有 env 直接用于 A-B-A |
 | UTIL-BATCH-SIDE-MIXER | 为生产两行 batch window 的 GDN qkv/gate 与 QSA q/K/V 实现窄范围 side stream | 先证明 graph capture、slot-local state、row order 与全部输出 bitwise；production-shaped batch harness 两卡均 7/7 胜且过 `0.183 ms`；随后 env-only A1-B-A2 过 2/4/6/8 的 1%、5/6、非回退、漂移和零错误门 | 否决 | L-121/L-122：24 层 mixed graph 两卡 7/7 胜、全 bitwise，B/A2 parity 全过；A1-B-A2 的 2/4/6/8 路 `-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`；2 路漂移 `-7.067%` | 只有 8 路过双门但其他级失败；A2 已恢复，不扫描 T=2 邻近窗口或按并发级开条件分支 |
+| UTIL-Q5-HEAD-IL-GRID | 只限制生产 Q5_K head 的 persistent CTA grid，保留现有精确 IL 算术 | `T=1..8` 全部 bitwise；head 中位至少改善 18.5% 或约 `0.192 ms`，两卡同向且 5/7 胜，之后才允许 server A-B-A | 否决 | L-123：性能筛选门；全 parity，`T=2` 所有 capped grid 慢于默认，`T=3` 最佳只比默认快 `0.182` 个百分点，最佳 capped gain `1.272%` | 源码已移除；不扫描邻近 grid 或改写 IL row/reduction |
 | TEST-027 | 上游合并测试缺口 | 6 个 CTest 失败逐项归因；允许外部资产 skip，但不能把 OOM 或位差吞成跳过 | 待做 | L-092：`mmvq_il`、`iq_multi`、`gdn_rec`、`native_grouped`、`ple`、`native_expert_q8_0_q8_0` | 与性能优化分开收口 |
 | T-PROBE-PATH | 版本探针识别新部署路径 | 能从 server 子进程识别 `build75-027/strata`，并拒绝 hash 与运行路径不一致 | 已完成 | 2026-10-28 现网返回 `problems=[]`；engine/server/config 均来自运行 argv | 工具联合回归 `28 passed, 1 skipped`；完整 root GPU Metrics 本轮未重跑 |
 | QSA-DIAG | 150K QSA selection 诊断 | 同真实 150K prompt 读取 16-query union overlap、FP16/FP32 selected-cell 一致率、差异 cells 和 `qsa select` 占比；输出足以决定是否实现 | 已完成 | L-096：overlap 中位 28.0%/mean 26.84%；FP16 全选择 70.9207%、cells 99.9619%；select 4.0% | FP16 否决；候选共享上界 1.996%，转入下一项 |

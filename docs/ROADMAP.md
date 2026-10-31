@@ -69,8 +69,11 @@ head 已在源码门否决：末级每级只有一个 verifier 和一套 head �
 sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但 A1-B-A2 的
 2/4/6/8 路为 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`；只有 8 路
 名义过 1%，未过 5/6 胜，A 漂移还达 `+4.053%`。2/4/6 回退超过 1%，因此否决并恢复 A2。
-下一项回到真实阶段成本，寻找不经 IL/LFUSE 替换、也不重复 launch/head/group 聚合的独立
-固定成本机制。P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
+`UTIL-Q5-HEAD-IL-GRID` 随后只限制生产 Q5_K head 的 persistent CTA grid；全部
+`T=1..8`/rows `1/2/4` parity 通过，但 `T=2` 的 capped grid 均不如默认，`T=3` 最佳
+只比默认快 `0.182` 个百分点，已在性能筛选门否决。下一项回到末级约 `8.5%` 的 `waitA`
+真实来源：CPU expert-plan 计算/发布、GPU 完成后的 host poll/hand-off、普通调度等待。
+P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
 
 ## 候选路线
 
@@ -113,6 +116,7 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
 | UTIL-QFUSE-HC | M14 | 生产 HC Q8 up read 同读写出 consumer q8_1，省掉独立量化 launch | 已证伪（整窗绝对收益） | 低；两卡独立 harness，未重启 | **否决**：两卡全 bitwise，T=1/2/3 完整局部路径 `+1.31–2.67%`；但每 read 仅省 `0.44–0.79 us`，每 stage 48 次后只有 `0.11–0.20%` |
 | UTIL-SIDE-MIXER | M14 | 用 side stream 重叠 qkv/gate 与 QSA q/k/v | 已证伪（生产可达性） | 低；两卡独立 harness，未重启 | **否决**：T=3/4 整窗上界 `+1.10–1.29%`，560 个 buffer 全 bitwise；但生产 batch window 含 `!batch_rec_` 排除，命中率为零 |
 | UTIL-BATCH-SIDE-MIXER | M14 | 只对 `batch_rec_ && T==2` 重叠 GDN qkv/gate 与 QSA q/K/V | production graph 两卡 7/7 胜、全 bitwise；服务端至少一级 `+1%`、5/6 胜、其他级不回退 >1%、漂移 ≤3% | 中；两卡 GPU 预筛、B parity、三次同 boot sweep | **否决**：2/4/6/8 路 `-2.755%/-6.766%/+0.378%/+4.969%`，只有 8 路过双门；2 路漂移 `-7.067%`，A2 已恢复 |
+| UTIL-Q5-HEAD-IL-GRID | M14 | 只限制生产 Q5_K output head 的 persistent CTA grid | 全 `T=1..8`/rows `1/2/4` bitwise；head 改善至少 18.5% 或约 `0.192 ms`，两卡同向、5/7 胜后才进入 server | 低；独立构建与 kernel screening，未重启 | **否决（performance screening）**：全 parity；`T=2` 所有 capped grid 慢于默认，`T=3` 最佳只比默认快 `0.182` 个百分点，源码已移除 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -243,6 +247,13 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
     `-2.755%/-6.766%/+0.378%/+4.969%`，胜场 `4/6, 1/6, 2/6, 5/6`。只有 8 路同时过
     1% 与 5/6，2/4 路回退超过 1%，2 路 A1/A2 漂移为 `-7.067%`。候选否决，A2 已恢复；
     不扫描 T=2 邻近窗口或按并发级套用条件。
+40. **UTIL-Q5-HEAD-IL-GRID 在性能筛选门否决**：候选仅对 `n_out > 100000` 的 Q5_K
+    head 设置 persistent CTA 上限，保留现有精确 IL 每行算术和 reduction。
+    `mmvq_il_parity` 对 `T=1..8`、rows `1/2/4` 和真实 head table 全部 bitwise；
+    有效 `screen2-gpu0-*` 中 `T=2` 的 capped grid 全不如默认，`T=3` 最佳 grid `2560`
+    相对 plain 为 `+1.272%`，仅比默认高 `0.182` 个百分点，距 18.5% head/约
+    `0.192 ms` 整 stage 门槛超过 15 个百分点。未跑七进程确认或 server A-B-A，源码已移除。
+    下一项只读审计 `waitA`，与已否决的 poll 无 ring 快返回严格区分。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

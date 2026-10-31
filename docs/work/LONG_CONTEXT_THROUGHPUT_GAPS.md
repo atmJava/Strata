@@ -25,6 +25,20 @@ captured graph 全 bitwise。B 以 6 slots / 2 groups、health loaded 启动，�
 1% 与 5/6；2/4 路回退超过 1%，2 路 A 漂移 `-7.067%` 超过 3%。候选已否决，A2 已恢复；
 不扫描 T=2 邻近窗口，也不把单窗口形状收益当作固定并发级的端到端收益。
 
+**2026-10-31 Q5 head grid addendum**：`UTIL-Q5-HEAD-IL-GRID` 只限制生产
+`2560 -> 248320` Q5_K output head 的 persistent CTA grid，保留现有 exact IL 的每行算术、
+reduction 和 dispatch。`mmvq_il_parity` 对 `T=1..8`、rows `1/2/4` 和真实 head table
+全部 bitwise；有效 `screen2-gpu0-*` 计时中，`T=2` 的所有 capped grid 都慢于默认路径。
+`T=3` 最好的 grid `2560` 相对 plain kernel 为 `+1.272%`，却只比默认高 `0.182`
+个百分点，远低于从 head 约 `1.04-1.06 ms` 覆盖 stage 1% 所需的 18.5%/约
+`0.192 ms`。该候选已在性能筛选门否决，源码移除，没有构建 server 或重启。
+
+**下一只读审计**：末级 `waitA` 在 6/8 路窗口分别约 `1.63/1.65 ms`，占
+`19.22/18.27 ms` 的约 `8.5%`。下一步必须从源码和现有 stamp 区分：CPU expert-plan 计算、
+同步发布、GPU 已完成但 host poll/hand-off 尚未返回，以及普通流水调度等待。不能用
+`UTIL-POLL-TURNOVER` 已否决的“无 ring 快返回”解释或重试；只有真实触发率、保守整窗
+绝对节省 ≥1%、数值影响和回滚都成立时才预注册新候选。
+
 本文审查 `freeze/server-adapt-0.2.7` 在真实服务器和长上下文负载下仍未被主线覆盖的吞吐
 优化方向。逐项实现和已经测得的局部收益见
 [`HANDOVER-2026-10-29-freeze-027-throughput.md`](../archive/HANDOVER-2026-10-29-freeze-027-throughput.md)。

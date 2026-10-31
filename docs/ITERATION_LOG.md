@@ -3,6 +3,41 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-96 · Q5 head persistent grid 在性能筛选门否决
+
+- 目标 / 指标：验证只限制生产 `2560 -> 248320` Q5_K output-head 的 persistent CTA grid，
+  能否在保留现有精确 IL 每行算术和 reduction 的前提下，把头调用降低预注册的至少 18.5%
+  （约 `0.192 ms`），从而覆盖末级窗口 1%。
+- 假设与预期：默认约 15,520-31,040 个 CTA 每次只处理一个 row group，较小 persistent
+  grid 可能减少调度和尾部开销；如果这能把约 `1.04-1.06 ms` 的 head 明显压低，才值得
+  构建 server 并支付一次 A-B-A 的加载成本。
+- 为什么继续这一项：Q5 head 是末级占比约 `5.4-5.5%` 的独立固定成本，机制既不合并 group、
+  不拆双卡，也不改 token 选择，和已否决的 head split、batch head 合并及 Q8 head fusion 不同。
+- 改动与实验：默认关闭的 `STRATA_MMVQ_IL_HEAD_GRID=N` 只在 `n_out > 100000` 时生效，
+  扫描 `160/320/640/1280/2560/5120/off`。隔离构建通过 `mmvq_il_parity`；有效计时只取
+  `screen2-gpu0-*`，并比较同一进程内 selected-IL 对 plain-kernel 的比率。
+- 结果：`T=2` 的每个 capped grid 都慢于默认，最高只有 `+0.847%`。`T=3` 最好的 grid
+  `2560` 为 `+1.272%`，只比默认高 `0.182` 个百分点；仍需约 `18.5%` head 改善，差距
+  超过 15 个百分点。`T=4` 最佳 grid `1280` 为 `+1.377%`，同样不足以覆盖整 stage。
+- 判决：**UTIL-Q5-HEAD-IL-GRID 在性能筛选门否决。** parity 通过不等于收益足够；没有跑
+  七进程确认、server 构建或 A-B-A。早期 `screen-gpu0-*` 因 `MMVQ_IL_ONLY` 过滤错误，
+  不作为证据。临时源码已移除。
+- 预期为何落空：现有 grid-stride kernel 的默认大 grid 在真实 head 上已把每 CTA 的
+  work/tail 压得很小；减少 CTA 主要增加每 CTA 串行行数。`T=3` grid 略有收益，但离
+  临界路径 1% 的绝对预算仍差 15 个百分点以上。
+- 生产状态与回滚：A2 server/engine/vision PID `13890/13906/13901`，health loaded、
+  6 slots / 2 groups、engine `105a4171...`、config `88de996a...`；运行环境没有
+  `STRATA_MMVQ_IL_HEAD_GRID`。systemd inactive/dead，RAM available 约 14 GiB、swap 0，
+  两卡 idle 且分别约 `1006/1074 MiB` free。未重启。
+- 证据：台账 L-123、`UTIL_Q5_HEAD_IL_GRID_RESULT-20261031.md`；目录
+  `/opt/ai/logs/util-q5-head-il-grid-20261031T1120CST/`，summary sha256
+  `71163c81167a730c5b44aaae4a535db8b4900273c8dac918f984636a55ae2d43`。
+- 学到什么：只凭“persistent grid 通常更省调度”不能越过生产形状门槛；必须在同进程内把
+  候选与默认完整路径比较，并报告真实 head/整 stage 的绝对比例。
+- 下一步与理由：只读审计末级约 `8.5%` 的 `waitA`，判定它是在等 CPU expert-plan 计算/
+  发布、GPU 已完成但 host poll/hand-off 尚未返回，还是普通调度等待。该审计必须给出真实
+  触发率和保守整窗绝对预算后才预注册候选，并严格避开已否决的 poll 无 ring 快返回。
+
 ## I-20261031-95 · Batch side mixer 完成同 boot A-B-A，在 2/4 路回退和 2 路漂移门否决
 
 - 目标 / 指标：完成 `UTIL-BATCH-SIDE-MIXER` 在同一 boot 的 A1-B-A2，验证生产
