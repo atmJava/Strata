@@ -19,11 +19,12 @@ import sys
 import time
 import urllib.request
 
-BASE = "http://127.0.0.1:8080"
+BASE = os.environ.get("QE_BASE", "http://127.0.0.1:8080")
+MODEL = os.environ.get("QE_MODEL", "qwen3.8-flash-next-iq3_xxs-abliterated")
 OUT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/qeval")
 OUT.mkdir(parents=True, exist_ok=True)
-MAX_TOKENS = 2200
-EFFORT = "high"                      # -> xhigh in Strata's template
+MAX_TOKENS = int(os.environ.get("QE_MAX_TOKENS", "2200"))
+EFFORT = os.environ.get("QE_EFFORT", "high")      # -> xhigh in Strata's template
 
 
 def facts(n=45):
@@ -71,7 +72,7 @@ TASKS = [
 
 def post(text, max_tokens=MAX_TOKENS):
     payload = {
-        "model": "qwen3.8-flash-next-iq2_xs",
+        "model": MODEL,
         "messages": [{"role": "user", "content": text}],
         "max_tokens": max_tokens,
         "reasoning_effort": EFFORT,

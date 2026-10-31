@@ -22,8 +22,9 @@ def request(items, *, tools=None, kind="turn"):
     return {
         "model": "qwen",
         "stream": True,
+        "temperature": 0.25,
         "instructions": "instructions-secret",
-        "tools": tools if tools is not None else [{"name": "exec_command"}],
+        "tools": tools if tools is not None else [{"type": "function", "name": "exec_command"}],
         "client_metadata": {"x-codex-turn-metadata": json.dumps(turn)},
         "input": items,
     }
@@ -74,6 +75,8 @@ class AgentShapeProxyTest(unittest.TestCase):
         self.assertNotIn("thread-secret", rendered)
         self.assertEqual(shaped["input"]["count"], 1)
         self.assertEqual(shaped["tools"]["names"], ["exec_command"])
+        self.assertEqual(shaped["tools"]["types"], ["function"])
+        self.assertEqual(shaped["sample"], {"temperature": 0.25})
 
     def test_compaction_tools_are_the_first_divergence(self):
         previous = MODULE.request_shape(request([message("same")]))

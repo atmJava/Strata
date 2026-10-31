@@ -63,6 +63,9 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `agent_budget_ab.py` | agent-shaped A/B with a real tool loop, self-scoring tasks | `/opt/ai/runs/agent-budget-ab-*.json` |
 | `probe-agent-sessions.py` | metadata-only 1/2/4-conversation A/A for shared prompts, continuation turns, latency and cache reuse; no restart | JSON named by `--output` |
 | `probe-codex-sessions.py` | real Codex session token shape: totals, root turns, compaction cache gaps and top uncached events; never prints prompt text or server timing as attribution | JSON named by `--output` or stdout |
+| `agent-shape-proxy.py` | privacy-safe request shape between Codex and Strata: model, declared tool names/types, context sizes and response metadata; no prompt or response bodies | JSONL named by `--log` |
+| `codex-model-catalog.py` | add or refresh the current Strata model slug in a Codex JSON model catalog with an atomic write and timestamped backup; no `--apply` means check only | JSON status on stdout |
+| `bench-agent-quality.py` | deterministic fresh-repository coding tasks through Codex; scores tests, protected test bytes, final sentinel and tool protocol without retaining prompt or response text | JSON named by `--output` |
 | `quality_eval.py`, `quality_eval_budget.py` | small self-scoring quality eval (the quality gate) | stdout |
 | `effort-cost.py`, `effort_lang_ab.py`, `replay_effort_ab.py` | what a thinking budget costs and changes | jsonl / stdout |
 | `conv_cache_ab.py` | two long conversations alternating: parking and restore costs | stdout |

@@ -7,8 +7,13 @@
 
 ## 当前决策前沿
 
-0. **全局目标已第二十三次修订并暂停**：优化真实 AI vibe coding 的任务墙钟、首个可执行结果、
-   严重尾部和成功率；没有进入用户实际路径的能力只算机制收益。普通热续轮固定成本项
+0. **全局目标已第二十四次修订并继续执行**：先把真实 AI vibe coding 的质量、任务成功率、
+   指令遵循和工具协议设为硬门，再优化任务墙钟、首个可执行结果和严重尾部；没有进入用户
+   实际路径的能力只算机制收益。当前项 `AGENT-CODEX-MODEL-CATALOG-QUALITY` 已复现
+   Codex 模型目录缺失会从 14 个工具降到 9 个并省略 `apply_patch`；本地目录修复后
+   7/7 fixture 通过，但 `apply_patch` 四次合并仅 3/4 严格通过。下一步
+   `AGENT-CODEX-CATALOG-PROVISION` 先找产品级安装/连接入口并验证幂等回滚，不用速度
+   收益覆盖质量缺口。普通热续轮固定成本项
    `AGENT-HOT-TURN-FIXED-COST` 已否决：`short_read=0` 在所有热续轮尺寸都未取得
    1% 收益，1 路短热续 prompt/wall 反而慢 `13.75%/8.14%`，因此保留默认 64，
    不扫描邻近阈值。`AGENT-EDIT-TEST-LOOP-TRACE` 已完成：576 次测试的 178 次命令签名
@@ -181,6 +186,8 @@
 
 | ID | 项 | 验收条件 | 状态 | 证据 | 备注 |
 |---|---|---|---|---|---|
+| AGENT-CODEX-MODEL-CATALOG-QUALITY | 修复 Codex 缺失模型目录造成的工具面缩减 | 真实请求声明 `apply_patch`；服务无未声明工具；7 个 coding fixture 测试/测试不变/最终 sentinel 全过；`apply_patch` 至少 3 次独立稳定；目录幂等可回滚；不改生产引擎 | 诊断完成，修复未产品化 | L-159：无目录 9 工具、有目录 14 工具；日志 6 次未声明；基础 Qwen high 5/6、DeepSeek 参考 6/6、目录后 7/7；`apply_patch` 合并 3/4 | 质量是硬门；不把混合模型/hosting 差异归咎引擎；`medium` 更快约 7% 但严格 2/4，保留 high |
+| AGENT-CODEX-CATALOG-PROVISION | 让产品安装/连接流程幂等供给 Codex 模型目录 | 找出现有 launch/install/connect 入口；不覆盖用户配置；目录匹配实际模型 slug；重复运行不重复添加；失败可恢复；陌生用户目录走通；真实 Codex 请求工具面和 7 fixture 复测通过 | 进行中 | `tools/server/codex-model-catalog.py` 与 3 tests 已通过；尚需嵌入产品路径和服务/客户端重启边界 | 不重启 GPU；若当前版本没有自动连接入口，先做最小文档/检查命令并明确手工步骤 |
 | AGENT-CODEX-TITLE | Codex thread-title 请求不进入引擎 | 三个 title 请求返回合法标题且 engine request/prompt/output 增量均为 0；普通 Responses 请求仍进入引擎；健康与配置可回滚 | 已完成 | L-126：B `1.8–2.1 ms`、零引擎请求/token；普通请求 +1；A2 基线 `1.978–10.292 s` | **已采纳并保持运行**；配置可回滚，无引擎重建 |
 | AGENT-CODEX-COMPACTION-LRU | 多线程 compaction 保留各自工具前缀 | 1 主 3 子代理交错时每个线程的 compaction 均用自己的工具集合；并发安全、有界 LRU 和淘汰测试通过；无效 metadata/title 不污染缓存；默认关闭路径字节不变 | 已完成 | L-127：8.3K prompt 复用量 `99.52–99.64%`，墙钟 `0.69–0.89 s`；45 tests OK，title 仍零引擎 | **已采纳并保持运行**；B2 配置/源码可回滚 |
 | AGENT-STATIC-SYSTEM-PREFIX | 让兄弟 agent 复用共享 system 前缀 | deterministic 渲染证明新顺序增加共享字节，同时 tool/system 内容集合不变；真实模型仍按声明工具调用；1/2 路端到端改善 ≥1%，4 路不退 >1%；默认关闭 byte-identical | 已完成 | L-128：共同前缀 `320 → 54,366` 字节；后续兄弟复用 `5,120` token，平均墙钟 `24.56%`，后三 `33.34%`；四次并发工具隔离通过 | **已采纳并保持运行**；B3a 6/2、engine hash 不变；需同步 pack 模板 |
@@ -276,7 +283,7 @@
 | F1F2 | 多路准入判据 | 由 S0b/S2 的证据决定可接受上界；不允许首 token 后静默数十秒 | 待做 | R11 旧提案 | AI 根据测量裁决，不等待用户 |
 | cache_salt | 前缀缓存隔离 | 不同 salt 不共享前缀；有测试 | 待做 | | |
 
-未完成采纳项：19
+未完成采纳项：21
 
 ## 搁置
 

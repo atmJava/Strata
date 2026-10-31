@@ -2,26 +2,25 @@
 
 日期：2026-10-31
 
-状态：第二十三次修订后暂停。用户于 2026-10-31 要求保留进度并暂停优化；恢复前不启动
-新候选、不重启服务做实验、不继续未完成的并发矩阵。
+状态：第二十四次修订后恢复执行。用户反馈 Strata 显著更快，但主观质量下降；当前先以
+Codex 模型目录、真实工具面、任务成功率和严格收口为硬门，再恢复速度优化。
 
 ## 全局目标
 
-除非用户明确停止，持续缩短真实 AI vibe coding 任务从提交到产生可用代码、测试结果或
-明确阻塞的时间，并减少完成同一任务所需的重复模型工作。当前执行主轴是通常 1 个主代理、
-偶尔 2 个的编辑—测试循环；优先消除每一轮都会发生的 prompt/read 与 decode 等待。
-每轮必须先用真实触发率和绝对秒数证明收益，不能把局部 kernel 改善或 token/s 当作结果。
-当前 frontier 已从“猜相邻 kernel”收窄到 596/94K 普通热续轮中反复出现的 expert
-布局/传输成本。`wait copy`、lookahead 与“重复 dequant”三条假设已经分别被实测或
-源码审计否决。resident direct-pointer 候选在 group 级达到 `1.49x`，端到端 596 的
-1 路 wall 改善 `1.862%`（相对 A1 为 `2.145%`、`32.667 ms`）且三波全胜；这符合用户
-“1% 多也算”的价值原则，但仍未过本项预注册的绝对 `0.05 s` 门，94K wall 差值也没有
-对应 prompt 改善，4/6/8 未完成。因此只保留为暂停中的未采纳候选，不把 `1.86%`
-写成完整验收，也不放宽质量或非回退门。
+除非用户明确停止，持续提高真实 AI vibe coding 的任务成功率、指令遵循、工具协议和
+代码正确性，再缩短任务从提交到产生可用代码、测试结果或明确阻塞的时间，并减少重复模型
+工作。质量不是主观附加项：测试必须通过、受保护测试不能改写、最终回复必须收口、工具调用
+必须真实声明，否则速度收益无效。当前执行主轴是通常 1 个主代理、偶尔 2 个的编辑—测试
+循环；只有质量硬门通过后，才优先消除每一轮都会发生的 prompt/read 与 decode 等待。
 
-恢复执行时，最高优先级不是重跑同形 A-B-A，而是先统计 48 层中实际进入 direct path
-的层数和 fallback 原因，解释为什么端到端 `1.86%` 远低于 group 级 `12.1%` 乐观
-上界。只有覆盖缺口给出新的整请求 `>=1%` 保守收益，才补 4/6/8 门；否则关闭该路线。
+当前 frontier 是 `AGENT-CODEX-MODEL-CATALOG-QUALITY`。已复现 Codex 模型 slug 缺失会让
+工具面从 14 个降到 9 个并省略 `apply_patch`，服务日志累计有 6 次未声明工具后退回文本；
+目录修复后小 fixture 7/7，但 `apply_patch` 合并四次仍只有 3/4。先把目录供给产品化并用
+真实 Codex 路径复测，不能把客户端协议问题继续留给 GPU kernel 优化。
+
+resident direct-pointer 仍是暂停历史候选：group 级 `1.49x`、596 的 1 路 wall
+`1.862%`，但绝对只省 `32.667 ms`，94K prompt 无对应改善，4/6/8 未完成。质量门通过前
+不恢复其逐层覆盖审计，也不重跑同形 A-B-A。
 
 优先级按用户实际感受到的结果排列：
 
@@ -70,7 +69,7 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 - engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
 - engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
 - config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
-- 当前 PID：server / vision / engine `166198 / 166200 / 166205`
+- 当前 PID：server / vision / engine `172634 / 172636 / 172641`
 - 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
 
 生产启动与恢复约需 2–3 分钟。每次重启必须说明预期节省能否覆盖加载、缓存丢失和不可用
@@ -139,8 +138,20 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 
 ### P0：正确性与真实路径
 
-保持生产健康、工具结果完整、测试正确和长输出不被静默截断。任何候选先证明能进入真实
-客户端路径，再讨论性能收益。
+当前主项 `AGENT-CODEX-MODEL-CATALOG-QUALITY` / `AGENT-CODEX-CATALOG-PROVISION`：
+
+- 保持生产健康、工具结果完整、测试正确和长输出不被静默截断；
+- 让 Codex 模型 slug 有可识别元数据，真实请求声明 `apply_patch`；
+- 以 7 个确定性 coding fixture 和真实编辑—测试任务验证测试、测试字节、最终 sentinel、
+  工具协议和任务成功；
+- 模型目录更新必须幂等、有备份、可回滚，不覆盖用户已有 provider；
+- 不改变 engine、pack、量化、GPU、上下文或 6 slots / 2 groups；
+- 任何候选先证明能进入真实客户端路径，再讨论性能收益。
+
+当前证据：无目录 9 个工具、有目录 14 个且 `apply_patch` 为 `custom`；Qwen high 基础
+严格 5/6，目录后 7/7，`apply_patch` 合并 3/4。DeepSeek 直连参考 6/6 但同时改变模型、
+provider 和 hosting，不能归因 GPU 引擎。见
+[`AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md`](../../work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
 
 ### P1：`AGENT-HOT-TURN-FIXED-COST`（已否决）
 
@@ -447,9 +458,10 @@ prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零�
 
 ## 当前断点
 
-**2026-10-31 暂停。** 用户要求保留计划进度、更新文档并停止优化。已停止进行中的 4 路
-基线，移除 A2 候选进程并恢复 A1 原始 config/engine；没有启动新目标。恢复时从
-`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的覆盖审计开始，不重跑已完成的同形三臂测量。
+**2026-11-01 恢复执行。** 用户反馈 Strata 快但质量下降，当前从
+`AGENT-CODEX-MODEL-CATALOG-QUALITY` 开始；先完成产品级目录供给和真实工具面/任务成功
+验证，再决定是否恢复 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的覆盖审计。生产仍是
+server/vision/engine `172634/172636/172641`，未因本轮客户端配置问题重启。
 
 `AGENT-CONTEXT-DIET-REAL-YIELD` 已否决产品化；`AGENT-HISTORY-STATE-RESIDENCY` 降为
 低频 p99 可行性项。
@@ -464,8 +476,8 @@ prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零�
 `AGENT-HOT-TURN-PHASE-MAP` 已完成：596/94K 热长轮都只约有 554 个 fresh token；
 stage 2 的 `wait copy 173 ms` 是最大可移动相位。`AGENT-HOT-TURN-STREAM-RING` 已否决：
 full ring 让 596 wall 慢 `25.714%`，没有把 stage 2 copy 等待转成用户收益。当前生产为
-server/vision/engine
-`169846/169849/169854`，health loaded、六 slots / 两 groups，`strata.service` inactive。
+server/vision/engine `172634/172636/172641`，health loaded、六 slots / 两 groups，
+`strata.service` inactive。
 
 只读 routing 审计已完成：当前层 selected-only staged copy 已是生产路径，跨层推测 routing
 没有源码支持；full-ring 还切换了多个调度机制。`AGENT-HOT-TURN-STAGED-PREFETCH` 随后把
@@ -474,5 +486,5 @@ grouped staged walk 的实际传输在前数从 8 提到安全上限 15，但 59
 恢复 A2。`AGENT-HOT-TURN-DEQUANT-AUDIT` 随后确认该 phase 实际是 native group gather，
 每层只处理唯一 selected experts，没有同一 expert/layout 的重复转换；MMQ 固定 stride
 要求使 resident cache slot 不能直接替代组 buffer。resident direct-path 随后在 group
-级和 596 端到端取得真实正向信号，但因绝对门与并发安全门未完整通过，按用户要求暂停，
-保持默认关闭。当前没有运行中的优化实验。
+级和 596 端到端取得真实正向信号，但因绝对门与并发安全门未完整通过而保持默认关闭。
+当前不运行内核候选；先完成 Codex 模型目录、真实工具面和任务质量门。

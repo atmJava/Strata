@@ -766,6 +766,7 @@ events are the official ones, in order, ending in `response.completed`, `respons
 model = "strata"                        # any name; Strata answers with its model
 model_provider = "strata"
 model_context_window = 32768            # the context you chose in setup: Codex compacts before it gets there
+model_catalog_json = "~/.codex/models.json"  # recommended; keeps apply_patch declared
 show_raw_agent_reasoning = true         # show the model's thinking (it writes no summaries)
 # model_reasoning_effort = "medium"     # none, low, medium or high; default: the model's (high)
 
@@ -777,7 +778,12 @@ stream_idle_timeout_ms = 600000         # a first, long prompt can take minutes 
 # env_key = "STRATA_API_KEY"            # only if the server has an api_key: the variable holding it
 ```
 
-Run `codex` (or `codex exec "..."`). Codex warns `Model metadata for ... not found` for a local model name; that is expected.
+Run `codex` (or `codex exec "..."`). If Codex warns `Model metadata for ... not found`, it
+falls back to a reduced tool set that omits `apply_patch`; the model may then write the tool
+call as plain text and fail to edit the file. Add an entry for the model slug to
+`~/.codex/models.json` and point `model_catalog_json` at it. In a source checkout,
+`python3 tools/server/codex-model-catalog.py --apply` adds the current Qwen slug atomically
+and keeps a timestamped backup. Restart Codex after changing the catalog.
 On Windows, Codex's own sandbox rejected shell commands until it was started with `-c 'windows.sandbox="unelevated"'` (a
 Codex setting, not Strata's).
 

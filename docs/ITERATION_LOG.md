@@ -3,6 +3,31 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-130 · 快速但质量下降先按工具面/任务成功处理；resident 内核项降级
+
+- 目标 / 指标：解释“Strata 从十余分钟降到几分钟，但主观质量下降”，并只在质量门通过后
+  恢复速度优化。
+- 假设与预期：服务端日志中的未声明工具、Codex 模型目录回退、最终收口失败会比继续调
+  GPU kernel 更直接地解释用户看到的“改不动、绕路、没收住”。
+- 改动与实验：新增隐私安全的确定性 coding 基准和 Codex 目录幂等工具；通过 shape proxy
+  比较无目录/有目录请求的工具面；跑 Qwen high、Qwen medium、DeepSeek 参考和
+  `apply_patch` 重复；未改生产 engine/config，未重启服务。
+- 结果：无目录请求 9 个工具且无 `apply_patch`；有目录 14 个工具且它被声明为 `custom`。
+  服务日志累计 6 次模型写未声明 `apply_patch` 后退回文本。Qwen high 基础严格 5/6、
+  测试 6/6；DeepSeek 直连参考 6/6；目录后 7/7；`apply_patch` 首次加三次重复合计 3/4。
+  Qwen medium 严格 2/4，速度只比 high 约 7%。
+- 判决：**AGENT-CODEX-MODEL-CATALOG-QUALITY 诊断完成，修复未产品化。** 不用 7% 的
+  medium 速度换严格收口；不把混合模型/provider/hosting 小样本归因给 GPU 引擎。
+- 生产状态与回滚：未改生产。server/vision/engine `172634/172636/172641`，health
+  loaded、262144、6/2；本地目录已有备份，Codex 侧可按备份恢复。
+- 证据：L-159、[契约](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_CONTRACT-20261101.md)、
+  [结果](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
+- 学到什么：用户感受到的“质量下降”不能只用最终答案肉眼判断，要同时看工具声明、真实
+  修改、测试、最终收口和任务成功。一个 1.86% 的局部 wall 信号不应盖过这些硬门。
+- 下一步与理由：`AGENT-CODEX-CATALOG-PROVISION`。先查产品级安装/launch/连接入口，
+  做幂等、可回滚的目录供给；再在同一 Qwen high 条件重跑 7 个 fixture 和真实编辑—测试
+  任务。只有质量门通过才恢复 resident-path 覆盖审计或其它速度候选。
+
 ## I-20261031-129 · resident direct path 有 1.86% 信号；用户要求暂停并保留进度
 
 - 目标 / 指标：验证 resident direct-pointer/fused 能否绕开 MMQ group gather，并至少

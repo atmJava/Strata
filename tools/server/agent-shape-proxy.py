@@ -259,6 +259,11 @@ def request_shape(req: dict) -> dict:
     input_items = req.get("input")
     if not isinstance(input_items, list):
         input_items = []
+    tool_types = sorted(
+        tool.get("type")
+        for tool in tools or []
+        if isinstance(tool, dict) and isinstance(tool.get("type"), str)
+    )
     tool_names = sorted(
         name
         for tool in tools or []
@@ -275,9 +280,15 @@ def request_shape(req: dict) -> dict:
         "model": req.get("model"),
         "stream": req.get("stream"),
         "max_output_tokens": req.get("max_output_tokens"),
+        "sample": {
+            key: req.get(key)
+            for key in ("temperature", "top_p", "top_k", "seed")
+            if req.get(key) is not None
+        },
         "instructions": text_fingerprint(req.get("instructions")),
         "tools": {
             "count": len(tools) if isinstance(tools, list) else 0,
+            "types": tool_types,
             "names": tool_names,
             "sha256": digest(tools),
         },

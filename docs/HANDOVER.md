@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-11-01（RESIDENT_PATH 暂停后）。
+> 整理时间：2026-11-01（代码质量与 Codex 工具面审计后）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -16,19 +16,25 @@
 
 ## 2. 当前断点
 
-- **全局目标已第二十三次修订并暂停**：用户于 2026-10-31 明确要求保留进度、更新文档并
-  暂停优化。当前没有运行中的实验或优化目标；恢复时必须由用户明确要求。全局价值仍是
-  优先优化普通单代理编辑—测试循环中的模型请求
-  等待，再处理首工具/首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
+- **全局目标已第二十四次修订并恢复执行**：用户反馈 Strata 显著更快，但主观质量下降。
+  当前先修复可验证的 Codex 模型目录/工具面、建立代表性任务质量门，再恢复普通单代理
+  编辑—测试循环的性能优化。质量、任务成功率、测试正确性和工具协议是硬门，不能用约 7%
+  的速度收益交换严格收口失败。真实 AI vibe coding 的最终目标仍是任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
   触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
   可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十三版更新后接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十三版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第二十四版更新后该接口仍以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第二十四版计划
   为权威，不要回到平台旧目标的状态快照。
-- **暂停前的最后候选**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的 native
+- **当前质量断点**：模型 slug 不在 Codex 本地目录时，请求只有 9 个工具且没有
+  `apply_patch`；加入目录条目后变为 14 个工具，`apply_patch` 为 `custom`。生产服务日志
+  累计有 6 次未声明 `apply_patch` 后退回文本。Qwen high 的 6 个基础 fixture 严格
+  5/6、测试 6/6；DeepSeek 直连参考 6/6，但同时改变模型/provider/hosting。目录修复后
+  7 个 fixture 7/7，但 `apply_patch` 合并四次为 3/4，仍有最终收口缺口。结果见
+  [AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
+- **暂停的历史候选**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的 native
   direct-pointer 路径真实命中，group 级 `11.671 → 7.848 ms/layer`（`1.49x`）。
   596 fresh、1 路 wall 相对 A1/A2 合并基线改善 `1.862%`，相对 A1 改善 `2.145%`、
   `32.667 ms`，三波全胜；这符合用户“1% 多也算”的原则，但未过预注册的绝对
@@ -47,7 +53,7 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `169846/169849/169854`。server cwd 为
+- **当前运行**：server/vision/engine `172634/172636/172641`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
   `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`

@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-157，按编号）
+## 台账索引（L-000…L-159，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -172,9 +172,56 @@
 | L-156 | 10-31 14:4xZ | grouped staged lookahead 8→15 实际命中且 A1/B/A2 质量全过；596 wall `1.510583→1.505333 s`，只改善 `0.3475%`、绝对 `5.25 ms`；prompt `1384.3→1392.6 ms`，慢 `0.5996%` | **AGENT-HOT-TURN-STAGED-PREFETCH 否决**；双门未过，未跑 B 的 94K/并发；关闭 lookahead 参数轴；A2 已恢复；下一项 `AGENT-HOT-TURN-DEQUANT-AUDIT` |
 | L-157 | 10-31 15:0xZ | phase map 的 `dequant 106 ms` 在生产 native IQ3_XXS staged path 中是 `gather_native_group` 字节搬运；每层 order 唯一，每 16 个 gather 一次；stage 1/2 不同层，staged/streamed/fused/peer 互斥；hot-long cache hit 596 `95.1–98.1%`、94K `98.4–98.8%`；MMQ 固定 stride 无法直读任意 cache slot；group 级 direct-path 预筛因现役占用下 full-layer harness OOM 尚未取得性能数据 | **AGENT-HOT-TURN-DEQUANT-AUDIT 否决重复工作假设**；不改源码、不重启、不扫 dequant/group/profiler 参数；下一项 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`，只做 group 级 |
 | L-158 | 10-31 15:2xZ | group 级 `512 experts / 32 groups`：MMQ `11.671 ms/layer`、native direct `7.848 ms/layer`，`1.49x`，48 层乐观上界 `183.5 ms`；596 A1/B/A2 1 路 wall `1.522684/1.490017/1.513878 s`，合并基线改善 `1.862%`，相对 A1 `2.145%`、`32.667 ms`，3/3 胜；2 路 hot-long `+0.705%`、2/3 胜；94K B/A2 wall `1.401311/1.438884 s` 但 prompt `1251.2/1251.5 ms`；固定 greedy 三臂全等 | **RESIDENT-PATH 正向但暂停验收，未采纳**；用户的 1% 原则认可方向，原 `0.05 s` 绝对门未过，94K 不归因；4 路在 `1:44` 后用户暂停，6/8 未跑；候选默认关闭，恢复 A1 后不继续实验 |
+| L-159 | 11-01 00:2x–00:5x | Codex 模型目录缺失使工具面 `14→9` 且省略 `apply_patch`；服务日志累计 6 次未声明工具；Qwen high 基础严格 5/6、测试 6/6，DeepSeek 直连参考 6/6，目录后 7/7；`apply_patch` 首次加三次重复 3/4；medium 严格 2/4、约快 7% | **质量硬门生效**；本地目录修复但未产品化，不归因 GPU 引擎；继续 `AGENT-CODEX-CATALOG-PROVISION`，质量通过前不恢复速度实验 |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-159 · Codex 模型目录缺失造成工具面缩减；质量门先于速度
+
+**判定：AGENT-CODEX-MODEL-CATALOG-QUALITY 诊断完成，本地修复未产品化。**
+
+用户反馈 Strata 把十余分钟任务降到几分钟，但主观质量下降。先检查真实 Codex 请求面：
+模型 slug `qwen3.8-flash-next-iq3_xxs-abliterated` 不在本地模型目录时，请求只声明
+9 个工具且没有 `apply_patch`；加入兼容条目后为 14 个工具，`apply_patch` 为 `custom`。
+生产服务日志
+`/opt/ai/logs/agent-resident-path-20261031T2300Z/A1-restored-server.log`
+累计出现 6 次模型写未声明 `apply_patch`、服务退回文本的记录。
+
+确定性 coding fixture（全新仓库、测试文件字节保护、严格最终 sentinel）：
+
+| arm | strict | tests | serial wall |
+|---|---:|---:|---:|
+| Qwen high，无目录，6 tasks | 5/6 | 6/6 | 149.475 s |
+| DeepSeek high 直连参考，6 tasks | 6/6 | 6/6 | 77.243 s |
+| Qwen high，有目录，7 tasks | 7/7 | 7/7 | 211.625 s |
+| Qwen medium，无目录，4 tasks | 2/4 | 4/4 | 75.200 s |
+
+Qwen 与 DeepSeek 同时改变模型、量化、provider 和 hosting，不能作为引擎质量回归的因果
+证据。串行 wall 也未随机化，不作通用速度结论。`medium` 只快约 7%，但严格收口从 4/4
+降到 2/4，因此保留 `high`。
+
+`apply-patch` 在无目录时 0/1 且测试失败；有目录后首次 1/1，随后三次重复 2/3，合计
+3/4。失败请求的测试已通过但最终回复不是严格 sentinel。共享 `temperature=0.2` 三次也只
+2/3，没有证明改善；设置已清除。因此目录修复缩小了已确认缺口，但还不能宣称主观质量
+已完全恢复。
+
+本地目录备份为 `~/.codex/models.json.bak-20261101T004130`。工具
+`tools/server/codex-model-catalog.py` 幂等、写入前备份；产品安装/launch/连接入口尚未
+接入。服务端未改 engine/config，未重启；最终 server/vision/engine
+`172634/172636/172641`，health loaded、262144、6 slots / 2 groups。
+
+完整记录：
+
+- [`AGENT_CODEX_MODEL_CATALOG_QUALITY_CONTRACT-20261101.md`](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_CONTRACT-20261101.md)
+- [`AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md`](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)
+- `tools/server/bench-agent-quality.py`
+- `tools/server/codex-model-catalog.py`
+
+下一项 `AGENT-CODEX-CATALOG-PROVISION`：检查产品级安装、launch 和连接入口，在不覆盖
+用户已有 Codex 配置的前提下提供幂等、可恢复目录供给；然后用同一 Qwen high 条件重跑
+7 个 fixture 和至少一个真实编辑—测试任务。质量门通过前不恢复 resident-path 或其它
+速度候选。
 
 ## L-158 · resident direct path 有真实 1.86% 信号，但暂停验收
 
