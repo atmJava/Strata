@@ -18,8 +18,9 @@
   CUDA/engine/HTTP 错误；三组 fixed greedy 各两轮 B 内重复且等于 A，64-token smoke 正常。
 - 判决：**AGENT-HOT-TURN-STREAM-RING 否决。** 按预注册停止门未跑 B 的 94K、2 路或
   4/6/8；A2 已恢复且运行 env 无该候选。
-- 预期被推翻：`wait copy` 是真实大头，但 full ring 按全部专家顺序预取，而 554-token
-  chunk 只路由少量专家；额外 copy 远大于少数专家更早到达的收益。
+- 预期被推翻：`wait copy` 是真实大头，但该 env 同时切换 whole-chunk stream、关闭
+  staged 的 shared-expert defer 并启用 cross-layer issuer；复合分支整体反向，不能把
+  回退单独归因给 ring 深度。554 x top-10 有 `5,540` 个 pairs，也不是少量专家。
 - 生产状态与回滚：server/vision/engine `166198/166200/166205`，engine
   `105a4171...`、config `6ece1a13...`；A2 parity repeatable/exact、finish `stop`。
 - 证据：L-155、
@@ -28,10 +29,10 @@
 - 复盘：这一轮证明“看到大 phase 就直接加深 prefetch”仍然是局部思维。是否值得继续
   `wait copy`，取决于 routing 是否在 copy 前足够早且完整可见，以及能否只预取实际选中
   专家；这些都必须先用源码和真实路由统计给出整请求秒数上界。
-- 下一步与理由：`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`，只读、不重启。检查 554-token
-  chunk 的 top-k routing 可用时点、15-expert lookahead 的等待来源、最坏路由密度、
-  bookkeeping 与数值边界；只有 wall `>=1%` 且绝对 `>=0.05 s` 的保守上界才预注册实现。
-  否则转向 `dequant 106 ms` 是否含可证明的重复工作，不扫描更多 prefetch 参数。
+- 下一步与理由：`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`，只读、不重启。审计确认
+  staged 路径已在每层 router 后按实际选中专家建序，后续层 routing 又依赖当前层输出，
+  跨层 selected-expert prefetch 关闭；真正可动项是 grouped staged path 当前 8 个实际
+  传输在前，而 ring/group 安全上限为 15。后续只测该单一调度差异。
 
 ## I-20261031-125 · GDN conv/L2 局部收益未穿透 wall；改为先拆热续轮主相位
 

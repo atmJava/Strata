@@ -11,9 +11,11 @@ B 只把 `STRATA_PREFILL_STREAM_MIN` 从生产默认值改为 `0`，真实 554-t
 全部通过；但 596 fresh-token 热长轮的 wall 反而从 A1 中位 `1.509808 s` 升到
 `1.898041 s`，慢 `25.714%`，绝对多 `0.388233 s`。
 
-这不支持“更早 copy 会隐藏 stage 2 的 `wait copy 173 ms`”的假设。554-token chunk 只路由
-少量专家，而 full ring 按全部专家的顺序预取；额外 copy 量远大于少数专家更早到达带来的
-收益。按预注册停止门，没有运行 B 的 94K、2 路或并发矩阵。
+这不支持把该 whole-chunk stream 直接当作“更早 copy 会隐藏 stage 2 的 `wait copy
+173 ms`”。`STRATA_PREFILL_STREAM_MIN=0` 同时切换 whole-chunk streamed walk、关闭
+staged 路径的 shared-expert defer，并启用 cross-layer issuer；复合分支的整体结果明确
+反向，但不能单独归因给 ring 深度。554 x top-10 实际有 `5,540` 个 routed pairs、每层
+512 个专家，也不是“少量专家”形状。按预注册停止门，没有运行 B 的 94K、2 路或并发矩阵。
 
 ## Arms 与路径
 
@@ -79,6 +81,8 @@ A2-parity.json    5fbad3c0df3db2c8a454092fe1c6ed59bd502415aa0dd149540ab8eba798c9
 
 ## 复盘
 
-phase map 指出的 173 ms 仍是真实大头，但“更深 ring”不是正确的利用方式；只有在能证明
-当前 routing 已足够早确定选中专家、并且只对选中专家预取时，才值得继续这条机制。下一项先
-做只读源码审计，不直接改 kernel，也不重开阈值、ring 容量或 profiler 参数扫描。
+phase map 指出的 173 ms 仍是真实大头。后续只读源码审计确认 staged 路径已经在每层
+router 后按实际选中专家建序，后续层 routing 又依赖当前层输出，跨层 selected-only
+prefetch 没有现存路径。唯一直接可动项是 grouped staged path 的实际传输在前数：生产为
+8，ring/group 安全上限为 15。后续只测这个单一调度差异；不重开阈值、ring 容量或 profiler
+参数扫描。

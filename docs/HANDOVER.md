@@ -147,15 +147,19 @@
 - **上一项判决**：`AGENT-HOT-TURN-STREAM-RING` 否决。B 的路径、实际 env、健康、资源、
   三组 greedy 和 smoke 全过，但 596 hot-long wall 从 A1 中位 `1.509808 s` 升到
   `1.898041 s`，慢 `25.714%`，绝对多 `0.388233 s`；prompt 中位从 `1401.7 ms` 升到
-  `1787.9 ms`。full ring 按全部专家顺序预取，554-token chunk 只路由少量专家，额外
-  copy 抵消了更早 fetch。未跑 94K/并发矩阵，A2 已恢复。见
+  `1787.9 ms`。full-ring 分支同时建立 whole-chunk stream、关闭 staged 的
+  shared-expert defer 并改用 cross-layer issuer；其慢不能单独归因给 ring 深度。
+  554 x top-10 有 `5,540` 个 routed pairs，不是少量专家。未跑 94K/并发矩阵，A2 已
+  恢复。见
   [result](work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
-- **当前状态与下一动作**：只读执行 `AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`。查明
-  554-token chunk 的 top-k routing 在 copy 前多早、是否完整，当前 15-expert lookahead
-  的等待来自 ring 容量还是 routing 可见性，以及只预取选中专家能否给出 596/94K
-  wall `>=1%` 且绝对 `>=0.05 s` 的整请求保守上界。审计同时给出最坏路由密度、额外
-  bookkeeping、bitwise/数值影响与 env 回滚；未过门不构建、不重启。若上界不足，转向
-  检查 `dequant 106 ms` 的可证明重复工作；不扫 prefetch 参数邻域。
+- **当前状态与下一动作**：`AGENT-HOT-TURN-STAGED-PREFETCH` 已预注册。只读审计确认
+  当前层 staged walk 已经只拷贝本层实际 routed、非驻留专家，后续层 routing 依赖当前层
+  输出，跨层 selected-expert prefetch 没有源码路径，因此该方向关闭。候选只在 grouped
+  staged path 把实际传输在前数从默认 8 提到安全上限 15，保留 shared-expert defer 和
+  全部算术。stage 2 `wait copy` 中位 `173 ms`；隐藏 `15.1 ms` 即达到 596 wall 1%，
+  隐藏 `50 ms` 即过绝对门。A1/B/A2 覆盖同口径 596/94K；失败立即恢复 A2，不扫邻近
+  深度、stager thread/batch/ring 或 stream threshold。见
+  [contract](work/AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md)。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说

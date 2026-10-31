@@ -168,15 +168,15 @@
 | L-152 | 10-31 21:5x | 双卡 MTP batched draft K/V 真实命中；94K B/A2 prompt `1241.5/1271.5 ms`（B 改善 `2.359%`）、wall `1.434450/1.433790 s`（B 慢 `0.046%`）；18 个 94K 请求零错误、finish `stop`、零外来请求 | **AGENT-SPLIT-MTP-BATCH 否决**；未过 `0.05 s` 绝对 wall 门，停止 189K/全矩阵；A2 已恢复且无该 env；下一项 `ENGINE-0.1.55-EVAL` |
 | L-153 | 10-31 22:3x | 官方 `0.1.55` CLI 不支持 `--prompt-cache-long`；移除 128K-only 扩展后成功启动，三组 greedy/smoke 全过；596/94K hot-long A 参考 wall `1.500656/1.397534 s`，B 为 `1.588491/1.457059 s`，慢 `5.853%/4.259%`；A 漂移 `1.893%/2.250%` | **ENGINE-0.1.55-EVAL 否决**；不进入其 GDN env、189K 或并发矩阵；A2 已恢复旧 engine；下一项 `GDN-CONVL2` |
 | L-154 | 10-31 23:4x | GDN conv/L2 融合实际命中且质量全过；A1/B 的 596/94K prompt `1409.4→1394.2/1259.4→1258.6 ms`，wall `1.514727→1.502251/1.413078→1.410180 s`；wall 仅改善 `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`；A2 prompt/wall 漂移最大 `0.388%` | **GDN-CONVL2 否决**；不扫邻近参数；A2 已恢复；下一项 `AGENT-HOT-TURN-PHASE-MAP` |
-| L-155 | 10-31 14:1xZ | 554-token hot-long 进入 full streamed ring 后，596 wall 中位 `1.509808→1.898041 s`，慢 `25.714%`、绝对多 `0.388233 s`；prompt 中位 `1401.7→1787.9 ms`；实际 env、6/2、health、资源、greedy 和 smoke 全过 | **AGENT-HOT-TURN-STREAM-RING 否决**；小 chunk 只路由少量专家，按全专家顺序预取 copy 过重；未跑 94K/并发；A2 已恢复；下一项 routing-aware prefetch 只读审计 |
+| L-155 | 10-31 14:1xZ | 554-token hot-long 进入 full streamed ring 后，596 wall 中位 `1.509808→1.898041 s`，慢 `25.714%`、绝对多 `0.388233 s`；prompt 中位 `1401.7→1787.9 ms`；实际 env、6/2、health、资源、greedy 和 smoke 全过 | **AGENT-HOT-TURN-STREAM-RING 否决**；该分支同时改变 whole-chunk stream、shared defer 与 issuer；未跑 94K/并发；A2 已恢复；后续审计确认 staged 已按 selected experts 拷贝，转 staged lookahead |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
 
 ## L-155 · full streamed ring 让小 chunk 热续轮更慢
 
-**判定：`AGENT-HOT-TURN-STREAM-RING` 否决；下一项为只读
-`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`。**
+**判定：`AGENT-HOT-TURN-STREAM-RING` 否决。** 后续只读 routing 审计已完成并关闭跨层
+推测，当前进入 `AGENT-HOT-TURN-STAGED-PREFETCH`。
 
 B 只给 A1 config 增加 `STRATA_PREFILL_STREAM_MIN=0`，使 554 fresh-token hot-long chunk
 进入 full streamed ring。实际 engine env 命中，engine/config hash、六 slots / 两 groups、
@@ -190,9 +190,11 @@ health loaded、262144、systemd inactive、RAM/VRAM 安全均通过；三组 fi
 | A1 | `1.521472 / 1.509808 / 1.489629` | `1.509808 s` | `1410.2 / 1401.7 / 1380.7` | `1401.7 ms` |
 | B | `1.913422 / 1.898041 / 1.888786` | `1.898041 s` | `1806.6 / 1787.9 / 1780.1` | `1787.9 ms` |
 
-B wall 慢 `25.714%`（`+0.388233 s`），prompt 中位慢约 `27.55%`。554-token chunk 只路由
-少量专家，而 full ring 按全部专家的顺序预取；额外 copy 远大于少数专家更早到达的收益。
-方向明确，按预注册停止门未跑 B 的 94K、2 路或 4/6/8。
+B wall 慢 `25.714%`（`+0.388233 s`），prompt 中位慢约 `27.55%`。`STRATA_PREFILL_STREAM_MIN=0`
+切换的不只是 ring 深度：它还进入 whole-chunk streamed walk、关闭 staged 路径的
+shared-expert defer，并启用 cross-layer issuer。该复合调度在本形状明确反向，但不能把
+回退单独归因给 ring。554 x top-10 有 `5,540` 个 routed pairs、每层 512 个专家，也不是
+“少量专家”。按预注册停止门未跑 B 的 94K、2 路或 4/6/8。
 
 生产最终 server/vision/engine `166198/166200/166205`，engine
 `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`，config
@@ -215,8 +217,10 @@ A2-parity.json    5fbad3c0df3db2c8a454092fe1c6ed59bd502415aa0dd149540ab8eba798c9
 
 完整记录见
 [`AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md`](work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
-下一项先只读判断 top-k routing 在 copy 前何时可用、能否仅预取选中专家，以及 596/94K
-整请求保守上界是否同时达到 wall `>=1%` 与 `>=0.05 s`。未过门不改源码、不重启。
+后续只读审计确认：每层 router 完成后才下载 top-k 并建立 staged order，已经只拷贝本层
+实际选中、非驻留专家；后续层 routing 依赖当前层输出，源码没有提前获知路径。因此跨层
+selected-expert prefetch 关闭。真正可动项是 grouped staged path 当前只保持 8 个实际
+传输在前，而 ring/group 约束允许安全保持 15 个；下一项只测该调度差异。
 
 ## L-154 · GDN conv/L2 融合正确但没有穿透热续轮 wall
 

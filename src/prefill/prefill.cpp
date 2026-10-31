@@ -1190,6 +1190,18 @@ uint64_t qsa_set_bytes(size_t T, int64_t cap, int64_t max_blocks, int64_t sel_ba
 // isolated MMQ improved, but an adjacent 36K production A/B made the MoE half only 0.8% faster and the full GPU
 // timeline 1.9% slower, so 16 remains the default and the larger group is not kept.
 constexpr int MMQ_GROUP = 16;
+// Routed-only prefill keeps this many streamed expert copies ahead of the MMQ group being
+// computed. The grouped staged walk may hold one MMQ group's slots until it gathers them;
+// STAGE_GRP therefore bounds the safe depth to 32 - 16 - 1 = 15. The default stays the
+// established eight-transfer schedule; the env is an exact scheduling A/B.
+inline size_t staged_ahead_limit() {
+    static const size_t v = [] {
+        const char* e = std::getenv("STRATA_PREFILL_STAGED_AHEAD");
+        const int n = e ? std::atoi(e) : STAGE;
+        return (size_t) std::clamp(n, 1, STAGE_GRP - MMQ_GROUP - 1);
+    }();
+    return v;
+}
 // MMQ reads up to one 256-value tile past a matrix's last row when the row length is not a multiple of it (the down
 // product: 640 values).  Those bytes meet zero activations, which is harmless only if they decode to finite numbers -
 // llama.cpp zero-pads after every tensor, and so does a group buffer: this many zeroed bytes follow its last expert.
@@ -4390,11 +4402,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             size_t staged = 0;
                             size_t pending = 0;
                             const bool stream_ahead = stream_ahead_enabled();
+                            const size_t ahead = group_resident ? staged_ahead_limit() : (size_t) STAGE;
                             const size_t lookahead = group_resident ? (size_t) (STAGE_GRP - MMQ_GROUP - 1) : STAGE - 1;
                             for (size_t j = 0; j < order.size(); ++j) {
-                                // Resident experts occupy no staging slot. Keep STAGE actual transfers ahead,
-                                // rather than STAGE positions in the mixed resident/streamed order.
-                                while (staged < order.size() && (stream_ahead ? pending < STAGE : staged <= j + lookahead)) {
+                                // Resident experts occupy no staging slot. Keep `ahead` actual transfers ahead,
+                                // rather than a count of positions in the mixed resident/streamed order.
+                                while (staged < order.size() && (stream_ahead ? pending < ahead : staged <= j + lookahead)) {
                                     if (!stage_one(staged)) return false;
                                     if (stage_of[staged] >= 0) ++pending;
                                     ++staged;

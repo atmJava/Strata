@@ -269,8 +269,8 @@ GDN/短读/版本邻域。
 
 ### P2f：`AGENT-HOT-TURN-STREAM-RING`（已否决）
 
-554-token chunk 低于默认 `stream_all_min=1024`，当前走 32-slot staged walk，只提前
-15 个专家，stage 2 的 copy 等待达到 `173 ms`。B 只设置现有 env
+554-token chunk 低于默认 `stream_all_min=1024`，当前走 32-slot staged walk，实际保持
+8 个在线传输在前，stage 2 的 copy 等待达到 `173 ms`。B 只设置现有 env
 `STRATA_PREFILL_STREAM_MIN=0`，让同一真实请求进入更大的 streamed ring。
 
 乐观上限是把 stage 2 copy 等待隐藏到 stage 1 的 `13 ms`，约 `11%` wall；即使只隐藏
@@ -282,18 +282,19 @@ GDN/短读/版本邻域。
 
 判决：B 通过路径、质量、健康与资源门，但 596 hot-long wall 从 A1 中位
 `1.509808 s` 升到 `1.898041 s`，慢 `25.714%`，绝对多 `0.388233 s`；prompt 中位从
-`1401.7 ms` 升到 `1787.9 ms`。full ring 按全部专家顺序预取，而 554-token chunk 只路由
-少量专家，额外 copy 远大于更早 fetch 的收益。按门未跑 94K/并发矩阵，生产已恢复 A2。
+`1401.7 ms` 升到 `1787.9 ms`。该分支同时切换 whole-chunk stream、shared-expert defer
+和 cross-layer issuer，整体明确反向，但不能单独归因给 ring 深度。按门未跑 94K/并发
+矩阵，生产已恢复 A2。
 见
 [`AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md`](../../work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
 
-### P2g：`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`（当前，只读）
+### P2g：`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`（已完成，关闭跨层推测）
 
 phase map 仍显示 stage 2 有 `173 ms wait copy`，但 full-ring 已证明盲目加深预取会亏。
-当前只读审计需要回答：
+审计检查了以下问题：
 
 - 554-token chunk 的 top-k routing 在 copy 开始前多早可用，是否完整；
-- 当前 staged walk 为什么只提前 15 个专家，哪些等待来自 ring 容量、routing 可见性或
+- 当前 staged walk 为什么实际只保持 8 个在线传输在前，哪些等待来自 ring 容量、routing 可见性或
   host/GPU 同步；
 - 只预取本 chunk 实际选中专家能否减少 copy，最坏路由密度和额外 bookkeeping 是什么；
 - 以真实 596/94K 三波 phase 和绝对秒数计算，单次整请求保守上界能否同时达到
@@ -301,9 +302,24 @@ phase map 仍显示 stage 2 有 `173 ms wait copy`，但 full-ring 已证明盲�
 - 改动是否保持每行算术、top-k 结果、token 选择、finish 和工具语义逐字不变，以及能否
   用 env 精确关闭。
 
-只有源码控制流、真实 routing 统计和保守上界都过门，才预注册 A1/B/A2 实现候选。审计本身
-不改源码、不重启、不产出性能声明；若 routing 无法提前且上界不足，则转向 `dequant` 是否
-存在可证明的重复工作，而不是扫描更多 prefetch 参数。
+审计结论：生产 staged walk 在每层 router 完成后读取该层 top-k，并按实际选中专家建序；
+它已经只拷贝本层 routed、非驻留专家。后续层 routing 依赖当前层输出，源码没有提前获得整
+chunk 所有层 top-k 的路径，因此“跨层只预取 selected experts”不是现有能力。554 x top-10
+有 `5,540` 个 routed pairs、每层 512 个专家，也不是少量专家形状。full-ring B 同时切换
+whole-chunk stream、shared-expert defer 和 cross-layer issuer，不能用它得出单一 ring
+深度结论。跨层推测 routing 关闭，不构建。
+
+### P2h：`AGENT-HOT-TURN-STAGED-PREFETCH`（当前）
+
+审计保留的唯一直接可动项是 grouped staged walk 的实际 lookahead：当前保持 8 个传输在前，
+而 32-slot ring 与 16-expert gather 允许安全保持 15 个。候选只在默认 8 之外增加 env
+`STRATA_PREFILL_STAGED_AHEAD=15`，保留同一 routed 顺序、shared-expert defer、group、
+copy stream、release event 和 kernel 顺序。
+
+stage 2 `wait copy` 中位 `173 ms`；只需隐藏 `15.1 ms` 就达到 596 wall 的 1%，隐藏
+`50 ms` 达到绝对 `0.05 s`。A1/B/A2 覆盖同口径 596/94K；失败立即恢复 A2，不扫描邻近深度、
+stager thread/batch/ring 或 stream threshold。契约：
+[`AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md`](../../work/AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md)。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -381,7 +397,8 @@ stage 2 的 `wait copy 173 ms` 是最大可移动相位。当前执行
 copy 等待转成用户收益。当前生产为 server/vision/engine
 `166198/166200/166205`，health loaded、六 slots / 两 groups，`strata.service` inactive。
 
-当前执行只读 `AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`：先查明 routing 结果在 copy 前是否
-可用、只预取选中专家能否在 596/94K 上给出 `>=1%` 且 `>=0.05 s` 的整请求保守上界，并
-证明不会改变模型算术。未过源码/上界门不构建、不重启；审计完成后立即按同一优先级门复盘
-下一项，不能停在局部 prefetch 参数扫描。
+只读 routing 审计已完成：当前层 selected-only staged copy 已是生产路径，跨层推测 routing
+没有源码支持；full-ring 还切换了多个调度机制。当前改为
+`AGENT-HOT-TURN-STAGED-PREFETCH`，只在 grouped staged walk 把实际传输在前数 8 提到安全上限
+15，保留 shared-expert defer 和其他行为。若不能把 stage 2 `wait copy 173 ms` 转成至少
+1% 且 `0.05 s` wall，立即关闭该参数轴，不构建邻近深度或 stager 参数组合。

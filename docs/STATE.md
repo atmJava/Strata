@@ -106,15 +106,23 @@
   六 slots / 两 groups、health、资源、三组 fixed greedy 和 smoke。但 596 hot-long
   wall 从 A1 中位 `1.509808 s` 升到 `1.898041 s`，慢 `25.714%`，绝对多
   `0.388233 s`；prompt 中位从 `1401.7 ms` 升到 `1787.9 ms`。full ring 按全部专家
-  顺序预取，而 554-token chunk 只路由少量专家，额外 copy 远大于更早 fetch 的收益。
+  顺序建立 whole-chunk stream，并同时关闭 staged 路径的 shared-expert defer、改用
+  cross-layer issuer；该复合分支不适合本形状，但不能把结果单独归因给 ring 深度。
+  554 x top-10 实际有 `5,540` 个 routed pairs、每层 512 个专家，不是少量专家。
   按停止门未跑 94K、2 路或并发矩阵；生产已恢复 A2。见
   [result](work/AGENT_HOT_TURN_STREAM_RING_RESULT-20261031.md)。
-- 当前项：AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT（只读）。先证明 554-token chunk 的
-  top-k routing 在 copy 前何时可用、当前 15-expert lookahead 的等待来自哪里，以及只
-  预取本 chunk 选中专家能否在 596/94K 上给出 wall `>=1%` 且绝对 `>=0.05 s` 的整请求
-  保守上界。必须同时说明最坏路由密度、额外 bookkeeping、bitwise/数值影响和 env
-  回滚；未过源码与上界门不构建、不重启。若 routing 无法提前或上界不足，转向检查
-  `dequant 106 ms` 是否存在可证明的重复工作，不扫描更多 prefetch 参数。
+- 已完成：`AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`。生产 staged walk 在每层 router
+  完成后读取该层 top-k，按实际选中专家建序，已经只拷贝本层 routed、非驻留专家；
+  后续层 routing 依赖当前层结果，不能提前获知。源码没有跨层 speculative routing，
+  因此该方向关闭。当前 grouped staged path 实际只保持 8 个传输在前，而不是 15 个位置。
+- 当前项：AGENT-HOT-TURN-STAGED-PREFETCH（grouped staged lookahead）。32-slot ring
+  与 16-expert gather 允许安全
+  保持 15 个后续传输。候选只在默认 8 之外增加 `STRATA_PREFILL_STAGED_AHEAD=15`，
+  保留同一 routed 顺序、shared-expert defer、group、copy stream、release event 和
+  kernel 顺序。stage 2 `wait copy` 中位 `173 ms`；只需隐藏 `15.1 ms` 就达到 596 wall
+  1%，隐藏 `50 ms` 达到绝对 `0.05 s`。A1/B/A2 测同口径 596/94K；失败立即恢复 A2，
+  不扫邻近深度、stager thread/batch/ring 或 stream threshold。见
+  [contract](work/AGENT_HOT_TURN_STAGED_PREFETCH_CONTRACT-20261031.md)。
 - 降级项：`AGENT-HISTORY-STATE-RESIDENCY` 仍保留为低频 p99 可行性。34 个有效会话只有
   1 个超过 24 小时间隔、2 个超过 12 小时，不得排在普通热续轮之前；检查双卡 layer split、
   六 batch slots、prompt cache 下多 stage 状态格式、223K 容量、恢复时间、写放大、

@@ -81,10 +81,11 @@ engine/config hash、实际 env、health、六 slots / 两 groups、systemd inac
 ## 判决
 
 B 的 596 hot-long wall 从 A1 中位 `1.509808 s` 变为 `1.898041 s`，慢 `25.714%`，
-绝对多 `0.388233 s`；prompt 中位从 `1401.7 ms` 变为 `1787.9 ms`。原因是 full ring
-按全部专家顺序预取，而 554-token chunk 只路由少量专家，额外 copy 远大于更早预取收益。
-质量、路径、健康、资源和资源门均通过，但这不能抵消明确的端到端回退。
+绝对多 `0.388233 s`；prompt 中位从 `1401.7 ms` 变为 `1787.9 ms`。该 env 同时切换
+whole-chunk stream、关闭 staged 的 shared-expert defer、启用 cross-layer issuer，
+因此结果不能单独归因给 ring 深度。质量、路径、健康、资源和资源门均通过，但这不能抵消
+明确的端到端回退。
 
-生产已恢复 A2，运行 env 不含该候选。不扫 threshold、ring 容量或邻近参数。下一项改为
-只读审计“路由结果何时可用、能否仅预取选中专家”，在给出真实命中率、绝对秒数上界、
-bitwise/数值影响和回滚前不改源码、不重启。
+生产已恢复 A2，运行 env 不含该候选。不扫 threshold、ring 容量或邻近参数。后续源码审计
+确认 staged 路径已经按本层 selected experts 拷贝，而后续层 routing 不可提前获知；
+跨层推测预取关闭。下一项只测 grouped staged path 的传输 lookahead 8→15。

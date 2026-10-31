@@ -24,10 +24,12 @@
    `AGENT-HOT-TURN-PHASE-MAP`：同口径 596/94K 热长轮都约有 554 个 fresh token；
    stage 2 的最大 phase 为 `wait copy 173 ms`。`AGENT-HOT-TURN-STREAM-RING` 随后
    完成并否决：full ring 真实命中且质量全过，但 596 hot-long wall 从 `1.509808 s`
-   升到 `1.898041 s`，慢 `25.714%`；554-token chunk 只路由少量专家，按全部专家顺序
-   预取引入的额外 copy 远大于更早 fetch 收益。当前转为只读
-   `AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT`：先证明 routing 可见性、选中专家预取的
-   保守整请求上界和数值/回滚边界，未过门不构建、不重启。
+   升到 `1.898041 s`，慢 `25.714%`；该分支同时切换 whole-chunk stream、shared-expert
+   defer 和 cross-layer issuer，不能把回退单独归因给 ring 深度。只读审计随后确认
+   staged 路径本来就在每层 router 后按实际选中专家建序，后续层 routing 无法提前获知，
+   因此跨层推测预取关闭。当前转为 `AGENT-HOT-TURN-STAGED-PREFETCH`：只把 grouped
+   staged walk 的实际传输在前数从默认 8 提到安全上限 15，验证能否转化 stage 2 的
+   `wait copy 173 ms`。
    真实 trace 中，工具 union `123,693 s` 是 35 文件快照的根任务主体，普通单路模型
    union `66,228 s` 是第二大块；恰好两路仅 `171 s`。编辑—测试 36 文件快照中，19 个
    root 同时含编辑和测试，首修改前模型/工具 `3,235.782/6,365.546 s`，首修改到首测试
@@ -198,8 +200,9 @@
 | ENGINE-0.1.55-EVAL | 评估官方 `0.1.55` CUDA13 引擎版本级收益 | 包/二进制 SHA 和实际进程路径一致；同生产 config 仅替换 executable；health、6/2、路径标记、三组 greedy、smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，另一尺寸不同向相反，A 漂移 <=3% | 否决 | L-153：官方 CLI 不支持 `--prompt-cache-long`，移除该 128K-only 选项后成功启动；三组 greedy/smoke 全过；596/94K wall 慢 `5.853%/4.259%`，绝对慢 `0.087835/0.059525 s`；A 漂移 `<3%` | 版本级候选否决；不跑官方 GDN env、189K/全矩阵；A2 已恢复旧 engine |
 | GDN-CONVL2 | 融合 prompt GDN conv 与 Q/K L2 norm | B 只增加 `STRATA_GDN_CONVL2=2`；实际进程 env、6/2、health、三组 greedy/smoke 全过；596/94K 至少一个 hot-long wall 改善 >=1% 且绝对 >=0.05 s，两个尺寸不反向，A 漂移 <=3% | 否决 | L-154：A1/B 的 596/94K prompt `1409.4→1394.2/1259.4→1258.6 ms`，wall `1.514727→1.502251/1.413078→1.410180 s`；wall 仅改善 `0.8245%/0.2051%`，绝对 `0.012476/0.002898 s`；A2 漂移 `<0.4%`，质量全过 | 未过双门；不跑 189K、并发矩阵或邻近 GDN 参数；A2 已恢复且无该 env |
 | AGENT-HOT-TURN-PHASE-MAP | 拆 596/94K 普通 Agent 热续轮的真实 prefill 主相位 | 一次 `STRATA_PREFILL_TIMING=1` profile；记录 21 相、host staging、双卡数值、prompt/wall/cache/finish；单相绝对 >=0.05 s、真实可移除且 wall 保守上界 >=1% 才进入实现；profiler wall 不作收益；完成后恢复 A2 | 已完成 | stage 1 GPU/host `459/501 ms`，stage 2 `647/788 ms`；stage 2 `wait copy 173 ms`、`gemm gate/up 130 ms`、`dequant 106 ms`、`gemm down 68 ms`；parity/quality 全过 | 已恢复无 profiler A2；下一项 `AGENT-HOT-TURN-STREAM-RING` |
-| AGENT-HOT-TURN-STREAM-RING | 让 554-token 热续轮使用更深的 streamed expert ring | B 只加 `STRATA_PREFILL_STREAM_MIN=0`；实际 env、6/2、health、greedy/smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3%；1 路通过后报告 2 路第二 TTFT/跨度，4 路非回退，6/8 安全 | 否决 | L-155：B 路径和全部质量/资源门通过，但 596 wall 中位 `1.509808→1.898041 s`，慢 `25.714%`、绝对多 `0.388233 s`；prompt `1401.7→1787.9 ms`；full ring 预取全部专家，而 554-token chunk 只路由少量专家 | 596 明确反向，按门未跑 94K/并发；A2 已恢复；不扫 threshold、ring 容量或邻近参数 |
-| AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT | 判断能否只预取本 chunk 实际选中专家 | 只读源码/日志；证明 routing 在 copy 前何时可用、当前 15-expert lookahead 的等待来源、最坏路由密度和额外 bookkeeping；据 596/94K 给出 wall >=1% 且绝对 >=0.05 s 的整请求保守上界；说明 bitwise/数值影响、生产命中率与 env 回滚 | 进行中 | phase map：stage 2 `wait copy 173 ms`；full-ring 已证明盲目加深预取会慢 25.714% | 当前入口；未过源码/上界门不构建、不重启；上界不足转 `dequant 106 ms` 重复工作检查 |
+| AGENT-HOT-TURN-STREAM-RING | 让 554-token 热续轮使用更深的 streamed expert ring | B 只加 `STRATA_PREFILL_STREAM_MIN=0`；实际 env、6/2、health、greedy/smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3%；1 路通过后报告 2 路第二 TTFT/跨度，4 路非回退，6/8 安全 | 否决 | L-155：B 路径和全部质量/资源门通过，但 596 wall 中位 `1.509808→1.898041 s`，慢 `25.714%`、绝对多 `0.388233 s`；prompt `1401.7→1787.9 ms`；whole-chunk 分支还改变 shared defer 和 issuer | 596 明确反向，按门未跑 94K/并发；A2 已恢复；不扫 threshold、ring 容量或邻近参数 |
+| AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT | 判断能否只预取本 chunk 实际选中专家 | 只读源码/日志；证明 routing 在 copy 前何时可用、当前 lookahead 的等待来源、最坏路由密度和额外 bookkeeping；据 596/94K 给出 wall >=1% 且绝对 >=0.05 s 的整请求保守上界；说明 bitwise/数值影响、生产命中率与 env 回滚 | 已完成 | 每层 router 完成后才建 routed order；staged 路径已经只拷贝本层选中非驻留专家；后续层 routing 依赖当前层输出。554 x top-10 有 `5,540` 个 pairs、每层 512 专家 | **跨层推测预取关闭**；当前真实可动项是 grouped staged lookahead 默认 8、安全上限 15，转下一项；未重启 |
+| AGENT-HOT-TURN-STAGED-PREFETCH | 把 grouped staged expert lookahead 从 8 提到安全上限 15 | 默认 8 不变；B 只加 `STRATA_PREFILL_STAGED_AHEAD=15`；实际 env、6/2、health、greedy/smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3%；1 路通过后报告 2 路第二 TTFT/跨度，4 路非回退，6/8 安全 | 进行中 | stage 2 `wait copy` 中位 `173 ms`；隐藏 15.1 ms 即达 596 wall 1%，隐藏 50 ms 达绝对门；32-slot ring 与 16-expert gather 使 15 为安全上限 | 当前入口；失败停止该参数轴，不扫邻近深度、stager thread/batch/ring 或 stream threshold |
 | AGENT-HISTORY-STATE-RESIDENCY | 跨进程恢复隔天旧会话，避免 113 秒冷 prefill | 先只读证明多 stage KV/checkpoint 可序列化；测 223K 状态大小、写放大、恢复时间和 RAM 峰值；真实旧会话等待至少减少 1% 且保存成本不转移到每轮；有指纹、失效、安全删除和精确回滚 | 搁置 | 真实 223K resume `113.014 s`；当前 session file 明确拒绝 `--layer-split`、`--peer-device`、`--batch`、`--prompt-cache 0`，不能直接用于双卡六槽生产 | **低频 p99**；34 个有效会话仅 1 个超过 24h；普通热续轮、首工具/首修改和重复测试优先；不实现、不重启 |
 | AGENT-REAL-DECODE-SHAPE | 按真实形状拆模型 decode 成本 | 只读汇总 output/reasoning 尺寸、请求类型、1/2 路并发和模型区间；不改服务、不输出正文；至少重放三种真实尺寸；只有真实触发率后的整任务 >=1% 上界才预注册一个机制 | 已完成 | 35 文件、152 root、14,768 请求；output/reasoning `10,343,967/3,347,547` token；单路模型 union `69,064.894 s`、两路 `171.303 s`；416/1490/4483 单路 `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s`；4483 出现提前 `stop` | **诊断完成，长输出稳定性未完全过门**；现役配置同时开着 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`，生产仪器开销成为下一项 |
 | AGENT-PROFILE-HYGIENE | 移除生产 decode 计时与 GPU 剖析器 | 当前 B4 形状 A1-B-A2-B2；B 只移除 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`；416/1490/4483 各 3 波；至少一个主要尺寸中位改善 >=1%，4483 不回退 >1%，A2 漂移 <=3%，finish/hash/health/6 slots 全过；失败精确恢复 | 已完成 | 416/1490/4483 A adjacent median `4.188/14.395/42.322 s`，B `3.911/13.620/37.230 s`；416/1490 改善 `6.61%/5.38%`，A2 漂移 `-2.45%/+0.66%`；4483 漂移 `-13.77%` 不用于加速归因 | **已采纳并留在生产**；B2 engine env 无两个 profiling 变量，health loaded、6 slots、64-token smoke 过；4483 在 B/A2 都有提前 `stop`，独立保留 |
