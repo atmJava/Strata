@@ -15,8 +15,11 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import hashlib
 import json
 import pathlib
+import re
+import shlex
 import statistics
 import sys
 from typing import Iterable
@@ -50,6 +53,124 @@ def iso(value: dt.datetime | None) -> str | None:
 
 def number(value) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _exit_code(output: str) -> int | None:
+    patterns = (
+        r"(?im)^\s*process\s+exited\s+with\s+code\s+(-?\d+)\s*$",
+        r"(?im)^\s*exit(?:ed)?(?:\s+status)?\s*[:=]\s*(-?\d+)\s*$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, output)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _test_failed(output: str, exit_code: int | None) -> bool | None:
+    if exit_code is not None:
+        return exit_code != 0
+    if re.search(r"(?i)\btraceback \(most recent call last\)", output):
+        return True
+    if re.search(r"(?im)^\s*(?:failed|error)\b", output):
+        return True
+    if re.search(r"(?i)\b(?!0\b)\d+\s+(?:failed|errors?)\b", output):
+        return True
+    if re.search(r"(?i)\b(?:passed|ok|success)\b", output):
+        return False
+    return None
+
+
+def _call_text(payload: dict) -> str:
+    raw = payload.get("arguments")
+    if raw is None:
+        raw = payload.get("input")
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if isinstance(parsed, dict):
+            command = parsed.get("cmd")
+            return command if isinstance(command, str) else ""
+    return ""
+
+
+def _command_parts(command: str) -> list[list[str]]:
+    parts: list[list[str]] = []
+    for piece in re.split(r"(?:&&|\|\||[;\n|])", command):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            words = shlex.split(piece, posix=True)
+        except ValueError:
+            words = piece.split()
+        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words.pop(0)
+        if words and pathlib.PurePath(words[0]).name in {"sudo", "command", "env", "time"}:
+            words.pop(0)
+        if words:
+            parts.append(words)
+    return parts
+
+
+def command_kind(name: str | None, command: str) -> str:
+    """A conservative command category; the command itself is never returned."""
+    leaf = (name or "").rsplit(".", 1)[-1]
+    if leaf == "apply_patch":
+        return "edit"
+    if leaf == "write_stdin":
+        return "poll"
+    if leaf in {"view_image", "tool_search"}:
+        return "read" if leaf == "view_image" else "search"
+    if leaf != "exec_command":
+        return "other"
+
+    for words in _command_parts(command):
+        executable = pathlib.PurePath(words[0]).name
+        args = words[1:]
+        if executable in {"pytest", "py.test", "ctest", "tox", "nox", "vitest", "jest", "mocha"}:
+            return "test"
+        if executable in {"npm", "pnpm", "yarn", "bun"}:
+            if args and args[0] in {"test", "t"}:
+                return "test"
+            if len(args) > 1 and args[0] == "run" and args[1].startswith("test"):
+                return "test"
+        if executable in {"cargo", "go"} and args and args[0] == "test":
+            return "test"
+        if executable.startswith("python") and "-m" in args:
+            index = args.index("-m")
+            if index + 1 < len(args) and args[index + 1] in {"pytest", "unittest"}:
+                return "test"
+        if executable == "make" and any(arg in {"test", "tests", "check"} for arg in args):
+            return "test"
+        if executable in {"bash", "sh", "zsh"}:
+            script = next((arg for arg in args if not arg.startswith("-")), "")
+            if re.search(r"(?:^|[/_-])test(?:s|_|\.|$)", pathlib.PurePath(script).name):
+                return "test"
+        if re.search(r"(?:^|[/_-])test(?:s|_|\.|$)", executable):
+            return "test"
+        if executable in {"rg", "grep", "find", "ls", "cat", "head", "tail", "sed", "awk", "wc", "stat"}:
+            if executable == "sed" and any(arg.startswith("-i") for arg in args):
+                return "edit"
+            return "read"
+        if executable in {"git"} and args and args[0] in {"status", "diff", "log", "show"}:
+            return "read"
+        if executable in {"git"} and args and args[0] == "apply":
+            return "edit"
+        if executable in {"cmake", "ninja", "make", "gcc", "g++", "clang", "clang++"}:
+            return "build"
+        if executable == "patch":
+            return "edit"
+        if executable in {"python", "python3", "perl"} and any(
+            arg.startswith(("-i", "-pi")) for arg in args
+        ):
+            return "edit"
+    return "other"
 
 
 def files(paths: Iterable[pathlib.Path]) -> list[pathlib.Path]:
@@ -209,12 +330,18 @@ def parse(paths: Iterable[pathlib.Path]) -> dict:
                             name = payload.get("name")
                             if not isinstance(name, str) and payload_kind == "tool_search_call":
                                 name = "tool_search"
+                            command = _call_text(payload)
                             calls[call_id] = {
                                 "at": when,
                                 "root": root,
                                 "thread": thread,
                                 "turn": turn,
                                 "name": name,
+                                "command_kind": command_kind(name, command),
+                                "command_signature": (
+                                    hashlib.sha256(command.strip().encode()).hexdigest()
+                                    if command.strip() else None
+                                ),
                             }
                         else:
                             output = payload.get("output")
@@ -234,6 +361,9 @@ def parse(paths: Iterable[pathlib.Path]) -> dict:
                                 "root": root,
                                 "thread": thread,
                                 "turn": turn,
+                                "exit_code": _exit_code(output) if isinstance(output, str) else None,
+                                "failed": _test_failed(output, _exit_code(output))
+                                if isinstance(output, str) else None,
                             })
 
                 elif kind == "compacted" or payload_kind == "context_compacted":
@@ -455,10 +585,14 @@ def tool_spans(data: dict) -> tuple[list[dict], dict[str, int]]:
             "root": call.get("root"),
             "thread": call.get("thread"),
             "name": call.get("name"),
+            "command_kind": call.get("command_kind"),
+            "command_signature": call.get("command_signature"),
             "start": start,
             "end": end,
             "seconds": max(0.0, (end - start).total_seconds()),
             "output_chars": output["chars"],
+            "exit_code": output.get("exit_code"),
+            "failed": output.get("failed"),
         })
     return spans, {"calls": len(data["calls"]), "unpaired": missing}
 

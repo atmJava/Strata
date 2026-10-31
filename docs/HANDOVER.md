@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T20:10+08:00。
+> 整理时间：2026-10-31T21:35+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,19 +12,20 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-150。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-151。
 
 ## 2. 当前断点
 
-- **全局目标已第十五次修订并继续执行**：优先优化普通编辑—测试热续轮，再处理首工具/
-  首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
+- **全局目标已第十六次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
+  等待，再处理首工具/首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
   触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
   可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused，当前目标接口不能改写文本或恢复它；接手时
-  以本仓库第十五版计划为权威，不要回到平台旧目标的状态快照。
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。尝试创建第十六版新目标时接口以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第十六版计划
+  为权威，不要回到平台旧目标的状态快照。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
   `handoff_safe=1`，DKMS 与 initramfs 自动路径固定，功耗墙各为 `280 W`。当前慢不是
@@ -115,10 +116,17 @@
   prompt/wall 慢 `13.75%/8.14%`，1 路长热续慢 `3.96%/3.55%`，2/4 路同样反向。
   保留默认 64，不扫描邻近阈值。A64r 已恢复，见
   [result](work/AGENT_HOT_TURN_FIXED_COST_RESULT-20261031.md)。
-- **当前状态与下一动作**：`AGENT-EDIT-TEST-LOOP-TRACE`。从最新 35 文件真实 Codex
-  rollout 只读拆首个工具、首次修改、首个测试、同命令重复测试、失败回传后的额外轮次，
-  以及每类的 prompt/cached/output、1/2 路并发和绝对秒数。产物必须给出真实触发率、
-  两类最重循环和一个 >=1% 可实测候选；工具执行或客户端行为占主导时明确 Strata 边界。
+- **上一项判决**：`AGENT-EDIT-TEST-LOOP-TRACE` 完成。36 文件、170 root、34 thread、
+  22,749 工具、2,318 编辑、576 测试中，19/170 root 同时含编辑和测试；首修改前模型/
+  工具 `3,235.782/6,365.546 s`，首修改到首测试 `4,072.900/8,241.516 s`。178 次测试
+  签名重复中 173 次之间有新编辑，无编辑重复只有 5 次且状态不可判定，成功/失败后立即
+  重复均为 0。重复测试方向否决，
+  见 [AGENT_EDIT_TEST_LOOP_RESULT](work/AGENT_EDIT_TEST_LOOP_RESULT-20261031.md)。
+- **当前状态与下一动作**：`AGENT-SPLIT-MTP-BATCH`。源码已确认
+  `STRATA_SPLIT_MTP_BATCH=1` 在双卡、MTP、native embed、末级 drafter 条件下进入
+  `Prefill::draft_kv`；另一台双卡机的 prompt read 为 25K/51K/104K
+  `+6.7%/+4.3%/+3.3%`。先由候选启动日志证明当前 2080 Ti/六槽路径真实命中，再跑
+  596/94K/189K 热续 A1/B/A2。拒绝则不测；94K 无方向性收益则不做全矩阵。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说
