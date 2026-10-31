@@ -2,6 +2,12 @@
 
 **状态：分析记录及 2026-10-31 L0/显式 layer-major 执行记录；不是已实现的优化，也不是新的默认配置。**
 
+**2026-10-31 decode addendum**：`UTIL-QFUSE-HC` 已补测生产 Q8 HC read 的完整
+`gr_up_q8_kernel + native_quantize_q8_1` 路径。两卡输出与 q8 image 全 bitwise，局部路径在
+T=1/2/3 有 `+1.31–2.67%`，但每次只省 `0.44–0.79 us`；每个 24 层 stage 只有 48 次读，
+整窗投影为 `0.11–0.20%`，已在 server 重启前否决。后续候选必须直接报告整窗绝对节省，
+不能把局部 launch/path 的百分比当成端到端收益。
+
 本文审查 `freeze/server-adapt-0.2.7` 在真实服务器和长上下文负载下仍未被主线覆盖的吞吐
 优化方向。逐项实现和已经测得的局部收益见
 [`HANDOVER-2026-10-29-freeze-027-throughput.md`](../archive/HANDOVER-2026-10-29-freeze-027-throughput.md)。

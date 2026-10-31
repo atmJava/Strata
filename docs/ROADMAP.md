@@ -110,6 +110,7 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
 | UTIL-POLL-TURNOVER | M14 | 降低完成 poll、group hand-off 与下一 stage launch 的串行周转成本 | 已证伪（高并发） | 中；一次候选启动和恢复，附首次构建控制失败 | **否决**：同选项 B2 parity 全过，但 6/8 路回退 `3.241%/6.122%`，最佳级胜场也不足；源码已移除 |
 | UTIL-B6-ROWS | M13/M14 | Q4_K/Q5_K/IQ4_XS 多列 MMVQ 跨 rows 复用 activation fragment | 已证伪（生产 reach） | 低；现有精确 opt-in，仅本机 kernel screening | **否决**：全 parity，但相对 IL T=2 中位 `-5.868%`、0/22 胜，Q5_K/Q6_K 回退最高 `38.63%`；未构建、未重启 |
 | UTIL-LFUSE-SHARED | M14 | 共享专家标量 gate 并入 router，sigmoid+scale 并入 resident combine | 已证伪（吞吐/漂移） | 中；两卡 harness、A1-B-A2 各 12 waves | **否决**：parity 与 greedy 全过，但 2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`、胜场 `1/6, 1/6, 2/6, 4/6`；8 路 A 漂移 `+4.053%`，A2 已恢复 |
+| UTIL-QFUSE-HC | M14 | 生产 HC Q8 up read 同读写出 consumer q8_1，省掉独立量化 launch | 已证伪（整窗绝对收益） | 低；两卡独立 harness，未重启 | **否决**：两卡全 bitwise，T=1/2/3 完整局部路径 `+1.31–2.67%`；但每 read 仅省 `0.44–0.79 us`，每 stage 48 次后只有 `0.11–0.20%` |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -217,6 +218,11 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
     A1-B-A2 的 2/4/6/8 路为 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场
     `1/6, 1/6, 2/6, 4/6`。8 路虽名义 `+4.362%`，但 A 漂移 `+4.053%` 且胜场不足；
     2/4/6 超过 1% 回退线。A2 已恢复，下一项重新做源码/阶段成本审计。
+37. **UTIL-QFUSE-HC 已在生产投影门否决**：完整 Q8 A/B 路径在两卡 `T=1..8` 逐字相等，
+    T=1/2/3 的局部路径达到 `+1.312–2.674%` 且 6/7 或 7/7 胜，但绝对节省只有
+    `0.44–0.79 us/read`。每 stage 24 层 × 2 次 HC read =48 次，最快 stage 只有
+    `18.27 ms`，单卡投影 `0.11–0.20%`；即使不扣两卡 overlap 也不到 0.6%。没有构建
+    server 或重启。下一候选必须按真实触发次数证明整窗绝对节省 ≥1%。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

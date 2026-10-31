@@ -3915,6 +3915,33 @@ graph 路径没有提供可复现收益，部分行反而回退。
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
 
+## L-119 UTIL-QFUSE-HC：完整路径通过 1%，但整窗乐观上界仍低于 0.5%
+
+**判定**：**UTIL-QFUSE-HC 在生产投影门否决。** 生产 `STRATA_HC_Q8=1` 的 A 路径是
+`gr_up_q8_kernel + native_quantize_q8_1`，B 路径由 `gr_up_q8_q32_kernel` 同读写出完整
+q8_1 image。两卡 `T=1..8` 的 `R/lo/rs/inject/mixed` 与 q8_1 全部逐字相等；完整 A/B 路径
+在 T=1/2/3 的两卡中位均过 1%，胜场 7/7 或 6/7。但单次只节省 `0.44–0.79 us`，而每 stage
+有 24 层 × 2 次 HC 读 =48 次；最快 stage-2 为 `18.27 ms`，单卡生产宽度投影仅
+`0.11–0.20%`。即使不扣流水线 overlap、把两卡收益直接相加，非生产 T=7 也只有 `0.554%`。
+因此不可能达到全局 1% 门，没有构建 server candidate、没有重启或改生产文件。
+
+**七组交替进程**：GPU0 的 T=1/2/3/4/6/7/8 为 `+2.674%/+1.695%/+1.720%/+1.112%/
++1.057%/+1.608%/+1.365%`，T=5 为 `+0.794%`；GPU1 的 T=1/2/3 为
+`+2.329%/+1.312%/+1.563%`，其余 `+0.029–0.862%`。所有臂每个 T 的输出与 q8 hash 一致，
+无 CUDA error。
+
+**状态**：A2 server/engine/vision 仍为 `604897/604926/604905`，engine/config SHA-256 为
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
+`88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`，health 200/loaded、
+6 slots / 2 groups；systemd inactive/dead，GPU free `803/904 MiB`，RAM
+`49 GiB used / 12 GiB available`。
+
+**证据**：`/opt/ai/logs/util-qfuse-hc-total-20261031T0210UTC/`，`all-sha256.txt` sha256
+`f51774e0b9653443b2b4e333657240501cedecec50ba1ba040141599ef67e4c2`；完整结果见
+[`UTIL_QFUSE_HC_RESULT-20261031.md`](work/UTIL_QFUSE_HC_RESULT-20261031.md)。**没测什么**：
+没有 server A-B-A、graph replay、长上下文、自然语言 parity 或混合流量，因为 1% 整窗上界
+已在重启前被排除。
+
 ## L-118 UTIL-LFUSE-SHARED：正确性通过，但 2/4/6 路回退超过 1%
 
 **判定**：**UTIL-LFUSE-SHARED 在端到端吞吐、配对胜率和漂移门否决。** 现有

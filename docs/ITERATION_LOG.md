@@ -3,6 +3,36 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-92 · Q8 HC read 的完整量化路径变快，但整窗最多不到 0.6%
+
+- 目标 / 指标：验证生产 `STRATA_HC_Q8=1` 的 HC up read 同读写出消费者 q8_1 image，能否
+  省掉后续 `native_quantize_q8_1` launch，并给真实双卡 decode window 带来至少 1%。
+- 假设与预期：现有 verifier 的 `g_qfuse_hc()` 固定 false，因此生产仍执行 Q8 up 后再量化；
+  `gr_up_q8_q32_kernel` 已能按 32 列拥有完整 q8_1 group。先证明完整 read+quant 路径有
+  1% 收益，再把该局部收益乘以每 stage 的 48 次 HC read。
+- 为什么选这条路线：它绕开已否决的旧 `STRATA_QFUSE` GDN recurrence，也从真实阶段成本
+  出发；首轮 BF16 屏幕没有测到生产 Q8 up 内核，因此必须用独立 harness 关闭这个证据缺口。
+- 改动与实验：新增 `qfuse_hc_bench`，A 为 Q8 read + `native_quantize_q8_1`，B 为同 read
+  直接写 q8_1；两卡先做 `T=1..8` 全输出和 q8 image parity，再各跑 7 个交替 A/B 进程，
+  每进程 5 批 × 200 iters。没有修改远端冻结源码、运行 engine、config 或 systemd。
+- 结果：两卡 parity 全过，所有进程每个 T 的 values/q8 hash 唯一且相同。完整路径在 GPU0
+  T=1/2/3 为 `+2.674%/+1.695%/+1.720%`，GPU1 为 `+2.329%/+1.312%/+1.563%`；生产宽度
+  胜场为 6/7 或 7/7。绝对节省只有 `0.44–0.79 us/read`。
+- 判决：**UTIL-QFUSE-HC 在生产投影门否决。** 每 stage 48 次 read 只能节省约 `21–38 us`；
+  相对最快 `18.27 ms` stage 为 `0.11–0.20%`。即使两卡收益直接相加且不扣 overlap，最高
+  非生产 T=7 也只有 `0.554%`，没有进入 1% 的保守路径。
+- 预期部分成立：总路径的局部 1% 和配对胜率真实存在，生产 Q8 路径也逐字正确；但局部百分比
+  不能替代绝对时间和整窗占比。这次在服务器切换前否决，节省约 3–7 分钟加载成本。
+- 生产状态与回滚：没有任何候选部署。A2 PID `604897/604926/604905`、health loaded、
+  6 slots / 2 groups、engine `105a4171...`、config `88de996a...` 保持不变。
+- 证据：台账 L-119、`UTIL_QFUSE_HC_RESULT-20261031.md`、远端
+  `/opt/ai/logs/util-qfuse-hc-total-20261031T0210UTC/`；`all-sha256.txt` sha256
+  `f51774e0b9653443b2b4e333657240501cedecec50ba1ba040141599ef67e4c2`。
+- 学到什么：先测“完整局部路径”仍需再乘真实触发次数和阶段总成本；局部 1% 只有在绝对节省
+  足以覆盖临界窗口 1% 时才是候选。小 launch 消除应优先用整 stage 或整 window harness。
+- 下一步与理由：继续源码/阶段审计，优先寻找单项成本至少 `0.18 ms/window`、且在生产
+  6 路窗口真实可达的机制；不再重试 HC Q8 image fusion 或其原子尾近似。
+
 ## I-20261031-91 · Shared-expert LFUSE is exact but regresses three concurrency levels
 
 - 目标 / 指标：验证现有 `STRATA_LFUSE=1` + `STRATA_MMVF_ROWS=1` 的共享专家标量门/router

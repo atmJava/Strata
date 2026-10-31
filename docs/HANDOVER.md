@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-115。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-119。
 
 ## 2. 当前断点
 
@@ -49,7 +49,11 @@
   B/A2 三组冻结 greedy 两轮逐字一致；但 2/4/6/8 路相对 A 合并中位为
   `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`。只有 8 路名义过 1%，
   未过 5/6 胜，A 漂移还达 `+4.053%`；2/4/6 回退超过 1%，因此否决并恢复 A2。当前断点转为
-  下一项不同机制源码/阶段成本审计。
+  下一项不同机制源码/阶段成本审计。`UTIL-QFUSE-HC` 随后补测了生产 Q8 HC read：两卡
+  `T=1..8` 全输出和 q8 image 逐字相等；完整 `read + native_quantize_q8_1` 对 fused q8 read
+  在 T=1/2/3 为 `+1.31–2.67%`，但绝对节省只有 `0.44–0.79 us/read`。每 stage 48 次读仅
+  投影 `0.11–0.20%`，不扣两卡 overlap 的乐观上界也不到 0.6%，因此在重启前否决。A2 未动，
+  下一项必须按真实触发次数证明整窗 ≥1%。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；
