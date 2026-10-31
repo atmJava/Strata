@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-142 · host 请求路径判 null；标题跨后续工具 step 仍抢资源
+
+- 目标 / 指标：确认普通热续轮的模板、Responses 转换、PromptEncoder、`prepare` 和
+  assembler 是否值得继续优化，并据真实 DSH 多 step 路径重新选择下一项。
+- 假设与预期：旧 server timing 不覆盖 `Service.prepare()` 之前的 host 路径，因此需先测
+  6K/94K/189K；若保守上界低于整任务 1%，应明确关闭而不是继续抠局部 CPU。
+- 为什么选这条路线：用户最大的感受是任务慢，但此前不知道热续轮的固定成本来自 host、
+  engine prompt 还是 decode；没有这条边界就无法避免继续局部优化。
+- 改动与实验：新增无引擎的 `probe-host-request-path.py`，用生产 tokenizer/template 在
+  6K/94K/189K 上各测 7 次热请求；修复 DSH v4 的 stream/timestamp 解析并加回归测试；
+  用真实 DSH `single-file` 跑 6 个主 step，按精确 token 数与 server 请求关联。
+- 结果：热 `Service.prepare` 中位 `6.439/11.527/18.345 ms`，p90
+  `6.607/11.778/18.708 ms`；JSON、Responses 转换和 assembler 更小。真实任务
+  `13.261 s`，模型 wall `12.112 s`（`91.287%`），工具并集 `0.991 s`；普通 step 的
+  first stream 只比 engine prompt 多约 `25–26 ms`。但现有标题门只等第一个主请求：
+  step 2 与标题重叠，首 token 前 `2.681 s` 而 prompt 只有 `1.148 s`，额外 `1.533 s`
+  约占任务 `11.6%`。
+- 判决：**`AGENT-DSH-REQUEST-PATH-MAP` 判 null 并关闭；`DSH-TITLE-END-OF-TURN`
+  成为当前项。** 不修改 server/engine，不重启。
+- 预期被推翻：原先把后续 step 的未归属时间列为候选 host 成本；live 关联证明普通 step
+  的剩余时间已经由 engine prompt/decode 解释，唯一多秒缺口来自标题与下一工具 step 重叠。
+- 生产状态与回滚：生产 server/vision/engine 仍为 `232891/232893/232899`，server
+  `bd3e4289...`、engine `105a4171...`、config `6ece1a13...`，health loaded、
+  262144、6 slots / 2 groups；无新增 Xid，无重启。
+- 证据：L-169、[结果](work/AGENT_DSH_REQUEST_PATH_RESULT-20261101.md)、
+  [下一契约](work/DSH_TITLE_END_OF_TURN_CONTRACT-20261101.md)。
+- 学到什么：测量工具本身必须支持当前客户端格式；否则 null timing 会被误当成机制线索。
+  另外，辅助请求隔离必须覆盖完整多 step turn，只避开首个请求会制造下一处争用。
+- 下一步与理由：实现默认关闭的 end-of-turn title gate，先在本地状态机和 no-restart
+  真实 DSH 路径验证；只有多 step A/B 任务墙 >=1%、5/6 胜且无逐 step 重叠才考虑生产重启。
+
 ## I-20261101-141 · 首轮前缀复用改善 35.7%；测试口径排除 checkpoint 污染
 
 - 目标 / 指标：减少连续新 DSH 会话首轮重复 prefill，并确认它在真实 1/2 会话路径上的

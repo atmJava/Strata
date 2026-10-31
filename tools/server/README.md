@@ -61,7 +61,8 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `probe_determinism.py` | is run-to-run spread sampling or the engine | `/opt/ai/runs/probe-determinism.json` |
 | `probe-gpu-utilization.py` | what the GPU hardware counters show during a controlled short decode and cold long prefill; separates SM activity, issue, Tensor, warps and DRAM | `/opt/ai/logs/gpu-util-*/probe.json`, `.nsys-rep` and `.sqlite`; `--check-only` validates the collection path without inference |
 | `probe-gpu-stability.py` | recent NVIDIA `NVRM: Xid` kernel events joined with current clocks, temperatures, power, memory, throttle reasons and owning process; read-only and no restart | JSON named by `--output`; `--require-clean` exits 2 when any Xid is present |
-| `probe-dsh-session-cost.py` | joins privacy-safe DSH session timings and token metadata with Strata `/metrics?requests=all`; separates `task_wall_s`, `turn_union_s`, model prompt/decode, tools, `post_turn_s` and unmatched title requests | JSON named by `--output` or stdout; never prints prompt, reasoning or tool bodies |
+| `probe-dsh-session-cost.py` | joins privacy-safe DSH session timings and token metadata with Strata `/metrics?requests=all`; separates `task_wall_s`, `turn_union_s`, first stream, model prompt/decode, tools, `post_turn_s` and unmatched title requests | JSON named by `--output` or stdout; reads current DSH v4 `chunk.time` and older `chunk.time0`; never prints prompt, reasoning or tool bodies |
+| `probe-host-request-path.py` | measures DSH-shaped JSON receipt, Responses conversion, template rendering, PromptEncoder, `Service.prepare` and assembler cost with the production tokenizer/template; no engine or restart | JSON named by `--output`; synthetic text only, with token counts and timings but no message bodies |
 | `agent_budget_ab.py` | agent-shaped A/B with a real tool loop, self-scoring tasks | `/opt/ai/runs/agent-budget-ab-*.json` |
 | `probe-agent-sessions.py` | metadata-only 1/2/4-conversation A/A for shared prompts, continuation turns, latency and cache reuse; no restart | JSON named by `--output` |
 | `probe-codex-sessions.py` | real Codex session token shape: totals, root turns, compaction cache gaps and top uncached events; never prints prompt text or server timing as attribution | JSON named by `--output` or stdout |
@@ -155,6 +156,7 @@ probe-version-stamp.py [--host H | --local] [--out FILE] [--expect-env-file FILE
 probe-gpu-utilization.py [--profile short|long|mixed] [--long-tokens N] [--check-only]
 probe-gpu-stability.py [--boot | --since TIME] [--cluster-seconds N] [--journal FILE] [--json] [--output FILE] [--require-clean]
 probe-dsh-session-cost.py SESSION... [--metrics FILE] [--match-window S] [--output FILE]
+probe-host-request-path.py --tokenizer DIR [--template FILE] [--contexts 6000,94700,189100] [--reps 7] [--output FILE]
 agent-shape-proxy.py --upstream URL --listen HOST:PORT --log FILE [--pin-tool-prefix] [--pin-first-turn-tokens N]
 run-matrix.py --batch V1 [--src DIR] [--only ID] [--skip ID] # one batch, one matrix run
 check_assert_lock.py <source-tree> <build-dir>   # the 64/256 shape is locked by static_assert

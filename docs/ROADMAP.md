@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-11-01（第三十三次目标修订；严重可靠性抢占、质量与工具协议为硬门）。
+> 最后更新：2026-11-01（第三十五次目标修订；严重可靠性抢占、质量与工具协议为硬门）。
 
 ## 用户目标
 
@@ -63,12 +63,13 @@
 | M48 | resident expert 绕开 MMQ gather | stage 1/2 gather 合计约 `183 ms`；group 级 direct path `7.848` 对 MMQ `11.671 ms/layer`（`1.49x`）；596 1 路 wall 改善 `1.862%`（相对 A1 `2.145%`、`32.667 ms`），三波全胜 | group 级上界、路径命中、greedy 和 1/2 路测量已完成；原契约绝对 `0.05 s` 未过，94K prompt 无对应改善，4/6/8 未完成 | **暂停验收，未采纳**：用户的 1% 价值原则记录为正向信号，但不静默放宽契约；候选默认关闭，已恢复 A1 生产。恢复后先审计 48 层 direct-path 覆盖/fallback，而非重跑同形 A-B-A |
 | M49 | Codex 模型目录与 coding 质量 | 无目录时 9 工具且无 `apply_patch`；目录后 14 工具且为 `custom`。Codex/Strata 基础严格 `5/6`、测试 `6/6`、`159.777 s`；`apply_patch` 独立重复 `3/3` | 产品化幂等目录供给；真实工具面无错；基础 fixture 测试不变、最终 sentinel、无事件错误；不改变引擎和量化 | **目录供给完成**：`strata codex catalog [--apply]` 已产品化；Codex 专用 `apply_patch` 与 DSH `edit/write` 分开统计 |
 | M50 | DSH Web 与 terminal 质量对照 | 用户 DSH Web 为 `atm/qwen3.8.../:8888`；旧 `dsh headless` 为 `deepseek-official/deepseek-flash`。显式 overlay 对齐 Qwen/Strata 后，6 个基础测试 `6/6`、严格 `3/6`，事件/工具错误 `0/0`，wall `243.865 s` | 报告不混淆 runner/profile/provider/model；至少重复一次并保留失败类型；不能把另一 hosting 归因当前引擎 | **完成**：旧 DeepSeek `6/6` 剔除；DSH 实际工具面为 `edit/write`，不声明 `apply_patch`；新增 Xid `0` |
-| M51 | GPU0 低频 Xid 稳定性 | DSH 最终 Responses `input=15,419`、31 tools、76 reasoning token 后因 `layer 11 never rang` 失败；GPU0 同秒 8×Xid 13 + Xid 43。约 60 次精确重放、30 个最终请求全 200，无新 Xid；GPU0 另有 Xid 62/154 历史；上游同类板需板卡特异 offset，报告负载不可横比 | 每个真实窗口从 UTC 起点读取新增 NVRM Xid；同一 PCI 5 秒内事件聚簇但保留原始事件数；`--boot` 覆盖整个 boot；固定 prompt 不作硬件稳定性证明；重复事故后先单变量验证 `STRATA_HC_SPLIT=1`，再测可回滚显存降频，最后单卡隔离；无新事故时不空等 | **P0 抢占项**：高度怀疑改装 22GB 卡显存/板级稳定性，未证明本机芯片损坏；只读探针已固化，未改 GPU/engine/config。当前主动项为 M56 |
+| M51 | GPU0 低频 Xid 稳定性 | DSH 最终 Responses `input=15,419`、31 tools、76 reasoning token 后因 `layer 11 never rang` 失败；GPU0 同秒 8×Xid 13 + Xid 43。约 60 次精确重放、30 个最终请求全 200，无新 Xid；GPU0 另有 Xid 62/154 历史；上游同类板需板卡特异 offset，报告负载不可横比 | 每个真实窗口从 UTC 起点读取新增 NVRM Xid；同一 PCI 5 秒内事件聚簇但保留原始事件数；`--boot` 覆盖整个 boot；固定 prompt 不作硬件稳定性证明；重复事故后先单变量验证 `STRATA_HC_SPLIT=1`，再测可回滚显存降频，最后单卡隔离；无新事故时不空等 | **P0 抢占项**：高度怀疑改装 22GB 卡显存/板级稳定性，未证明本机芯片损坏；只读探针已固化，未改 GPU/engine/config。当前主动项为 M57 |
 | M52 | 严格最终回复契约 | 同 Qwen/Strata DSH 路径，当前 prompt 的基础严格 `3/6`；3 个失败均代码/测试正确但最终多写解释。`transaction-rollback` 当前 prompt `4/5` | 同一失败 fixture 至少 5 次；明确最终 assistant message 的唯一内容与禁止项；代码/测试不退化，其他基础 fixture 不下降；不静默改写输出 | **通过**：候选 `5/5`；完整基础严格 `3/6 -> 6/6`，测试 `6/6`、受保护测试未改、事件/工具错误 `0/0`，新增 Xid `0` |
 | M53 | DSH 实际工具循环成本 | 7 个基础/fixture 会话 runner `197.776 s`；模型 step `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联，7 个隐藏标题请求 | 只读关联 DSH 事件与 server metrics；分开 runner 进程、主任务 turn、模型、工具和 turn 后工作；给出真实触发率与绝对秒数 | **已完成**：标题请求约 266 prompt/118 output token、中位 `9.8 s`，与主请求争用 GPU/cache；转 M54 |
 | M54 | DSH 标题争用 | 短任务关闭标题 runner `16.854→14.901 s`（`-10.647%`）、主 turn `14.929→13.001 s`（`-11.843%`），`5/6` 胜；长任务 `0/2` 胜；首组 cache 跨臂污染 | 保留标题，主任务结束后异步生成；6 对短任务 ABBA、2 对长任务；`task_wall_s` 主指标 >=1%，长任务不明显回退，标题不退化；真实流式代理、零错误；两个会话无法安全配对时 fail open | **opt-in 采纳**：生产单会话主 turn `19.629→16.078 s`（`18.091%`）、runner `15.914%`；3/3 质量/provider；双会话 2/2 质量/provider、defer 增量 0；重启 `136 s`、新增 Xid `0` |
 | M55 | 新会话首轮共享前缀复用 | 原 checkpoint 在 system 后约 `582` token；相同 system+tools 前缀为 `5,463` token | 精确 DSH shape 固定 system+tools；prompt ids 不变；1 路整任务 >=1%，2 路无冲突，质量/provider 标题/健康/Xid 全过；不能依赖被 checkpoint 污染的同 boot ABBA | **opt-in 采纳**：干净 boot 稳态 task 中位 `11.3715→7.3165 s`（`35.66%`、`4.055 s`），首步 model wall `6.2–6.4→2.7–3.0 s`；6 fixture 与双会话通过；回滚移除 `STRATA_PIN_DSH_TOOL_PREFIX=1` |
-| M56 | 普通热续轮请求路径固定成本 | 94K/189K 热续轮已高度 cached，prompt 仍约 `2.09/2.43 s`；短输出 decode 仅约 `50–73 ms` | 用同一真实 DSH step 对齐客户端与服务端，拆模板渲染、PromptEncoder/cache lookup、admission、serialization、engine prompt、TTFT/decode；每项给绝对秒数/触发率；至少一个 >=1% 的机理解释和精确回滚，否则停止 | **进行中**：先做 `AGENT-DSH-REQUEST-PATH-MAP` 只读边界测量，不直接跳 kernel，不重启 |
+| M56 | 普通热续轮请求路径固定成本 | 生产 tokenizer/template 的 6K/94K/189K 热 `Service.prepare` 中位 `6.439/11.527/18.345 ms`，JSON、Responses 转换和 assembler 更小 | 无重启拆 host、client、server 和 engine 边界；按整任务真实触发率设置 1% 门，低于门明确 null，不进入局部实现 | **null result，已关闭**：真实 6-step DSH fixture 的模型 step `12.112 s`（任务 `13.261 s` 的 `91.287%`），普通 step 首 token 仅比 engine prompt 多约 `25–26 ms`；停止 host 微优化 |
+| M57 | DSH 完整 turn 的标题隔离 | 现有标题门只等首个主请求结束；live step 2 立即开始，首 token 前 `2.681 s` 而 prompt `1.148 s`，`1.533 s` 并发成本约占 `13.261 s` 任务的 `11.6%` | 跟踪完整工具循环，只在 terminal no-tool assistant response 且无普通请求时放行标题；保留 2 会话 fail-open、title-only grace、60 s 上限；真实多 step A/B 任务墙 >=1%、5/6 胜、无逐 step 标题重叠、质量/健康全过 | **当前**：先本地状态机与 no-restart proxy/real DSH 验证，再评估 server 重启 |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 

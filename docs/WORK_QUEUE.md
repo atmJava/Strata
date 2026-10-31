@@ -7,7 +7,7 @@
 
 ## 当前决策前沿
 
-0. **全局目标已第三十三次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+0. **全局目标已第三十五次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
    Xid、engine 非预期退出或错误结果风险时，暂停性能实验并保存事故。没有新事故时，不把
    “等待低频故障”当作主线，继续处理真实用户的质量与等待。
    - `AGENT-DSH-REAL-PATH-COST` 已完成：模型 step 占 `93.202%`，工具并集占 `5.312%`；
@@ -18,10 +18,13 @@
      `11.3715→7.3165 s`（`35.66%`、`4.055 s`）；首步 cached `582→5,463`，
      model wall `6.2–6.4→2.7–3.0 s`。6 个 fixture、双会话 provider 标题、健康和 Xid
      门通过。同 boot ABBA 被 conversation-cache checkpoint 污染，已作废。
-   - 当前主动项：`AGENT-DSH-REQUEST-PATH-MAP`。普通热续轮已有高 cache 复用时，94K/189K
-     prompt 仍约 `2.09/2.43 s`。下一轮在一条真实 DSH step 上拆模板渲染、
-     PromptEncoder/cache lookup、admission、serialization、engine prompt 和 decode，
-     用绝对秒数和真实触发率选一个 >=1% 的后续实现。
+   - `AGENT-DSH-REQUEST-PATH-MAP` 已判 null：6K/94K/189K 热 `Service.prepare`
+     中位仅 `6.439/11.527/18.345 ms`；真实 6-step fixture 的普通 step 首 token 只比
+     engine prompt 多约 `25–26 ms`。停止 host 路径微优化。
+   - 当前主动项：`DSH-TITLE-END-OF-TURN`。现有标题门只等第一个主请求；live step 2
+     随后与标题重叠，首 token 前 `2.681 s` 而 prompt `1.148 s`。下一轮跟踪完整工具
+     循环，只在 terminal no-tool assistant response 且无普通请求时放行标题，先本地和
+     无重启真实 DSH 验证，再做 1% 多 step A/B。
    - 测试口径：runner 进程 wall 和主任务 `task_wall_s` 分开；代理必须逐块流式转发；
      会写持久缓存 checkpoint 的候选不能用未验证的同 boot ABBA，必须独立 boot 或把不可逆
      顺序明确写成 A→B 并单列冷启动，同时保留标题质量/长任务非回退门。
@@ -191,7 +194,8 @@
 | AGENT-DSH-REAL-PATH-COST | 拆 DSH 实际工具循环并找整任务 >=1% 的下一机制 | 只读覆盖基础 fixture 和长任务；记录每 step input/cached/fresh、output/reasoning、prompt/decode、finish、工具类别/回流、客户端 wall；给出真实触发率与绝对秒数；低于 1% 或无法进入实际路径不实现 | 已完成 | L-165：7 会话 runner `197.776 s`，模型 `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联；7 个未关联标题请求，中位 `9.8 s`；短任务关闭标题主 turn `5/6`、`-11.843%`，长任务 `0/2` 胜 | **完成**；关闭标题不能通用产品化；转 `DSH-TITLE-INTERFERENCE` |
 | DSH-TITLE-INTERFERENCE | 保留 DSH 标题语义但避免与主请求争用 | 显式 overlay/proxy，不改用户 profile；至少 6 对短任务 ABBA、2 对长任务；主指标 `task_wall_s`，runner wall 次之；短任务中位 >=1%，长任务无明显回退，标题不退化/fallback；记录 prompt/decode/cache/零错误；代理真实流式；两个会话无法安全配对时 fail open | 已完成 | L-167：生产单会话主 turn `19.629→16.078 s`（`18.091%`），runner wall `15.914%`；3/3 质量/provider；双会话 2/2 质量/provider、defer 增量 0；重启 `136 s`、新增 Xid `0` | **opt-in 采纳并保持运行**；双会话恢复原并发；回滚移除 `STRATA_DEFER_TITLE_REQUESTS=1` |
 | DSH-FIRST-TURN-PREFIX-REUSE | 减少连续新会话首轮重复 prefill | 精确 DSH shape 固定 system+tools；prompt ids 不变，shape/工具/explicit prefix 变化 fail open；真实 1 路整任务 >=1%，2 路/provider 标题/质量/健康/Xid 全过；缓存 checkpoint 不能靠同 boot ABBA 隔离 | 已完成 | L-168：干净 boot A2/A3 中位 `11.3715 s`，B2/B3 `7.3165 s`，改善 `35.66%`、绝对 `4.055 s`；首步 cached `582→5,463`、model wall `6.2–6.4→2.7–3.0 s`；6 fixture 与双会话通过 | **opt-in 采纳并保持运行**；回滚移除 `STRATA_PIN_DSH_TOOL_PREFIX=1`；同 boot ABBA 数据作废 |
-| AGENT-DSH-REQUEST-PATH-MAP | 拆普通热续轮从 DSH step 到首 token 的服务端固定成本 | 用同一真实 DSH shape 对齐 client step / server request；分开模板渲染、PromptEncoder/cache lookup、admission、serialization、engine prompt、TTFT/decode；每项报告绝对秒数与触发率；至少一个未关闭机制给出真实触发后整任务 >=1% 的保守上界、质量边界和回滚，否则明确停止 | 进行中 | 94K/189K 热续轮 prompt 约 `2.09/2.43 s`，即使 cache 高度命中；短输出 decode 仅约 `50–73 ms`；首轮前缀已有 `5,463` cached | **当前**；先建立同请求 phase boundary，不直接改 kernel，不重启 |
+| AGENT-DSH-REQUEST-PATH-MAP | 拆普通热续轮从 DSH step 到首 token 的服务端固定成本 | 用同一真实 DSH shape 对齐 client step / server request；分开 HTTP receipt、Responses preparation、模板、PromptEncoder/cache lookup、make prepare、admission、serialization、engine prompt、首 token 前、decode、最后 token 后；每项报告绝对秒数与触发率；至少一个未关闭机制给出真实触发后整任务 >=1% 的保守上界、质量边界和回滚，否则明确停止 | 已完成 | L-169：生产 6K/94K/189K 热 `Service.prepare` 中位 `6.439/11.527/18.345 ms`；real 6-step fixture 的模型 wall `12.112 s`、普通 step 首 token 仅比 prompt 多约 `25–26 ms` | **null result，已关闭**：host 路径低于整任务 1%，不改 server/engine；转 `DSH-TITLE-END-OF-TURN` |
+| DSH-TITLE-END-OF-TURN | 避免 DSH 标题在后续主工具 step 中抢 GPU/cache | 精确 title shape；完整 turn 只有 terminal no-tool assistant response 且无普通请求才放行；2 会话/title-only/cancel/timeout fail open；真实多 step A/B 任务墙 >=1%、5/6 胜、候选无逐 step 重叠、标题质量/健康/Xid 全过 | 待做 | L-169：现有门让标题与 step 2 重叠；首 token 前 `2.681 s` 对 prompt `1.148 s`，额外 `1.533 s` 约占任务 `11.6%` | **当前**；先本地状态机和 no-restart proxy/real DSH，再评估重启 |
 | AGENT-CODEX-TITLE | Codex thread-title 请求不进入引擎 | 三个 title 请求返回合法标题且 engine request/prompt/output 增量均为 0；普通 Responses 请求仍进入引擎；健康与配置可回滚 | 已完成 | L-126：B `1.8–2.1 ms`、零引擎请求/token；普通请求 +1；A2 基线 `1.978–10.292 s` | **已采纳并保持运行**；配置可回滚，无引擎重建 |
 | AGENT-CODEX-COMPACTION-LRU | 多线程 compaction 保留各自工具前缀 | 1 主 3 子代理交错时每个线程的 compaction 均用自己的工具集合；并发安全、有界 LRU 和淘汰测试通过；无效 metadata/title 不污染缓存；默认关闭路径字节不变 | 已完成 | L-127：8.3K prompt 复用量 `99.52–99.64%`，墙钟 `0.69–0.89 s`；45 tests OK，title 仍零引擎 | **已采纳并保持运行**；B2 配置/源码可回滚 |
 | AGENT-STATIC-SYSTEM-PREFIX | 让兄弟 agent 复用共享 system 前缀 | deterministic 渲染证明新顺序增加共享字节，同时 tool/system 内容集合不变；真实模型仍按声明工具调用；1/2 路端到端改善 ≥1%，4 路不退 >1%；默认关闭 byte-identical | 已完成 | L-128：共同前缀 `320 → 54,366` 字节；后续兄弟复用 `5,120` token，平均墙钟 `24.56%`，后三 `33.34%`；四次并发工具隔离通过 | **已采纳并保持运行**；B3a 6/2、engine hash 不变；需同步 pack 模板 |

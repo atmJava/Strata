@@ -79,6 +79,13 @@ AI 负责整个优化循环，包括：
 - 若任一臂会写入跨请求复用的持久缓存 checkpoint，不能默认假设同 boot ABBA 可隔离两臂。
   先证明显式边界不会覆盖或复用另一臂的 checkpoint；否则使用独立 boot 的顺序 A→B，冷启动
   单列，并明确它不是交错 A/B。由缓存状态污染得到的胜场不能用于采纳。
+- 客户端整步墙钟、server 请求计时和 engine prompt/decode 是三个边界，不能直接相加或
+  相减冒充同一时钟。尤其 `Service.run()` 的计时从 `prepare()` 完成后开始，不覆盖 HTTP
+  body、Responses 解析、模板渲染、`PromptEncoder` 和 `Service.prepare()`。拆请求成本时
+  必须明确每个数字的起止点，并把首 token 前、最后 token 后未归属的时间单列。
+- 辅助请求（例如 DSH 的隐藏标题）必须跟踪完整多 step turn，而不是只测它是否避开第一个
+  主请求。验收要同时报告逐 step 重叠、`task_wall_s`、标题是否仍由 provider 生成以及
+  title-only/two-session fail-open；把一个 title 从 step 1 推到 step 2 不算隔离成功。
 - 低于项目噪声地板的差异不宣称提升；4 路跨 boot 噪声约 9%，同会话通常按 3% 判断。
 - 性能实验必须同时检查正确性；配置实验要验证实际运行配置，代码实验要验证实际运行文件。
 - 探针本身有成本时先量探针代价。测速期间不运行竞争负载、不派子代理、不并发构建。

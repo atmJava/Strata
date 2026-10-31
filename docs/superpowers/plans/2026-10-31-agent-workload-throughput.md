@@ -2,10 +2,10 @@
 
 日期：2026-10-31
 
-状态：第三十三次修订后继续执行。用户实际 DSH Web 路径已对齐到 Qwen/Strata relay；
+状态：第三十五次修订后继续执行。用户实际 DSH Web 路径已对齐到 Qwen/Strata relay；
 6 个基础 coding fixture 的代码/测试全过，明确最终消息契约后严格通过从 `3/6` 提到
 `6/6`。真实路径成本已拆清：模型 step 占 `93.202%`，工具并集只占 `5.312%`；当前主动
-项转为“普通热续轮服务端请求路径固定成本”。标题争用和连续新会话首轮共享前缀已分别进入
+项已从 host 请求路径关闭为 null，转“完整 DSH turn 的标题隔离”。标题争用和连续新会话首轮共享前缀已分别进入
 真实生产路径并取得收益。GPU0 Xid 13 仍是随时抢占的 P0 风险，固定重放无法复现时不空等。
 
 ## 全局目标
@@ -15,7 +15,9 @@
 严重运行时/GPU 故障有最高抢占权：新增 Xid、engine 退出或错误答案可能被误当成功时，暂停
 性能实验、保存事故并优先处理。没有新事故时，不把“等待下一次低频故障”当作主线，而是
 继续做可验证的质量和用户等待优化。当前执行主轴仍是通常 1 个主代理、偶尔 2 个的编辑—
-测试循环。
+测试循环。每一轮必须按真实 1/2 会话加权成本选择当前最大可移动瓶颈；1% 也算收益，但必须
+有绝对秒数、真实触发率和保守整任务上界。先做便宜且能区分大假设的测量，再为候选付出
+重启成本；连续局部内核、参数扫描或无法进入用户路径的机制不算进展。
 
 质量对照和严格收口已完成。用户当前 DSH Web 是
 `atm -> qwen3.8-flash-next-iq3_xxs-abliterated -> 129.28.27.137:8888`；旧
@@ -36,7 +38,7 @@ provider 模型生成，长任务 `A B B A` 中 B 不明显回退。生产 opt-i
 `582` token 后移到 system+tools 的 `5,463` token；干净 boot 顺序 A→B 的稳态 task
 中位 `11.3715→7.3165 s`（`35.66%`、绝对 `4.055 s`），首步 model wall
 `6.2–6.4→2.7–3.0 s`。6 个 fixture、双会话 provider 标题、健康和 Xid 门通过。
-当前主动项转为普通热续轮请求路径固定成本。
+host 请求路径已判 null；当前主动项转为完整 DSH turn 的 end-of-turn 标题隔离。
 
 短任务关闭标题的旧 A/B 为：runner wall `16.854 → 14.901 s`（`-10.647%`），主任务
 turn wall `14.929 → 13.001 s`（`-11.843%`），均 `5/6` 胜；长任务无标题 `0/2` 胜，
@@ -310,20 +312,52 @@ Xid 通过。一次 `parser-edge` 可恢复工具参数错误保留，单独重�
 冷启动单列。结果见
 [`DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md`](../../work/DSH_FIRST_TURN_PREFIX_REUSE_RESULT-20261101.md)。
 
-### P1：`AGENT-DSH-REQUEST-PATH-MAP`
+### P1：`AGENT-DSH-REQUEST-PATH-MAP`（已完成，null result）
 
 普通热续轮即使有约 `95%+` cache 复用，94K/189K 的 prompt 仍约 `2.09/2.43 s`，而短输出
-decode 只有约 `50–73 ms`。先在同一条真实 DSH step 和对应 server request 上建立边界：
+decode 只有约 `50–73 ms`。但真实 6K DSH 会话不能把短输出外推到所有请求：两个稳态会话
+的 continuation step 2 有 `125/142` output token，decode `2460.9/2771.2 ms`，整步
+`3.879/4.178 s`；step 3 有 `46/50` output token，decode `598.7/662.6 ms`。标题请求在
+这两个窗口内持续延后 `2.749/2.401 s`，不是步骤间空档的解释。
+
+因此先在同一条真实 DSH step 和对应 server request 上建立边界：
 
 - 客户端：step start、请求发出、首 stream、step finish；
 - server：body parse、Responses input/tool/template preparation、`PromptEncoder` 与
   cache lookup、admission / slot wait、engine request serialization；
 - engine：prompt phase、TTFT、decode、finish；
+- 任何不属于上述区间的首 token 前或最后 token 后时间必须单列，不能并入 decode；
 - 每段报告 prompt/context/cached/fresh、绝对秒数和典型 1/2 会话触发率；
 - 所有请求必须成功、finish 正确、无外来请求；诊断开关默认关闭且可完整移除；
 - 只有至少一个新的未关闭机制能在真实触发后保守改善整任务 >=1%，才预注册实现；
+- host preparation 合计上界低于 1% 时明确记录 null result，下一项在“热 prompt 后的
+  engine 首 token 前成本”和“真实长输出 decode/reasoning”之间按加权证据选择；
 - 不直接跳 kernel，不重扫 `short_read`、stream ring、staged lookahead、GDN、head split、
   fair serve 等已否决项。
+
+**结果：** 生产 tokenizer/template 的 6K/94K/189K 热 `Service.prepare` 中位只有
+`6.439/11.527/18.345 ms`；JSON、Responses conversion 和 assembler 更小。真实 6-step
+DSH fixture 的模型 wall 为 `12.112 s`（任务 `13.261 s` 的 `91.287%`），普通 step 的
+首 token 只比 engine prompt 多约 `25–26 ms`。host 路径不满足 1% 门，本轮不修改
+server 或 engine。
+
+同一个 fixture 暴露了更重要的真实缺口：现有标题门只等标题到达时的第一个主请求。
+该请求一结束，标题立刻开始，而 DSH 同时提交 step 2。step 2 的首 token 前为
+`2.681 s`，其中 engine prompt 仅 `1.148 s`；额外 `1.533 s` 约占整任务 `11.6%`。
+
+### P2：`DSH-TITLE-END-OF-TURN`
+
+标题隔离必须覆盖完整多 step turn，而不是只避开第一请求。候选精确匹配现有 title
+shape，跟踪普通请求结果；只有最近一个 terminal assistant response 不含 tool call，
+且没有普通请求在途时才放行。两个主会话、title-only、取消、超时和 draining 都保持现有
+fail-open。先在本地状态机和无重启真实 DSH 路径验证，再做多 step A/B：
+
+- 主指标为 `task_wall_s`，同时报告逐 step first-stream、title overlap 和 token usage；
+- 至少 1%，5/6 配对胜，绝对秒数必须给出；
+- 候选不得让标题与任何主模型 step 重叠；
+- 标题仍由 provider 生成，质量/事件/工具/finish/health/Xid 全过；
+- 若标题只是从 step 1 推到 step 2、导致 title-only fallback 或没有任务级收益，判失败；
+- 修改 server 前先证明候选值得承担重启和约 3 分钟加载成本；不改 engine、profile 或 kernel。
 
 ### P1 历史：`AGENT-HOT-TURN-FIXED-COST`（已否决）
 
@@ -630,7 +664,7 @@ prefill。A1/B/A2 固定 greedy 全部逐字一致，finish 全为 `stop`，零�
 
 ## 当前断点
 
-**2026-11-01 第三十三次修订后继续执行。** 用户已放弃“鹈鹕 SVG”问题；原 DSH 请求在
+**2026-11-01 第三十五次修订后继续执行。** 用户已放弃“鹈鹕 SVG”问题；原 DSH 请求在
 76 个 reasoning token 后触发 GPU0 Xid 13，约 60 次精确重放未复现。当前不空等低频事故：
 只读探针持续记录下一次 Xid，任何新事故立即抢占。质量侧已确认用户 DSH Web 走
 Qwen/Strata relay；同一路径 6 个基础 fixture 代码/测试全过，明确最终消息契约后严格
@@ -639,7 +673,11 @@ Qwen/Strata relay；同一路径 6 个基础 fixture 代码/测试全过，明�
 `19.629→16.078 s`（`18.091%`），runner wall `15.914%`；双会话 fail-open 后质量和
 provider 标题通过。`DSH-FIRST-TURN-PREFIX-REUSE` 也已 opt-in 采纳：稳态 task 中位
 `11.3715→7.3165 s`（`35.66%`、`4.055 s`），首步 model wall
-`6.2–6.4→2.7–3.0 s`。当前主动项为 `AGENT-DSH-REQUEST-PATH-MAP`。生产
+`6.2–6.4→2.7–3.0 s`。`AGENT-DSH-REQUEST-PATH-MAP` 已关闭为 null：生产
+tokenizer/template 的热 host prepare 只有毫秒级，真实普通 step 的首 token 也只比 engine
+prompt 多约 `25–26 ms`。当前主动项改为 `DSH-TITLE-END-OF-TURN`：现有标题门让标题与后续
+工具 step 重叠，live step 2 的额外并发等待约 `1.533 s`。下一轮跟踪完整工具 turn，
+先做本地和 no-restart 真实路径，再决定是否重启部署。生产
 server/vision/engine 为 `232891/232893/232899`，server `bd3e4289...`、health loaded、
 六 slots / 两 groups，新增 Xid `0`。
 

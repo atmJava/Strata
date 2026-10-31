@@ -11,11 +11,19 @@
   代理；1/2 路是主要场景，4 路非回退，6/8 只做安全回归。
 - **继续执行**：平台里的旧“2/4/6/8 路引擎”全局目标仍是 paused，且当前接口不能改写或
   恢复它；本文件与仓库总计划是当前权威目标。用户已明确放弃“鹈鹕 SVG”问题。
-- 当前项：AGENT-DSH-REQUEST-PATH-MAP
-- 当前项说明：普通热续轮即使已有约 `95%+` cache 复用，仍要支付服务端请求路径固定成本；
-  94K/189K 热续轮 prompt 约 `2.09/2.43 s`。下一轮先在同一条真实 DSH step 上拆模板渲染、
-  PromptEncoder/cache lookup、admission、server serialization、engine prompt 与 decode，
-  算清绝对秒数和触发率后再选一个 >=1% 的机制，不先改 kernel。
+- 当前项：DSH-TITLE-END-OF-TURN
+- 当前项说明：`AGENT-DSH-REQUEST-PATH-MAP` 已关闭为 null result。生产 tokenizer/template
+  下，6K/94K/189K 热 `Service.prepare` 中位只有 `6.439/11.527/18.345 ms`；JSON、
+  Responses 转换和 assembler 更小，不应继续优化 host。真实 6-step DSH fixture 的模型
+  wall 为 `12.112 s`（任务 `13.261 s` 的 `91.287%`），普通 step 的首 token 仅比 engine
+  prompt 多约 `25–26 ms`；但现有标题门只等到第一个主请求结束，标题随后与 step 2 重叠，
+  该步首 token 前为 `2.681 s` 而 prompt 只有 `1.148 s`。下一项改为跟踪完整 DSH 工具
+  循环，在主 turn 的 terminal no-tool assistant response 后才放行标题；多 step 真实
+  A/B、标题质量、双会话 fail-open 和 1% 任务门全部通过才采纳。
+- `AGENT-DSH-REQUEST-PATH-MAP` 结果见
+  [请求路径](work/AGENT_DSH_REQUEST_PATH_RESULT-20261101.md)。当前 DSH v4 timing
+  解析缺陷也已修复：支持 `data.stream` 和 `chunk.time`，同时兼容旧 `message.stream` /
+  `chunk.time0`；专项回归覆盖两种格式。
 - **`DSH-FIRST-TURN-PREFIX-REUSE` 已采纳**：干净 boot 顺序 A→B 中，A2/A3 稳态 task
   中位 `11.3715 s`，B2/B3 `7.3165 s`，改善 `35.66%`、绝对 `4.055 s`；B 的首步
   cached 从 `582` 增至 `5,463`，model wall 从 `6.2–6.4 s` 降至 `2.7–3.0 s`。6 个
@@ -52,11 +60,11 @@
   目录供给已产品化为 `strata codex catalog [--apply]`。该结果继续记录在
   [AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第三十三次修订并继续执行。可靠性、质量、任务成功率和工具协议是硬门；局部优化必须先给出
+  已完成第三十五次修订并继续执行。可靠性、质量、任务成功率和工具协议是硬门；局部优化必须先给出
   真实触发率后的整任务 1% 上界；低频但
   单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。没有接入用户实际路径的能力
   只算机制收益，不能写成体验已改善；重启成本必须计入当轮。
-  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第三十三版更新后仍受旧 unfinished goal
+  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。第三十五版更新后仍受旧 unfinished goal
   限制，当前工具不能改写目标文本或恢复它。本仓库计划是当前执行的权威目标，不能把平台
   旧目标当作已更新。
 - 真实 DSH 成本已拆清：7 个基础/fixture 会话 runner 总墙钟 `197.776 s`，模型 step
@@ -629,9 +637,10 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-11-01（第三十三版计划；GPU0 稳定性、质量与工具协议为硬门。
+- 最后更新：2026-11-01（第三十五版计划；GPU0 稳定性、质量与工具协议为硬门。
   Codex 目录供给已产品化；
   Schema 3 当前 Qwen/Strata 基础严格 `5/6`、测试 `6/6`、`apply_patch` 重复 `3/3`，
   DSH 同 Qwen/Strata 路径明确最终契约后基础严格 `6/6`。GPU0 在 DSH 请求末尾发生
-  Xid 13 后已重启；DSH 首轮前缀复用已采纳；当前 health loaded、6 slots / 2 groups、
+  Xid 13 后已重启；DSH 首轮前缀复用已采纳；host request path 已判 null；当前
+  health loaded、6 slots / 2 groups、
   systemd inactive）

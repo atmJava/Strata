@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-168，按编号）
+## 台账索引（L-000…L-169，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -182,9 +182,56 @@
 | L-166 | 11-01 18:47Z–19:05Z | 标题延后 ABBA：短任务 6 对 `task_wall` 合并中位 `17.637→15.238 s`（`13.602%`），配对中位 `13.465%`，`5/6` 胜；12/12 质量与 provider 标题；长任务 B `37.943/41.297 s` 对 A `46.411/82.438 s`，B 不回退，但 A 臂 8→11 step 漂移，只作非回退；16/16 无错误、无新增 Xid | **代理候选通过**：主任务结束前不生成标题仍保留标题质量；进入默认关闭的 server admission 产品候选，随后做生产 A/B |
 | L-167 | 11-01 19:1xZ–19:3xZ | 生产 A/B2 单会话主 turn `19.629→16.078 s`（`18.091%`），runner wall `21.484→18.065 s`（`15.914%`）；3/3 质量/provider 标题。第一版双会话各等 `26.6 s` 后只留 fallback，否决；多普通请求 fail-open 修正后双会话 2/2 质量/provider，defer 增量 0。两个长任务完成，其中一个保留 `tool_error=1` 后恢复。最终 PID `222685/222690/222697`、六 slots / 两 groups、重启 `136 s`、新增 Xid `0` | **DSH-TITLE-INTERFERENCE opt-in 采纳**：单会话真实收益成立，双会话保留原并发；不能默认开启或宣称双会话加速。下一项 `DSH-FIRST-TURN-PREFIX-REUSE` |
 | L-168 | 11-01 19:4xZ–20:0xZ | 首轮 checkpoint `582→5,463`；干净 boot 顺序 A→B，A2/A3 task 中位 `11.3715 s`、B2/B3 `7.3165 s`（`35.66%`、`4.055 s`）；首步 model wall `6.2–6.4→2.7–3.0 s`。6 fixture、双会话 provider 标题、健康全过；一次可恢复工具参数错误单列并重跑 `1/1` 零错误。最终 PID `232891/232893/232899`、server `bd3e4289...`、重启约 `190 s`、新增 Xid `0` | **DSH-FIRST-TURN-PREFIX-REUSE opt-in 采纳**：精确 DSH shape 固定 system+tools；同 boot ABBA 被持久 checkpoint 污染，正式方法改为干净 boot A→B 且冷启动单列。下一项 `AGENT-DSH-REQUEST-PATH-MAP` |
+| L-169 | 11-01 04:2xZ–05:0xZ | 生产 tokenizer/template 的 6K/94K/189K 热 `Service.prepare` 中位 `6.439/11.527/18.345 ms`；real 6-step DSH 任务 `13.261 s`、模型 `12.112 s`（`91.287%`）、工具并集 `0.991 s`。普通 step 首 token 只比 prompt 多约 `25–26 ms`；标题与 step 2 重叠，首 token 前 `2.681 s` 对 prompt `1.148 s`，额外 `1.533 s` 约占任务 `11.6%`。DSH v4 `data.stream/chunk.time` timing bug 已修复并回归 | **host null result**：关闭 `AGENT-DSH-REQUEST-PATH-MAP`，不修改 server/engine、不重启；下一项 `DSH-TITLE-END-OF-TURN`，按完整多 step turn 做标题隔离 |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-169 · host 热路径只有毫秒级；标题跨 step 2 仍造成 1.533 秒争用
+
+**判定：`AGENT-DSH-REQUEST-PATH-MAP` 完成并判 null；下一项为
+`DSH-TITLE-END-OF-TURN`。** 无引擎探针使用生产 tokenizer/template，测 6K、94K、
+189K 各 7 次热请求。
+
+| prompt | cold `Service.prepare` | hot median | hot p90 | JSON median |
+|---:|---:|---:|---:|---:|
+| 6K | `8.161 ms` | `6.439 ms` | `6.607 ms` | `0.101 ms` |
+| 94K | `46.161 ms` | `11.527 ms` | `11.778 ms` | `0.415 ms` |
+| 189K | `87.861 ms` | `18.345 ms` | `18.708 ms` | `0.754 ms` |
+
+Responses preparation 为 `0.099/0.099/0.105 ms`，assembler 约 `0.03 ms`。这些
+数字远低于用户整任务的 1%，继续优化 host 是局部收益。
+
+真实 DSH `single-file` 任务墙 `13.261 s`，6 个主 step 全部按 token 数关联，另有 1 个
+标题请求。模型 wall `12.112 s`（`91.287%`），工具并集 `0.991 s`（`7.469%`）；
+first stream 合计 `7.166 s`，first stream 之后 `4.946 s`。普通 step 的 client
+first stream 与 engine first token 只差几毫秒，first engine token 又只比 engine prompt
+多约 `25–26 ms`，没有未解释的 host 多秒段。
+
+唯一异常是 step 2：它在标题请求后约 `0.2 s` 开始，first engine token `2.681 s`，
+engine prompt `1.148 s`，额外 `1.533 s` 占任务 `11.6%`。现有标题门只等到到达时活跃的
+第一个普通请求结束；DSH 随即提交 step 2，于是标题与下一步共享 GPU/cache。这个结果推翻
+“首请求结束就等于标题隔离完成”的假设。
+
+同轮修复 `probe-dsh-session-cost.py`：当前 DSH v4 把 stream 放在 assistant event 的
+`data.stream`，时间在 `chunk.time`；旧实现只读 `message.stream/chunk.time0`，把
+`time_to_first_stream_s` 错报为 null。两种格式现在都有回归测试。
+
+证据：
+
+- `/tmp/dsh-host-path-20261101.json`
+  SHA-256 `b8e9d566dec4c8c8c4dda0f0444cf976cdb957a14e7202c900c8e48ae22ab371`
+- `/tmp/dsh-live-gap-cost-corrected-20261101.json`
+  SHA-256 `75a5d4bf0a3b7ad931b676953b7ce67a87e4ca39a9c7281f41000bad4afadb23`
+- `/tmp/dsh-live-gap-metrics-20261101.json`
+  SHA-256 `d423ff77e8e39b3316fb53d48891789b9124421667c3e9c6111ace14e0aaa44e`
+- `/tmp/dsh-second-cost-corrected-20261101.json`
+  SHA-256 `a71cf9e0d7db254e82cf4cf8680472ac3b8215162ba5ca1a9db74f325a9f5444`
+
+完整结果见
+[`AGENT_DSH_REQUEST_PATH_RESULT-20261101.md`](work/AGENT_DSH_REQUEST_PATH_RESULT-20261101.md)，
+下一项契约见
+[`DSH_TITLE_END_OF_TURN_CONTRACT-20261101.md`](work/DSH_TITLE_END_OF_TURN_CONTRACT-20261101.md)。
 
 ## L-168 · 首轮 system+tools checkpoint 改善 35.66%，ABBA 因缓存污染作废
 
@@ -232,9 +279,9 @@ ABBA 判决。
 `190 s`，新增 Xid `0`、swap 约 `11 MiB`；备份为
 `/opt/ai/backups/prod-dsh-prefix-final-20261031T200434Z/`。
 
-**新 frontier**：`AGENT-DSH-REQUEST-PATH-MAP`。94K/189K 热续轮已高度 cached，prompt
-仍约 `2.09/2.43 s`；下一步对齐同一条 DSH step 与服务端请求，拆模板、PromptEncoder/
-cache lookup、admission、serialization、engine prompt 与 decode，禁止直接跳到内核。
+**当时的新 frontier**：`AGENT-DSH-REQUEST-PATH-MAP`。后来由 L-169 完成并判 null；
+94K/189K 热续轮的 host prepare 只有毫秒级，当前入口已转为
+`DSH-TITLE-END-OF-TURN`。
 
 证据：
 

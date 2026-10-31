@@ -63,16 +63,30 @@ def interval_union(spans: list[tuple[float, float]]) -> float:
 
 
 def stream_first_time(message: dict[str, Any]) -> float | None:
-    """The first content/stream timestamp attached to one assistant message."""
+    """The first stream timestamp in a current or older assistant event.
+
+    DSH v4 puts `stream` beside `message` in the assistant/message event; older
+    fixtures put it inside the message itself. Accept either without inspecting
+    any stream content.
+    """
+    events = message.get("stream")
+    if not isinstance(events, list):
+        events = (message.get("message") or {}).get("stream") or []
     times = []
-    for event in message.get("stream") or []:
+    for event in events:
         if not isinstance(event, dict):
             continue
         if isinstance(event.get("time"), (int, float)):
             times.append(float(event["time"]))
         chunk = event.get("chunk")
-        if isinstance(chunk, dict) and isinstance(chunk.get("time0"), (int, float)):
-            times.append(float(chunk["time0"]))
+        if isinstance(chunk, dict):
+            # DSH v4 stores the wall-clock timestamp on `chunk.time`; older
+            # exports carried only the relative `time0`.  Reading only time0
+            # made every current export report a null first-stream time.
+            for key in ("time", "time0"):
+                if isinstance(chunk.get(key), (int, float)):
+                    times.append(float(chunk[key]))
+                    break
     return min(times) if times else None
 
 
@@ -141,10 +155,10 @@ def summarize_session(
             step_start_ms = float(when)
             assistant = None
         elif kind == "assistant/message" and isinstance(when, (int, float)):
-            assistant = (float(when), data.get("message") or {}, data.get("usage") or {})
+            assistant = (float(when), data, data.get("usage") or {})
         elif kind == "step/end" and step_start_ms is not None and assistant is not None:
-            ended_ms, message, usage = assistant
-            first_stream_ms = stream_first_time(message)
+            ended_ms, envelope, usage = assistant
+            first_stream_ms = stream_first_time(envelope)
             fresh = int(usage.get("inputTokens") or 0)
             cached = int(usage.get("cacheReadTokens") or 0)
             output = int(usage.get("outputTokens") or 0)

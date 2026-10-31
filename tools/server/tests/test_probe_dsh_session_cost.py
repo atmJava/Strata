@@ -95,6 +95,22 @@ def test_summary_separates_model_tool_and_client_time(tmp_path):
     assert result["tool_calls"] == {"read": {"calls": 2, "wall_s": 0.45}}
 
 
+def test_current_dsh_chunk_wall_clock_sets_first_stream_time():
+    assert PROBE.stream_first_time({
+        "stream": [
+            {"type": "chunk", "time": 101.0, "chunk": {"time": 190.5}},
+            {"type": "chunk", "time": 102.0, "chunk": {"time": 191.5}},
+        ]
+    }) == 101.0
+
+
+def test_current_dsh_stream_sits_beside_message():
+    assert PROBE.stream_first_time({
+        "message": {"content": "not inspected"},
+        "stream": [{"type": "chunk", "time": 77.5, "chunk": {"time": 177.5}}],
+    }) == 77.5
+
+
 def test_task_wall_excludes_events_after_the_final_turn(tmp_path):
     session = tmp_path / "task" / "session-example"
     session.mkdir(parents=True)
