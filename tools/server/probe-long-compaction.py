@@ -5,6 +5,9 @@ The probe sends one deterministic history turn and then the same conversation
 with Codex's compaction metadata and ``tools: []``.  It reports token counts,
 cache reuse, walls and status, but never writes prompt or response text.
 
+The optional post-compaction branch mode is diagnostic. It does not model the
+user's separate "reopen a conversation last used more than a day ago" case.
+
 Example:
     python3 tools/server/probe-long-compaction.py \
       --config /path/to/strata.json \
@@ -69,8 +72,11 @@ def turn_meta(session: str, thread: str, kind: str) -> dict:
     }
 
 
-def turn_body(model: str, text: str, session: str, thread: str, output_tokens: int = 16) -> dict:
-    return {
+def turn_body(model: str, text: str, session: str, thread: str, output_tokens: int = 16,
+              pin_chars: int | None = None, pin_tokens: int | None = None) -> dict:
+    if pin_chars is not None and pin_tokens is not None:
+        raise ValueError("choose pin_chars or pin_tokens, not both")
+    body = {
         "model": model,
         "instructions": "You are a coding agent. Read the archive and answer briefly.",
         "input": [{
@@ -86,6 +92,16 @@ def turn_body(model: str, text: str, session: str, thread: str, output_tokens: i
         "max_output_tokens": output_tokens,
         "temperature": 0,
     }
+    if pin_chars is not None:
+        if pin_chars < 1 or pin_chars >= len(text) + len("\n\nReply with exactly READY."):
+            raise ValueError("pin_chars must leave part of the user message unpinned")
+        # turn_body also sends an ``instructions`` field, which becomes message 0.
+        body["strata_prefix"] = {"message": 1, "chars": pin_chars}
+    if pin_tokens is not None:
+        if pin_tokens < 1:
+            raise ValueError("pin_tokens must be positive")
+        body["strata_prefix"] = {"tokens": pin_tokens}
+    return body
 
 
 def compaction_body(model: str, turn: dict, output: list, session: str, thread: str,
@@ -142,6 +158,13 @@ def main() -> int:
     parser.add_argument("--compaction-output-tokens", type=int, default=256)
     parser.add_argument("--session", default=f"long-compaction-{time.time_ns()}")
     parser.add_argument("--thread", default="main")
+    parser.add_argument("--pin-history", action="store_true",
+                        help="pin the history/user-message boundary before the READY instruction")
+    parser.add_argument("--pin-tokens", type=int,
+                        help="pin this exact prompt-token prefix instead of resolving a character boundary")
+    parser.add_argument("--branch-after-compaction", action="store_true",
+                        help="repeat the original turn after compaction to test branch checkpoint retention; "
+                             "this is not an aged-session resume test")
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
@@ -150,12 +173,17 @@ def main() -> int:
 
     key = api_key(args.config, args.api_key_env)
     url = args.base_url.rstrip("/") + "/v1/responses"
-    turn = turn_body(args.model, history_text(args.history_words, args.session), args.session,
-                     args.thread, args.turn_output_tokens)
+    text = history_text(args.history_words, args.session)
+    turn = turn_body(args.model, text, args.session, args.thread, args.turn_output_tokens,
+                     len(text) if args.pin_history and args.pin_tokens is None else None,
+                     args.pin_tokens)
     turn_payload, turn_wall = post_json(url, key, turn, args.timeout)
     compact = compaction_body(args.model, turn, turn_payload.get("output") or [],
                               args.session, args.thread, args.compaction_output_tokens)
     compaction_payload, compaction_wall = post_json(url, key, compact, args.timeout)
+    branch_payload = branch_wall = None
+    if args.branch_after_compaction:
+        branch_payload, branch_wall = post_json(url, key, turn, args.timeout)
     result = {
         "target": "long history then Codex compaction",
         "history_words": args.history_words,
@@ -164,6 +192,8 @@ def main() -> int:
         "turn": response_row(turn_payload, turn_wall),
         "compaction": response_row(compaction_payload, compaction_wall),
     }
+    if branch_payload is not None:
+        result["branch"] = response_row(branch_payload, branch_wall)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"output": str(args.output), **result}, sort_keys=True))

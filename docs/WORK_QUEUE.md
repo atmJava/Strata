@@ -14,8 +14,11 @@
    降低 `24.56%`。自动 boundary pin 和 `UTIL-TWO-STREAM-SERIAL` 也已采纳；后者把
    512-token 两路完成跨度降低 `15.05%`、64-token 降低 `8.18%`，第三条出现时恢复
    batch。[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-   当前大项是 `AGENT-LONG-HOT-RESTORE`：208K 热 turn 已达 `9.6 s`，高于 189K 的
-   `2.43 s`；先只读拆恢复阶段并统计 recovery 尾部，不从 12K 合成 prompt 直接跳候选。
+   当前目标已校正：用户所说的“180K 重读历史”是隔天重新打开约 180K token 的旧会话，
+   不是 compaction 后重走旧历史分支。恢复执行后的下一项是 `AGENT-OLD-SESSION-RESUME`。
+   210K compaction 前缀已复用 `99.987%`；精确 pin 虽能把 208K 合成分支从约 9 秒降到
+   `0.274 s`，但真实 rollout 的 109 次 compaction 中立即触发为 0/109，因此 exact pin /
+   `cap=9` 只保留为低频诊断，不作当前实现目标。
 1. **P4 已采纳**：同一新引擎 boot 上，代码由 A 合并中位 41.1875 s 降到 5.074 s（−87.681%）；
    96K by_kind +2.761%、wave +2.202%，短 JSON 3.980 s，三臂零错误且 needle 全对。
 2. **余量风险**：短 JSON 距 4 s 约 20 ms，96K 距 3% 约 0.24 个百分点；生产指标靠近边界时
@@ -168,8 +171,9 @@
 | AGENT-WORKLOAD-TRACE | 从真实 Codex session 定位整任务大头 | 只读汇总 input/cached/uncached/output、root turn、compaction、分位数和 top event；不输出 prompt 正文或密钥；结论与 server timing 分开 | 已完成 | L-130：3,614 请求 cached `97.22%`，uncached `17.82M`；36 次 compaction 约占全部 uncached 一半 | 工具 `probe-codex-sessions.py` 已固化，4 tests OK；不直接宣称性能 |
 | AGENT-COMPACTION-LARGE | 验证线程 compaction 缓存对长历史仍有效 | 同一真实 HTTP 路径先读约 180K 历史，再发 compaction；prompt 不超 context；compaction `completed`；缓存率和墙钟证明避免整段重读 | 已完成 | L-131：cold `65.555 s`；compaction cached `180,272/180,301 = 99.984%`、wall `2.385 s`、重读 29 token | **验证通过**；不再重复同形 compaction 实验 |
 | AGENT-SERVER-BREAKDOWN | 拆 1/2 路热续轮和冷首轮成本 | 同服务记录 wall、prompt、decode、TTFT、slot wait、cached；全部请求成功且无外来请求；区分短输出与真实长输出 | 已完成 | L-132：1 路冷/续 `7.382/1.610 s`；2 路 `11.075/2.290 s`；续轮 prompt `1.4–1.5 s`，decode 仅约 50–73 ms | 短输出不能代表长 decode；下一项拆固定/恢复路径 |
-| AGENT-COST-MAP | 建立真实请求尺寸与秒数的优化优先级 | 不改服务；复用 12K/94K/189K 热续轮与 96K/180K/210K 长读证据；补 210K 后 Codex compaction 和 180K 重读后的普通续轮；记录 2 路第二条 TTFT、单请求 wall、完成跨度；只保留真实加权上界 ≥1% 的方向 | 已完成 | L-136：94K/189K/208K 热续轮约 `2.09/2.43/9.67 s`；210K compaction 缓存 `99.987%`，三臂 wall `5.853/8.845/85.017 s` | 压缩缓存收口；长前缀热恢复与 recovery 尾部进入下一项 |
-| AGENT-LONG-HOT-RESTORE | 拆 208K 热状态恢复与 recovery 无进展尾部 | 不改服务；只读定位 checkpoint/host restore/KV restore 各阶段，并统计 recovery 尾部真实频率；候选须给 ≥1% 整任务上界、正确性和回滚 | 进行中 | 相同 208K turn wall `9.605–9.784 s`；189K 仅 `2.430 s`；3 次 210K compaction 中 1 次 recovery 后约 75 秒无新 token | 先统计触发率，不因单次异常直接重启或改 GPU kernel |
+| AGENT-COST-MAP | 建立真实请求尺寸与秒数的优化优先级 | 不改服务；复用 12K/94K/189K 热续轮与 96K/180K/210K 长读证据；补 210K 后 Codex compaction；记录 2 路第二条 TTFT、单请求 wall、完成跨度；只保留真实加权上界 ≥1% 的方向 | 已完成 | L-136：94K/189K 热续轮 `2.09/2.43 s`，208K 分支重读 `9.67 s`；210K compaction 缓存 `99.987%`，两次正常 wall `5.853/8.845 s`，recovery 臂 `85.017 s` | 压缩缓存收口；L-137 把“隔天旧会话恢复”与合成分支分开，下一项转为旧会话恢复 |
+| AGENT-LONG-CHECKPOINT-BRANCH | 验证 long-prompt 分支 checkpoint 保留机制 | 用精确 token pin 跑 history→compaction→history，确认旧边界可复用；再扫描真实 compaction 的立即后续请求，决定是否值得实现自动保留 | 已完成 | 精确 pin `208528` 后分支 cached `208528/208533`、wall `0.274 s`，无 pin 对照 `9.016–9.523 s`；真实 14,183 请求/109 次 compaction 的立即回读为 0/109 | **机制成立但低频，不作主目标**；不自动启用 exact pin 或 `cap=9`，除非真实频率另有证据 |
+| AGENT-OLD-SESSION-RESUME | 测量隔天约 180K 旧会话的冷恢复成本 | 固定会话年龄来源与约 180K 形状；记录 input、cached/uncached、prompt、TTFT、wall、slot wait、finish、并发和资源；区分真实旧会话与冷缓存代理；候选须有真实触发率后的整任务 ≥1% 上界、正确性和回滚 | 待做 | 现有 180K 冷 turn `65.555 s` 是同服务新合成会话，只能作代理；尚未覆盖超过一天未使用后的恢复 | 全局优化循环当前暂停；恢复后先执行本项，不与 compaction LRU 或压缩后旧分支混算 |
 | UTIL-MTP-LOWCONC | 用 serial batch-MTP 恢复两路每槽投机 | 同 boot A-B-A；1/2 路至少一级 ≥1%，4 路不退 >1%，输出、finish、health、资源不变 | 否决 | L-133：2 路 `88.50 → 91.38 tok/s`（`+3.25%`），但 4 路 `136.01 → 96.58`（`-28.99%`）；A 输出逐字 | 不扫描 draft depth、阈值或组数；A2 已恢复 |
 | UTIL-TWO-STREAM-SERIAL | 恰好两路依次走 solo，三路恢复 batch | 两路完成跨度至少改善 1%；1/4 路不退，6 路安全；solo 输出重复一致，零错误 | 已完成 | L-134：512-token `11.776 → 10.004 s`（`-15.05%`），64-token `1.692 → 1.554 s`（`-8.18%`）；1 路 `-0.38%`、4 路持平、6 路 `163.07 tok/s` | **已采纳**；`STRATA_BATCH_SERIAL_TWO=1`，第二条 TTFT 约 5.1 s 是明确取舍 |
 | S0b | 长读时邻居停顿 | 同 boot A-B 证明机制有效，停顿 ≤1 s 或给出经证据支持的上界 | 否决 | L-068：路径 3/3 触发但无用户收益；L-082 撤回“整个 0.1.51 回退”的临时概括 | 不再重复同形实验 |

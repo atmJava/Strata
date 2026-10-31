@@ -43,6 +43,8 @@ compaction 返回 24 output token，状态 `completed`。该验证只证明长�
 ## 限制
 
 - 目标为约 180K token，未覆盖 256K 边界。
+- 这里的 cold turn 是同一服务上的新合成会话，不是放置超过一天后重新打开的旧会话；
+  不能把 `65.555 s` 写成隔天旧会话恢复已经覆盖。
 - 后续已在约 210K 补做同会话 compaction：复用 `99.987%`，但出现一次 recovery 无进展
   长尾。见
   [`AGENT_210K_COMPACTION_RESULT-20261031.md`](AGENT_210K_COMPACTION_RESULT-20261031.md)。

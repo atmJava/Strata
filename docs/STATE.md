@@ -1,7 +1,8 @@
 # 当前状态
 
 > 接手顺序：`RULES.md` → 本文件 → `ROADMAP.md` → `ITERATION_LOG.md` 最近两条。
-> 本文件只写当前断点，不重复历史、规则或完整证据。
+> 当前断点写在前；后面的“近期判决索引”只用于防重复，不驱动当前任务。完整证据见
+> `WORK_QUEUE.md` 和 `EVIDENCE_LEDGER.md`。
 
 - 目标：针对用户真实 Agent 负载（通常 1 会话、少量 2 会话、峰值 4 会话）缩短端到端
   任务时间；优先消除非必要 prefill、compaction 重读和关键路径等待，不再以 6/8 路为联合
@@ -17,34 +18,51 @@
   （`-15.05%`），64-token 两路 `1.692 → 1.554 s`（`-8.18%`）；1 路相对 A1/A2
   合并中位 `-0.38%`，4 路吞吐/完成时间不退，6 路 `163.07 tok/s` 安全。第二条请求
   TTFT 约 `5.1 s` 是已接受的取舍。见 L-134。
-- 当前项：AGENT-LONG-HOT-RESTORE
-  第一轮 `AGENT-COST-MAP` 已完成：实际 94K/189K 热续轮为 `2.086/2.430 s`，相同 208K
-  热 turn 三次稳定在 `9.605–9.784 s`；180K compaction `2.385 s`，210K compaction 均
-  复用 `99.987%` 且 completed。下一步只读拆解 208K 热恢复，并统计
-  `reasoning_loop_recovery` 一次约 75 秒无新 token 的真实触发率。
+- 当前项：AGENT-OLD-SESSION-RESUME
+  全局优化循环已由用户暂停，当前只做文档和目标校正。用户所说的“重读历史 180K 会话”
+  是指放置超过一天后重新打开约 180K token 的旧会话，不是 compaction 后重走旧历史
+  分支。现有 180K 冷 turn `65.555 s` 是同服务新合成会话，只是近似基线，尚未覆盖旧会话
+  恢复。
+- 长上下文口径：210K compaction 已复用 `99.987%`；两次未触发 recovery 的运行
+  prompt `0.248–0.283 s`，recovery 运行的 `prompt_ms` 为 `75.474 s`，其中包含约
+  75 秒无新 token 的尾部。精确 pin
+  可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
+  中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
 - 当前运行：候选 server/vision/engine `50648/50651/50656`，源码
   `/opt/ai/src/strata-two-stream-serial-20261031`，监听 `127.0.0.1:8080`；engine
   `105a4171...` 未重建，config `7c901092...`，server `10bd8318...`，health loaded、
-  262144 context、6 slots / 2 groups，server 进程含 `STRATA_BATCH_SERIAL_TWO=1`。
+  262144 context、6 slots / 2 groups；实际核对到 `STRATA_BATCH_SERIAL_TWO=1`、
+  `STRATA_ADMIT_MERGE_FIRST=1` 和 `STRATA_PIPE_BYIELD_NODRAIN=1`。
   `strata.service` 仍 inactive/dead。回滚为原源码目录 + `a-config.json` 且不带该 env。
 - 口径修正：两路串行把第二条 TTFT 推到约 `5.1 s`，只证明“总完成时间优先”的批处理
   取舍，不能作为交互式双会话或全局用户收益。后续双路实验必须同时报告第二条 TTFT、
   单请求 wall 和完成跨度。
 - 当前证据断点：真实 Codex 29 小时会话共 3,614 请求，cached `97.22%`；36 次长历史
   compaction 每次约 26–30 万 input、仅约 3.5–7.6K cached，占全部 uncached input 约一半。
-  现役 B4 的 180K 真实 HTTP replay 已证明 compaction 复用 `180,272/180,301 =
+  现役 B4 的 180K live HTTP probe（人工合成会话）已证明 compaction 复用 `180,272/180,301 =
   99.984%`、墙钟 `2.385 s`，冷 turn 为 `65.555 s`。见
   [AGENT_WORKLOAD_TRACE](work/AGENT_WORKLOAD_TRACE-20261031.md)、
   [AGENT_COMPACTION_LARGE_RESULT](work/AGENT_COMPACTION_LARGE_RESULT-20261031.md)。
-- 最新成本地图：实际 94K 热续轮 wall `2.086 s`、189K `2.430 s`、208K `9.605–9.784 s`；
-  210K compaction 输入新增约 27 token、缓存 `99.987%`，输出 347/532/734 token 时 wall
-  `5.853/8.845/85.017 s`。第三次触发 `reasoning_loop_recovery` 后约 75 秒无新 token。
+- 最新成本地图：实际 94K 热续轮 wall `2.086 s`、189K `2.430 s`；210K compaction
+  输入新增约 27 token、缓存 `99.987%`；两次正常运行的 prompt 为 `0.248–0.283 s`，
+  输出 347/532 token、wall `5.853/8.845 s`。recovery 运行输出 734 token、wall
+  `85.017 s`，其 `prompt_ms=75.474 s`，不能并入正常 prompt 范围。208K 压缩后旧分支的
+  精确 pin 已动态成功：分支 cached `208528/208533`、wall `0.274 s`；无 pin 对照
+  `9.016–9.523 s`。但该分支立即触发为 0/109，不能替代旧会话恢复。
+  第三次 compaction 触发 `reasoning_loop_recovery` 后约 75 秒无新 token，真实频率未知。
   见 [AGENT_210K_COMPACTION_RESULT](work/AGENT_210K_COMPACTION_RESULT-20261031.md)。
+- 长上下文测试已固化：`probe-long-compaction.py` 与 session trace 探针当前
+  `11 passed`；long-context runner 与 `serve/test_reasoning_loop_recovery.py` 的联合
+  回归曾为 `24 passed in 0.88s`。GPU 上的 180K/210K 结果来自 live probe，不是普通离线
+  测试；合成分支 pin 是人工 live 验证，不是自动 GPU 回归。
 - trace 工具已固化：`tools/server/probe-codex-sessions.py` 只读汇总 totals、root、
   compaction 和 top uncached，不输出 prompt 正文，4 tests OK。
 - 同服务 1/2 路 breakdown：1 路冷/续轮 wall `7.382/1.610 s`，2 路
   `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅
   `50–73 ms`。见 [AGENT_SERVER_BREAKDOWN](work/AGENT_SERVER_BREAKDOWN-20261031.md)。
+
+## 近期判决索引（只用于防重复）
+
 - 上一项：AGENT-STATIC-SYSTEM-PREFIX 已把共同前缀由 `320` 字节升到 `54,366` 字节；
   真实四线程不同 tools 的后续请求各复用 `5,120` token，平均墙钟
   `7.515 → 5.669 s`（`-24.56%`），后三个兄弟请求 `7.502 → 5.001 s`（`-33.34%`）。
@@ -175,23 +193,9 @@
 - 前一项：LM-EXPLICIT 已完成并否决。16K host-residual 路径真实执行了 10/13 个
   super-chunk，但六请求 prompt 吞吐中位 `1892.9` 对 A1 `2208.55 tok/s`（−14.29%）；
   候选 8080 已恢复带 pipe 的 A 配置。
-- 当前迭代：AGENT-CODEX-TITLE、AGENT-CODEX-COMPACTION-LRU 和
-  AGENT-STATIC-SYSTEM-PREFIX 均已采纳。UTIL-BATCH-FAIR-SERVE、UTIL-PIPED-MTP、
-  cache-neutral 启动路线、CPU-order parity、1-vs-2 batch-group
-  调度、EXPDEC、checkpoint move、GDN recurrence 合并、跨 group head 延迟合并、
-  vocabulary-row head split、Q8 head write/mixer fusion 和 batch poll 快返回均已否决；
-  window profile 已完成。
-  attention v2 已是当前默认并完成 1% 门复验；
-  不要再次用
-  `STRATA_PA_V2T=1` 做同形 A/B，回退 v1 才是有效对照。FP16 indexer-key 与同 CTA cache
-  co-residency 两条 QSA 路线都已否决。
-- 下一动作：静态前缀目前只复用 `5,120` token，而共同 system 边界约为 8.5K–9K token。
-  手动 `strata_prefix {"message": 0, "chars": len(system)}` 已把后三次请求提高到
-  `9,976/10,229`（`97.53%`）、墙钟约 `1.09–1.13 s`。下一项把这些字段安全自动注入，
-  默认关闭，通过同形源码、工具和 1/2/4 路门后再默认启用。
-- 当前候选：没有已部署候选；刚采纳的静态前缀保持运行。B3a engine 仍为
-  `105a4171...`，1/2/4/8 安全请求与 title/compaction 均无 HTTP、CUDA、timeout 或外来请求错误。
-  EXPDEC 未启动；P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
+- 当前候选：没有实验候选。现役 B4 是已采纳的两路串行版本，engine 仍为
+  `105a4171...`；title、compaction LRU、共享 system、boundary pin 与两路串行均已通过
+  各自安全门。P7 不恢复：实测 Tensor pipe 仅 `0.04%`。
   256K 切换前生产快照为 `/opt/ai/tmp/pre-ctx256k-20261026T075110Z/`；更早的 P4 回滚基线为
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
@@ -202,16 +206,18 @@
 
 ## 生产
 
-- 最近核对时 `strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=0`。A2 手动实例
-  server/engine/vision PID `26243/26252/26247`，health loaded，host uptime 自
+- 最近核对时 `strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=0`。当前 B4
+  手动实例 server/engine/vision PID `50648/50656/50651`，health loaded，host uptime 自
   `2026-10-31 02:43:50 UTC`，两张 2080 Ti 均可联合 initialize。
-- A2 baseline engine/config hash 为
+- 历史 A2 对照基线的 engine/config hash 为
   `105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` /
   `88de996aeb0e7ae82e59937e3106473adf2f9eabd98aca8c711654fa254e443f`，frozen greedy
-  parity 通过，运行 env 无候选开关。已停 fair-service B engine/config hash 为
+  parity 通过，运行 env 无候选开关；它不是当前 B4 实例。已停 fair-service B
+  engine/config hash 为
   `0099f11a08fa3e8a5a58783e0fdc1e2c4fdb60cebb288c6044d3b7e31b3002b7` /
   `c68b9e81ae2c28a654700218a3155be37464c8044db8b7aa0fe362b6818c3c31`，仅供证据复现。
-- **生产已部署上游合并构建 `0.1.51` / `0e4a9596`**：代码树 `/opt/ai/src/strata-027-picks`
+- **systemd 生产回退版本为上游合并构建 `0.1.51` / `0e4a9596`**：代码树
+  `/opt/ai/src/strata-027-picks`
   干净停在 `c219fbca`；engine sha256 `2aaf2751…`、server md5 `11fd33f0`、
   config md5 `023663ba`。服务实际启动的 engine 为
   `/opt/ai/src/strata-027-picks/build75-027/strata`；修复后的 T-probe 从进程 argv 识别实际
@@ -406,5 +412,5 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-31T15:05+08:00（第一轮成本地图完成：长前缀热恢复和 recovery
-  无进展尾部成为下一项；无重启）
+- 最后更新：2026-10-31T15:00+08:00（长上下文三分类校正；全局循环暂停，下一项为
+  隔天约 180K 旧会话恢复；无重启）

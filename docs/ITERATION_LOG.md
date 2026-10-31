@@ -3,28 +3,60 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
-## I-20261031-108 · 成本地图定位到 208K 热恢复与 recovery 长尾
+## I-20261031-109 · 长上下文目标校正：隔天旧会话恢复，不是压缩后分支
+
+- 目标 / 指标：确认用户所说的 180K“重读历史”到底属于哪类负载，并清除把 compaction、
+  旧会话恢复和压缩后旧分支混在一起的误导。
+- 假设与预期：原计划认为重点是 compaction 后保留旧历史 checkpoint；用户澄清实际是
+  放置超过一天后重新打开约 180K token 的旧会话。
+- 为什么选这条路线：当前首要问题不是继续优化，而是先统一目标口径；错误的成本模型会
+  让后续实现和服务器重启全部投到低频场景。
+- 改动与实验：只读扫描本机 26 个 rollout；给长压缩探针加入精确 token pin 和压缩后分支
+  选项，并补请求构造测试；没有改 engine/server，没有重启。
+- 结果：全量 14,183 请求、109 次 compaction，compaction 占全部 uncached input
+  `29,351,478 / 57,278,644 = 51.24%`。109 次 compaction 后第一次请求均未回到压缩前
+  历史，input 中位只有压缩前的约 `5.2%`。精确 pin `208528` 使合成分支 cached
+  `208528/208533`、wall `0.274 s`，无 pin 对照 `9.016–9.523 s`。
+- 判决：**未定项改为口径校正。** compaction 前缀复用已解决；exact pin / `cap=9`
+  机制成立但真实立即触发为 0/109，降为低频诊断。180K 新合成 cold turn `65.555 s`
+  不能写成隔天旧会话恢复已覆盖。
+- 预期被推翻：压缩后旧历史分支不是用户当前描述的主负载。
+- 文档复查修正：`248–283 ms` 只覆盖两次未触发 recovery 的 compaction；第三次 recovery
+  运行的 `prompt_ms=75.474 s`，包含约 75 秒无进展尾部，不能并入正常范围。
+- 生产状态与回滚：server/vision/engine `50648/50651/50656` 未变，health loaded、
+  6 slots / 2 groups、systemd inactive；无重启。探针改动可单独回退，不影响服务。
+- 证据：L-137、`AGENT_210K_COMPACTION_RESULT-20261031.md`、
+  `/opt/ai/logs/agent-long-branch-pin-exact-20261031T1300Z.json`。
+- 学到什么：用户口语中的“重读历史”必须记录会话年龄、缓存状态和请求形状，不能从 token
+  大小或一次合成实验反推场景。
+- 下一步与理由：全局循环当前暂停；恢复后先执行 `AGENT-OLD-SESSION-RESUME`，测放置
+  超过一天、约 180K 上下文旧会话的冷恢复，再决定实现方向。
+
+## I-20261031-108 · 成本地图定位到 208K 边界重读与 recovery 长尾（后续校正）
 
 - 目标 / 指标：按真实长上下文尺寸和秒数重排下一项，不再把 12K prompt 当作代表；同时验证
   用户常见的约 180K/210K 历史压缩。
 - 改动与实验：无源码/服务改动。同一服务补测工具型 94K/189K 热续轮；新增
   `probe-long-compaction.py`，真实发送 208K history turn 后 Codex compaction，完成 3 次
   高上限运行；只保存 token、缓存、wall 和状态。
-- 结果：94K/189K 热续轮 wall `2.086/2.430 s`；相同 208K 热 turn 三次
-  `9.784/9.605/9.620 s`。210K compaction 三次均 completed，cached
+- 结果：94K/189K 热续轮 wall `2.086/2.430 s`；208K 分支 turn 三次
+  `9.784/9.605/9.620 s`，每次复用 `196,608`、重读 `11,924`。210K compaction 三次均 completed，cached
   `208,527/208,554 = 99.987%`，输出 `347/532/734` token，wall
   `5.853/8.845/85.017 s`。
 - 异常：第三次在 512 reasoning token 后触发 `reasoning_loop_recovery`，随后约 75 秒没有
   新 token，最后正常完成。该异常不计入普通中位数，也不能由一次样本推出生产频率。
 - 判决：**AGENT-COST-MAP 第一轮完成。** compaction 前缀缓存到 210K 仍有效，不再重做；
   剩余最大项是 208K 热状态恢复的约 9.6 秒，以及 recovery 的无进展长尾。
+- 后续校正（I-109）：9.6 秒并非无记录的“热恢复”；该 208K 分支只复用 `196,608`，
+  重读 `11,924`，prompt 为 `9.314–9.486 s`。本条的“热恢复”标签不再作为执行依据。
 - 生产状态与回滚：server/vision/engine `50648/50651/50656` 未变，health loaded、
   6 slots / 2 groups、systemd inactive；本轮没有重启。新增探针单测 4 项、offline preflight
   和 diff 检查通过。
 - 证据：L-136、[`AGENT_210K_COMPACTION_RESULT-20261031.md`](work/AGENT_210K_COMPACTION_RESULT-20261031.md)、
   `/opt/ai/logs/agent-cost-map-*.json`、`/opt/ai/logs/agent-compaction-210k-*.json`。
-- 下一步与理由：进入 `AGENT-LONG-HOT-RESTORE`，只读拆 checkpoint/host/KV restore，并用
-  历史日志统计 recovery 尾部频率；候选须先证明真实频率加权后能节省整任务 ≥1%。
+- 当时的下一步与理由：进入 `AGENT-LONG-HOT-RESTORE`，只读拆 checkpoint/host/KV restore，
+  并用历史日志统计 recovery 尾部频率。I-109 已确认这只是当时假设，不是最终目标；当前
+  恢复入口是 `AGENT-OLD-SESSION-RESUME`。
 
 ## I-20261031-107 · 两路凹点改为 solo 串行：长/短输出分别改善 14.83%/8.18%
 

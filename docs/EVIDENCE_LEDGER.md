@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-136，按编号）
+## 台账索引（L-000…L-137，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -149,27 +149,31 @@
 | L-133 | 10-31 15:0x | serial batch-MTP 两路 `88.50 → 91.38 tok/s`（`+3.25%`、输出逐字一致），但四路 `136.01 → 96.58`（`-28.99%`）；A2 漂移 `-1.39%/-0.74%/-0.15%` | **UTIL-MTP-LOWCONC 四路非回退门否决；不扫 MTP 参数；A2 已恢复** |
 | L-134 | 10-31 15:1x | 恰好两路 solo 串行：512-token 完成跨度 `11.776 → 10.004 s`（`-15.05%`），64-token `1.692 → 1.554 s`（`-8.18%`）；1 路 `-0.38%`，4 路持平，6 路 `163.07 tok/s` 零错误 | **UTIL-TWO-STREAM-SERIAL 采纳；三路恢复 batch；第二条 TTFT 约 `5.1 s`** |
 | L-135 | 10-31 15:1x | `spec_min_p 0/0.5/0.7/0.9` wall `4.51–4.54 s`；aux CPU `4.5489/4.5561 s`；`pcie_frac 0/0.15/0.31/0.45` `4.597–4.611 s`；checkpoint 开关 `0.4461/0.4465 s` | **固定负载无可测差异；这些参数轴停止扫描** |
-| L-136 | 10-31 14:2x | 210K history: cold `75.295 s`，相同热 turn `9.605–9.784 s`；compaction cached `208,527/208,554=99.987%`，output 347/532/734，wall `5.853/8.845/85.017 s`；第三次 recovery 后约 75 秒无新 token | **210K compaction 缓存通过，但暴露出恢复与 recovery 尾部；下一项只读拆 208K 热恢复和长尾频率** |
+| L-136 | 10-31 14:2x | 210K cold `75.295 s`；208K 长前缀分支复用 `196,608`、重读 `11,924`，prompt `9.314–9.486 s`、wall `9.605–9.784 s`；compaction cached `208,527/208,554=99.987%`，两次正常 prompt `248–283 ms`，recovery 运行 `prompt_ms=75.474 s`，三臂 wall `5.853/8.845/85.017 s` | **compaction 前缀缓存通过；长前缀边界回落与 recovery 尾部待拆；后续 L-137 已校正场景口径** |
+| L-137 | 10-31 14:5x | 全量本地 rollout 14,183 请求/109 次 compaction，compaction 占 uncached input `51.24%`；压缩后立即回读旧历史 0/109。精确 pin `208528` 把合成分支从 `9.016–9.523 s` 降到 `0.274 s`。用户澄清 180K“重读历史”是放置超过一天后重新打开旧会话 | **三类场景已拆分；exact pin/`cap=9` 降为低频诊断；下一项为 AGENT-OLD-SESSION-RESUME；全局循环暂停** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
 
 ## L-136 · AGENT-COST-MAP：94K/189K 热续轮与 210K compaction 的秒级成本
 
-**判定：诊断完成，长前缀热恢复和 recovery 尾部进入下一项。** 同一现役服务、无重启：
+**判定：诊断完成；长前缀边界回落与 recovery 尾部进入下一项。** 同一现役服务、无重启：
 
 - 实际 94,885-token 续轮 cached `94,282`（`99.36%`），prompt `1.942 s`，wall `2.086 s`；
 - 实际 189,093-token 续轮 cached `188,490`（`99.68%`），prompt `2.243 s`，wall `2.430 s`；
-- 实际 208,532-token 相同热 turn 三次 wall `9.784/9.605/9.620 s`，usage cached
-  `196,608`，engine 日志从 `204,800` 开始显示已读进度；
+- 实际 208,532-token 分支 turn 三次 wall `9.784/9.605/9.620 s`，usage cached
+  `196,608`、重读 `11,924`，prompt `9.314–9.486 s`；engine 日志从 `204,800` 开始显示
+  已读进度，不代表复用从该位置开始；
 - 208,554-token compaction 三次均 completed，cached `208,527`（`99.987%`），输出
   `347/532/734`，wall `5.853/8.845/85.017 s`；
 - 第三次 compaction 在 512 reasoning token 后触发 `reasoning_loop_recovery`，随后约
-  75 秒没有新 token，最终正常完成。
+  75 秒没有新 token，最终正常完成；其 `prompt_ms=75.474 s`，所以 `248–283 ms`
+  只描述前两次未触发 recovery 的运行。
 
-结论：compaction 的前缀复用已在 210K 规模成立，不应继续重复同形缓存优化；长历史热恢复
-与 recovery 无进展尾部才是剩余秒级大头。单次尾部异常不能当成稳定中位数，下一项先统计
-真实触发率并做只读阶段拆解。
+结论：compaction 的前缀复用已在 210K 规模成立，不应继续重复同形缓存优化；“长历史热恢复”
+这一旧标签不成立，实际是 `196,608` 边界之后的约 11.9K-token 重读；recovery 无进展
+尾部是独立风险。单次尾部异常不能当成稳定中位数，L-137 进一步把 0/109 的真实立即分支
+频率和用户所说的隔天旧会话恢复分开。
 
 证据见
 [`AGENT_210K_COMPACTION_RESULT-20261031.md`](work/AGENT_210K_COMPACTION_RESULT-20261031.md)
@@ -5437,3 +5441,39 @@ UTIL-KERNEL。
   （sha256 `2353fe726a04dea9beeab4623f2cce4fcd04e08eb4b279bd3708bc3e95623bf3`）
 - `/opt/ai/logs/qsa-union-attn-20261030T171808Z/same4-group3.txt`
   （sha256 `1f16d9ea7403eb4f5a1c84a7673959d39a3e22cbc0307df0152dd10ac5c4ff94`）
+
+## L-137 · 长上下文三分类校正：隔天旧会话恢复不是压缩后分支
+
+**判定：compaction 前缀缓存已测通；精确分支 pin 机制已验证但真实立即触发为 0/109；
+用户所说的 180K 历史重读是隔天重新打开旧会话，现有 180K 冷 turn 只算代理基线。**
+
+测试覆盖分三层：
+
+- CPU 联合回归为 `24 passed in 0.88s`，覆盖 long-context runner、compaction 请求构造、
+  cache/output 字段、恢复 prompt/sampling/cancel；当前长压缩与会话 trace 探针聚焦回归为
+  `11 passed`。
+- 180K/210K 时长来自真实 GPU HTTP probe，不是普通离线测试。`probe-long-compaction.py`
+  的 `--branch-after-compaction` 可测检查点分支，但不是自动 GPU 回归，也不是旧会话年龄
+  测试。
+- 全量扫描本机 26 个 rollout：14,183 请求、109 次 compaction。compaction uncached input
+  `29,351,478`，占全部 uncached `57,278,644` 的 `51.24%`。
+
+三类场景不能互换：
+
+- 210K compaction：三次 completed，input `208,554`、cached `208,527`
+  （`99.987%`）；两次正常运行 prompt `248–283 ms`、wall `5.853/8.845 s`，
+  一次 recovery 后 wall `85.017 s`、`prompt_ms=75.474 s`。
+- 180K cold turn：`65.555 s` 后 compaction 复用 `180,272/180,301 = 99.984%`、wall
+  `2.385 s`。这是同一服务上的新合成会话；用户实际场景是超过一天未使用的旧会话，
+  目前没有同口径 live 测量。
+- 压缩后旧历史分支：无 pin 时复用 `196,608`、重读 `11,924`、wall `9.016–9.523 s`；
+  精确 `strata_prefix {"tokens": 208528}` 后 cached `208528/208533`、prompt
+  `208528 + 27`、wall `0.274 s`，单次约省 `9.24–9.25 s`。但 109 次真实 compaction
+  的第一次后续请求均未回读压缩前历史，input 中位只有压缩前的约 `5.2%`。
+
+由此，exact pin / `cap=9` 不作为当前实现目标，除非新的真实流量证明该分支达到可测频率。
+恢复全局循环后的下一项是 `AGENT-OLD-SESSION-RESUME`；必须记录旧会话年龄、缓存状态、
+prompt、TTFT、wall、slot wait 和资源。
+
+recovery 仍有独立风险：server 日志只有 3 条 `repeated reasoning detected`，没有可靠请求
+分母，不能把 synthetic 1/3 当成生产触发率。

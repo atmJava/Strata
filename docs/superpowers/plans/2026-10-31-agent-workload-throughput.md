@@ -2,9 +2,9 @@
 
 日期：2026-10-31
 
-状态：第三次复盘后重拟并通过评审。旧版按“容易测的合成吞吐”排序，本版改为按
-真实用户可见的秒数和触发频率排序。阶段 1 已取得第一组结果，当前转入长前缀热恢复
-的只读阶段拆解；仍不提前固定 kernel 或调度候选。
+状态：第四次复盘后校正。第一阶段成本地图已完成；用户已澄清“180K 重读历史”是指
+隔天重新打开约 180K token 的旧会话，不是 compaction 后重走旧历史分支。当前全局优化
+循环暂停，先完成文档和目标校正；恢复后的下一项是 `AGENT-OLD-SESSION-RESUME`。
 
 ## 全局目标
 
@@ -19,6 +19,18 @@
 
 这里的路数是实际同时在途的模型请求，不是 Codex 会话数或服务器槽数。工具执行、用户思考
 和等待子代理时没有在途模型请求，不能算作并发。
+
+### 长上下文场景定义
+
+下面三类问题必须分开命名、分开测量，不能用一个结果替代另一个：
+
+1. **当前会话 compaction**：当前会话接近上下文上限时生成摘要。用户通常约 210K 触发，
+   但有些客户端日志会到约 260–300K。
+2. **隔天旧会话恢复**：一个超过一天未使用的会话重新打开，携带约 180K 历史；旧缓存可能
+   已过期、被淘汰或因服务重启消失。这是用户所说的“重读历史 180K 会话”。
+3. **压缩后旧历史分支**：compaction 后重新请求压缩前的同一段历史。它是独立的分支/检查点
+   场景，不代表第 2 类；现有真实 rollout 中 109 次 compaction 的第一次后续请求均未回到
+   压缩前历史。
 
 ### 主指标
 
@@ -80,9 +92,19 @@
 5. 局部优化连续被否决并非执行不够，而是缺少“真实频率 × 绝对秒数”的排序。继续问“哪个
    kernel 还能快 1%”会再次把时间花在错误层级。
 
-当前最重要的未知量是：真实长前缀在已高度缓存时，Strata 仍然花多少秒；这些秒分布在
-host、checkpoint restore、uncached prefill、准入和 decode 的哪里。没有这个地图，任何
-后续实现都只是猜测。
+第一轮成本地图得到三个不同结论：
+
+- 210K compaction 的前缀复用已经成立：input `208,554`、cached `208,527`
+  （`99.987%`）。两次未触发 recovery 的运行 prompt 为 `0.248–0.283 s`，正常新增成本
+  主要是摘要输出；recovery 运行的 `prompt_ms=75.474 s`，包含约 75 秒无进展尾部。
+- 压缩后重走旧 208K 分支时只复用 `196,608`，重读 `11,924`，约 `9.3–9.5 s`。精确
+  `strata_prefix {"tokens": 208528}` 可把该合成分支降到 `0.274 s`，证明机制有效。
+- 但真实本地 rollout 的 14,183 请求、109 次 compaction 中，0 次在 compaction 后立刻
+  回读压缩前历史；第一次后续请求的 input 中位只有压缩前请求的 `5.2%`。因此精确 pin /
+  `cap=9` 不是当前主项，也不能替代隔天旧会话恢复。
+
+按照用户实际负载，恢复执行后的第一项改为隔天旧会话冷恢复。现有 180K 冷 turn
+`65.555 s` 是重要近似基线，但它是同一服务上的新合成会话，不覆盖会话放置一天后的行为。
 
 ## 已有秒级证据
 
@@ -107,25 +129,28 @@ compaction/冷读事件可能压过大量普通续轮。
 | 实际 94K 续轮，99.36% cached | prompt `1.94 s`，wall `2.09 s` | 热前缀并非按长度线性变慢 |
 | 实际 189K 续轮，99.68% cached | prompt `2.24 s`，wall `2.43 s` | 长前缀仍有约 2 秒固定/恢复成本 |
 | 96K 冷读 | wall 约 `42 s` | 长冷读是秒级大头 |
-| 180K 冷 turn | wall `65.555 s` | 冷读更长 |
-| 180K 真实会话重读 | 已做冷读后同会话 compaction | 复读路径已覆盖一次 |
+| 180K 冷 turn | wall `65.555 s` | 冷读更长；但这是新合成会话，不是隔天旧会话 |
 | 180K compaction，LRU 命中 | cached `180,272/180,301 = 99.984%`，wall `2.385 s` | 已完成线程级缓存，不再重读整段 |
 | 210K 冷读/续读/25% 改写 | cold `88.293 s`；warm suffix `11.529 s`；rewrite25 `76.400 s` | 长读历史已测；重新定位/部分改写仍昂贵 |
-| 210K 后 compaction | 输入 `208,554`，cached `208,527 = 99.987%`；输出 347/532/734 token；wall `5.853/8.845/85.017 s`，均 completed | 前缀缓存已解决；一次 recovery 后 75 秒无新 token 的尾部异常成为新问题 |
+| 210K 后 compaction | 输入 `208,554`，cached `208,527 = 99.987%`；两次正常 prompt `0.248–0.283 s`，wall `5.853/8.845 s`；recovery 运行 `prompt_ms=75.474 s`，wall `85.017 s`；均 completed | 长历史前缀缓存已解决；正常剩余成本是 summary decode，recovery 的无进展尾部留在 `prompt_ms` 中，不能并入正常范围 |
+| 210K compaction 后重走旧历史 | 无 pin：复用 `196,608`、重读 `11,924`、wall `9.016–9.523 s`；精确 pin `208528` 后 cached `208528/208533`、wall `0.274 s` | 机制有效，但真实 rollout 中 0/109 次 compaction 立即触发；仅作低频诊断 |
 | 512-token 单路 | wall 约 `4.5 s` | 有实质正文时 decode 是重要成本 |
 | 两路 512-token batch | 聚合约 `88 tok/s`，完成跨度 `11.7 s` | 两路 batch 存在低并发凹点 |
 | 两路 solo 串行 | 完成跨度 `10.0 s`，第二条 TTFT `5.1 s` | 只适合总完成时间优先，不能直接算交互收益 |
 
-目前已有 94K/189K/208K 热续轮成本及 180K/210K compaction。第一次成本地图显示：
+目前已有 94K/189K 热续轮、208K 分支重读及 180K/210K compaction。成本地图显示：
 
-- 208K 完全相同的热历史 turn 三次稳定在 `9.605–9.784 s`；
+- 208K 历史分支 turn 三次稳定在 `9.605–9.784 s`，但每次仍只复用 `196,608`、
+  重读 `11,924`；
 - 同样 compaction 的 prompt 只新增 22–27 token，前缀恢复不是主要问题；
 - 正常 compaction 输出 347/532 token 时为 `5.853/8.845 s`；
 - 第三次在 512 个 reasoning token 后触发 recovery，随后约 75 秒没有新 token，最终
   输出 734 token、wall `85.017 s`。这是一个明确的无进展尾部，不能混入普通中位数。
 
-按当前证据，第一优先不是继续改 compaction prompt cache，而是拆解 208K 热状态从 host
-恢复到可 decode 的约 9.6 秒，并确认 recovery 无进展尾部能否避免。
+按当前证据，compaction prompt cache 和合成分支 pin 都已收口。恢复执行后先测隔天旧会话
+恢复是否仍接近 180K 冷 prefill；只有真实触发频率和绝对秒数能支撑整任务 ≥1% 时，再比较
+冷 prefill、缓存淘汰和可选持久化方案。recovery 尾部保留为独立低频风险，不与旧会话恢复
+混在一起。
 
 ## 执行阶段
 
@@ -136,7 +161,8 @@ compaction/冷读事件可能压过大量普通续轮。
 - server/vision/engine `50648/50651/50656`；
 - 源码 `/opt/ai/src/strata-two-stream-serial-20261031`；
 - engine `105a4171...` 未重建，config `7c901092...`，server `10bd8318...`；
-- `STRATA_BATCH_SERIAL_TWO=1`，health loaded，6 slots / 2 groups，262144 context；
+- `STRATA_BATCH_SERIAL_TWO=1`、`STRATA_ADMIT_MERGE_FIRST=1` 和
+  `STRATA_PIPE_BYIELD_NODRAIN=1`；health loaded，6 slots / 2 groups，262144 context；
 - `strata.service` inactive/dead。加载耗时约 177 秒。
 
 回滚是启动原源码目录的 `strata.py serve --config a-config.json`，且不带
@@ -154,8 +180,9 @@ compaction/冷读事件可能压过大量普通续轮。
 2. 1 路冷读已有 96K/180K/210K 结果；除非频率证明必要，不重跑冷读。
 3. 180K 后 compaction 已在 `2.385 s` 内复用 `99.984%`；约 210K 的同会话测试也已完成，
    三次均复用 `99.987%` 且 completed。压缩前缀缓存路线收口，只剩输出/recovery 尾部。
-4. 用户常见的约 180K 历史重读已由冷读 + compaction 覆盖；不重复整段冷读，改测重读后一次
-   普通续轮是否仍保持高复用。
+4. 用户确认常见约 210K compaction，并把“180K 重读历史”澄清为超过一天未使用的旧会话。
+   现有 180K 冷 turn 只作为近似基线，不能写成旧会话恢复已经覆盖；下一项必须单独记录
+   会话年龄、缓存状态、input/cached、TTFT、wall 和服务资源。
 5. 2 路只测一个代表性尺寸，主流验收第二条 TTFT、每个请求 wall 和完成跨度，同时报告三种
    指标，不用完成跨度覆盖首结果延迟。
 6. 输出长度用短工具结果和 512-token 正文两类，分别代表交互回复与实质生成。
@@ -168,8 +195,8 @@ finish、错误、实际并发数；不保存 prompt/response 正文和密钥。
 - 先用已有 `prompt_ms`、`STRATA_TRACE`、checkpoint/restore 和 stage timing 能提供的字段；
 - 先做只读源码审计，确认字段是否在现役二进制可达；
 - 只补 instrumentation 能改变观测开销而无重启路径的 trace；
-- 将热点分为 host/prompt-cache validation、checkpoint restore、uncached prefill、准入/排在
-  decode，并记录方差与重叠关系；
+- 将热点分为 host/prompt-cache validation、checkpoint restore、uncached prefill、准入/排队
+  和 decode，并记录方差与重叠关系；
 - 用客户端真实尺寸频率加权，得到每类成本的“每请求”和“每 root task”秒数上界。
 
 停止条件：
@@ -183,8 +210,7 @@ finish、错误、实际并发数；不保存 prompt/response 正文和密钥。
 
 根据阶段 1 的绝对秒数选一个方向，顺序不预先写死。可能的大头只有以下几类：
 
-1. 热缓存长前缀的 host/checkpoint/restore 固定或线性成本：208K 同 turn 已稳定
-   `9.6 s`，而 189K 只需 `2.24 s`；
+1. 隔天旧会话约 180K 上下文恢复：确认缓存是否命中、冷 prefill 的绝对秒数及主要 stage；
 2. 64K–280K 冷 prefill 的主要 stage；
 3. 单路实质正文 decode，或真实双路低并发 decode；
 4. reasoning-loop recovery 后无新 token 的长尾；当前 3 次 210K compaction 中 1 次出现
@@ -193,6 +219,24 @@ finish、错误、实际并发数；不保存 prompt/response 正文和密钥。
 
 候选必须先给出触发率、单次绝对节省、整任务上界、预计新增 TTFT、回滚和正确性影响，再决定
 是否构建。一次候选最多一次服务器重启；修改 engine 还要额外证明收益覆盖构建和加载成本。
+
+压缩后旧历史分支 exact pin / `cap=9` 只保留为已验证的诊断结论。除非新的真实流量证明该
+分支达到可测频率，否则不构建、不自动启用。
+
+### 阶段 2A：AGENT-OLD-SESSION-RESUME（恢复后的下一项）
+
+先测量，不先实现：
+
+1. 选取放置超过一天、上下文约 180K 的真实会话形状。若日志没有可重放的请求正文，使用
+   唯一约 180K prompt 和全新 cache key 作为冷缓存代理，并明确标注“代理，不是实际年龄”。
+2. 记录会话年龄来源、input、cached/uncached、prompt、TTFT、wall、slot wait、finish、
+   RAM/VRAM/swap 与实际并发；不得只记录 token/s。
+3. 在同一服务上先测可免重启的冷缓存恢复；只有需要区分缓存过期、淘汰或重启路径时，才
+   计入约 2–3 分钟加载和 cache 冷启动成本。
+4. 将结果与现有 180K 冷 turn `65.555 s`、210K cold `88.293 s` 分开，不用当前会话续轮
+   或 compaction LRU 命中替代旧会话恢复。
+5. 只有冷恢复的真实频率和关键路径秒数给出整任务 ≥1% 上界后，才比较 prefill、缓存淘汰
+   和持久化路线。合成分支 exact pin 不属于本项。
 
 ### 阶段 3：用户级 replay，而不只是同步矩阵
 
@@ -206,7 +250,7 @@ finish、错误、实际并发数；不保存 prompt/response 正文和密钥。
 主判据是根任务墙钟和首可用结果时间；请求级吞吐只用于解释原因。若模型层收益被工具/编排
 的累积等待吞没，应记录真实上界并转向下一项，不能把局部胜场包装成用户收益。
 
-### 阶段 4：闭环与持续循环
+### 阶段 4：闭环与持续循环（恢复执行后）
 
 每轮立即：
 
@@ -215,7 +259,7 @@ finish、错误、实际并发数；不保存 prompt/response 正文和密钥。
    `HANDOVER` 和 contract/result；
 3. 跑格式、UTF-8/BOM、offline preflight 和聚焦测试；
 4. 提交、HTTPS 推送并核对远端 commit；
-5. 从更新后的成本地图选择下一项并立即继续。
+5. 恢复执行后，从更新后的成本地图选择下一项并立即继续。
 
 ## 当前不再做
 
@@ -227,11 +271,13 @@ finish、错误、实际并发数；不保存 prompt/response 正文和密钥。
 - 不因局部 kernel 快 1–2% 就假设整任务变快；
 - 不把两路串行增加的第二条 TTFT 隐藏在一个聚合完成数字里；
 - 不重复已完成的 title、基础前缀复用、线程 compaction LRU 和 180K compaction 验证；
+- 不把隔天旧会话恢复写成 180K compaction 或压缩后旧分支；不据此自动启用 exact pin/`cap=9`；
 - 不把 API key、token、sudo 密码或 prompt 正文写入仓库、日志或回复。
 
 ## 计划评审
 
-结论：**通过，允许先执行 AGENT-COST-MAP。**
+结论：**第四次校正通过；全局循环暂停期间只更新文档。恢复后先执行
+AGENT-OLD-SESSION-RESUME。**
 
 保留：
 
@@ -246,6 +292,8 @@ finish、错误、实际并发数；不保存 prompt/response 正文和密钥。
 - 主指标从 token/s 和完成跨度改为根任务墙钟、首可用结果时间和单请求 wall；
 - 把 12K prompt 证据降级为形状提示，不当作 188K 真实负载代表；
 - 明确两路串行的 TTFT 取舍，不再把它直接写成全局用户收益；
+- 把当前会话 compaction、隔天旧会话恢复和压缩后旧分支拆成三个独立场景；
+- 把 exact pin / `cap=9` 从主目标降级为真实频率不足的低优先级诊断；
 - 删除已经否决或已测无差异的参数、kernel 和矩阵扫描。
 
 已知局限：
@@ -257,9 +305,10 @@ finish、错误、实际并发数；不保存 prompt/response 正文和密钥。
 
 ## 当前断点
 
-阶段 0、trace 工具、`UTIL-MTP-LOWCONC`、`UTIL-TWO-STREAM-SERIAL` 和第一轮
-`AGENT-COST-MAP` 已完成。当前服务 server/vision/engine `50648/50651/50656`，
-`STRATA_BATCH_SERIAL_TWO=1`，health loaded，无重启。
+阶段 0、trace 工具、`UTIL-MTP-LOWCONC`、`UTIL-TWO-STREAM-SERIAL`、第一轮
+`AGENT-COST-MAP` 和长上下文目标校正已完成。当前服务 server/vision/engine
+`50648/50651/50656`，`STRATA_BATCH_SERIAL_TWO=1`，health loaded，无重启。
 
-下一项是 `AGENT-LONG-HOT-RESTORE`：先只读拆解 208K 热 turn 的约 `9.6 s`，并统计
-reasoning-loop recovery 停滞的真实触发率；没有可测的 1% 整任务上界前不构建、不重启。
+全局优化循环当前由用户暂停。恢复后的下一项是 `AGENT-OLD-SESSION-RESUME`：测放置超过
+一天、约 180K 上下文的旧会话重新读取；现有 180K 冷 turn 只是代理基线。精确 pin /
+`cap=9` 的真实立即触发率为 0/109，不再作为主目标。

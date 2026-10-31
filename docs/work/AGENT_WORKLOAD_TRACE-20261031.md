@@ -58,3 +58,7 @@ compaction 前一轮普通 turn 通常保持约 99% 缓存。例如 05:20:46 的
 下一轮把本统计固化为只读工具，支持按 root turn、compaction、缓存率分位数和 top
 uncached 事件输出。工具不输出 prompt 正文、API key 或密码。选择性能候选时必须把
 客户端 token 形状与远端 server timing 分开记录。
+
+本文件仍只描述上面这一份 29 小时会话。后续全量扫描 14,183 请求和 109 次 compaction
+的跨会话结论、以及“隔天旧会话恢复”的口径校正，以
+[`../EVIDENCE_LEDGER.md`](../EVIDENCE_LEDGER.md) L-137 为准。

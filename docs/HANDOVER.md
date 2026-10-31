@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T15:05+08:00。
+> 整理时间：2026-10-31T15:00+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-135。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-137。
 
 ## 2. 当前断点
 
@@ -35,20 +35,34 @@
   uncached `17.82M`。普通 uncached 中位只有 265 token；36 次 compaction 每次约 26–30
   万 input、仅约 3.5–7.6K cached，合计约占全部 uncached input 一半。这是客户端请求
   形状，不是 Strata server timing。
-- **长 compaction 已验证**：现役 B4 的 180K 真实 HTTP replay 中，cold turn 为
+- **全量本地 rollout 校正**：共扫描 14,183 请求和 109 次 compaction；compaction
+  uncached input `29,351,478`，占全部 uncached `57,278,644` 的 `51.24%`。109 次
+  compaction 后第一次请求均未立即回到压缩前历史，input 中位只有压缩前的 `5.2%`。
+- **长 compaction 已验证**：现役 B4 的 180K live HTTP probe（人工合成会话）中，
+  cold turn 为
   `65.555 s`，随后 compaction input `180,301`、cached `180,272`（`99.984%`）、wall
-  `2.385 s`，只重读 29 token。该路线不再重做同形实验。
+  `2.385 s`，只重读 29 token。该路线不再重做同形实验；cold turn 是新合成会话，不能
+  等同于隔天旧会话恢复。
 - **trace 工具已固化**：`tools/server/probe-codex-sessions.py` 只读汇总 totals、root、
   compaction 和 top uncached，不输出 prompt 正文；4 tests OK。
 - **同服务 breakdown 已完成**：1 路冷/续轮 wall `7.382/1.610 s`，2 路
   `11.075/2.290 s`；续轮 cached 约 95%，prompt 仍 `1.4–1.5 s`，短输出 decode 仅
   `50–73 ms`。2 路冷首轮 TTFT `10.993 s`，其中 slot wait `7.307 s`。
-- **下一动作**：AGENT-LONG-HOT-RESTORE。第一轮成本地图已完成：实际 94K/189K 热续轮
-  `2.086/2.430 s`，相同 208K 热 turn 三次 `9.605–9.784 s`；210K compaction 均复用
-  `99.987%` 且 completed，但一条 recovery 路径出现约 75 秒无新 token 的尾部。下一步只读
-  拆 checkpoint/host restore/KV restore，并统计 recovery 真实频率；两路继续同时报告
-  第二条 TTFT。
-- 用户已恢复“除非叫停否则持续执行”的全局优化循环；UTIL-NCU 已完成，UTIL-KERNEL、
+- **当前状态与下一动作**：全局优化循环由用户暂停，当前只做文档校正。恢复后的下一项是
+  `AGENT-OLD-SESSION-RESUME`：测量放置超过一天、约 180K token 的旧会话重新打开时的
+  冷恢复，记录 input、cached/uncached、prompt、TTFT、wall、slot wait、并发与资源。
+  现有 180K 冷 turn `65.555 s` 只是代理基线。
+- **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
+  cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
+  rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说
+  的隔天旧会话恢复混为一谈。
+- **测试覆盖**：`probe-long-compaction.py`、long-context runner 和
+  `serve/test_reasoning_loop_recovery.py` 联合 `24 passed in 0.88s`；当前长压缩探针与
+  session trace 探针聚焦回归为 `11 passed`。180K/210K 的 GPU 秒数由 live probe 测得，
+  普通离线套件不运行该负载。
+### 已关闭路线（只用于防重复；细节见队列和台账）
+
+- 用户已暂停全局优化循环。UTIL-NCU 已完成，UTIL-KERNEL、
   UTIL-ACT、UTIL-WEIGHT、UTIL-GRID-PAD、UTIL-WEIGHT-RO 与 UTIL-PIPED-MTP 均按预注册门否决，
   cache-neutral 的 `UTIL-PIPED-MTP-CACHE` 也在启动门否决，CPU-order 的
   `UTIL-PIPED-MTP-ORDER` 又在 parity 门否决；`UTIL-BATCH-GROUP-FIT` 也已过启动门，
@@ -141,19 +155,20 @@
   B6 kernel/reach 门也已否决；batch side mixer 虽然过了 production-shaped GPU 门和真实
   T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决；Q5 head grid 也在
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
-  因此也已否决。当前请求级候选已采纳，下一步转入 `strata_prefix` 边界 pin 的源码与真实
-  负载验证，不再回到已关闭的本地 kernel 路线。
+  因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线，
+  当前目标暂停，恢复后从隔天旧会话测量开始。
 
 ## 3. 当前生产
 
-生产 `strata.service` 保持 inactive；B3a 以手动实例运行，health loaded。
+生产 `strata.service` 保持 inactive；B4 以手动实例运行，health loaded。以下 PID、hash
+和参数于 2026-10-31T15:00+08:00 通过 relay 重新核对。
 
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=0` |
-| server/engine/vision | `36610/36618/36613`，health loaded，监听 `:8080` |
-| B3a running | engine `105a4171...`，config `a8a8a42f...`，template `8f0ac93c...` |
-| latest accepted candidates | title、compaction LRU、system-before-tools |
+| server/engine/vision | `50648/50656/50651`，health loaded，监听 `:8080` |
+| B4 running | engine `105a4171...`，config `7c901092...`，server `10bd8318...` |
+| latest accepted candidates | title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
 | GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；`vram_free_mib=1005` |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
@@ -162,6 +177,8 @@
 
 ```text
 STRATA_ADMIT_SHORT_FIRST=2048
+STRATA_ADMIT_MERGE_FIRST=1
+STRATA_BATCH_SERIAL_TWO=1
 STRATA_BATCH_STAGED_READ=1
 STRATA_HC_Q8=1
 STRATA_MP_STAGED_READ=1
@@ -170,6 +187,7 @@ STRATA_PIPED_CONCURRENT=1
 STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS=4096
 STRATA_PIPED_DECODE_LEADIN_MS=1600
 STRATA_PIPED_DECODE_LEADIN_WAIT_MS=750
+STRATA_PIPE_BYIELD_NODRAIN=1
 STRATA_SHARED_SLOT_ROPE=1
 STRATA_SM75_PERF=1
 ```

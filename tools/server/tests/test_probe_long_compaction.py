@@ -44,6 +44,26 @@ class LongCompactionProbeTests(unittest.TestCase):
         self.assertEqual(turn["max_output_tokens"], 8)
         self.assertEqual(compaction["max_output_tokens"], 1024)
 
+    def test_history_tail_pin_is_optional_and_survives_compaction(self):
+        plain = MODULE.turn_body("m", "history", "session", "thread")
+        self.assertNotIn("strata_prefix", plain)
+        turn = MODULE.turn_body("m", "history", "session", "thread", pin_chars=7)
+        self.assertEqual(turn["strata_prefix"], {"message": 1, "chars": 7})
+        compaction = MODULE.compaction_body("m", turn, [], "session", "thread")
+        self.assertEqual(compaction["strata_prefix"], {"message": 1, "chars": 7})
+
+    def test_pin_must_leave_the_answer_instruction_reusable(self):
+        text = "history"
+        with self.assertRaises(ValueError):
+            MODULE.turn_body("m", text, "session", "thread",
+                             pin_chars=len(text) + len("\n\nReply with exactly READY."))
+
+    def test_exact_token_pin_is_supported_and_exclusive(self):
+        turn = MODULE.turn_body("m", "history", "session", "thread", pin_tokens=208_528)
+        self.assertEqual(turn["strata_prefix"], {"tokens": 208_528})
+        with self.assertRaises(ValueError):
+            MODULE.turn_body("m", "history", "session", "thread", pin_chars=7, pin_tokens=8)
+
     def test_history_text_rejects_an_empty_history(self):
         with self.assertRaises(ValueError):
             MODULE.history_text(0, "x")
