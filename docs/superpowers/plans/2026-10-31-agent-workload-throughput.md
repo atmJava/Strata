@@ -2,7 +2,7 @@
 
 日期：2026-10-31
 
-状态：第十六次评审后修订，可以继续执行。
+状态：第十七次评审后修订，可以继续执行。
 
 ## 全局目标
 
@@ -56,6 +56,7 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 - engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
 - engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
 - config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
+- 当前 PID：server / vision / engine `161266 / 161268 / 161308`
 - 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
 
 生产启动与恢复约需 2–3 分钟。每次重启必须说明预期节省能否覆盖加载、缓存丢失和不可用
@@ -175,7 +176,7 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 可优化部分仍是普通请求延迟。见
 [`AGENT_EDIT_TEST_LOOP_RESULT-20261031.md`](../../work/AGENT_EDIT_TEST_LOOP_RESULT-20261031.md)。
 
-### P2b：`AGENT-SPLIT-MTP-BATCH`（当前）
+### P2b：`AGENT-SPLIT-MTP-BATCH`（已否决）
 
 当前双卡 layer split + MTP 默认由末级 drafter 自己逐 8 行填 prompt K/V。既有 opt-in
 `STRATA_SPLIT_MTP_BATCH=1` 可在末级 prompt path 批量完成同一工作；另一台双卡机器的
@@ -190,6 +191,30 @@ prompt read 测量为 25K `+6.7%`、51K `+4.3%`、104K `+3.3%`。这与本机真
 
 契约：
 [`AGENT_SPLIT_MTP_BATCH_CONTRACT-20261031.md`](../../work/AGENT_SPLIT_MTP_BATCH_CONTRACT-20261031.md)。
+
+判决：batched 路径在启动日志中真实命中，94K 热续 prompt 从 `1271.5 ms` 降到
+`1241.5 ms`（`-2.359%`），但 wall 从 `1.433790 s` 升到 `1.434450 s`
+（慢 `0.046%`），没有达到预注册的 `0.05 s` 绝对收益。按停止门未跑 189K 与并发矩阵；
+生产已恢复 A2，进程环境不含该 env。见
+[`AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md`](../../work/AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md)。
+
+### P2c：`ENGINE-0.1.55-EVAL`（当前）
+
+官方 `v0.2.9` 的 Linux CUDA 13 引擎为 `0.1.55`，build
+`99866a47a2b8+cuda13.0`，包含 `sm_75`，可能比当前 `0.1.51` 派生构建减少 GDN、批处理
+和固定 launch 成本。归档 SHA-256 为
+`ce86b23b26a4521a1871113057534b8a34c01df0ac7b916adccf9b1c8c068f92`；engine 和
+`libstrata_kq.so` 已与本地/远端逐字核对，远端 `--version` 为 `0.1.55`。
+
+先保持模型、pack、layer split、六 slots、两 groups、cache、采样和生产 env 不变，只把
+隔离 config 的 executable 从当前 engine 指向官方包路径。版本级候选先过启动、路径、
+health、三组固定 greedy 和 64-token smoke，再跑 A1/B0/A2 的 596 fresh 与 94K 热续轮。
+至少一个代表尺寸 wall 改善 `>=1%` 且绝对 `>=0.05 s`、两个尺寸不同向相反、A 漂移
+`<=3%` 才继续；94K 无 wall 方向收益立即停止，不跑 189K 或全矩阵。
+
+版本级默认没有收益时，才单独评估官方引擎的 `STRATA_GDN_TC=1` /
+`STRATA_GDN_CONVL2=2` Turing 路径；sm75 runtime gate 未命中的 env 不能算收益。契约：
+[`ENGINE_0155_EVAL_CONTRACT-20261031.md`](../../work/ENGINE_0155_EVAL_CONTRACT-20261031.md)。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -255,6 +280,7 @@ prompt read 测量为 25K `+6.7%`、51K `+4.3%`、104K `+3.3%`。这与本机真
 低频 p99 可行性项。
 
 `AGENT-HOT-TURN-FIXED-COST` 已否决并恢复 A64。`AGENT-EDIT-TEST-LOOP-TRACE` 已完成：
-没有可产品化的重复测试浪费，主要模型等待来自正常编辑—测试轮次。当前执行
-`AGENT-SPLIT-MTP-BATCH`：先用启动日志证明双卡末级 batched draft K/V 真实可达，再测
-普通热续轮 prompt/wall；路径拒绝时不重启，路径命中且 94K 无方向性收益时不做无效全矩阵。
+没有可产品化的重复测试浪费，主要模型等待来自正常编辑—测试轮次。
+`AGENT-SPLIT-MTP-BATCH` 也已完成：路径真实命中，94K prompt 改善 `2.359%`，但 wall
+反向 `0.046%`，因此否决并恢复生产。当前执行 `ENGINE-0.1.55-EVAL`：先做独立包启动、
+正确性和 greedy parity，再测 596/94K wall；94K 无方向性收益不做无效全矩阵。

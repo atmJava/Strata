@@ -3,6 +3,39 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-123 · MTP prompt 局部收益未穿透 wall；转向官方 0.1.55 版本级验证
+
+- 目标 / 指标：验证双卡末级用 prompt path 批量填充 MTP draft K/V，能否缩短普通 Agent
+  96K/94K 热续轮的 prompt 与用户 wall。
+- 假设与预期：另一台双卡机的 prompt read 收益为 `3.3–6.7%`；当前本机 94K 热续轮
+  prompt 占 wall 大多数，若路径真实命中，prompt 改善应部分穿透到 wall。
+- 改动与实验：B 只给 A config 增加 `STRATA_SPLIT_MTP_BATCH=1`；engine、模型、pack、
+  layer split、六 slots、两 groups、MTP、采样和 cache 不变。启动日志先证明路径命中，
+  再测 596 fresh 与 94K 热续；94K 无 wall 方向收益即停止。
+- 结果：日志出现 `draft layer prompt K/V batched on CUDA1 ... K/V mode 2`，无
+  declined。596 fresh B 中位 prompt/wall `1373.6 ms/1.515669 s`，相对历史 A 约
+  `-3.1%/-1.1%`、wall 仅省约 `0.02 s`。94K B/A2 prompt 为
+  `1241.5/1271.5 ms`（改善 `2.359%`），wall 为 `1.434450/1.433790 s`
+  （反向 `0.046%`）。
+- 质量：18 个 94K A/B 请求和 9 个 B-596 请求零 HTTP/engine 错误、finish `stop`、
+  零工具、零外来请求。
+- 判决：**AGENT-SPLIT-MTP-BATCH 否决。** prompt 局部改善没有转换成用户 wall，且远低于
+  `0.05 s` 绝对门；不跑 189K、4/6/8，不扫邻近 MTP batching 参数。
+- 预期被推翻：路径命中与 prompt 指标改善不等于用户等待改善；wall 必须作为主判决。
+- 生产状态与回滚：A2 已恢复，server/vision/engine `161266/161268/161308`，config
+  `6ece1a13...`、engine `105a4171...`、health loaded、6/2，systemd inactive；运行环境
+  无 `STRATA_SPLIT_MTP_BATCH`。删除该 env 即可精确回滚候选。
+- 证据：L-152、
+  [`AGENT_SPLIT_MTP_BATCH_RESULT`](work/AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md)、
+  `/opt/ai/logs/agent-split-mtp-batch-20261031T1252Z/`。
+- 复盘：上一轮把较高频 94K 热续轮的 prompt 当成主导问题是对的，但没有预先防止“prompt
+  改善、wall 不变”的局部收益。下一项不再叠加 MTP env，而先验证官方 `0.1.55` 的版本级
+  改动是否在相同 596/94K wall 上有效；只有版本级无收益才拆其 GDN 路径。
+- 下一步与理由：`ENGINE-0.1.55-EVAL`。官方 CUDA13 包已通过 archive/engine/KQ SHA、
+  `ldd` 和 `--version` 校验；同 config 只替换 executable，先过启动、路径、health、三组
+  fixed greedy 和 smoke，再做 A1/B0/A2 代表尺寸 A/B。版本升级可能一次覆盖多个上游
+  固定成本，信息价值高于继续微调已否决的 MTP 邻域。
+
 ## I-20261031-122 · 编辑—测试重复测试假设否决，转向双卡 MTP prompt K/V
 
 - 目标 / 指标：从真实 Codex 编辑—测试事件中确认重复测试、首次修改前额外读取和失败

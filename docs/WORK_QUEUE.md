@@ -7,15 +7,18 @@
 
 ## 当前决策前沿
 
-0. **全局目标已第十六次修订**：优化真实 AI vibe coding 的任务墙钟、首个可执行结果、
+0. **全局目标已第十七次修订**：优化真实 AI vibe coding 的任务墙钟、首个可执行结果、
    严重尾部和成功率；没有进入用户实际路径的能力只算机制收益。普通热续轮固定成本项
    `AGENT-HOT-TURN-FIXED-COST` 已否决：`short_read=0` 在所有热续轮尺寸都未取得
    1% 收益，1 路短热续 prompt/wall 反而慢 `13.75%/8.14%`，因此保留默认 64，
    不扫描邻近阈值。`AGENT-EDIT-TEST-LOOP-TRACE` 已完成：576 次测试的 178 次命令签名
    重复中，173 次之间有新编辑；无编辑重复只有 5 次且状态不可判定，成功/失败后立即
-   重复都为 0。重复测试、测试缓存和自动跳过从队列剔除。当前转为
-   `AGENT-SPLIT-MTP-BATCH`：先用启动日志证明双卡末级 batched draft K/V 可达，再测
-   596/94K/189K 普通热续；路径拒绝不重启，94K 无方向性收益不做无效全矩阵。
+   重复都为 0。重复测试、测试缓存和自动跳过从队列剔除。
+   `AGENT-SPLIT-MTP-BATCH` 已完成并否决：启动日志证明 batched 路径真实命中，94K
+   prompt 改善 `2.359%`，但 wall 反向 `0.046%`，未过 `0.05 s` 绝对门，因此停止
+   189K/全矩阵并恢复生产。当前转为 `ENGINE-0.1.55-EVAL`：官方 CUDA13 包已校验，
+   保持模型/config/env 不变，只替换隔离 config 的 executable；先过启动、路径、
+   health、greedy 和 smoke，再测 596/94K 的 A1/B0/A2。
    真实 trace 中，工具 union `123,693 s` 是 35 文件快照的根任务主体，普通单路模型
    union `66,228 s` 是第二大块；恰好两路仅 `171 s`。编辑—测试 36 文件快照中，19 个
    root 同时含编辑和测试，首修改前模型/工具 `3,235.782/6,365.546 s`，首修改到首测试
@@ -182,7 +185,8 @@
 | AGENT-CONTEXT-DIET-REAL-YIELD | 证明上下文饮食在真实会话和实际 coding 路径上的收益 | 隐私安全统计可折叠成功输出、错误输出、后续可见轮次和保守 token 上界；真实会话整任务上界至少 1% 才进入三组配对；编辑/测试正确、错误可见、artifact 可逐字恢复、wall 中位至少改善 1%、默认路径字节不变 | 否决 | 选择门曾通过；三组真实 Codex 配对 diet wall 慢 `17.365%/86.935%/41.276%`，中位慢 `41.276%`，input 中位多 `38.190%`；两组请求增加、三组工具调用增加 | **不产品化**；六臂最终测试/artifact 正确，失败来自额外重读/复跑；默认路径未改、未重启 |
 | AGENT-HOT-TURN-FIXED-COST | 降低普通 Agent 热续轮 prompt 固定成本 | 同一引擎/生产配置的 `A64/B0/A64r` 三次受控 boot；1/2 路各至少 3 波，覆盖短续写和约 596 fresh token；至少一个普通热续轮 prompt/wall 中位改善 1%、绝对节省 0.15 s；其他尺寸不退 >1%，A64r 漂移 <=3%，输出/finish/cache/health/6 slots/2 groups 全过，4 路不退 >1% | 否决 | 189 请求零错误/零外来；B0 无热续轮胜场；1 路短热续 prompt/wall 慢 `13.75%/8.14%`，1 路长热续慢 `3.96%/3.55%`；2/4 路同样反向；A64r 部分短读漂移 >3% | 保留默认 64，不扫邻近阈值；A64r 已恢复、health loaded、6 slots / 2 groups；见 result |
 | AGENT-EDIT-TEST-LOOP-TRACE | 拆真实 Codex 编辑—测试循环并选高收益机制 | 覆盖现有真实 rollout；只读统计首工具、首修改、首测试、同命令重复测试和失败回传后的额外轮次；按会话/root 保留 token 与绝对秒数；产物给出触发率、两类最重循环和一个 >=1% 可实测候选；不输出正文 | 已完成 | L-151：36 文件、170 root、34 thread、22,749 工具、2,318 编辑、576 测试；19 root 同时含编辑/测试（11.176%）；首修改前模型/工具 `3,235.782/6,365.546 s`，修改到首测试 `4,072.900/8,241.516 s`；178 次签名重复中 173 次之间有编辑，无编辑重复 5 次，成功/失败后立即重复 0 | **重复测试假设否决**；不实现测试去重、缓存或自动跳过；11 tests OK，无重启；下一项 AGENT-SPLIT-MTP-BATCH |
-| AGENT-SPLIT-MTP-BATCH | 双卡末级用 prompt 路径批量填充 MTP draft K/V | 启动日志证明 batched 路径命中；A1/B/A2 覆盖 596 fresh、94K、189K 热续，1 路至少一个 prompt/wall >=1% 且绝对 wall >=0.05 s，其他 1/2 路不退 >1%，A 漂移 <=3%，4 路不退 >1%，6/8 零错误且质量/health/资源全过 | 进行中 | 源码门通过：`on_chunk` 在双卡、MTP、native embed、末级 drafter 下调用 `Prefill::draft_kv`；另一台双卡机 25K/51K/104K prompt read `+6.7%/+4.3%/+3.3%`；当前 B4 已核对 native、spec/MTP、layer split 24、batch 6 | 当前入口；先启动日志门，拒绝则不测不重启；94K 无收益则不做全矩阵 |
+| AGENT-SPLIT-MTP-BATCH | 双卡末级用 prompt 路径批量填充 MTP draft K/V | 启动日志证明 batched 路径命中；A1/B/A2 覆盖 596 fresh、94K、189K 热续，1 路至少一个 prompt/wall >=1% 且绝对 wall >=0.05 s，其他 1/2 路不退 >1%，A 漂移 <=3%，4 路不退 >1%，6/8 零错误且质量/health/资源全过 | 否决 | L-152：B 路径真实命中；94K B prompt/wall `1241.5 ms/1.434450 s`，A2 `1271.5 ms/1.433790 s`；prompt `-2.359%`、wall `+0.046%`；18 个 94K 请求零错误、finish `stop` | 未过 `0.05 s` 绝对收益，按门停止 189K/全矩阵；A2 已恢复，运行环境无该 env |
+| ENGINE-0.1.55-EVAL | 评估官方 `0.1.55` CUDA13 引擎版本级收益 | 包/二进制 SHA 和实际进程路径一致；同生产 config 仅替换 executable；health、6/2、路径标记、三组 greedy、smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，另一尺寸不同向相反，A 漂移 <=3% | 进行中 | archive `ce86b23b...`、engine `e4406b47...`、KQ `7ed52722...`；远端 `ldd` 和 `strata 0.1.55` 通过；build `99866a47a2b8+cuda13.0` | 当前入口；先做 A1/B0/A2 的 596/94K，94K 无 wall 方向收益即停止；GDN env 是后续独立候选 |
 | AGENT-HISTORY-STATE-RESIDENCY | 跨进程恢复隔天旧会话，避免 113 秒冷 prefill | 先只读证明多 stage KV/checkpoint 可序列化；测 223K 状态大小、写放大、恢复时间和 RAM 峰值；真实旧会话等待至少减少 1% 且保存成本不转移到每轮；有指纹、失效、安全删除和精确回滚 | 搁置 | 真实 223K resume `113.014 s`；当前 session file 明确拒绝 `--layer-split`、`--peer-device`、`--batch`、`--prompt-cache 0`，不能直接用于双卡六槽生产 | **低频 p99**；34 个有效会话仅 1 个超过 24h；普通热续轮、首工具/首修改和重复测试优先；不实现、不重启 |
 | AGENT-REAL-DECODE-SHAPE | 按真实形状拆模型 decode 成本 | 只读汇总 output/reasoning 尺寸、请求类型、1/2 路并发和模型区间；不改服务、不输出正文；至少重放三种真实尺寸；只有真实触发率后的整任务 >=1% 上界才预注册一个机制 | 已完成 | 35 文件、152 root、14,768 请求；output/reasoning `10,343,967/3,347,547` token；单路模型 union `69,064.894 s`、两路 `171.303 s`；416/1490/4483 单路 `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s`；4483 出现提前 `stop` | **诊断完成，长输出稳定性未完全过门**；现役配置同时开着 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`，生产仪器开销成为下一项 |
 | AGENT-PROFILE-HYGIENE | 移除生产 decode 计时与 GPU 剖析器 | 当前 B4 形状 A1-B-A2-B2；B 只移除 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`；416/1490/4483 各 3 波；至少一个主要尺寸中位改善 >=1%，4483 不回退 >1%，A2 漂移 <=3%，finish/hash/health/6 slots 全过；失败精确恢复 | 已完成 | 416/1490/4483 A adjacent median `4.188/14.395/42.322 s`，B `3.911/13.620/37.230 s`；416/1490 改善 `6.61%/5.38%`，A2 漂移 `-2.45%/+0.66%`；4483 漂移 `-13.77%` 不用于加速归因 | **已采纳并留在生产**；B2 engine env 无两个 profiling 变量，health loaded、6 slots、64-token smoke 过；4483 在 B/A2 都有提前 `stop`，独立保留 |

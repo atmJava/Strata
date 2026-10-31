@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-150，按编号）
+## 台账索引（L-000…L-152，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -165,9 +165,48 @@
 | L-149 | 10-31 20:1x | 项目 TU102 文档的锁定额 `62.40 TFLOPS`、双卡解锁 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 两卡均 `unlocked=1`、`result=0 handoff_safe=1`，DKMS/initramfs 固定，两卡功耗墙 `280 W`，满载约 `278 W` 无热降频 | **TU102-UNLOCK-VERIFY 完成**；算力已解锁，当前慢不是解锁失败；不再研究解锁、DKMS、initramfs 或功耗墙 |
 | L-150 | 10-31 20:5x | A64/B0/A64r 各 63 请求；B0 无热续轮胜场；1 路短热续 prompt/wall `520.8 ms/0.643 s` 对 `458.0 ms/0.596 s`，慢 `13.75%/8.14%`；1 路长热续慢 `3.96%/3.55%`，2/4 路同样反向；189 请求零错误、零外来、finish/reply 全对 | **AGENT-HOT-TURN-FIXED-COST 否决**；保留默认 64，不扫邻近阈值；A64r 已恢复；下一项 `AGENT-EDIT-TEST-LOOP-TRACE` |
 | L-151 | 10-31 21:1x | 36 文件、170 root、34 thread、22,749 工具、2,318 编辑、576 测试；19 root 同时含编辑/测试（11.176%）；首修改前模型/工具 `3,235.782/6,365.546 s`，修改到首测试 `4,072.900/8,241.516 s`；178 次签名重复中 173 次之间有新编辑，无编辑重复 5 次，成功/失败后立即重复 0 | **AGENT-EDIT-TEST-LOOP-TRACE 完成**；重复测试/缓存/自动跳过否决；11 tests OK；无重启；下一项 `AGENT-SPLIT-MTP-BATCH` |
+| L-152 | 10-31 21:5x | 双卡 MTP batched draft K/V 真实命中；94K B/A2 prompt `1241.5/1271.5 ms`（B 改善 `2.359%`）、wall `1.434450/1.433790 s`（B 慢 `0.046%`）；18 个 94K 请求零错误、finish `stop`、零外来请求 | **AGENT-SPLIT-MTP-BATCH 否决**；未过 `0.05 s` 绝对 wall 门，停止 189K/全矩阵；A2 已恢复且无该 env；下一项 `ENGINE-0.1.55-EVAL` |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-152 · MTP batched draft K/V 只缩短 prompt，未缩短用户 wall
+
+**判定：`AGENT-SPLIT-MTP-BATCH` 否决；下一项为 `ENGINE-0.1.55-EVAL`。**
+
+B 相对 A1 的 config 只多 `STRATA_SPLIT_MTP_BATCH=1`；engine、模型、pack、layer
+split、六 slots、两 groups、MTP、采样和 cache 均相同。B 启动日志真实出现：
+
+```text
+strata serve: draft layer prompt K/V batched on CUDA1
+(E-9 on the layer split, K/V mode 2)
+```
+
+没有 `declined`。596 fresh 的 B 中位为 prompt `1373.6 ms`、wall `1.515669 s`；
+相对历史 A 约 `-3.1%/-1.1%`，但只省约 `0.02 s`，且是跨 boot 比较。
+
+94K 同形状：
+
+| arm | prompt | wall |
+|---|---:|---:|
+| B | `1241.5 ms` | `1.434450 s` |
+| A2 | `1271.5 ms` | `1.433790 s` |
+| B relative | `-2.359%` | `+0.046%` |
+
+prompt 改善没有穿透到 wall，未满足 `0.05 s` 绝对门；按预注册规则未跑 189K 和
+2/4/6/8。所有 94K A/B 请求零错误、finish `stop`、无工具、零外来请求。
+
+生产恢复为 A2：server/vision/engine `161266/161268/161308`、config
+`6ece1a13...`、engine `105a4171...`、health loaded、6 slots / 2 groups，
+systemd inactive；运行 env 不含 `STRATA_SPLIT_MTP_BATCH`。
+
+证据目录：`/opt/ai/logs/agent-split-mtp-batch-20261031T1252Z/`。B-94K、A2-94K、
+B-596 结果 SHA 分别为 `a4e2c6d8...`、`01e6e765...`、`6ca607e9...`。完整记录见
+[`AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md`](work/AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md)。
+
+官方 `0.1.55` CUDA13 包已隔离校验：archive `ce86b23b...`、engine
+`e4406b47...`、KQ library `7ed52722...`，远端 `ldd` 与 `strata 0.1.55` 通过。
+下一项只替换隔离 config 的 executable，先做启动/路径/greedy 门，再测 596/94K。
 
 ## L-151 · 编辑—测试循环：重复测试是伪方向
 

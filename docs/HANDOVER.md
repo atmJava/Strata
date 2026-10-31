@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T21:35+08:00。
+> 整理时间：2026-10-31T22:05+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -16,15 +16,15 @@
 
 ## 2. 当前断点
 
-- **全局目标已第十六次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
+- **全局目标已第十七次修订并继续执行**：优先优化普通单代理编辑—测试循环中的模型请求
   等待，再处理首工具/首修改和 p90 尾部。总目标是真实 AI vibe coding 的任务完成时间、首个可
   执行结果、严重尾部和成功率，而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、
   峰值 1 主 3 子代理；1/2 路为主，4 路非回退，6/8 只做安全回归。任何局部候选先算真实
   触发率后的整任务 1% 上界；没有进入用户实际路径的能力只算机制收益。低频旧会话恢复
   可按 p99 体验单独立项。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。尝试创建第十六版新目标时接口以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第十六版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。尝试创建新目标时接口以
+  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第十七版计划
   为权威，不要回到平台旧目标的状态快照。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
@@ -38,7 +38,7 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `159219/159221/159226`。server cwd 为
+- **当前运行**：server/vision/engine `161266/161268/161308`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
   `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`
@@ -122,11 +122,16 @@
   签名重复中 173 次之间有新编辑，无编辑重复只有 5 次且状态不可判定，成功/失败后立即
   重复均为 0。重复测试方向否决，
   见 [AGENT_EDIT_TEST_LOOP_RESULT](work/AGENT_EDIT_TEST_LOOP_RESULT-20261031.md)。
-- **当前状态与下一动作**：`AGENT-SPLIT-MTP-BATCH`。源码已确认
-  `STRATA_SPLIT_MTP_BATCH=1` 在双卡、MTP、native embed、末级 drafter 条件下进入
-  `Prefill::draft_kv`；另一台双卡机的 prompt read 为 25K/51K/104K
-  `+6.7%/+4.3%/+3.3%`。先由候选启动日志证明当前 2080 Ti/六槽路径真实命中，再跑
-  596/94K/189K 热续 A1/B/A2。拒绝则不测；94K 无方向性收益则不做全矩阵。
+- **上一项判决**：`AGENT-SPLIT-MTP-BATCH` 否决。启动日志确认真实命中末级 batched
+  draft K/V；94K prompt `1271.5 → 1241.5 ms`（`-2.359%`），但 wall
+  `1.433790 → 1.434450 s`（`+0.046%`），没有达到 `0.05 s` 绝对门。未运行 189K
+  与全矩阵，生产已恢复 A2。见
+  [AGENT_SPLIT_MTP_BATCH_RESULT](work/AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md)。
+- **当前状态与下一动作**：`ENGINE-0.1.55-EVAL`。官方 CUDA13 包的 archive/engine/KQ
+  SHA 已核对，远端动态库解析和 `strata 0.1.55` 启动通过。先只替换隔离 config 的
+  executable，保持模型、pack、六槽/两组、cache、采样和生产 env 不变；启动、路径、
+  health、三组固定 greedy 与 smoke 通过后跑 596/94K 的 A1/B0/A2。94K 无 wall
+  方向性收益即停止，不跑 189K/全矩阵。
 - **已降级诊断**：208K 压缩后旧历史分支的精确 pin `208528` 已成功，分支
   cached `208528/208533`、wall `0.274 s`；无 pin 对照 `9.016–9.523 s`。但真实
   rollout 的立即触发为 0/109，故 exact pin / `cap=9` 不是当前主目标，不能与用户所说
@@ -233,8 +238,8 @@
   T=2 route-hit，但完整 A-B-A 在 2/4 路回退且漂移超门，已经否决；Q5 head grid 也在
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
   因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线。
-  这些历史细节只用于防重复；当前入口是普通编辑—测试热续轮的
-  `AGENT-HOT-TURN-FIXED-COST`，223K 旧会话仅为低频 p99。
+  普通热续轮 `short_read`、编辑—测试重复测试和 MTP 批量 draft K/V 也已分别否决。
+  当前入口是官方 `ENGINE-0.1.55-EVAL`；223K 旧会话仅为低频 p99。
 
 ## 3. 当前生产
 
@@ -244,7 +249,7 @@
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=8`（误触发的失败启动已停止） |
-| server/engine/vision | `159219/159226/159221`，health loaded，监听 `:8080` |
+| server/engine/vision | `161266/161308/161268`，health loaded，监听 `:8080` |
 | server cwd | `/opt/ai/src/strata-two-stream-serial-20261031` |
 | engine binary/cwd | `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`；cwd 为同目录上一级 |
 | B4 running | engine `105a4171...`，config `6ece1a13...`，server `10bd8318...` |
