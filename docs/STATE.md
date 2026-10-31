@@ -8,10 +8,10 @@
   严重尾部，并保持工具调用、代码修改、测试结果和任务成功率正确。通常 1 个主代理、偶尔
   2 个、峰值 1 主 3 子代理；1/2 路是主优化目标，4 路非回退，6/8 只做安全回归。
 - 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第十七次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
+  已完成第十八次修订并通过评审。局部优化必须先给出真实触发率后的整任务 1% 上界；低频但
   单次数十秒的旧会话恢复可按 p90/p99 用户体验单独立项。没有接入用户实际路径的能力
   只算机制收益，不能写成体验已改善；重启成本必须计入当轮。
-  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。尝试创建第十七版新目标时，接口以
+  平台内的旧“2/4/6/8 路引擎”目标仍为 paused。尝试创建第十八版新目标时，接口以
   “unfinished goal”拒绝；当前工具不能改写目标文本或恢复旧目标。本仓库计划是当前执行
   的权威目标，不能把平台旧目标当作已更新。
 - 当前阶段：真实 Agent 请求级优化已采纳 title、线程级 compaction LRU（在对应测试请求
@@ -83,12 +83,17 @@
   `1.433790 → 1.434450 s`（反向 `0.046%`），远低于预注册 `0.05 s` 绝对门。
   按停止门未跑 189K 和 2/4/6/8；生产已恢复 A2，不保留该 env。见
   [AGENT_SPLIT_MTP_BATCH_RESULT](work/AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md)。
-- 当前项：ENGINE-0.1.55-EVAL
-  官方 `v0.2.9` Linux CUDA13 包已隔离下载并校验：
-  archive `ce86b23b...`、engine `e4406b47...`、KQ library `7ed52722...`，远端
-  `ldd` 与 `./strata --version` 均通过。先保持生产 config 不变，只替换隔离 config 的
-  engine executable；启动、路径、health、三组固定 greedy 与 smoke 通过后跑 596/94K
-  的 A1/B0/A2。94K 无 wall 方向性收益即停止，不跑全矩阵。
+- 上一项已否决：ENGINE-0.1.55-EVAL。官方 CLI 不接受本地 `--prompt-cache-long`；移除该
+  128K-only 选项后，官方 `0.1.55` 成功启动且 parity/smoke 全过，但 596/94K
+  hot-long wall 相对 A1/A2 参考中位慢 `5.853%/4.259%`，绝对慢
+  `0.087835/0.059525 s`。A1/A2 漂移均低于 3%，版本级候选否决并恢复旧引擎。见
+  [ENGINE_0155_EVAL_RESULT](work/ENGINE_0155_EVAL_RESULT-20261031.md)。
+- 当前项：GDN-CONVL2
+  当前旧 engine 的 `STRATA_GDN_CONVL2=2` 在大于 64-token 的 GDN prompt chunk 中融合
+  conv 与 Q/K L2 norm，省一次 launch 和中间写回。当前 8192 chunk 可达且进程无
+  `STRATA_GDN_CONV_SERIAL`。先只给 A1 config 增加该 env，启动后核对实际进程 env、
+  6/2、health、三组固定 greedy 与 smoke，再跑 596/94K 的 A1/B/A2；94K 无 wall
+  方向收益即停止。
 - 降级项：`AGENT-HISTORY-STATE-RESIDENCY` 仍保留为低频 p99 可行性。34 个有效会话只有
   1 个超过 24 小时间隔、2 个超过 12 小时，不得排在普通热续轮之前；检查双卡 layer split、
   六 batch slots、prompt cache 下多 stage 状态格式、223K 容量、恢复时间、写放大、
@@ -103,7 +108,7 @@
   上三次真实 Codex compaction 已复用约 `99.1%`，不能再写成 Strata 缺陷。精确 pin
   可把 208K 压缩后旧分支从约 9 秒降到 `0.274 s`，但真实本地 rollout 的 109 次 compaction
   中立即回读为 0/109，因此 exact pin / `cap=9` 降为低频诊断，不作当前实现目标。
-- 当前运行：server/vision/engine `161266/161268/161308`。server cwd 为
+- 当前运行：server/vision/engine `162903/162905/162910`。server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`，cwd 为
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z`。监听 `127.0.0.1:8080`；
@@ -305,7 +310,7 @@
 ## 生产
 
 - 最近核对时 `strata.service` 为 `inactive/dead`、`MainPID=0`、`NRestarts=8`。当前 B4
-  手动实例 server/engine/vision PID `161266/161308/161268`，health loaded，host uptime 自
+  手动实例 server/engine/vision PID `162903/162910/162905`，health loaded，host uptime 自
   `2026-10-31 02:43:50 UTC`，两张 2080 Ti 均可联合 initialize。server cwd 与 engine
   路径不同，见上。
 - 历史 A2 对照基线的 engine/config hash 为

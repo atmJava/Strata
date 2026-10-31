@@ -2,7 +2,10 @@
 
 日期：2026-10-31
 
-状态：预注册；先做启动、路径、健康与 greedy parity，再测两个代表尺寸。
+状态：已否决（2026-10-31）。`--prompt-cache-long` 不在官方 CLI；移除该 128K-only
+本地扩展后，官方引擎成功启动并通过 parity，但 596/94K hot-long wall 分别慢
+`5.853%/4.259%`。结果见
+[`ENGINE_0155_EVAL_RESULT-20261031.md`](ENGINE_0155_EVAL_RESULT-20261031.md)。
 
 ## 问题
 

@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-124 · 官方 0.1.55 正确但两个热续尺寸均变慢；转向现有 GDN 融合
+
+- 目标 / 指标：验证官方 CUDA13 `0.1.55` 是否能在相同真实 596 fresh 与 94K 热续形状上
+  缩短 hot-long wall，同时保持输出和 finish。
+- 假设与预期：版本包含较新的 GDN、批处理和 runtime gating 代码，可能一次减少多个固定
+  成本；至少一个尺寸 wall 应改善 `>=1%` 且绝对 `>=0.05 s`。
+- 改动与实验：先核对 archive/engine/KQ SHA、`ldd` 和 `--version`。成功 config 保留
+  A1 全部模型/cache/env，只把 executable 指向隔离官方包；因官方 CLI 不支持 128K-only
+  的本地 `--prompt-cache-long`，B0 明确移除该项。随后 A1/B0/A2 各测 596 与 94K 三波。
+- 结果：B0 正确性全过，三组 fixed greedy 两轮与 A 归一化完全相同，64-token smoke 正常。
+  但 596 wall 从 A 参考 `1.500656 s` 升到 `1.588491 s`，慢 `5.853%`；94K 从
+  `1.397534 s` 升到 `1.457059 s`，慢 `4.259%`。两个尺寸同向反向，A1/A2 wall 漂移
+  `1.893%/2.250%`，均低于 3%。
+- 质量：54 个性能请求零 HTTP/engine 错误、finish `stop`、回复符合、零外来请求，
+  596/94K cached tokens 逐波相同。
+- 判决：**ENGINE-0.1.55-EVAL 否决。** 不跑官方 GDN env、189K 或 4/6/8；当前版本
+  不替换生产，也不重复相邻 release。
+- 预期被推翻：更晚的版本号和更完整打包不等于相同硬件/模型形状更快。版本启动分配的
+  expert slots 从 17,274 变为 16,583，但未做因果 profile，不能单独归因；完整候选仍明确
+  不过 wall 门。
+- 生产状态与回滚：A2 已恢复旧 engine `105a4171...` 和 config `6ece1a13...`；
+  server/vision/engine `162903/162905/162910`，health loaded、6/2，systemd inactive。
+- 证据：L-153、
+  [`ENGINE_0155_EVAL_RESULT`](work/ENGINE_0155_EVAL_RESULT-20261031.md)、
+  `/opt/ai/logs/engine-0155-eval-20261031T1320Z/`。
+- 学到什么：先做版本级 A-B-A 是正确顺序。删除 128K-only 参数对本轮 94K 路径无直接影响，
+  但任何其他 unsupported 参数都必须作为可追踪 delta，不能静默改写。
+- 下一步与理由：`GDN-CONVL2`。当前 prefill 的 8192-token GDN prompt 路径先写 conv 结果，
+  再单独做 Q/K L2；现有 env 可将两者融合并省一次 launch 和中间写回。它比继续扫描版本或
+  MTP 邻域更有针对性，但必须先证明本机 greedy parity，再要求 94K wall 转化。
+
 ## I-20261031-123 · MTP prompt 局部收益未穿透 wall；转向官方 0.1.55 版本级验证
 
 - 目标 / 指标：验证双卡末级用 prompt path 批量填充 MTP draft K/V，能否缩短普通 Agent

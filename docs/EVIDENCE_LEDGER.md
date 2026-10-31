@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-152，按编号）
+## 台账索引（L-000…L-153，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -166,9 +166,43 @@
 | L-150 | 10-31 20:5x | A64/B0/A64r 各 63 请求；B0 无热续轮胜场；1 路短热续 prompt/wall `520.8 ms/0.643 s` 对 `458.0 ms/0.596 s`，慢 `13.75%/8.14%`；1 路长热续慢 `3.96%/3.55%`，2/4 路同样反向；189 请求零错误、零外来、finish/reply 全对 | **AGENT-HOT-TURN-FIXED-COST 否决**；保留默认 64，不扫邻近阈值；A64r 已恢复；下一项 `AGENT-EDIT-TEST-LOOP-TRACE` |
 | L-151 | 10-31 21:1x | 36 文件、170 root、34 thread、22,749 工具、2,318 编辑、576 测试；19 root 同时含编辑/测试（11.176%）；首修改前模型/工具 `3,235.782/6,365.546 s`，修改到首测试 `4,072.900/8,241.516 s`；178 次签名重复中 173 次之间有新编辑，无编辑重复 5 次，成功/失败后立即重复 0 | **AGENT-EDIT-TEST-LOOP-TRACE 完成**；重复测试/缓存/自动跳过否决；11 tests OK；无重启；下一项 `AGENT-SPLIT-MTP-BATCH` |
 | L-152 | 10-31 21:5x | 双卡 MTP batched draft K/V 真实命中；94K B/A2 prompt `1241.5/1271.5 ms`（B 改善 `2.359%`）、wall `1.434450/1.433790 s`（B 慢 `0.046%`）；18 个 94K 请求零错误、finish `stop`、零外来请求 | **AGENT-SPLIT-MTP-BATCH 否决**；未过 `0.05 s` 绝对 wall 门，停止 189K/全矩阵；A2 已恢复且无该 env；下一项 `ENGINE-0.1.55-EVAL` |
+| L-153 | 10-31 22:3x | 官方 `0.1.55` CLI 不支持 `--prompt-cache-long`；移除 128K-only 扩展后成功启动，三组 greedy/smoke 全过；596/94K hot-long A 参考 wall `1.500656/1.397534 s`，B 为 `1.588491/1.457059 s`，慢 `5.853%/4.259%`；A 漂移 `1.893%/2.250%` | **ENGINE-0.1.55-EVAL 否决**；不进入其 GDN env、189K 或并发矩阵；A2 已恢复旧 engine；下一项 `GDN-CONVL2` |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-153 · 官方 0.1.55 通过正确性但在两个代表热续尺寸都变慢
+
+**判定：`ENGINE-0.1.55-EVAL` 否决；下一项为 `GDN-CONVL2`。**
+
+官方 archive、engine、KQ library SHA 分别为 `ce86b23b...`、`e4406b47...`、
+`7ed52722...`，build `99866a47a2b8+cuda13.0`，远端 `ldd` 和 `--version` 通过。首次
+启动 exit 2：官方 CLI 不认识本地 `--prompt-cache-long`。该选项只影响 128K+，
+本次 596/94K 不进入该分支，因此 B0 只移除这一项并替换 executable；其余 args/env/
+模型/cache 不变。
+
+官方版启动时分配 16,583 expert slots（9,600 primary + 6,983 layer split），A 为
+17,274（10,065 + 7,209）。slot 变化是版本内部启动行为，未单独归因。B0 health loaded、
+262144、6 slots / 2 groups，systemd inactive。三组 fixed greedy 在 B0 内可重复、全部
+精确，归一化结果与 A1/A2 完全相同；64-token smoke 返回 `stop` 和非空内容。
+
+hot-long 三波中位：
+
+| shape | A1 prompt / wall | B0 prompt / wall | A2 prompt / wall | B wall vs A ref |
+|---|---:|---:|---:|---:|
+| 596 | `1376.8 ms / 1.486586 s` | `1488.8 ms / 1.588491 s` | `1409.4 ms / 1.514727 s` | `-5.853%` |
+| 94K | `1232.3 ms / 1.381990 s` | `1314.8 ms / 1.457059 s` | `1259.4 ms / 1.413078 s` | `-4.259%` |
+
+A1/A2 prompt/wall 漂移为 `2.368%/1.893%` 与 `2.199%/2.250%`，均在 3% 内。54 个性能
+请求零错误、finish `stop`、回复符合、零外来请求，cached tokens 逐波一致。两个尺寸
+同向变慢，按门未跑官方 GDN env、189K 或 4/6/8。
+
+A2 已恢复旧 engine `105a4171...` 与 config `6ece1a13...`；server/vision/engine
+`162903/162905/162910`，health loaded、6/2，systemd inactive。
+
+证据目录：`/opt/ai/logs/engine-0155-eval-20261031T1320Z/`。A1/B0/A2 的 596 与 94K
+JSON、server log、parity、smoke 和 config SHA 均保存在该目录。完整记录见
+[`ENGINE_0155_EVAL_RESULT-20261031.md`](work/ENGINE_0155_EVAL_RESULT-20261031.md)。
 
 ## L-152 · MTP batched draft K/V 只缩短 prompt，未缩短用户 wall
 

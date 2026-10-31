@@ -2,7 +2,7 @@
 
 日期：2026-10-31
 
-状态：第十七次评审后修订，可以继续执行。
+状态：第十八次评审后修订，可以继续执行。
 
 ## 全局目标
 
@@ -56,7 +56,7 @@ TU102 22G 算力解锁是项目已有能力，不是待办项。项目文档记�
 - engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`
 - engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`
 - config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`
-- 当前 PID：server / vision / engine `161266 / 161268 / 161308`
+- 当前 PID：server / vision / engine `162903 / 162905 / 162910`
 - 形状：双卡 layer split、6 batch slots、2 groups、262144 context、INT8 KV、prompt cache。
 
 生产启动与恢复约需 2–3 分钟。每次重启必须说明预期节省能否覆盖加载、缓存丢失和不可用
@@ -198,7 +198,7 @@ prompt read 测量为 25K `+6.7%`、51K `+4.3%`、104K `+3.3%`。这与本机真
 生产已恢复 A2，进程环境不含该 env。见
 [`AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md`](../../work/AGENT_SPLIT_MTP_BATCH_RESULT-20261031.md)。
 
-### P2c：`ENGINE-0.1.55-EVAL`（当前）
+### P2c：`ENGINE-0.1.55-EVAL`（已否决）
 
 官方 `v0.2.9` 的 Linux CUDA 13 引擎为 `0.1.55`，build
 `99866a47a2b8+cuda13.0`，包含 `sm_75`，可能比当前 `0.1.51` 派生构建减少 GDN、批处理
@@ -215,6 +215,25 @@ health、三组固定 greedy 和 64-token smoke，再跑 A1/B0/A2 的 596 fresh 
 版本级默认没有收益时，才单独评估官方引擎的 `STRATA_GDN_TC=1` /
 `STRATA_GDN_CONVL2=2` Turing 路径；sm75 runtime gate 未命中的 env 不能算收益。契约：
 [`ENGINE_0155_EVAL_CONTRACT-20261031.md`](../../work/ENGINE_0155_EVAL_CONTRACT-20261031.md)。
+
+判决：官方 CLI 不接受本地 `--prompt-cache-long`，移除该 128K-only 选项后成功启动。
+正确性全过，但 596/94K hot-long wall 相对 A1/A2 参考中位分别慢
+`5.853%/4.259%`，绝对慢 `0.087835/0.059525 s`；A 漂移均在 3% 内。版本级候选否决，
+不进入官方引擎的 GDN env、189K 或并发矩阵。见
+[`ENGINE_0155_EVAL_RESULT-20261031.md`](../../work/ENGINE_0155_EVAL_RESULT-20261031.md)。
+
+### P2d：`GDN-CONVL2`（当前）
+
+当前旧 engine 已包含 `STRATA_GDN_CONVL2`。在超过 64-token 的 GDN prompt chunk 中，
+它把 conv 与 Q/K L2 norm 融进一个 block，省一次 launch 和 `h` 中间写回；V 通道、
+recurrence、模型和 cache 不变。当前 `--prefill auto` 实际用 8192-token chunk，进程不含
+`STRATA_GDN_CONV_SERIAL`，目标分支可达。
+
+B 只在 A1 env 中增加 `"STRATA_GDN_CONVL2": "2"`。先过启动、实际 env、6/2、health、
+三组固定 greedy 和 smoke；随后 A1/B/A2 测 596 fresh 与 94K。至少一个 hot-long wall
+改善 `>=1%` 且绝对 `>=0.05 s`、两个尺寸不同向相反、A 漂移 `<=3%` 才继续；94K 无
+wall 方向收益立即停止。契约：
+[`GDN_CONVL2_CONTRACT-20261031.md`](../../work/GDN_CONVL2_CONTRACT-20261031.md)。
 
 ### P3：旧会话跨重启状态驻留（低频 p99）
 
@@ -282,5 +301,6 @@ health、三组固定 greedy 和 64-token smoke，再跑 A1/B0/A2 的 596 fresh 
 `AGENT-HOT-TURN-FIXED-COST` 已否决并恢复 A64。`AGENT-EDIT-TEST-LOOP-TRACE` 已完成：
 没有可产品化的重复测试浪费，主要模型等待来自正常编辑—测试轮次。
 `AGENT-SPLIT-MTP-BATCH` 也已完成：路径真实命中，94K prompt 改善 `2.359%`，但 wall
-反向 `0.046%`，因此否决并恢复生产。当前执行 `ENGINE-0.1.55-EVAL`：先做独立包启动、
-正确性和 greedy parity，再测 596/94K wall；94K 无方向性收益不做无效全矩阵。
+反向 `0.046%`，因此否决并恢复生产。`ENGINE-0.1.55-EVAL` 随后通过启动和正确性门，但
+596/94K wall 慢 `5.853%/4.259%`，版本级候选否决并恢复旧引擎。当前执行
+`GDN-CONVL2`：只增加现有融合 conv+L2 env，先过 greedy，再测 596/94K wall。
