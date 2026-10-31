@@ -133,6 +133,7 @@
 | L-116 | 10-31 08:5xZ | poll fast B1 漏掉 A 编译开关而作废；同选项 B2 parity 全过，但相邻 A2/B2/A3 的 2/4/6/8 路为 `+9.129%/+7.885%/-3.241%/-6.122%`，胜场 `4/6, 5/6, 1/6, 0/6` | **UTIL-POLL-TURNOVER 吞吐/漂移门否决；源码已移除、A3 已恢复；转 UTIL-B6-ROWS kernel 门** |
 | L-117 | 10-31 09:1xZ | B6 两卡全部 parity；相对生产 IL 选择，T=2 中位 `-5.868%`、0/22 胜，Q6_K/Q5_K 单点回退 `16-39%`；真实张量代理投影无生产宽度稳定 ≥1% | **UTIL-B6-ROWS kernel screening/reach 门否决；未构建、未重启；转不同生产路径源码审计** |
 | L-118 | 10-31 10:0x | LFUSE 两卡 parity 与 B/A2 greedy 全过；2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`，胜场 `1/6, 1/6, 2/6, 4/6`；8 路的 A 漂移 `+4.053%` | **UTIL-LFUSE-SHARED 吞吐/漂移门否决；A2 已恢复；转不同源码/阶段成本审计** |
+| L-120 | 10-31 10:1xZ | SIDE-MIXER 两卡 14 进程、196 条结果行、560 个 buffer 全 bitwise；T=3/4 整窗上界 `+1.10–1.29%`，但 `side_proj/sidem` 含 `!batch_rec_`，生产 `capture_batch()` 命中率为零 | **UTIL-SIDE-MIXER server 可达性门否决；未构建、未重启；转 batch-only 三/四行候选** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -3914,6 +3915,31 @@ graph 路径没有提供可复现收益，部分行反而回退。
 `batch_poll -> verdict -> stage hand-off -> batch_launch`，以及 `conc_serving` 的 doorbell
 交接。必须从现有 BSTAT/stage stamp 或真实同 boot 采样证明 1%+ 固定间隙和触发率，才允许
 实现；普通循环顺序重排不足以构成候选。
+
+## L-120 UTIL-SIDE-MIXER：三/四行上界超过 1%，但现有开关不进入生产 batch window
+
+**判定**：**UTIL-SIDE-MIXER 在 server 可达性门否决。** 独立 GPU harness 使用生产张量类型
+和形状，比较 GDN qkv+gate 与 QSA q/k/v 的串行和双 stream 版本。两卡各跑七个独立进程，
+覆盖 `T=1..8`；14 个进程共 196 条结果行、560 个 device buffer 全部逐字相等，零 CUDA 错误。
+
+**局部与整窗**：每个进程的中位来自 100 iters × 5 rounds；七个进程再取中位。按每 stage
+约 18 个 GDN、6 个 QSA 层换算，T=3 为 GPU0 `229.6 us / +1.257%`、GPU1
+`235.0 us / +1.286%`；T=4 为 `201.6 us / +1.104%`、`214.9 us / +1.176%`。T=1 的两卡
+上界为 `-0.634%/-0.358%`，T=2 的 GPU1 只有 `+0.924%`。这个换算假设所有局部节省都在
+临界路径，因此只是 batch 实现的上界。
+
+**可达性**：生产 `batch_step -> run_slot_rows -> capture_batch` 会设置
+`batch_rec_=true`；`record_window` 中 `side_proj = ... && !batch_rec_` 且
+`sidem = side_mixer && !batch_rec_`。因此现有 env 在生产 2/4/6/8 路命中零次。直接做
+A-B-A 会把相同数值路径与空 stream/event 资源比较，不能作为候选。
+
+**状态 / 证据**：A2 PID `604897/604926/604905`、engine `105a4171...`、config
+`88de996a...`、health loaded、6 slots / 2 groups；systemd inactive/dead，未重启。
+证据目录 `/opt/ai/logs/util-side-mixer-screen-20261031T0240UTC/`，`all-sha256.txt`
+sha256 `5e45f383c0eb07560efe6adf4ff018d7dd245ef1cb8917f1cd81638688022183`；完整结果见
+[`UTIL_SIDE_MIXER_RESULT-20261031.md`](work/UTIL_SIDE_MIXER_RESULT-20261031.md)。**下一步**：
+只在 `batch_rec_` 的三/四行窗口实现 GDN qkv/gate 侧分支，先过 graph capture、slot state、
+row order、全输出 bitwise 与 batch-window 绝对时间门；一/二行保持串行。
 
 ## L-119 UTIL-QFUSE-HC：完整路径通过 1%，但整窗乐观上界仍低于 0.5%
 

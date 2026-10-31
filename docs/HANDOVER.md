@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-10-31T09:54+08:00。
+> 整理时间：2026-10-31T10:15+08:00。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,7 +12,7 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-119。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-095–L-120。
 
 ## 2. 当前断点
 
@@ -52,8 +52,13 @@
   下一项不同机制源码/阶段成本审计。`UTIL-QFUSE-HC` 随后补测了生产 Q8 HC read：两卡
   `T=1..8` 全输出和 q8 image 逐字相等；完整 `read + native_quantize_q8_1` 对 fused q8 read
   在 T=1/2/3 为 `+1.31–2.67%`，但绝对节省只有 `0.44–0.79 us/read`。每 stage 48 次读仅
-  投影 `0.11–0.20%`，不扣两卡 overlap 的乐观上界也不到 0.6%，因此在重启前否决。A2 未动，
-  下一项必须按真实触发次数证明整窗 ≥1%。
+  投影 `0.11–0.20%`，不扣两卡 overlap 的乐观上界也不到 0.6%，因此在重启前否决。A2 未动。
+  `UTIL-SIDE-MIXER` 随后完成两卡各七个独立进程：196 条结果行、560 个 buffer 全 bitwise，
+  T=3/4 的乐观整窗上界为 `+1.10–1.29%`；但生产 `capture_batch()` 设置
+  `batch_rec_=true`，现有 `side_proj/sidem` 都含 `!batch_rec_`，所以 env-only 路径命中率
+  为零，已在 server 可达性门否决。当前下一项是 `UTIL-BATCH-SIDE-MIXER`：只为三/四行
+  batch window 实现 GDN qkv/gate 侧分支，一/二行保持串行，先过 graph parity 与
+  production-shaped 绝对时间门。
 - UTIL-WEIGHT 达到 `0.546%`（`473.2` 对 `475.8 us`）、6/7 胜，但未到 1%；两臂 shared 与
   global load 指令完全相同，寄存器 73→80，不采纳。
 - UTIL-ACT 的显式 activation reload 与 baseline 都执行 `10,583,040` 条 shared-load；

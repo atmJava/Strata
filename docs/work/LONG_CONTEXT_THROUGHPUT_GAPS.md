@@ -8,6 +8,13 @@ T=1/2/3 有 `+1.31–2.67%`，但每次只省 `0.44–0.79 us`；每个 24 层 s
 整窗投影为 `0.11–0.20%`，已在 server 重启前否决。后续候选必须直接报告整窗绝对节省，
 不能把局部 launch/path 的百分比当成端到端收益。
 
+**2026-10-31 side-mixer addendum**：普通窗口的 `STRATA_SIDE_MIXER=2` 在两卡
+`T=1..8` 保持 560 个输出 buffer 全 bitwise，T=3/4 按每 stage 18 GDN + 6 QSA 换算的乐观
+整窗上界为 `+1.10–1.29%`。但生产 decode 由 `capture_batch()` 设置 `batch_rec_=true`，
+源码的 `side_proj/sidem` 都要求 `!batch_rec_`，所以这个 env 在 2/4/6/8 路命中率为零。
+现有机制已否决；下一项只给三/四行 batch window 实现窄范围 GDN qkv/gate 侧分支，一/二行
+保持串行，并要求 production-shaped graph parity 与 batch harness 先复现至少 `0.183 ms`。
+
 本文审查 `freeze/server-adapt-0.2.7` 在真实服务器和长上下文负载下仍未被主线覆盖的吞吐
 优化方向。逐项实现和已经测得的局部收益见
 [`HANDOVER-2026-10-29-freeze-027-throughput.md`](../archive/HANDOVER-2026-10-29-freeze-027-throughput.md)。

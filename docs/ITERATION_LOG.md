@@ -3,6 +3,37 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-93 · Side-mixer 微基准达到 1% 上界，但生产 batch window 不可达
+
+- 目标 / 指标：验证现有 `STRATA_SIDE_MIXER=2` 能否在双 RTX 2080 Ti 的真实 decode window
+  中重叠 GDN qkv/gate 与 QSA q/k/v 投影，并让至少一个 2/4/6/8 路并发级稳定提升 1%。
+- 假设与预期：生产每 stage 约 18 个 GDN、6 个 QSA 层；若三/四行窗口的局部节省真实，
+  整窗乐观上界可能达到 `0.18 ms`。一/二行若不足或回退，应限制分支的触发宽度。
+- 为什么选这条路线：它与已否决的 head/group/checkpoint/IL/LFUSE/HC-Q8 机制不同；源码已
+  实现默认关闭的双 stream 分支，先做独立 GPU 门可以避免无收益重启。
+- 改动与实验：新增 `mixer_overlap_bench`，使用生产 IQ4_XS/IQ3_S/Q6_K 张量和真实形状，
+  `T=1..8` 比较串行与 side stream，两卡各跑七个独立进程；随后只读追踪
+  `batch_step -> run_slot_rows -> capture_batch -> record_window`。
+- 结果：两卡 14 个进程的 196 条结果行、560 个 device buffer 全部逐字相等，零 CUDA 错误。
+  `T=3` 的整窗乐观上界为 GPU0 `229.6 us / +1.257%`、GPU1 `235.0 us / +1.286%`；
+  `T=4` 为 `201.6 us / +1.104%` 与 `214.9 us / +1.176%`。但生产 `capture_batch()` 设置
+  `batch_rec_=true`，而 `side_proj` 与 `sidem` 都要求 `!batch_rec_`，因此现有 env 在生产
+  2/4/6/8 路中一次也不会进入被计时的路径。
+- 判决：**UTIL-SIDE-MIXER 在 server 可达性门否决。** 微基准证明了 batch 实现的潜力，但不
+  证明当前环境开关可用；跑 A-B-A 只会测到相同的串行路径并增加空 stream/event 资源。
+- 预期部分成立：三/四行的投影节省和 bitwise 正确性都成立；原先“每个 GDN layer”的源码
+  描述漏掉了 batch-window 排除条件，局部百分比不能替代生产 route-hit 证明。
+- 生产状态与回滚：没有构建服务器候选、没有重启。A2 PID `604897/604926/604905`、health
+  loaded、6 slots / 2 groups、engine `105a4171...`、config `88de996a...` 保持不变。
+- 证据：台账 L-120、`UTIL_SIDE_MIXER_RESULT-20261031.md`、远端
+  `/opt/ai/logs/util-side-mixer-screen-20261031T0240UTC/`；`all-sha256.txt` sha256
+  `5e45f383c0eb07560efe6adf4ff018d7dd245ef1cb8917f1cd81638688022183`。
+- 学到什么：每个候选都要在真实生产入口检查 route condition，而不是假设层内分支必然执行；
+  env 名和独立 harness 命中不能代替 `batch_rec_` 这类 dispatch gate。
+- 下一步与理由：开启 `UTIL-BATCH-SIDE-MIXER`，只为 `batch_rec_` 的三/四行窗口实现 GDN
+  qkv/gate 侧分支，先过 production-shaped graph parity 和 batch-window 绝对时间门；一行、
+  二行保持串行，避免已测到的 T=1 回退和 T=2 的 GPU1 不足。
+
 ## I-20261031-92 · Q8 HC read 的完整量化路径变快，但整窗最多不到 0.6%
 
 - 目标 / 指标：验证生产 `STRATA_HC_Q8=1` 的 HC up read 同读写出消费者 q8_1 image，能否

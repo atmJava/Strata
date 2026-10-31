@@ -1,7 +1,7 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-10-31T09:54+08:00。
+> 最后更新：2026-10-31T10:15+08:00。
 
 ## 用户目标
 
@@ -111,6 +111,8 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
 | UTIL-B6-ROWS | M13/M14 | Q4_K/Q5_K/IQ4_XS 多列 MMVQ 跨 rows 复用 activation fragment | 已证伪（生产 reach） | 低；现有精确 opt-in，仅本机 kernel screening | **否决**：全 parity，但相对 IL T=2 中位 `-5.868%`、0/22 胜，Q5_K/Q6_K 回退最高 `38.63%`；未构建、未重启 |
 | UTIL-LFUSE-SHARED | M14 | 共享专家标量 gate 并入 router，sigmoid+scale 并入 resident combine | 已证伪（吞吐/漂移） | 中；两卡 harness、A1-B-A2 各 12 waves | **否决**：parity 与 greedy 全过，但 2/4/6/8 路 `-3.513%/-8.782%/-2.697%/+4.362%`、胜场 `1/6, 1/6, 2/6, 4/6`；8 路 A 漂移 `+4.053%`，A2 已恢复 |
 | UTIL-QFUSE-HC | M14 | 生产 HC Q8 up read 同读写出 consumer q8_1，省掉独立量化 launch | 已证伪（整窗绝对收益） | 低；两卡独立 harness，未重启 | **否决**：两卡全 bitwise，T=1/2/3 完整局部路径 `+1.31–2.67%`；但每 read 仅省 `0.44–0.79 us`，每 stage 48 次后只有 `0.11–0.20%` |
+| UTIL-SIDE-MIXER | M14 | 用 side stream 重叠 qkv/gate 与 QSA q/k/v | 已证伪（生产可达性） | 低；两卡独立 harness，未重启 | **否决**：T=3/4 整窗上界 `+1.10–1.29%`，560 个 buffer 全 bitwise；但生产 batch window 含 `!batch_rec_` 排除，命中率为零 |
+| UTIL-BATCH-SIDE-MIXER | M14 | 只对 `batch_rec_` 的三/四行窗口重叠 GDN qkv/gate | 至少一级 `+1%`、5/6 胜、其他级不回退 >1%、漂移 ≤3% | 中；需 graph parity、batch harness 和一次 A-B-A | **进行中**；一行/二行保持串行 |
 | LM-EXPLICIT | 长上下文 prefill | 显式 layer-major 用 96 MiB 余量启动 16K host-residual super-chunk；真实 150K/210K 出现稳定、可归因的 ≥1% 改善 | 中 | 中；每轮重启约 2.5–3 分钟 | **否决**：路径真实执行，但六请求中位 −14.29%；不再扫相邻 target |
 | QSA slots 合并 launch | 4/6 路聚合吞吐 | 减少 batch window 固定 launch 开销 | 已证伪 | 低 | **否决**：4 路无收益，6 路首次收益不复现 |
 | T-probe 版本戳 | 可观测性/部署正确性 | 避免继续读到旧 server | 高 | 低 | **已完成**：hash 与 markers 来自运行路径 |
@@ -223,6 +225,14 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
     `0.44–0.79 us/read`。每 stage 24 层 × 2 次 HC read =48 次，最快 stage 只有
     `18.27 ms`，单卡投影 `0.11–0.20%`；即使不扣两卡 overlap 也不到 0.6%。没有构建
     server 或重启。下一候选必须按真实触发次数证明整窗绝对节省 ≥1%。
+38. **UTIL-SIDE-MIXER 已在可达性门否决，转 batch 专用实现**：两卡 14 个进程覆盖
+    `T=1..8`，196 条结果行的 560 个 buffer 全 bitwise，零 CUDA 错误。按每 stage 18 个 GDN
+    和 6 个 QSA 层投影，T=3 的 GPU0/1 乐观整窗节省为 `229.6/235.0 us`（`+1.257%/+1.286%`），
+    T=4 为 `201.6/214.9 us`（`+1.104%/+1.176%`）；T=1 回退，T=2 的 GPU1 只有 `0.924%`。
+    但生产 `capture_batch()` 设置 `batch_rec_=true`，现有 `side_proj/sidem` 都要求
+    `!batch_rec_`，所以 env-only A-B-A 会测到零命中。下一步只为三/四行 batch window 实现
+    窄范围 qkv/gate 分支，保持一/二行串行，并用 production-shaped graph parity 与 batch
+    harness 先证明 ≥`0.183 ms`。
 
 路线在每次复盘后允许改变。改变时必须写清新证据和取舍，而不是因为队列顺序。
 

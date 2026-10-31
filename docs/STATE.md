@@ -6,8 +6,13 @@
 - 目标：提高真实硬件资源利用率，并把它转化为更短的任务完成时间；不再把参数扫描作为工作方向。
 - 当前阶段：上游 v0.2.7 的 37 个提交已 fast-forward 到 `c219fbca` 并部署；`6×256K` 的
   功能验收与吞吐复测已完成，当前进入真实资源利用率优化。
-- 当前项：UTIL-QFUSE-HC 已完成并在生产投影门否决；正在为下一项做源码/阶段成本审计，
-  只接受生产可达、临界窗口绝对节省至少约 `0.18–0.19 ms` 且保守 ≥1% 的候选。
+- 当前项：UTIL-BATCH-SIDE-MIXER 已预注册；只对生产 `batch_rec_` 的三/四行窗口实现 GDN
+  qkv/gate 侧分支，先过 graph parity 和 batch-window 绝对时间门。现有普通窗口
+  `STRATA_SIDE_MIXER=2` 已在可达性门否决，不能直接用于服务 A-B-A。
+- 上一项：UTIL-SIDE-MIXER 在 server 可达性门否决。两卡 14 个独立进程、196 条结果行和
+  560 个 device buffer 全逐字相等；T=3/4 的理想整窗上界达到 `1.10–1.29%`。但生产
+  `capture_batch()` 设置 `batch_rec_=true`，而 `side_proj/sidem` 都要求 `!batch_rec_`，
+  所以现有 env 在生产 2/4/6/8 路命中率为零。没有构建、没有重启。
 - 上一项：UTIL-QFUSE-HC 的生产 Q8 `read + quantize` A/B 在两卡 `T=1..8` 全 bitwise。
   完整路径在 T=1/2/3 有 `+1.31–2.67%`、6/7 或 7/7 胜，但单次只省 `0.44–0.79 us`；
   每 stage 48 次 read 投影仅 `0.11–0.20%`，不扣两卡 overlap 的乐观上界也低于 0.6%。
@@ -108,7 +113,7 @@
   `/opt/ai/tmp/pre-P4-strict-20261026T054515Z/`。
 - 执行计划：[资源利用率优化计划](superpowers/plans/2026-10-27-resource-utilization-optimization.md)；
   Task 1–6 为 NCU 根因阶段，Task 7–9 只有在唯一根因和门限预注册后才进入。
-- 未完成采纳项：19。
+- 未完成采纳项：20。
 - 阻塞：DFlash2 drafter 权重缺失；代码、服务接线和工具已保留，显式启用后缺包会安全回落 MTP，
   该测量路线不阻塞主线。
 
@@ -168,6 +173,9 @@
 - UTIL-QFUSE-HC 已否决：生产 Q8 read+quantize 对 fused q8 read 在两卡全 bitwise，
   T=1/2/3 的完整局部路径达到 `+1.31–2.67%`，但仅省 `0.44–0.79 us/read`；按每 stage
   48 次 read 投影只有 `0.11–0.20%`，不足以进入 server A-B-A。未重启。
+- UTIL-SIDE-MIXER 已否决：两卡 14 个独立进程覆盖 `T=1..8`，560 个输出 buffer 全 bitwise；
+  T=3/4 的乐观整窗上界为 `+1.10–1.29%`。生产 batch capture 设置 `batch_rec_=true`，
+  现有 side branch 的 `!batch_rec_` 条件使其命中率为零，因此未构建服务或重启。
 - UTIL-PIPED-MTP 已否决：A1/A2 合并中位 `78.3/108.55/125.7 tok/s`，B 为
   `93.9/104.4/113.4`；2 路 `+19.92%`、5/6 胜，但 4/6 路 `-3.82%/-9.79%`。固定 greedy
   文本 B 两次不同；B 的 CUDA1 cache 比 A 少 169 slots，下一项先做 cache-neutral 隔离。
@@ -313,4 +321,4 @@
 - Nsight GPU Metrics 只能说明管线占用和吞吐，不提供 stall reason；不能把 SMs Active、SM Issue
   或 NVML 任一数字单独称为“真实利用率”。NCU 不能附加现役进程，必须使用受控实例。
 
-- 最后更新：2026-10-31T03:50+08:00（CPU-order parity 否决；batch-group 调度已预注册）
+- 最后更新：2026-10-31T10:15+08:00（UTIL-SIDE-MIXER reach 否决；batch side branch 已预注册）
