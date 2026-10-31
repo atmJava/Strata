@@ -5,18 +5,28 @@
 
 - 目标：针对用户真实 Agent 负载（通常 1 会话、少量 2 会话、峰值 4 会话）缩短端到端
   任务时间；优先消除非必要 prefill 和长上下文主计算，不再以 6/8 路为联合收益门。
+- 总计划：[真实 Agent 负载优化计划](superpowers/plans/2026-10-31-agent-workload-throughput.md)
+  已重写并通过评审。1/2 路是主验收，4 路是非回退上限，6/8 只做安全回归；局部优化必须
+  先给出真实触发率后的整任务 1% 上界，否则不构建、不重启。
 - 当前阶段：Agent 会话诊断已完成。1/2/4 路短上下文 A/A、75% 共享前缀和 Codex
   thread-title 基线证明普通会话缓存已工作，当前选择最低风险的真实工作流损失。
-- 当前项：AGENT-CODEX-TITLE — A2 配置未启用现有 `codex_thread_titles`；三个约 12K-token
-  的 Codex title 请求为 `10.292/2.791/1.978 s`，每次都增加一个引擎请求并生成
-  `154/184/146` token。候选只启用现有 opt-in，让 title 由服务端直接回答；合同和门禁见
-  [AGENT_CODEX_TITLE_CONTRACT](work/AGENT_CODEX_TITLE_CONTRACT-20261031.md)。
+- 当前项：AGENT-STATIC-SYSTEM-PREFIX — 当前模板先写每个线程各不相同的 tools，再写通常共享的
+  agent instructions/system。兄弟线程只要工具集合不同，共享的 10K 级 system 前缀就完全
+  无法复用。候选先做源码门和 deterministic prefix 测量，再决定是否实现 opt-in 顺序调整。
+- 上一项：AGENT-CODEX-COMPACTION-LRU 已采纳并保持运行。B2 server/engine/vision
+  `33065/33073/33068`，配置启用 title + compaction cache；真实 1 主 3 子代理 8.3K-token
+  交错测试中四次 compaction 分别复用 `8274/8278/8288/8288` token（约 99.5%），墙钟
+  `0.69–0.89 s`，旧单条目缓存会让前三个线程丢失工具前缀。结果见
+  [AGENT_CODEX_COMPACTION_LRU_RESULT](work/AGENT_CODEX_COMPACTION_LRU_RESULT-20261031.md)。
+- 上一项：AGENT-CODEX-TITLE 已采纳并保持运行。B server/engine/vision PID
+  `31228/31235/31230`，6 slots / 2 groups、health loaded，engine `105a4171...`、config
+  `36dcd908...`，相对 A 只多 `codex_thread_titles: true`。三个长前缀 title 请求均为
+  HTTP 200、合法标题、`1.8–2.1 ms`，finished request 与 prompt/output token 增量全为 0；
+  随后的普通 Responses 请求正常增加 1 个引擎请求。结果见
+  [AGENT_CODEX_TITLE_RESULT](work/AGENT_CODEX_TITLE_RESULT-20261031.md)、台账 L-126。
 - 当前项证据：普通同会话续轮复用 `95.16–95.21%`，首轮约 `7.3 s` 的 prompt 读取降到
   约 `1.4 s`；共享约 69% 实际前缀的新会话首轮 prompt 为约 `3.2 s`。正式结果是
   [AGENT_SESSION_PROFILE_RESULT](work/AGENT_SESSION_PROFILE_RESULT-20261031.md)、台账 L-125。
-- 下一项候选：`AGENT-CODEX-COMPACTION-LRU`。现有 compaction 缓存只保留最后一个
-  `(session_id, thread_id)`；用户 1 主 3 子代理交错时会丢失先前线程的工具集合。先做
-  源码测试与 prompt 前缀比较，再决定是否需要 server reload。
 - 上一项：UTIL-BATCH-FAIR-SERVE 已在同 boot A1-B-A2 吞吐门否决。默认关闭的候选在每个
   stage 每轮最多服务一个已到达的 layer，以让 `pump()` 先访问另一 stage。B 通过构建、
   6 slots / 2 groups、启动标记、8 个多行 batch capture、A1/B1/B2/A2 冻结 greedy 逐字

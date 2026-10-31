@@ -2,7 +2,8 @@
 
 Date: 2026-10-31
 
-Status: preregistered before enabling the existing opt-in on the server.
+Status: accepted. Result:
+[`AGENT_CODEX_TITLE_RESULT-20261031.md`](AGENT_CODEX_TITLE_RESULT-20261031.md).
 
 ## Question
 

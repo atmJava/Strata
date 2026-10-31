@@ -3,6 +3,50 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261031-100 · 线程级 compaction 工具缓存让 1 主 3 子代理各复用约 99.5%
+
+- 目标 / 指标：让主线程和三个子代理在交错请求后，各自 compaction 仍使用自己的工具集合，
+  从而保留已经缓存的对话前缀，而不是重读整段历史。
+- 假设与预期：原全局单条 `(session_id, thread_id)` 只保最后请求；改为 12 项线程安全 LRU
+  后，用户峰值 4 个线程都能保留，且不引入并发污染。
+- 改动与实验：只在 opt-in `codex_compaction_cache` 路径替换缓存结构和读写；容量 12，
+  OrderedDict + Lock，线程 title/无效 metadata 不写缓存。本地与远端 Responses 套件通过；
+  B2 使用同一 engine，只更新 Python server 和配置。
+- 结果：同一 session 下 4 个 8.3K-token 线程先交错输入，再依次 compaction；四份 prompt
+  分别复用 `8274/8278/8288/8288` token（`99.52–99.64%`），墙钟 `0.694–0.888 s`。
+  旧单条缓存下主线程和前两个子线程会丢失工具前缀。8 个请求全 HTTP 200，B2 title 仍为
+  `3.8 ms`、零引擎/token。
+- 判决：**AGENT-CODEX-COMPACTION-LRU 采纳并保持运行。** 测试上下文里 cold read 为
+  `6.85–7.67 s`，compaction 为 `0.69–0.89 s`；节省随用户长历史增长。
+- 生产状态与回滚：B2 server/engine/vision `33065/33073/33068`，engine hash 不变，
+  config 启用 title + compaction；原始两份 Python 文件已备份，engine 无需重建。
+- 证据：L-127、`AGENT_CODEX_COMPACTION_LRU_RESULT-20261031.md`；目录
+  `/opt/ai/logs/agent-codex-compaction-lru-20261031T0448Z/`。
+- 下一步与理由：实测 4 个线程只有 tools 名称不同时 cold reuse 仍为 0，因为模板把 tools
+  放在通常共享的 agent instructions 之前。下一步只在源码层证明“system 先于 tools”的
+  deterministic 共享前缀增量，再决定 opt-in 实现和真实工具质量门。
+
+## I-20261031-99 · Codex title 本地回答通过全部门，真实工作流中的秒级干扰已移除
+
+- 目标 / 指标：验证现有 `codex_thread_titles` opt-in 能否让 title 请求不占引擎和前缀
+  cache，同时保证普通 Responses 请求不受影响。
+- 改动与实验：B 配置相对 A 只增加 `codex_thread_titles: true`，引擎二进制不变。发三个
+  约 12K-token 共享 instruction 前缀的 title 请求，再发一个普通 Responses 请求；逐次读
+  `/metrics` 的 totals/history。
+- 结果：三个 title 均为 HTTP 200、合法标题、usage 全 0，墙钟 `1.8–2.1 ms`；finished
+  request、prompt/output token、prompt/decode time 和 draft counter 增量全为 0。普通
+  请求 `1.048 s`、64 prompt/8 output token，request 增量 1。B 保持 6 slots / 2 groups、
+  health loaded，无 HTTP/执行/CUDA/timeout 错误。
+- 判决：**AGENT-CODEX-TITLE 采纳并保持运行。** 每次 title 相对 A2 省
+  `1.976–10.290 s`，也避免一次 146–184 token 的非正文 decode。
+- 生产状态与回滚：server/engine/vision `31228/31235/31230`，engine
+  `105a4171...`、B config `36dcd908...`。回滚只需恢复 A config 并重启。
+- 证据：L-126、`AGENT_CODEX_TITLE_RESULT-20261031.md`；目录
+  `/opt/ai/logs/agent-codex-title-20261031T0448Z/`。
+- 下一步与理由：真实会话的主要重复成本更适合从线程级 prompt 前缀隔离下手。当前 compaction
+  工具缓存只保存最后一个线程，1 主 3 子代理交错会让早先线程丢掉自己的工具集合；先预注册
+  有界 LRU 合同，再做源码与测试。
+
 ## I-20261031-98 · 真实 Agent 负载重置目标：基础缓存已工作，先移除 Codex title 引擎请求
 
 - 目标 / 指标：按用户实际的 1 主 3 子代理上限，重测 1/2/4 会话的共享前缀、续轮复用、

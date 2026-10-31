@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import contextlib
 import http.client
 import io
@@ -176,7 +177,8 @@ def tools_of(req):
 
 class CodexCompaction(unittest.TestCase):
     def setUp(self):
-        responses._kept_prompt_tools = (None, None)
+        with responses._kept_prompt_tools_lock:
+            responses._kept_prompt_tools.clear()
 
     def test_a_compaction_prompt_starts_as_its_conversations_last_prompt(self):
         turn = codex_request("turn", tools=TOOLS)
@@ -191,18 +193,69 @@ class CodexCompaction(unittest.TestCase):
         self.assertEqual(tools_of(req)[1], request_tools(turn)[0])
         self.assertEqual(tools_of(req)[1], request_tools(turn)[0])   # a compaction leaves the entry as it was
 
-    def test_another_conversation_never_gets_these_tools(self):
+    def test_each_conversation_keeps_its_own_tools(self):
         tools_of(codex_request("turn", A, TOOLS))
         b = tools_of(codex_request("turn", B, OTHER_TOOLS))[1]
-        self.assertIsNone(tools_of(codex_request("compaction", A))[1])    # one entry, B's: A reads again
+        self.assertEqual(tools_of(codex_request("compaction", A))[1], request_tools({"tools": TOOLS})[0])
         self.assertEqual(tools_of(codex_request("compaction", B))[1], b)
         for other in (("019a-b", "019a-sub"),            # a sub-agent: the root's session, its own thread
                       ("019a-fork", "019a-fork")):        # a fork, or an ephemeral fork (same prompt_cache_key)
             self.assertIsNone(tools_of(codex_request("compaction", other))[1])
         self.assertEqual(tools_of(codex_request("compaction", B))[1], b)  # and they changed nothing
         tools_of(codex_request("turn", A, TOOLS))
-        self.assertIsNone(tools_of(codex_request("compaction", B))[1])    # A's turn came last: B reads again
+        self.assertEqual(tools_of(codex_request("compaction", B))[1], b)  # A's turn did not replace B
         self.assertEqual(tools_of(codex_request("compaction", A))[1], request_tools({"tools": TOOLS})[0])
+
+    def test_main_and_three_child_prompts_each_keep_their_prefix(self):
+        conversations = [("019a-root", "019a-main"), ("019a-root", "019a-child-1"),
+                         ("019a-root", "019a-child-2"), ("019a-root", "019a-child-3")]
+        rendered = {}
+        for i, conversation in enumerate(conversations):
+            tools = [{"type": "function", "name": f"tool_{i}", "description": f"Tool {i}.",
+                      "parameters": {"type": "object", "properties": {}}}]
+            req = codex_request("turn", conversation, tools)
+            _, shown = tools_of(req)
+            rendered[conversation] = TEMPLATE.render(input_messages(req), tools=shown,
+                                                     add_generation_prompt=False)
+        for conversation in conversations:
+            req = codex_request("compaction", conversation)
+            _, shown = tools_of(req)
+            prompt = TEMPLATE.render(input_messages(req), tools=shown, add_generation_prompt=False)
+            self.assertTrue(prompt.startswith(rendered[conversation]))
+            missing = TEMPLATE.render(input_messages(req), tools=None, add_generation_prompt=False)
+            self.assertFalse(missing.startswith(rendered[conversation]))
+
+    def test_concurrent_conversations_do_not_mix_or_corrupt_the_cache(self):
+        conversations = [("019a-root", f"019a-worker-{i}") for i in range(4)]
+        tools = [[{"type": "function", "name": f"worker_{i}", "description": f"Worker {i}.",
+                   "parameters": {"type": "object", "properties": {}}}] for i in range(4)]
+
+        def exercise(i):
+            for _ in range(100):
+                j = i % len(conversations)
+                own, shown = tools_of(codex_request("turn", conversations[j], tools[j]))
+                expected = request_tools({"tools": tools[j]})[0]
+                self.assertEqual(own, expected)
+                self.assertEqual(shown, expected)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(exercise, range(16)))
+        for conversation, raw in zip(conversations, tools):
+            expected = request_tools({"tools": raw})[0]
+            self.assertEqual(tools_of(codex_request("compaction", conversation))[1], expected)
+
+    def test_the_tool_cache_is_a_bounded_lru(self):
+        conversations = [("019a-lru", f"019a-{i}") for i in range(responses._PROMPT_TOOLS_LIMIT + 1)]
+        for i, conversation in enumerate(conversations[:-1]):
+            tools = [{"type": "function", "name": f"lru_{i}", "description": "LRU.",
+                      "parameters": {"type": "object", "properties": {}}}]
+            tools_of(codex_request("turn", conversation, tools))
+        self.assertIsNotNone(tools_of(codex_request("compaction", conversations[0]))[1])
+        tools_of(codex_request("turn", conversations[-1], OTHER_TOOLS))
+        self.assertIsNone(tools_of(codex_request("compaction", conversations[1]))[1])
+        self.assertIsNotNone(tools_of(codex_request("compaction", conversations[0]))[1])
+        self.assertEqual(tools_of(codex_request("compaction", conversations[-1]))[1],
+                         request_tools({"tools": OTHER_TOOLS})[0])
 
     def test_requests_that_are_not_a_codex_compaction_are_rendered_as_sent(self):
         tools_of(codex_request("turn", tools=TOOLS))
@@ -247,7 +300,7 @@ class CodexCompaction(unittest.TestCase):
                      {"x-codex-turn-metadata": json.dumps({"request_kind": "turn", "session_id": "019a-a"})},
                      {"x-codex-turn-metadata": json.dumps({"request_kind": "turn", "thread_id": "019a-a"})}):
             tools_of(codex_request("turn", tools=TOOLS, meta=meta))
-            self.assertEqual(responses._kept_prompt_tools, (None, None))
+            self.assertEqual(len(responses._kept_prompt_tools), 0)
         tools_of(codex_request("turn", tools=TOOLS))
         kept = responses._kept_prompt_tools
         compaction = {"x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}
@@ -702,7 +755,8 @@ class CodexCompactionOverHttp(Server):
 
     def setUp(self):
         super().setUp()
-        responses._kept_prompt_tools = (None, None)
+        with responses._kept_prompt_tools_lock:
+            responses._kept_prompt_tools.clear()
         self.svc.codex_compaction_cache = True       # opt-in (#924)
         self.parser_tools = []
         run = self.svc.run
@@ -749,6 +803,12 @@ class CodexCompactionOverHttp(Server):
         self.assertNotIn("multi_agent_v1.spawn_agent", plain[:plain.index("<|im_end|>")])
         self.assertEqual(self.parser_tools[-1], None)
         self.assertEqual([(o["type"], o["name"], o.get("namespace")) for o in r2["output"]], outputs)
+
+    def test_the_default_off_path_does_not_use_kept_tools(self):
+        self.svc.codex_compaction_cache = False
+        prompt, code, r = self.compaction(codex_meta("compaction"))
+        self.assertEqual(code, 200, r)
+        self.assertFalse(prompt.startswith(self.first_prompt))
 
     def test_a_compaction_too_long_with_the_kept_tools_is_rendered_as_sent(self):
         long = "before\n" * 300                         # a long tool output: the turn fits, its compaction barely

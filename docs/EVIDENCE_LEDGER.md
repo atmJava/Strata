@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-124，按编号）
+## 台账索引（L-000…L-127，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -139,9 +139,74 @@
 | L-123 | 10-31 11:2x | Q5 head IL grid 全 parity；有效 `screen2-gpu0-*` 中 T=2 的 capped grid 全慢于默认，T=3 最佳 grid `2560` 仅比默认快 `0.182` 个百分点，远低于 18.5% head 门槛 | **UTIL-Q5-HEAD-IL-GRID 性能筛选门否决；源码已移除；未构建 server、未重启** |
 | L-124 | 10-31 12:0x | Fair stage service 在 B 真实命中 8 个多行 batch capture，A1/B1/B2/A2 greedy 全逐字；2/4/6/8 路 `+8.901%/-5.121%/+2.114%/-2.612%`，胜场 `5/6, 3/6, 4/6, 2/6`，2 路 A 漂移 `-7.067%` | **UTIL-BATCH-FAIR-SERVE 吞吐/漂移门否决；A2 已恢复；三臂 180 请求零错误、零外来请求** |
 | L-125 | 10-31 12:3x | Agent A/A：同会话续轮复用 `95.16–95.21%`，prompt `约 7.3 → 1.4 s`；新会话 69% 实际共享前缀时 prompt 约 `3.2 s`。Codex title 仍进引擎，`1.978–10.292 s`、额外 146–184 output token | **诊断完成；基础缓存停止作候选，转 AGENT-CODEX-TITLE；A2 未重启** |
+| L-126 | 10-31 12:5x | Codex title B 三项 `1.8–2.1 ms`、零 engine request/prompt/output；普通 Responses 仍 +1 request、64 prompt/8 output | **ACT：采纳并保持运行；无引擎重建** |
+| L-127 | 10-31 12:5x | Compaction LRU：1 主 3 子代理各 8.3K prompt，compaction 复用 `99.52–99.64%`、墙钟 `0.69–0.89 s`；8 请求全 200，title 仍零引擎 | **ACT：采纳并保持运行；45 tests OK；B2 已加载** |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
+
+## L-127 · AGENT-CODEX-COMPACTION-LRU：1 主 3 子代理各保留工具前缀
+
+**判定：采纳。** 原 opt-in compaction cache 只保存最后一个
+`(session_id, thread_id)`。B2 改为 12 项、带锁的 `OrderedDict` LRU，仍由
+`codex_compaction_cache` 控制；tools JSON 在锁内更新，读取返回新解析的列表，
+thread-title 请求、无效 metadata 和缺少 conversation ID 的请求不读写缓存。
+
+**真实服务器复现**：同一 session 下主线程与 3 个子线程各以自己的工具定义和约 8.3K
+prompt 交错完成一个 turn，然后按主/子顺序分别发 compaction。4 个 compaction 分别复用
+`8274/8278/8288/8288` token，即 `99.52%/99.52%/99.64%/99.64%`；墙钟
+`0.888/0.807/0.760/0.694 s`。4 个 cold turn 为 `6.854–7.672 s`。旧单条缓存只会保留
+最后 child 的工具，前三个 compaction 的 prompt 无法匹配已缓存前缀。
+
+**门禁**：本地与远端 `serve.test_responses` 均为 `45 tests OK`，远端跳过 1 项缺少
+`jsonschema` 的 schema 测试；新增覆盖 1 主 3 子、1,600 次并发读写、LRU 淘汰、默认关闭、
+无效 metadata 和 title 不覆盖。8 个真实请求全 HTTP 200；B2 title 仍 `3.8 ms`、零引擎/token。
+health loaded，swap 0，两卡结束后 idle，无 HTTP/执行/CUDA/timeout/foreign failure。
+
+**运行形态**：server/engine/vision `33065/33073/33068`，engine sha256
+`105a4171...` 不变；B2 config `b54fd35e...`，`serve/responses.py`
+`c88b171e...`。B2 加载约 145 s。原始文件备份在证据目录 `original/`。
+
+**证据**：`/opt/ai/logs/agent-codex-compaction-lru-20261031T0448Z/`，其中
+`b2-replay.json`、`full-responses.log`、`local-unit.log`、`b2-server-console.log`。
+完整记录见
+[`AGENT_CODEX_COMPACTION_LRU_RESULT-20261031.md`](work/AGENT_CODEX_COMPACTION_LRU_RESULT-20261031.md)。
+
+**下一步**：4 个线程仅有 tools 不同时 cold reuse 仍全为 0。模板当前先输出 tools，再输出
+通常共享的 merged system instructions；先只读比较两种顺序的 deterministic 共享前缀，
+再预注册 opt-in 工具调用质量门。
+
+## L-126 · AGENT-CODEX-TITLE：本地回答零引擎/token，采纳并保持运行
+
+**判定：采纳。** B 配置相对 A 只增加 `codex_thread_titles: true`。三个约 12K-token
+共享 instruction 前缀的 Codex title 请求均为 HTTP 200、返回合法标题，墙钟
+`2.1/2.0/1.8 ms`；每项 usage 的 input、cached、output、reasoning、total 全为 0。
+`/metrics.history` 保持 0，finished request、prompt tokens、reused tokens、output
+tokens、prompt/decode time 和 draft counters 的增量也全为 0。
+
+随后一个普通 `/v1/responses` 请求在 `1.048 s` 完成，增加 1 个 engine request，读取
+64 prompt tokens 并产生 8 output tokens，证明非 title 请求仍走原路径。
+
+**运行形态**：server/engine/vision PID `31228/31235/31230`，health loaded、context
+262144、6 slots / 2 groups。engine sha256
+`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3` 与 A 相同；A config
+`88de996a...`，B config `36dcd908...`。B 加载约 176 s，bootstrap tunnel 已恢复可用。
+
+**收益**：A2 的 title 基线为 `1.978–10.292 s`、146–184 output tokens；B 每次省
+`1.976–10.290 s`，并避免 title 工作替换真实会话的 prefix cache 或占用 decode slot。
+这不是普通生成吞吐提升，不作 1/2/4 路聚合收益声明。
+
+**证据**：
+
+- `/opt/ai/logs/agent-codex-title-20261031T0448Z/a-config.json`
+- `/opt/ai/logs/agent-codex-title-20261031T0448Z/b-config.json`
+- `/opt/ai/logs/agent-codex-title-20261031T0448Z/b-server-console.log`
+- `/opt/ai/logs/agent-codex-title-20261031T0448Z/engine-sha256.txt`
+
+完整记录见
+[`AGENT_CODEX_TITLE_RESULT-20261031.md`](work/AGENT_CODEX_TITLE_RESULT-20261031.md)。
+下一步处理多线程 Codex compaction：当前工具集合只保留最后一个线程，1 主 3 子代理交错时
+早先线程的 compaction 会丢失自己的工具前缀。
 
 ## L-125 · Agent 会话缓存已工作；Codex title 仍占用引擎
 

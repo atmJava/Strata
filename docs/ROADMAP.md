@@ -28,7 +28,9 @@ prefill 和稳定的正文生成；6/8 路只保留安全回归，不作为候�
 | M13 | 32K 冷 prefill GPU 管线占用 | SMs Active 77%、SM Issue 13–14%、Tensor 10%、DRAM read 15%；NVML 40/99% 与 95/98% | 用 NCU 定位 stall 后改内核/调度；瓶颈计数器和端到端 wall 同向改善 | Nsight 双次已验证；NCU 后进入代码优化 |
 | M14 | 多并发吞吐曲线 | window-profile 的 A1/A2 合并中位 2/4/6/8 路为 `80.010/108.214/122.703/107.214 tok/s` | 2 路高于单路，8 路不回退且 TTFT 可控 | 2 路与 8 路均未达；6 路为峰值，8 路尾部已归因 |
 | M15 | Agent 会话前缀复用 | 同会话续轮约 95.2%；69% 共享前缀的新会话首轮 prompt 约 3.2 s | 新会话/续轮继续提高复用，且 1/2 路稳定改善 ≥1%、4 路不退 >1% | 缓存主体已工作；转入非正文 Codex 请求和 compaction 线程隔离 |
-| M16 | Codex title 请求 | 当前每个 title 进入引擎，`1.978–10.292 s`，额外 146–184 output token | 本地 title 路径 0 引擎请求、0 prompt/output token，合法标题且普通请求不受影响 | 候选 `AGENT-CODEX-TITLE` 待 server 验证 |
+| M16 | Codex title 请求 | A2 每个 title 进入引擎，`1.978–10.292 s`，额外 146–184 output token | 本地 title 路径 0 引擎请求、0 prompt/output token，合法标题且普通请求不受影响 | 已采纳：B 为 `1.8–2.1 ms`、零请求/token，普通请求仍进引擎 |
+| M17 | 多线程 Codex compaction 前缀 | 工具集合仅保留最后线程，1 主 3 子代理交错时早先线程可能重读整段历史 | 有界线程缓存使每个活跃线程保留自己的工具前缀；默认路径字节不变，LRU 淘汰和并发测试通过 | 已采纳：4 个线程各保留前缀，compaction 复用约 99.5%，墙钟 `0.69–0.89 s` |
+| M18 | 兄弟 Agent 共享 system 前缀 | tools 位于共享 agent instructions 之前；工具集合不同会使 10K 级通用 system 前缀失配 | 顺序调整只改变 tool block 与 system block 的相对位置，不改变内容；真实工具调用/质量门通过，缓存复用带来端到端收益 | 当前候选 `AGENT-STATIC-SYSTEM-PREFIX`，先做源码/前缀门 |
 
 数字的条件、证据和“没测什么”以 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 为准。
 

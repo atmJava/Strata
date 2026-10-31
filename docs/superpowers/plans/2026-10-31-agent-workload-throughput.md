@@ -1,139 +1,157 @@
-# Agent workload throughput plan
+# 真实 Agent 负载优化计划
 
-Date: 2026-10-31
+日期：2026-10-31
 
-## Objective
+状态：已按用户最新要求重写并通过评审，正在执行。
 
-Improve Strata's end-to-end performance for the workload the user actually runs:
-usually one Codex conversation, sometimes two, and never more than four
-(one main agent and up to three sub-agents). A stable improvement of at least 1%
-at a primary concurrency level counts. Four streams must not regress by more than
-1%. Six and eight streams remain safety and overload regressions, not joint
-throughput targets.
+## 全局目标
 
-## Why this replaces the previous loop
+缩短用户真实 Codex 任务从提交到可用结果的时间，并减少完成同一任务所消耗的引擎请求、
+prompt token、长上下文读取和排队时间。用户通常单会话，偶尔双会话，峰值是一主三子代理。
+因此 1/2 路是主验收，4 路是上限压力门，6/8 路只保留安全和过载回归。
 
-The previous loop optimized against a 2/4/6/8 matrix in which six streams was the
-throughput peak and eight streams was overload. The user rarely reaches six and
-never reaches eight. That mismatch encouraged low-value local kernel work and
-rejected low-concurrency mechanisms for regressions in levels the user does not
-normally run.
+这里的“1/2/4/6/8 路”指同时在处理请求的会话流数，不是服务器槽数。4 路可以是一主三子代理，
+但 Codex 主线程和子代理并不保证每个时刻都有请求在生成；这个差异必须由实际 trace 和请求
+元数据体现，不能用固定并发替代。
 
-The benchmark also had too little statistical power for a 1% decision. In the
-last matrix, three same-configuration two-stream A1 samples ranged from
-`63.854` to `85.196 tok/s`, and A1-to-A2 drift reached `7.067%`. A sequential
-three-wave A1-B-A2 comparison cannot distinguish a real 1% effect from that
-noise.
+以下任一稳定收益都算成功：真实任务墙钟、TTFT、完成时间或关键阶段时间至少改善 1%；
+或者在不增加墙钟的前提下消除至少 1% 的重复 prompt/引擎工作。局部微优化只有在其真实
+触发率乘上整任务临界路径后仍有 1% 上限时，才值得进入构建或重启。
 
-## Phase 1: measure the real bottleneck without changing the engine
+全程持续执行，直到用户明确停止。每轮完成判决、复盘并预注册下一项。服务器和 Strata 可以
+重启，但必须先证明候选有足够收益、记录加载成本，并且没有低成本的同进程或源码门可以先排除。
 
-Use the current A2 process and existing metrics. Do not restart or modify the
-engine.
+## 一夜低收益的复盘
 
-1. Read aggregate and per-request metadata only:
-   `prompt_tokens`, `cached_tokens`, `prompt_ms`, TTFT, decode time/tokens,
-   `slot_wait_ms`, finish reason and total wall time.
-2. Inspect the existing conversation-cache view and request history for:
-   reuse ratio, requests with reuse, total reused tokens, prompt tokens and
-   parked conversations.
-3. Build a deterministic agent-shaped replay only where real metadata is
-   insufficient. It must cover:
-   - one continuing conversation with tool-call-shaped turns;
-   - two concurrent conversations;
-   - one main thread and one child thread sharing a session;
-   - four conversations, with no more than six server slots;
-   - cold and warm prefixes at 4K, 32K, 128K and near-210K tokens.
-4. Run A/A repetitions at 1/2/4 streams and report median, dispersion and the
-   minimum detectable effect. A data set with an MDE above 1% is calibration
-   evidence, not candidate acceptance evidence.
+上一阶段的问题不是执行不够，而是优化对象选错：
 
-Stop condition: identify whether the dominant cost is context reread, cold
-long-context computation, queueing, or decode. If reuse is already high, skip
-the cache candidate and move directly to the dominant long-context phase.
+1. 长时间围绕 2/4/6/8 合成吞吐矩阵，把 6 路峰值当成用户目标，并反复扫描内核、group、
+   checkpoint、QSA、head 和 poll 的局部变体。
+2. 许多候选的单窗口上界只有亚毫秒到数毫秒，经过真实触发率后不足整任务的 1%，却在通过
+   parity 后仍消耗 server 构建、约 2–3 分钟加载和多臂长测。
+3. 1% 决策常建立在 3 次并发波次上，而 A/A 漂移可达 3–7%；统计功效不足，既容易误收也
+   容易误杀。
+4. prompt token 吞吐不等于用户等待时间。Agent 工作流还包括 title、compaction、工具轮次、
+   子代理交错和缓存断裂；这些请求级结构问题比单独内核更容易形成整任务收益。
+5. 已采纳的 title 和 compaction LRU 都来自真实 Agent 请求路径，说明应先找“重复工作”，
+   再找“算得更快的同一条工作”。
 
-### Phase 1 result
+因此新计划不再以更多重试换小概率收益。每轮先给出主导成本及保守整任务上界，再决定是否
+实现；达到止损点立即换瓶颈。
 
-The normal conversation cache is working. In the measured agent-shaped runs:
+## 指标与验收
 
-- same-conversation continuation reused `95.16–95.21%` of an approximately
-  12K-token prompt;
-- even a new conversation with roughly 69% of the actual prompt shared reused
-  `69.09%`;
-- stable wave-level 95% intervals after warmup were `0.16–2.45%` for the normal
-  2/4-parallel cases and about `1%` for stable one-stream cases.
+### 主指标
 
-The core conversation-cache path is therefore not the first candidate.
-However, Codex thread-title requests still enter the engine because
-`codex_thread_titles` is not enabled. Three approximately 12K-token title
-requests took `10.292 s` cold and `1.978–2.791 s` warm, each adding an engine
-request and 146–184 output tokens. The first candidate is the existing local
-title short-circuit, registered in
-[`AGENT_CODEX_TITLE_CONTRACT-20261031.md`](../work/AGENT_CODEX_TITLE_CONTRACT-20261031.md).
+- 端到端任务墙钟：从主任务开始到主线程给出可用结果，包含子代理等待和工具轮次。
+- 主线程关键路径时间：只计算延迟最终结果的那部分请求，不能用所有并发请求吞吐平均掩盖。
+- 请求/阶段成本：prompt token、cached token、prompt ms、TTFT、decode token/ms、
+  slot wait、finish reason 和总 wall。
+- 非正文开销：title 引擎请求/token 应为 0；compaction 应在对应线程保持高复用。
 
-## Phase 2: one structural candidate
+### 决策门
 
-Choose exactly one candidate from the measured result:
+1. 先测 A/A，当前 1 路和 2 路的相邻波次 MDE 必须低于 1%；达不到时先增加重复或用
+   paired interleaving 改测法，不能用噪声较大的单臂下结论。
+2. 候选必须在 1 或 2 路至少一个真实 Agent 形状上稳定改善 ≥1%，且不是只改善无关的
+   后台请求。
+3. 4 路不得回退 >1%，A 漂移不得 >3%；6/8 路只要求无错误、健康、无严重退化，不用它们的
+   合成峰值否定有效的低并发收益。
+4. 有数值变化时先过冻结 greedy parity、工具选择、finish 和内容质量门。不能只因速度接受
+   输出语义变化。
+5. 任何一级都不得出现 HTTP、CUDA、timeout、意外 finish 或外来请求错误。
 
-- context reuse or slot affinity if cold/warm reuse is poor;
-- QSA selection/attention if long cold prefill dominates;
-- MoE gate/up or down if it remains the largest long-prefill phase;
-- a low-concurrency decode mechanism only if decode dominates and can preserve
-  bitwise output.
+## 执行阶段
 
-The candidate contract must state:
+### 阶段 0：固化已采纳成果与恢复点
 
-- the real trigger count and production path;
-- the conservative whole-turn absolute saving, not only a local percentage;
-- whether the saving is on the critical path;
-- numeric or bitwise impact and a default-off rollback;
-- why the potential gain exceeds the measured noise at 1/2 streams.
+1. 提交并 HTTPS 推送 title、compaction LRU、测试和交接文档；推送后用 `ls-remote` 核对。
+2. 将 B2 的实际监听地址和 PID 写清楚：server/engine/vision 为 `33065/33073/33068`，
+   监听 `127.0.0.1:8080`；不要再把 PID 当成端口。
+3. 记录当前 B2 配置、engine hash、server hash 和回滚文件。远端 dirty/untracked 用户文件
+   必须保留，禁止 reset/clean/checkout。
 
-Reject before a server reload when the upper bound is below 1% of a primary
-turn, the path is unreachable, or the expected saving is hidden by existing
-noise.
+### 阶段 1：AGENT-STATIC-SYSTEM-PREFIX
 
-## Phase 3: validation
+这是当前唯一进入真实服务门的高杠杆候选，因为主线程和子代理通常共享约 10K 级 instructions，
+但不同的 tool 集合会让共享前缀在 325 字符处结束。
 
-Use low-cost local or same-process screens first. A server candidate must pass:
+1. 补 `serve/test_frontend.py`：默认关闭逐字不变；开启后 system/tool 内容不丢不多；
+   73,343 字符 fixture 的共同前缀从 325 升至至少 54,000；工具调用语法和 thinking 不变。
+2. 跑 frontend、Responses 和离线 preflight。源码门不过则删除候选，不重启。
+3. 源码门通过后只重启 Python server，不重建 engine；B3 保持 6 slots / 2 groups、相同
+   engine hash 和 256K context。
+4. 用同一长 system、四个不同 tools 的 1 主 3 子代理路径验证：第一请求可冷，后续请求应
+   出现实质性 cached token；每个线程只能调用自己的工具。
+5. 用 agent-shaped 的 1/2 路 A/B 验证端到端收益。若缓存不增长、调错工具、答案质量变化，
+   或 1/2 路没有 ≥1% 的稳定改善，立即关闭并恢复 B2。
+6. 一次真实门后停止该路线。不做 tool 顺序、分隔符、system 截断或测试夹具的参数扫描。
 
-1. startup, readiness, resource and real-path evidence;
-2. bitwise or frozen-greedy parity without unexplained finish changes;
-3. enough interleaved waves to keep the measured MDE below 1%;
-4. a stable improvement of at least 1% at one of 1/2 streams;
-5. no regression above 1% at four streams;
-6. zero request, CUDA, timeout and foreign-request errors.
+时间盒：源码门最多 30 分钟；服务验证最多一次重启和一组完整门。失败后直接进入阶段 2。
 
-Six and eight streams are reported as safety regressions only. Do not reject a
-valid low-concurrency feature solely because an overload level it does not
-target regresses.
+### 阶段 2：从真实 trace 重新定位大头
 
-## Phase 4: loop
+如果没有高杠杆请求级候选，采集一个用户实际形状的主任务 trace：主线程加最多三个子代理，
+记录每个请求的 input/cached token、prompt/decode/queue/工具等待和父子依赖。把总墙钟拆成：
 
-After each decision:
+1. 冷 prefill 与重复 prefill；
+2. 排队和槽位轮换；
+3. decode 与工具往返；
+4. title/compaction 等非正文请求；
+5. 主线程等待子代理或外部工具的空闲时间。
 
-1. restore the exact baseline;
-2. update the short evidence ledger and the current handoff;
-3. run `git diff --check`, UTF-8/BOM checks and
-   `python tools/server/preflight.py --offline`;
-4. commit, push over HTTPS and verify `ls-remote`;
-5. write a brief retrospective and preregister the next source- or
-   measurement-backed target.
+只选择占关键路径最大且尚未否决的一块。若要改引擎，候选必须基于该 trace 给出“单窗口
+绝对节省 × 真实触发次数 / 整任务时间”的保守上界，并超过 1%。若大头是工具往返或 Agent
+提示结构，优先在服务端解决，不以 kernel 优化掩盖。
 
-Continue until the user explicitly stops.
+### 阶段 3：单候选闭环
 
-## Plan review
+每轮只保留一个主候选：
 
-The plan is accepted with these controls:
+1. 预注册合同：生产命中路径、真实触发率、保守整任务收益、数值影响、默认关闭与回滚。
+2. 先跑无重启的源码、单元、fixture、同进程或独立 GPU 门；上界不足 1% 立即否决。
+3. 只有通过上界门才构建/部署；一次候选最多一次 server 重启。engine 不重建，除非候选本身
+   修改 engine 且已证明值得其构建与约 2–3 分钟加载成本。
+4. 完成正确性、资源、1/2 路主验收、4 路回退门和 6/8 安全回归。
+5. 采纳则保持运行；否决则恢复精确 A 配置。两者都记录时间、峰值资源、加载成本和证据。
 
-- It targets the user's measured concurrency rather than the server's synthetic
-  peak.
-- It measures the likely largest gain first: avoiding repeated long-context
-  prefill.
-- It does not assume shared prefixes or cache misses without request evidence.
-- It replaces the noisy A1-B-A2 decision rule before judging another 1% result.
-- It prevents another run of sub-millisecond kernels whose whole-window upper
-  bound cannot reach 1%.
-- It keeps a hard four-stream non-regression gate while removing six/eight from
-  joint candidate selection.
-- It does not authorize an unnecessary reboot; a server reload still needs a
-  candidate that passed a local upper-bound gate.
+### 阶段 4：持续复盘循环
+
+每轮结束立即做四件事：
+
+1. 写一句可验证的结论：哪项工作消除了多少关键路径时间，或为什么没有收益。
+2. 更新 `STATE`、`ROADMAP`、`WORK_QUEUE`、`ITERATION_LOG`、`EVIDENCE_LEDGER`、
+   `HANDOVER` 和 contract/result。
+3. 跑 `git diff --check`、UTF-8/BOM 检查、`python tools/server/preflight.py --offline`，
+   提交、HTTPS 推送并核对远端提交。
+4. 根据最新瓶颈预注册下一项；然后继续执行。除非用户明确停止，不因一轮失败停下。
+
+## 停止做和重启纪律
+
+- 不重开已关闭的 waitA、fair-service、poll fast return、head/LFUSE/Q5/IQ3、QSA、
+  checkpoint move、EXPDEC、PIPED-MTP 同形路线。
+- 不在没有真实触发率和 1% 整任务上界时构建 server 或重启。
+- 不用 6/8 路合成吞吐作为低并发候选的主要判决依据。
+- 不把 PIDs 当端口，不把静态源码发现写成性能已经改善。
+- 不把 API key、token 或 sudo 密码写入仓库、命令历史、日志或回复。
+
+## 当前断点和下一动作
+
+当前 B2 已启用 title 和多线程 compaction LRU。AGENT-STATIC-SYSTEM-PREFIX 只有部分源码，
+尚未通过源码门，也尚未部署。下一步顺序是：提交已采纳成果 → 补静态前缀测试 → 评审源码门
+结果 → 只有通过才进行 B3 的一次真实 Agent 验证。
+
+## 计划评审
+
+该计划保留正确的底层方向：优先消除重复工作，以真实低并发为验收对象，并坚持正确性和
+可回滚。相比上一版增加以下控制：
+
+- 把 1/2/4/6/8 明确为同时请求流数，避免把服务器六槽误称六会话。
+- 用 A/A MDE 校准决定权，解决 1% 目标与 3–7% 漂移不匹配的问题。
+- 给高杠杆候选设置时间盒和一次重启上限，失败后强制转移瓶颈。
+- 把非正文请求、缓存断裂、排队和工具等待纳入整任务成本，不再只测生成吞吐。
+- 要求每个引擎候选给出真实触发后的整任务上界，阻止亚毫秒内核再次消耗部署预算。
+
+已知局限：真实 Codex 主/子代理 trace 尚未自动化采集；title 和 compaction 是事件型收益，
+不能保证每个任务都出现。静态前缀候选也只帮助共享 system 且非同时冷启动的请求。计划用
+真实 trace 和主指标补足这些限制，不据此夸大整体加速。

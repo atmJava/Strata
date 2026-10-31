@@ -22,8 +22,10 @@ Based on #630 by CC-David-CC (the item/event assembler, namespace tools, call_id
 from __future__ import annotations
 
 import base64
+import collections
 import copy
 import json
+import threading
 import time
 import uuid
 
@@ -363,10 +365,12 @@ def thread_title_events(req: dict, model: str):
 # client_metadata["x-codex-turn-metadata"] (a JSON string, Codex 0.140 and later): `request_kind` and the
 # conversation's `session_id` and `thread_id` (a sub-agent shares its parent's session, not its thread; a fork gets
 # its own).  `prompt_cache_key` is not used: it groups requests for caching, and Codex gives sub-agents and ephemeral
-# forks their parent's.  A request without that metadata is rendered as sent and changes nothing.  One entry, replaced
-# by each prompt of a Codex conversation: nothing grows, and a compaction of any other conversation finds a different
-# (session_id, thread_id) and renders its request as sent.  Lost (a restart): the prompt is read again, as without it.
-_kept_prompt_tools = (None, None)                    # ((session_id, thread_id), its prompt's tools as JSON or None)
+# forks their parent's.  A request without that metadata is rendered as sent and changes nothing.  A main agent and
+# its children may interleave, so each conversation keeps its own tools in a bounded LRU.  Lost (a restart): the
+# prompt is read again, as without it.
+_PROMPT_TOOLS_LIMIT = 12                             # matches the configured conversation-cache slot count
+_kept_prompt_tools: "collections.OrderedDict[tuple[str, str], str | None]" = collections.OrderedDict()
+_kept_prompt_tools_lock = threading.Lock()
 
 
 def _codex_turn(req: dict):
@@ -387,8 +391,14 @@ def prompt_tools(req: dict, tools):
     """-> the tools the prompt is rendered with: request_tools' `tools`, or for a Codex compaction request without
     tools the ones its own conversation's last prompt was rendered with (so its prompt starts as that one did)."""
     kind, conversation = _codex_turn(req)
-    owner, kept = _kept_prompt_tools
-    if kind != "compaction" or conversation is None or owner != conversation or kept is None or req.get("tools"):
+    if kind != "compaction" or conversation is None or req.get("tools"):
+        return tools
+    with _kept_prompt_tools_lock:
+        if conversation not in _kept_prompt_tools:
+            return tools
+        kept = _kept_prompt_tools[conversation]
+        _kept_prompt_tools.move_to_end(conversation)
+    if kept is None:
         return tools
     return json.loads(kept)                          # a fresh copy: the kept one is nobody's to change
 
@@ -397,12 +407,16 @@ def prompt_made(req: dict, tools):
     """The prompt of `req` was rendered with `tools` and goes to the engine: a Codex request that is not a compaction
     leaves its conversation and those tools for that conversation's compaction. A thread-title turn is another
     session Codex sends beside the real one, and it does not replace this entry."""
-    global _kept_prompt_tools
     if (_turn_body(req) or {}).get("thread_source") == "thread_title":
         return
     kind, conversation = _codex_turn(req)
     if conversation is not None and kind != "compaction":
-        _kept_prompt_tools = (conversation, json.dumps(tools) if tools else None)
+        kept = json.dumps(tools) if tools else None
+        with _kept_prompt_tools_lock:
+            _kept_prompt_tools[conversation] = kept
+            _kept_prompt_tools.move_to_end(conversation)
+            while len(_kept_prompt_tools) > _PROMPT_TOOLS_LIMIT:
+                _kept_prompt_tools.popitem(last=False)
 
 
 def text_format(req: dict):
