@@ -4,7 +4,7 @@ set -u
 cd /opt/ai/src/strata-0.2.2 || exit 1
 cp -p strata-022.prod.json strata-022.json
 echo "restored strata-022.prod.json -> strata-022.json"
-echo 'p99832586' | sudo -S systemctl restart strata.service 2>/dev/null
+sudo -n systemctl restart strata.service
 echo "restart rc=$?"
 for i in $(seq 1 60); do
   H=$(curl -s -m 5 http://127.0.0.1:8080/health 2>/dev/null)

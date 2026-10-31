@@ -39,12 +39,13 @@ cp -p "$RUN" "$BK/strata-022.json.$TS"
 cp -p "$CFG" "$RUN"
 echo "config in place: $CFG   backup: $BK/strata-022.json.$TS   old engine pid ${oldpid:-none}"
 
-echo 'p99832586' | sudo -S systemctl restart strata.service
+sudo -n systemctl restart strata.service
 rc=$?
 echo "restart rc=$rc"
 if [ "$rc" -ne 0 ]; then
   echo "RESTART FAILED: the new config is in place but the service was not restarted."
-  echo "Roll back with: cp -p $BK/strata-022.json.$TS $RUN && sudo -S systemctl restart strata"
+  echo "Authenticate sudo in this terminal first, or roll back with:"
+  echo "  cp -p $BK/strata-022.json.$TS $RUN && sudo systemctl restart strata"
   exit 1
 fi
 
