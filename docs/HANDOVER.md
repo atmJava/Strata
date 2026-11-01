@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-11-01（冷 prompt 并发读修复已部署；成本主线转入长输出 decode）。
+> 整理时间：2026-11-01（用户已停止优化计划；生产进入仅维护稳定模式）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -16,15 +16,16 @@
 
 ## 2. 当前断点
 
-- **全局目标已第四十五次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
-  Xid、engine 非预期退出或错误结果风险时，立即暂停性能实验并保存事故。没有新事故时，
-  不空等低频故障，继续建立代表性任务质量门，再恢复普通单代理编辑—测试循环的性能优化。
+- **优化计划已停止**：用户明确要求现在停止计划并维护稳定。不得启动新候选、基准、槽数
+  比较、模型切换或重启；只处理明确故障、正确性问题，或在用户重新授权后恢复工作。
+  严重 GPU/运行时故障仍有最高抢占权；出现新 Xid、engine 非预期退出或错误结果风险时，
+  保存事故并维护可用性。
   质量、任务成功率、测试正确性和工具协议都是硬门，不能用速度交换失败或严格收口缺失。
   真实 AI vibe coding 的最终目标仍是任务完成时间、首个可执行结果、严重尾部和成功率，
   而不只优化 token/s。用户通常 1 个主代理、偶尔 2 个、峰值 1 主 3 子代理；1/2 路为主，
   4 路非回退，6/8 只做安全回归。任何局部候选先算真实触发率后的整任务 1% 上界；没有进入
-  用户实际路径的能力只算机制收益。完整计划在
-  [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
+  用户实际路径的能力只算机制收益。归档计划在
+  [`archive/2026-10-31-agent-workload-throughput.md`](archive/2026-10-31-agent-workload-throughput.md)。
   平台内的旧“2/4/6/8 路引擎”目标仍是 paused。当前目标接口不能改写文本或恢复它；
   接手时以本仓库第四十五版计划
   为权威，不要回到平台旧目标的状态快照。
@@ -109,12 +110,12 @@
   静默 `82.059→1.713 s`（`97.912%`），整场景 wall `104.843→83.118 s`（`20.721%`），
   joiner TTFT `84.058→72.384 s`；4 路 5 波 `14.0→13.1 s`。见
   [结果](work/AGENT_PROMPT_STAGING_CONCURRENT_RESULT-20261101.md)。
-- **当前性能主线**：`AGENT-CURRENT-PROD-COST-REMAP`。CPU share 已把普通 hot
+- **已停止的性能主线**：`AGENT-CURRENT-PROD-COST-REMAP`。CPU share 已把普通 hot
   continuation 降到 `0.52/1.35 s`，但普通 cold 仍约 `11.37 s`。真实 rollout 的
   `512+` output 请求占 `43.5%`，却占约 `72.1%` 模型跨度，因此普通长输出 decode 仍是
   最大可改成本。用户明确说“鹈鹕那个不管了”，其单个 `15,036` token / `173.323 s`
-  会话只保留为异常值，不作为代表目标或验收锚点。从这里继续；不继续扫描 CPU share、
-  cold prompt gate、鹈鹕样本或 HC_SPLIT 邻近参数。
+  会话只保留为异常值，不作为代表目标或验收锚点。用户现已停止该主线；不继续扫描 CPU
+  share、cold prompt gate、鹈鹕样本、槽数、模型切换或 HC_SPLIT 邻近参数。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
   `handoff_safe=1`，DKMS 与 initramfs 自动路径固定，功耗墙各为 `280 W`。当前慢不是
@@ -375,10 +376,10 @@
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
   因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线。
   普通热续轮 `short_read`、编辑—测试重复测试和 MTP 批量 draft K/V 也已分别否决。
-当前主动项是 `AGENT-CURRENT-PROD-COST-REMAP`，从真实长输出的 `173.323 s` decode
-继续。`GPU-XID13-STABILITY` 继续被动监测，新 Xid 仍有抢占权；HC_SPLIT 的有限 smoke
-通过不能写成硬件修复。cold prompt 并发读修复和 CPU-share guard 均已完成部署；223K
-旧会话仅为低频 p99。
+优化计划已停止，当前没有主动实验。历史断点 `AGENT-CURRENT-PROD-COST-REMAP` 保持暂停；
+`GPU-XID13-STABILITY` 仍在维护稳定时被动监测，新 Xid 仍有抢占权；HC_SPLIT 的有限
+smoke 通过不能写成硬件修复。cold prompt 并发读修复和 CPU-share guard 均已完成部署；
+223K 旧会话仅为低频 p99。
 
 ## 3. 当前运行与恢复基线
 

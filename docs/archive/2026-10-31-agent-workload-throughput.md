@@ -1,11 +1,14 @@
 # 真实 AI vibe coding 优化计划
 
+> 归档：2026-11-01。用户明确要求停止优化计划并维护稳定；本文件只保留历史目标、
+> 已完成收益、否决方向和接手证据。当前没有主动性能实验，生产断点以 `STATE.md` 为准。
+
 日期：2026-10-31（2026-11-01 第四十五次修订）
 
-状态：继续执行。当前主线是 `AGENT-CURRENT-PROD-COST-REMAP`，从真实长输出 decode
-开始；不重扫已否决的 CPU-share、cold prompt gate、host/head/group 邻域。
-`GPU-XID13-STABILITY` 继续被动监测并保留新事故抢占权；HC_SPLIT 的 27 请求 smoke
-通过不等于硬件修复，也不再无限空等低频故障。
+状态：已停止并归档。计划停止点原为 `AGENT-CURRENT-PROD-COST-REMAP`；用户决定不再
+继续长输出 decode 和局部 1% 优化，生产保持现有已验收配置。只有用户重新授权，或出现
+新的生产故障时才恢复计划。`GPU-XID13-STABILITY` 仍在维护稳定时被动监测；HC_SPLIT
+不是硬件修复。
 
 ## 全局目标
 

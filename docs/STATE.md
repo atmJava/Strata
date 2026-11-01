@@ -1,21 +1,16 @@
 # 当前状态
 
+> 2026-11-01 运行模式：**优化计划已按用户指令停止，生产进入仅维护稳定模式**。
+> 当前没有主动实验、候选构建、重启计划或后台基准；不要自行恢复优化。
+
 > 接手顺序：`RULES.md` → 本文件 → `ROADMAP.md` → `ITERATION_LOG.md` 最近一条。
 > 完整证据在 `EVIDENCE_LEDGER.md`；候选和回滚在 `WORK_QUEUE.md`。
 
-- 全局目标（第四十五次修订）：持续提高真实 AI vibe coding 的任务成功率、指令遵循、
-  工具协议和代码正确性，
-  再缩短可用代码、测试结果或明确阻塞的出现时间。严重 GPU/运行时事故有最高抢占权；没有
-  新事故时继续处理真实用户等待。用户通常 1 个主代理、偶尔 2 个，4 路非回退，6/8 只做
-  安全回归。1% 也算收益，但必须先证明候选进入现役 batch/slot、layer split 和真实 DSH
-  路径，并给出触发率、绝对秒数和保守整任务上界。不可达的 env-only 结果只算机制证据；
-  每轮先处理真实整任务中最大的可改成本，局部机制没有生产可达性和 1% 上界就立即关闭。
-  质量归因必须使用同 runner、模型目录、fixture、提示词和 provider 的 B0/B1 配对；
-  B0/B1 共同失败只能证明不是候选回归，不能算质量通过。
+- 全局目标：**保持现有生产稳定可用**，只处理明确的故障、数据正确性问题或用户重新授权
+  的变更。速度优化不再是当前目标；1% 历史收益保留在证据中，但不再为此启动实验。
 - 未完成采纳项：21
-- 当前项：AGENT-CURRENT-PROD-COST-REMAP
-  从真实 `512+` output 请求的 decode 分布继续；用户明确忽略的鹈鹕 15K 样本只作异常值，
-  不作为优先目标。GPU-XID13 继续被动监测，新 Xid 抢占。
+- 当前项：AGENT-CURRENT-PROD-COST-REMAP（暂停，无主动执行）。模型/槽数比较及所有新
+  候选均停止；未完成采纳项只表示历史队列，不授权继续执行。
 - 上一项完成：`AGENT-PROMPT-STAGING-CONCURRENT` 已采纳。冻结约 154K cold read 下，
   两个 decode 邻居最长静默 `82.059→1.713 s`，整场景 wall `104.843→83.118 s`
   （`20.721%`），joiner TTFT `84.058→72.384 s`；4 路 5 波 `14.0→13.1 s`。
@@ -40,7 +35,7 @@
 - 测试方法已修正：`probe-dsh-session-cost.py` 过去只统计成功的 `assistant/message`，
   会把上述 5 步失败会话报成 4 步。现在 `assistant/attempt` 也进入 step/model wall，并只
   保留 `failed`、finish kind 和 error code，不保留推理或错误正文；专项 `9 passed`。
-- 暂停项：`AGENT-CURRENT-PROD-COST-REMAP`。最新长输出会话 `task_wall_s=202.486 s`，
+- 已停止项：`AGENT-CURRENT-PROD-COST-REMAP`。最新长输出会话 `task_wall_s=202.486 s`，
   单个 `15,036` output-token step 占 `173.323 s`，模型总计 `96.799%`；这确认长输出
   decode 是后续性能大头，但在 GPU 用户可见失败收敛前不继续调它。
 - 标题方向已关闭：end-of-turn 会让 DSH 在最终主回复后取消标题客户端，真实代理记录
@@ -97,7 +92,6 @@
 - 质量配对必须保存并核对 runner、模型、reasoning、模型目录 SHA-256、fixture suite
   SHA-256、prompt suffix SHA-256 和 provider URL。比较器把候选从通过变失败判为回归，
   把双方共享失败判为 `blocked_shared_failures`；后者不能进入性能矩阵或生产。
-- 当前文档：总计划
-  [`2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第四十五次修订；旧平台全局目标仍是 paused，接口不能改写正文，本文件和仓库计划
-  是当前权威目标。
+- 当前文档：旧总计划已归档为
+  [`2026-10-31-agent-workload-throughput.md`](archive/2026-10-31-agent-workload-throughput.md)；
+  本文件是当前运行状态的权威入口。旧平台全局目标仍为 paused，接口不能改写正文。
