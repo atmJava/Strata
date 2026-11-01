@@ -26,10 +26,10 @@
   单点收益真实，但没有优先处理“一个读冻结两个会话”和长输出 decode 这类整任务大头。
   本轮修复证明先量化整任务成本和等待尾部更有效；文档已把 GPU Xid 改为被动监测/新事故
   抢占，当前主动项恢复为 `AGENT-CURRENT-PROD-COST-REMAP`。
-- 下一步与理由：最新真实 DSH `task_wall_s=202.486 s` 中单个 `15,036` output-token
-  step 占 `173.323 s`，模型占 `96.799%`。下一步只拆真实长输出 decode 的模型执行、
-  MTP verify、同步/launch 与槽服务间隙，选一个不同机制；不重扫已否决的 draft 参数或
-  short local kernels。
+- 下一步与理由：真实 rollout 中 `512+` output 请求占 `43.5%`、模型跨度约 `72.1%`；
+  下一步只拆这类真实 decode 的模型执行、MTP verify、同步/launch 与槽服务间隙，选一个
+  不同机制。用户明确说过“鹈鹕那个不管了”，因此其 15K 会话只保留为异常值，不进入
+  代表性验收；不重扫已否决的 draft 参数或 short local kernels。
 
 ## I-20261101-148 · systemd 自启动修复并完成正常重启与故障注入
 

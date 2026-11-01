@@ -110,10 +110,11 @@
   joiner TTFT `84.058→72.384 s`；4 路 5 波 `14.0→13.1 s`。见
   [结果](work/AGENT_PROMPT_STAGING_CONCURRENT_RESULT-20261101.md)。
 - **当前性能主线**：`AGENT-CURRENT-PROD-COST-REMAP`。CPU share 已把普通 hot
-  continuation 降到 `0.52/1.35 s`，但普通 cold 仍约 `11.37 s`。下一步先读取最新真实
-  DSH 会话已确认长输出 decode 是后续最大普通成本：一个 `15,036` output-token step
-  占 `173.323 s`，整任务 `202.486 s`。从这里继续；不继续扫描 CPU share、cold prompt
-  gate 或 HC_SPLIT 邻近参数。
+  continuation 降到 `0.52/1.35 s`，但普通 cold 仍约 `11.37 s`。真实 rollout 的
+  `512+` output 请求占 `43.5%`，却占约 `72.1%` 模型跨度，因此普通长输出 decode 仍是
+  最大可改成本。用户明确说“鹈鹕那个不管了”，其单个 `15,036` token / `173.323 s`
+  会话只保留为异常值，不作为代表目标或验收锚点。从这里继续；不继续扫描 CPU share、
+  cold prompt gate、鹈鹕样本或 HC_SPLIT 邻近参数。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
   `handoff_safe=1`，DKMS 与 initramfs 自动路径固定，功耗墙各为 `280 W`。当前慢不是

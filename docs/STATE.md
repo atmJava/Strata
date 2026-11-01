@@ -14,7 +14,8 @@
   B0/B1 共同失败只能证明不是候选回归，不能算质量通过。
 - 未完成采纳项：21
 - 当前项：AGENT-CURRENT-PROD-COST-REMAP
-  从真实长输出 decode 继续；GPU-XID13 继续被动监测，新 Xid 抢占。
+  从真实 `512+` output 请求的 decode 分布继续；用户明确忽略的鹈鹕 15K 样本只作异常值，
+  不作为优先目标。GPU-XID13 继续被动监测，新 Xid 抢占。
 - 上一项完成：`AGENT-PROMPT-STAGING-CONCURRENT` 已采纳。冻结约 154K cold read 下，
   两个 decode 邻居最长静默 `82.059→1.713 s`，整场景 wall `104.843→83.118 s`
   （`20.721%`），joiner TTFT `84.058→72.384 s`；4 路 5 波 `14.0→13.1 s`。
