@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-175，按编号）
+## 台账索引（L-000…L-178，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -186,9 +186,12 @@
 | L-170 | 11-01 05:xZ–06:xZ | 真实 DSH turn 结束时取消仍在等待的标题；标题等待 `9.421 s` 后 `BrokenPipeError/502`。提前 SSE 头与合法 chunked 心跳无效。该轮 task wall `9.598 s`、runner wall `11.628 s`，代码/测试/sentinel 与五个 model step 全过。128/64 cap task wall `12.004/11.490 s` 仍跨两个主 step；固定前缀 D1/D2 `14.161/12.221 s` 且均 `cached=0` | **DSH-TITLE-END-OF-TURN 否决**：标题生命周期归 DSH，服务端不能安全延后；不扫邻近等待、token cap 或 prompt。候选代码已移除，生产未重启；下一项恢复 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` |
 | L-171 | 11-01 | resident direct-path 逐层审计：热长轮 `T=865` 仅 layer `35/44/47` native 可支持且 staged `80–141`，实际 `fused_staged=0/48`；热短轮三波只两次各命中一层，单层理论上限约 `3.8 ms`；9/9 正确、零 Xid | **AGENT-HOT-TURN-RESIDENT-PATH-AUDIT 否决**：原组合 A/B 的 `1.862%` 不能归因该路径；不补 4/6/8，不扫 staging 数量 |
 | L-172 | 11-01 21:2xZ | 三层 16-expert 双缓冲真实命中 layer `35/44/47`，批次 `4–9`，9/9 正确；1 路 hot-long wall `1.511603→1.522504 s`（慢 `0.721%`）、prompt `1395.3→1397.2 ms`（慢 `0.136%`），三波仅胜一波 | **AGENT-HOT-TURN-STAGED-STREAM-PIPE 否决**：路径命中不等于墙钟改善；源码移除、A1 恢复，不扫 batch/ring |
+| L-176 | 11-01 00:03–00:09Z | 生产只增加 `STRATA_HC_SPLIT=1`；两卡日志确认 split 与逐位自检。1/2 路各 3 波 27 请求全成功、零外来请求、期望回复 `27/27`、finish 全 `stop`；六形状相对旧 B1 `+0.048%/+0.897%/+0.163%/+0.889%/+0.124%/-0.057%`，均在约 1% 噪声内。窗口约数分钟无新 Xid | **GPU-XID13-STABILITY P0 有限验证中**：路径和短 smoke 通过，不代表修复；完整 7 项质量、1/2 路长曝光、4/6/8 与至少 60 分钟混合曝光未完成 |
+| L-177 | 11-01 00:58–01:08Z | 旧 unit 指向不存在 engine；稳定 launcher/config 接管后，普通 restart 通过，受控 `SIGKILL` 后 15 秒自动生成新 PID，`NRestarts=1`，最终 health loaded、262144、6/2 | **自启动修复完成**；生产改由 enabled `strata.service` 管理；GPU Xid P0 状态不变 |
 | L-175 | 11-01 01:26:52–01:27:28 CST | 最新严重 DSH 会话共 5 步、`task_wall_s=36.31 s`；第 5 步 `2.296 s` 后 `layer 11 never rang`，GPU0 同秒 8×Xid 13 + Xid 43。成功 4 步模型墙 `32.853 s`，修正失败步骤后总模型墙 `35.149 s`。另一个长输出会话 `task_wall_s=202.486 s`，一个 15,036-output-token step `173.323 s`，模型 `96.799%` | **GPU-XID13-STABILITY P0 抢占**：成本重排暂停；下一步单变量 `STRATA_HC_SPLIT=1`。会话探针已计入失败 attempt 并只保留 finish/error code |
 | L-174 | 11-01 22:4xZ–23:5xZ | 生产选项 B0/B1/B0r：1 路 hot-short/hot-long wall 改善 `11.825%/10.991%`，2 路 `7.896%/8.056%`，四个比较均 `3/3` 波胜，控制漂移最大 `1.53%`；schema 5 质量 B0/B1 均 `7/7`；6/8 共 42 请求零错误，最终 binary 补跑仍零错误并记录两个输出哈希变体 | **AGENT-BATCH-PREFILL-CPU-SHARE-GUARD 采纳为 opt-in**：真实 CPU gate `3,698`、shared `2,814`；lease refusal/dispatch wait 未命中，不能宣称竞争路径时延；最终 engine `e60a334c...` 已部署 |
 | L-173 | 11-01 21:36Z–21:47Z | CPU-share 隔离 B0/B1 同为 `batch=0`、20,693 slots：hot-short wall `0.507168→0.492020 s`（`2.987%`、`15.148 ms`），hot-long `1.316394→1.290809 s`（`1.944%`、`25.585 ms`），9/9 正确；B1 精确 tail 有 264 gate/128 shared，B0 为 0。生产 `--batch 6` 命中 `o.batch <= 0` 静态门；已恢复 `254299/254303/254308`，无新增 Xid | **env-only 生产候选否决**：约 2% 仅是机制信号；只允许一次 batch prefill/decode `ExpertPool` 所有权审计，无阻塞 lease 即关闭 |
+| L-178 | 11-01 prompt-staging | `STRATA_IO_PREFETCH` 使 staged-source gate 关闭 `STRATA_PIPED_CONCURRENT`；只放行独立 prompt copy 的 page-fill `experts.bin`。冻结 154K：wall `104.843→83.118 s`（`20.721%`）、joiner TTFT `84.058→72.384 s`、邻居最长静默 `82.059→1.713 s`、读窗邻居 token `215→1,548`；4 路 5 波 `14.0→13.1 s`、聚合 `110.7→119.0 tok/s`；两轮/三轮真实并发读、零错误/重启/新 Xid | **AGENT-PROMPT-STAGING-CONCURRENT 采纳并部署**：engine `e1208e51...`，稳定 config `d76772e7...`；当前主线恢复 `AGENT-CURRENT-PROD-COST-REMAP`，从 15,036-token / 173.323 s 长输出 decode 开始 |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -234,6 +237,94 @@ runner wall 或只看一次 task wall 会把“标题已被取消”误判成契
 
 完整结果见
 [`DSH_TITLE_SCHEDULING_RESULT-20261101.md`](work/DSH_TITLE_SCHEDULING_RESULT-20261101.md)。
+
+## L-177 · systemd 自启动修复并完成 restart / SIGKILL 验证
+
+**判定：自启动修复完成；生产不再依赖 detached 手动实例。**
+
+旧 `strata.service` 调用 `/opt/ai/bin/run-strata-official-027.sh`，其 config 指向不存在的
+`/opt/ai/src/strata-0.2.7/build-sm75/strata`；开机后 unit 每 15 秒重试并以 exit 1
+退出。生产当时实际由 detached 手动进程提供服务，所以重启后 8080 不会恢复。
+
+新入口：
+
+```text
+/etc/systemd/system/strata.service
+/opt/ai/bin/run-strata-production.sh
+/opt/ai/etc/strata-production.json
+```
+
+unit 使用 `Restart=always`、`RestartSec=15`、`StartLimitIntervalSec=0` 和
+`KillSignal=SIGTERM`。普通 `systemctl restart` 从 PID `4631` 切到 `5172` 并最终 ready；
+对 `5172` 受控 `SIGKILL` 后，systemd 在 15 秒内拉起 PID `5836`、`NRestarts=1`，
+最终 health loaded、262144、6 slots / 2 groups。重启窗口没有新的 `NVRM: Xid`。
+
+身份：
+
+```text
+stable config d76772e7089c18af38c0a8932588d99674a8b6bd8208f386b6c8599fd81c863a
+launcher      a1e5619e9112a15272bdc233aa97f9d15e2efd8eaa92f37a2e67b468f287999b
+unit          893f8d0595ee6657a3e8e5a414870b99272cbb57c4e6fc4f4118d08f818276e1
+engine        e60a334c0ca5c1974d79385256aaf90519bcb646e2626f7e66de818d104b0ab7
+```
+
+完整记录见
+[`STRATA_SYSTEMD_AUTOSTART_RESULT-20261101.md`](work/STRATA_SYSTEMD_AUTOSTART_RESULT-20261101.md)。
+
+## L-178 · 冷 prompt 独立拷贝放行并发读；邻居冻结从 82 秒降到 1.7 秒
+
+**判定：`AGENT-PROMPT-STAGING-CONCURRENT` 采纳并部署。当前性能主线恢复为
+`AGENT-CURRENT-PROD-COST-REMAP`。**
+
+生产已设置 `STRATA_PIPED_CONCURRENT=1`，但 `STRATA_IO_PREFETCH` 使
+`FileExpertSource::stages_blobs()` 为真，粗粒度 gate 因而关闭所有 staged source 的并发
+读。候选新增默认 false 的 `prompt_copies_independent()`，只对 page-fill
+`experts.bin`、无 GGUF role assembly/direct handles 且映射有效的 source 返回 true。
+其他 staged/direct/GGUF/helper source 保持关闭。
+
+冻结约 154K cold prompt、两路 decode 重复三轮：
+
+| 指标 | 基线 A2 中位 | 候选中位 | 变化 |
+|---|---:|---:|---:|
+| 整场景 wall | `104.843 s` | `83.118 s` | 快 `20.721%` |
+| joiner TTFT | `84.058 s` | `72.384 s` | 快 `13.888%` |
+| 邻居最长无 token 静默 | `82.059 s` | `1.713 s` | 降 `97.912%` |
+| 读窗口邻居 token | `215` | `1,548` | `7.20x` |
+
+候选三轮都出现真实并发读，读期间 decode 行数分别为 `1,795/1,552/1,554`。4 路最终
+5 波对照：baseline wall 中位 `14.0 s`、聚合 `110.7 tok/s`；candidate `13.1 s`、
+`119.0 tok/s`，wall 快 `6.4%`、聚合高 `7.5%`。最初 3 波候选的 `14.6 s` 异常样本保留
+在结果中，没有被丢弃。
+
+固定 greedy 中 baseline 可重复的 prompt 1/2/3/5 在候选两轮和基线两轮逐字一致；
+prompt 4/6 的基线自身不稳定，不能作为逐字门。`batch_read_test: ok`、
+`file_expert_source_test: PASS`、`py_compile` 与 `git diff --check` 通过。health 保持
+loaded、262144、6 slots / 2 groups；测量窗口零 HTTP/执行错误、意外 finish、engine
+重启或新增 NVRM Xid。
+
+运行身份：engine `e1208e5166...`（candidate 与安装后的稳定路径同 hash），稳定 config
+`d76772e708...`，service/engine PID `41769/41789`。回滚为恢复
+`e60a334c...` engine 并 restart。完整结果见
+[`AGENT_PROMPT_STAGING_CONCURRENT_RESULT-20261101.md`](work/AGENT_PROMPT_STAGING_CONCURRENT_RESULT-20261101.md)。
+
+## L-176 · HC_SPLIT 路径生效且短 smoke 通过，稳定性仍未证明
+
+**判定：`GPU-XID13-STABILITY` 保持在 P0 的有限验证阶段；HC_SPLIT 是可回滚风险缓解
+候选，不是硬件修复。**
+
+生产在 CPU-share opt-in 上只增加 `STRATA_HC_SPLIT=1`。实际 engine env、health、
+6 slots / 2 groups 和两卡日志的 split/逐位自检均已核对。1/2 路各 3 波共 27 请求：
+零 HTTP/执行错误、零外来请求、期望回复 `27/27`、finish 全 `stop`。
+
+相对旧生产 B1，1 cold、1 hot-short、1 hot-long、2 cold、2 hot-short、2 hot-long 的 wall
+变化为 `+0.048%/+0.897%/+0.163%/+0.889%/+0.124%/-0.057%`，均在约 1% 噪声内。窗口从
+部署到本次核对只有数分钟，不能用于证明低频 Xid 已消失。
+
+报告 `/opt/ai/logs/gpu-xid13-hc-split-20261101T000258Z/HC1-hot.json`，SHA-256
+`f291a15e4b6a119d20b318b8f3081062fc15c6aed2159c3f2d2bb9e9321b7756`；当前 config
+SHA-256 `c956f280afaeae0847b48caed315bcc90fb7a6c74364494a8e25d62590b23312`。
+完整 7 项质量、1/2 路长曝光、4/6/8 和至少 60 分钟真实混合窗口仍未完成。详见
+[`GPU_XID13_HC_SPLIT_RESULT-20261101.md`](work/GPU_XID13_HC_SPLIT_RESULT-20261101.md)。
 
 ## L-175 · 失败 attempt 被旧成本探针漏掉；GPU0 用户失败重新抢占
 

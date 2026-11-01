@@ -3001,6 +3001,14 @@ bool FileExpertSource::transient(int64_t layer, int64_t expert) const {
     return override_.empty() || override_[index] == nullptr;
 }
 
+bool FileExpertSource::prompt_copies_independent() const {
+    // The production experts.bin page-fill path: decode's blob() may recycle stage_buf_, while the prompt Stager's
+    // copy_blobs() writes into its own pinned ring.  copy_blob() reads either the read-only resident complement or the
+    // mapping, and its pread scratch is thread-local.  Direct/unbuffered modes and GGUF role assembly keep the
+    // conservative gate until they have their own ownership proof.
+    return io_pf_ && role_ptr_.empty() && direct_.empty() && pdirect_.empty() && base_ != nullptr && !unmapped_;
+}
+
 double FileExpertSource::cached_share(int64_t samples) const {
 #if defined(__linux__)
     if (role_ptr_.empty() || unmapped_ || samples <= 0 || n_layers_ <= 0 || n_expert_ <= 0) return -1.0;

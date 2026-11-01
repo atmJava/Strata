@@ -802,9 +802,11 @@ void test_io_prefetch() {
     }
     FileExpertSource source;
     require(source.open(dir.path.string(), layers, experts, err), "could not map the synthetic pack: " + err);
+    require(!source.prompt_copies_independent(), "a plain mapped source claimed independent prompt copies");
     source.set_io_prefetch(true, 3);
 #if defined(__linux__)
     require(source.io_prefetch() && source.warms(), "io prefetch did not turn on");
+    require(source.prompt_copies_independent(), "the experts.bin page-fill source did not own prompt copies");
     // predictions for the next layers, some of them wrong or repeated, while the layers are read
     for (int round = 0; round < 20; ++round)
         for (int64_t l = 0; l < layers; ++l) {
@@ -835,8 +837,10 @@ void test_io_prefetch() {
     source.set_io_prefetch(false, 0);
     require(!source.io_prefetch() && !source.io_stats() && !source.io_sched(),
             "disabling io prefetch retained its worker configuration");
+    require(!source.prompt_copies_independent(), "prompt copies survived disabled io prefetch");
     source.set_io_prefetch(true, 1);
     require(source.io_prefetch() && source.io_stats(), "io prefetch did not restart");
+    require(source.prompt_copies_independent(), "prompt copies did not return with io prefetch");
     require(source.blob(0, 0) != nullptr, "an io-prefetch lookup failed after restart");
 #else
     require(!source.io_prefetch(), "io prefetch on a platform without it");

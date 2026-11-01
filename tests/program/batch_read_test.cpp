@@ -57,6 +57,19 @@ int main() {
         for (size_t j = i; j < std::size(each); ++j) s.*each[j] = true;
         CHECK(same(concurrent_read_off(s), named[i]));
     }
+    {
+        ConcurrentReadSetup s;
+        s.staged_source = true;
+        s.staged_prompt_independent = true;
+        CHECK(concurrent_read_off(s) == nullptr);
+    }
+    {
+        ConcurrentReadSetup s;
+        s.staged_source = true;
+        s.staged_prompt_independent = true;
+        s.other_source = true;
+        CHECK(same(concurrent_read_off(s), named[std::size(each) - 1]));
+    }
     // piped_read_piece (#1906): off -> one run; whole chunks, at least one, at most 32
     CHECK(piped_read_piece(0, 8192) == 0);
     CHECK(piped_read_piece(-5, 8192) == 0);

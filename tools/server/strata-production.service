@@ -1,0 +1,25 @@
+[Unit]
+Description=Strata production inference server (HC_SPLIT, SC117 IQ3_XXS, 2 GPUs)
+Documentation=file:/opt/ai/docs/HISTORY.md
+After=network-online.target nvidia-persistenced.service strata-host-tuning.service
+Wants=network-online.target nvidia-persistenced.service strata-host-tuning.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=atm
+Group=atm
+WorkingDirectory=/opt/ai/src/strata-two-stream-serial-20261031
+ExecStart=/opt/ai/bin/run-strata-production.sh
+Restart=always
+RestartSec=15
+TimeoutStartSec=0
+TimeoutStopSec=240
+KillMode=control-group
+KillSignal=SIGTERM
+LimitNOFILE=1048576
+StandardOutput=append:/opt/ai/logs/strata-service.log
+StandardError=append:/opt/ai/logs/strata-service.log
+
+[Install]
+WantedBy=multi-user.target

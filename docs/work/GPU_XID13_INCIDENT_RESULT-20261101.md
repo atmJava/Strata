@@ -3,7 +3,9 @@
 日期：2026-11-01
 
 状态：偶发 GPU 基础设施故障已确认；固定请求不能复现；根因仍是
-“高度怀疑改装卡显存时序/板级稳定性”，不是已证实的芯片损坏，也不是已完成的修复。
+“高度怀疑改装卡显存时序/板级稳定性”，不是已证实的芯片损坏。单变量
+`STRATA_HC_SPLIT=1` 已通过路径、自检和 27 请求 smoke，但完整质量、长曝光和
+4/6/8 安全尚未完成，不是已完成的修复。
 
 ## 触发
 
@@ -80,6 +82,21 @@ Xid 43: pid=172641, name=strata
 
 不能排除低频竞态、特定 GPU 微架构路径或板级/显存时序异常。
 
+## HC_SPLIT 候选 smoke
+
+生产在 CPU-share opt-in 上只增加 `STRATA_HC_SPLIT=1`。实际 engine env、health、
+6 slots / 2 groups 和两卡 split/逐位自检均已核对。1/2 路各 3 波、共 27 个请求：
+
+- 零 HTTP/执行错误，零外来请求；
+- 期望回复 `27/27`，finish 全 `stop`；
+- 相对旧生产 B1，六种形状 wall 变化为
+  `+0.048%/+0.897%/+0.163%/+0.889%/+0.124%/-0.057%`，均在约 1% 噪声内；
+- 报告后到本次核对约几分钟，未观察到新 Xid。
+
+这只证明候选路径生效、短 smoke 正确且没有明显性能回退。完整 7 项 coding quality、
+至少 60 分钟真实混合曝光、1/2 路长任务和 4/6/8 安全仍是未完成门。详见
+[`GPU_XID13_HC_SPLIT_RESULT-20261101.md`](GPU_XID13_HC_SPLIT_RESULT-20261101.md)。
+
 ## 同一设备的历史故障
 
 同一张 GPU 0 在 2026-09-25 曾记录不同软件栈下的 Xid 62/154，并由驱动标记
@@ -155,9 +172,9 @@ RTX 2080 Ti 改装 22 GB、相同 ESR `0x4c1eb72`、大量 Xid 13，并指出：
 3. 运行代表性 1/2 路混合负载时同步采集 GPU 状态；固定 prompt、单路、6 路并发和完整
    DSH 回合只用于不同代码路径，不作为硬件稳定性结论。窗口结束后用开始时间作 `--since`
    只读新增事件，避免把历史 Xid 混入本轮；
-4. 当前已有用户可见 Xid 失败，下一次维护窗口先验证单变量
-   `STRATA_HC_SPLIT=1` 是否绕开默认 staged cp.async 放大器；若只把 Xid 变成静默
-   wedge，仍判失败。随后测试可精确回滚的显存频率降低，最后才考虑 GPU0 单卡隔离；
+4. 单变量 `STRATA_HC_SPLIT=1` 已完成部署和短 smoke；继续完成完整质量、60 分钟真实
+   混合曝光与 4/6/8 安全。若新 Xid、质量回退或性能明显回退，恢复旧 config；若出现
+   新的 Xid，再单独测试可精确回滚的显存频率降低，最后才考虑 GPU0 单卡隔离；
 5. 不一次性关闭多个 Strata pipeline 开关。它们最多可能是放大器，没有证据支持当前就
    关闭；每次只改变一个变量。
 
@@ -187,11 +204,14 @@ RTX 2080 Ti 改装 22 GB、相同 ESR `0x4c1eb72`、大量 Xid 13，并指出：
 
 ## 当前生产状态
 
-- server / vision / engine：`172634 / 172636 / 193790`；
-- engine 在 Xid 后已自动重启，当前 health loaded；
-- 262144 context、6 slots / 2 groups、INT8 KV；
+- server / vision / engine：`295944 / 295950 / 295955`；
+- engine SHA-256：`e60a334c0ca5c1974d79385256aaf90519bcb646e2626f7e66de818d104b0ab7`；
+- 当前 config SHA-256：
+  `c956f280afaeae0847b48caed315bcc90fb7a6c74364494a8e25d62590b23312`；
+- engine env 在 CPU-share 生产开关之上增加 `STRATA_HC_SPLIT=1`，无 debug；
+- health loaded，262144 context、6 slots / 2 groups、INT8 KV；
 - `strata.service` 仍为 inactive；
-- 本轮文档和探针修改未要求重启。
+- launch 到 ready 约 `138 s`；当前处于有限 P0 验证，不是稳定性修复完成。
 
 ## 证据与工具
 

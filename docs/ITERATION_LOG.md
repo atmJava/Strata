@@ -3,6 +3,94 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-149 · 冷 prompt 并发读修复部署；成本主线回到长输出 decode
+
+- 目标 / 指标：消除 cold 长 prompt 读期间两个解码会话冻结的用户等待；主指标是同场景
+  wall、邻居最长无 token 静默、joiner TTFT，并要求 4 路和正确性不回退。
+- 根因：生产已设 `STRATA_PIPED_CONCURRENT=1`，但 `STRATA_IO_PREFETCH` 让
+  `FileExpertSource::stages_blobs()` 为真，gate 因此保守关闭所有 staged source 的并发读。
+- 改动：新增默认 false 的 `prompt_copies_independent()`；`FileExpertSource` 只对
+  page-fill `experts.bin` 且无 GGUF role assembly/direct handles、映射有效的 source
+  返回 true；其他 source 仍关闭。prompt 写 stager 自己的 ring，不共享 decode 复用的
+  `stage_buf_`。
+- 结果：冻结约 154K cold prompt 下，整场景 wall `104.843→83.118 s`（快 `20.721%`），
+  joiner TTFT `84.058→72.384 s`，邻居最长静默 `82.059→1.713 s`，读窗口邻居 token
+  `215→1,548`。4 路 5 波 wall `14.0→13.1 s`、聚合 `110.7→119.0 tok/s`。
+- 正确性与安全：固定 greedy 中基线可重复项逐字一致；异常基线样本单独排除；两个专项
+  测试、py_compile、diff check 通过；health loaded、262144、6 slots / 2 groups；零
+  HTTP/执行错误、意外 finish、engine 重启或新增 Xid。
+- 生产状态与回滚：engine `e1208e5166...` 已部署，稳定 config 保持
+  `d76772e708...`；service/engine PID `41769/41789`。回滚为恢复
+  `e60a334c...` engine 并 restart。
+- 计划偏差复盘：此前连续围绕 CPU share、head、group 和 cold gate 做局部实验，虽然
+  单点收益真实，但没有优先处理“一个读冻结两个会话”和长输出 decode 这类整任务大头。
+  本轮修复证明先量化整任务成本和等待尾部更有效；文档已把 GPU Xid 改为被动监测/新事故
+  抢占，当前主动项恢复为 `AGENT-CURRENT-PROD-COST-REMAP`。
+- 下一步与理由：最新真实 DSH `task_wall_s=202.486 s` 中单个 `15,036` output-token
+  step 占 `173.323 s`，模型占 `96.799%`。下一步只拆真实长输出 decode 的模型执行、
+  MTP verify、同步/launch 与槽服务间隙，选一个不同机制；不重扫已否决的 draft 参数或
+  short local kernels。
+
+## I-20261101-148 · systemd 自启动修复并完成正常重启与故障注入
+
+- 目标 / 指标：避免机器重启或 engine 异常退出后 Strata 长时间不可用；验收是 unit
+  `enabled`、普通 restart 成功、主进程被强杀后自动生成新 PID，最终 health loaded。
+- 根因：旧 unit 的 launcher 指向不存在的
+  `/opt/ai/src/strata-0.2.7/build-sm75/strata`，开机后在自动重试中反复以 exit 1 退出；
+  当时生产实际依赖一个 detached 手动实例，因此重启后没有自动恢复。
+- 改动：新增稳定 launcher `tools/server/run-strata-production.sh` 和 unit
+  `tools/server/strata-production.service`；稳定 config 快照为
+  `/opt/ai/etc/strata-production.json`。unit 使用 `Restart=always`、`RestartSec=15`、
+  `StartLimitIntervalSec=0`、`KillSignal=SIGTERM`，并等待 NVIDIA persistence 与 host
+  tuning。稳定 config 只把 A1 config 的 engine 日志改为 `/opt/ai/logs/strata-engine.log`。
+- 结果：普通 restart 后 PID `5172` 从冷加载到 health loaded；受控 `SIGKILL` 后
+  systemd 在 15 秒内启动 PID `5836`，`NRestarts=1`，随后再次 health loaded、
+  262144、6 slots / 2 groups。实测 server env 含四个既有开关，engine env 含
+  `STRATA_BATCH_SERIAL_TWO=1`、CPU-share 和 `STRATA_HC_SPLIT=1`。
+- 判决：systemd 自启动链路修复并验证；生产不再依赖 SSH 登录会话中的手动实例。
+  这不是 GPU Xid 修复，`GPU-XID13-STABILITY` 的有限验证状态不变。
+- 生产状态与回滚：unit SHA-256 `893f8d05...`，launcher `a1e5619e...`，稳定 config
+  `d76772e7...`；旧 unit 备份在
+  `/opt/ai/logs/strata.service.pre-autorestart-20261101`。
+- 证据：[自启动结果](work/STRATA_SYSTEMD_AUTOSTART_RESULT-20261101.md)、L-177。
+- 下一步与理由：按用户要求暂停计划，等待真实使用测试；只有出现新 Xid、错误 turn
+  或明确性能回退时才恢复主动实验。
+
+## I-20261101-147 · HC_SPLIT smoke 通过；P0 改为有限验证并清理计划噪声
+
+- 目标 / 指标：复盘 GPU Xid P0 是否偏离用户“更快且可靠完成 vibe coding”的总目标；用
+  smoke 的成功率、错误、1/2 路 wall 和真实路径命中决定是否继续，不以短窗口宣称修复。
+- 假设与预期：只增加 `STRATA_HC_SPLIT=1` 应能证明路径真实可达；若性能明显退化、回复
+  错误或 Xid 继续出现，立即回滚。先前脚本硬编码的旧臂名和文档重复叙事不应影响判决。
+- 为什么选这条路线：用户最后收到的是任务失败，且已有同秒 GPU0 Xid 证据；在不牺牲正确性
+  的前提下先排除或收敛这个用户可见风险，比继续做局部 1% 性能实验更高优先。
+- 改动与实验：核对远程生产、实际 env、双卡日志和报告；只增加 HC_SPLIT，未同时降低显存
+  频率或切换其他 pipeline。读取 27 请求报告并与旧生产 B1 的同形状结果比较。
+- 结果：两卡均记录 split 路径和逐位自检；1/2 路各 3 波共 27 请求，零 HTTP/执行错误、
+  零外来请求、期望回复 `27/27`、finish 全 `stop`。六个 wall 变化为
+  `+0.048%/+0.897%/+0.163%/+0.889%/+0.124%/-0.057%`，均在约 1% 噪声内。
+- 判决：HC_SPLIT 是“风险缓解候选 smoke 通过”，不是 GPU 修复。`GPU-XID13-STABILITY`
+  继续 P0，但只执行一个有限窗口：完整 7 项质量、1/2 路长曝光、4/6/8 安全和至少 60 分钟
+  真实混合曝光。通过后恢复 `AGENT-CURRENT-PROD-COST-REMAP` 并继续被动监测。
+- 计划偏差复盘：总目标没有偏。真实失败抢占超过普通提速是正确的；偏差在 P0 缺少明确
+  退出条件，且活跃文档仍混有旧 PID、“下一步做 HC_SPLIT”和重复历史，容易让人觉得
+  实验未做或已经修复。本轮已把旧 PID、“下一步做 HC_SPLIT”和重复历史从入口收敛，
+  证据仍保留在台账和 `docs/work/`。P0 不能无限围绕 HC_SPLIT 邻近参数打转。
+- 预期被推翻：无 Xid 的短窗口很容易被误写成稳定性通过，但低频故障不能由几分钟 smoke
+  排除；1/2 路性能在噪声内也不能当成加速收益。
+- 测试方法修正：P0 必须有“路径、完整质量、性能、并发、真实混合曝光、回滚”六项有限门；
+  短 smoke 与稳定性证明分开记录。当前文档只保留一个生产身份，历史身份要明确标成回滚或
+  历史证据。
+- 生产状态与回滚：server/vision/engine `295944/295950/295955`；engine
+  `e60a334c...`、当前 config `c956f280...`；回滚 config `2c4c7ac6...`。health loaded、
+  262144、6 slots / 2 groups，engine env 含 `STRATA_HC_SPLIT=1`。
+- 证据：L-176、
+  [HC_SPLIT result](work/GPU_XID13_HC_SPLIT_RESULT-20261101.md)、
+  [incident](work/GPU_XID13_INCIDENT_RESULT-20261101.md)。
+- 下一步与理由：先跑完整 7 项 coding quality，再用真实 1/2 路编辑—测试和长输出完成
+  60 分钟曝光；只有全部门通过才恢复成本重排。出现新 Xid、错误 turn 或质量回退立即回到
+  `2c4c7ac6...`，再单变量进入显存降频。
+
 ## I-20261101-146 · 失败会话重排确认 GPU0 用户失败，P0 重新抢占
 
 - 目标 / 指标：复盘最新两个真实 DSH 导出，判断当前最大用户风险，并决定 GPU 稳定性与

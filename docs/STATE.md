@@ -3,7 +3,7 @@
 > 接手顺序：`RULES.md` → 本文件 → `ROADMAP.md` → `ITERATION_LOG.md` 最近一条。
 > 完整证据在 `EVIDENCE_LEDGER.md`；候选和回滚在 `WORK_QUEUE.md`。
 
-- 全局目标（第四十三次修订）：持续提高真实 AI vibe coding 的任务成功率、指令遵循、
+- 全局目标（第四十五次修订）：持续提高真实 AI vibe coding 的任务成功率、指令遵循、
   工具协议和代码正确性，
   再缩短可用代码、测试结果或明确阻塞的出现时间。严重 GPU/运行时事故有最高抢占权；没有
   新事故时继续处理真实用户等待。用户通常 1 个主代理、偶尔 2 个，4 路非回退，6/8 只做
@@ -13,8 +13,13 @@
   质量归因必须使用同 runner、模型目录、fixture、提示词和 provider 的 B0/B1 配对；
   B0/B1 共同失败只能证明不是候选回归，不能算质量通过。
 - 未完成采纳项：21
-- 当前项：GPU-XID13-STABILITY（P0 抢占）
-- 上一项完成：`AGENT-BATCH-PREFILL-CPU-SHARE-GUARD` 已采纳为默认关闭、生产 opt-in。
+- 当前项：AGENT-CURRENT-PROD-COST-REMAP
+  从真实长输出 decode 继续；GPU-XID13 继续被动监测，新 Xid 抢占。
+- 上一项完成：`AGENT-PROMPT-STAGING-CONCURRENT` 已采纳。冻结约 154K cold read 下，
+  两个 decode 邻居最长静默 `82.059→1.713 s`，整场景 wall `104.843→83.118 s`
+  （`20.721%`），joiner TTFT `84.058→72.384 s`；4 路 5 波 `14.0→13.1 s`。
+  真实日志出现独立读线程且三轮分别 decode `1,795/1,552/1,554` 行。
+- 前一项完成：`AGENT-BATCH-PREFILL-CPU-SHARE-GUARD` 已采纳为默认关闭、生产 opt-in。
   生产选项 engine `e3d25b38...` 的 B0/B1/B0r 判决 `pass`，控制漂移最大 `1.53%`；
   1 路 hot-short/hot-long wall 改善 `11.825%/10.991%`，2 路
   `7.896%/8.056%`，全部 `3/3` 波胜。4 路同源码隔离证据仍为
@@ -22,11 +27,15 @@
 - 质量门已过：fixture schema 5 修正最终消息歧义后，B0/B1 均 `7/7`，比较器 `pass`，
   零身份不一致、零候选回归、零共享失败。旧 B1 `5/7` 与首轮 `6/7` 分别是 XML tool-call
   重复采样波动和最终消息摘要格式歧义，不再作为质量回退证据。
-- 当前断点：最新严重 DSH 会话已按失败步骤重新核算。该 turn 共 5 步，`task_wall_s`
-  `36.31 s`、含失败步骤的模型墙 `35.149 s`；第 5 步等待 `2.296 s` 后以
-  `server_error: verify: layer 11 never rang (an illegal instruction was encountered)`
-  结束，GPU0 同秒记录 8×Xid 13 + Xid 43。这是用户任务直接失败，优先级高于继续提速；
-  当前先做单变量 `STRATA_HC_SPLIT=1` 风险缓解验证。
+- 当前断点：冷长 prompt 冻结邻居的生产 gate 已修复。此前 `STRATA_PIPED_CONCURRENT=1`
+  被 `experts.bin + STRATA_IO_PREFETCH` 的粗粒度 staged-source 判断挡住；现在只有
+  已证明 prompt copy 独立的 page-fill `experts.bin` source 才放行，其他 staged/direct/
+  GGUF role assembly/helper source 仍关闭。若 JSON 等轻量输出出现错误，仍优先于继续提速。
+- HC_SPLIT smoke：1/2 路各 3 波、共 27 请求，零 HTTP/执行错误、零外来请求、期望回复
+  `27/27`、finish 全 `stop`。相对旧生产 B1 的六种形状变化为
+  `+0.048%/+0.897%/+0.163%/+0.889%/+0.124%/-0.057%`（正数表示更快），都在约 1% 噪声内。
+  两卡日志均确认 split 路径真实运行并逐位自检。该结果只证明路径可达、短 smoke 正确且
+  性能未明显退化，不证明低频 Xid 已修复。
 - 测试方法已修正：`probe-dsh-session-cost.py` 过去只统计成功的 `assistant/message`，
   会把上述 5 步失败会话报成 4 步。现在 `assistant/attempt` 也进入 step/model wall，并只
   保留 `failed`、finish kind 和 error code，不保留推理或错误正文；专项 `9 passed`。
@@ -55,16 +64,24 @@
   109 次中触发 0 次，只保留低频诊断。
 - 硬件：两张 RTX 2080 Ti 的算力解锁已固定；cuBLAS FP16
   `62.40→93.69/94.07 TFLOPS`，当前 boot `unlocked=1`。不重新研究或修改解锁。
-- 运行状态：CPU-share 候选已作为生产 opt-in 部署。server/engine `292517/292525`，
-  A1 server cwd `/opt/ai/src/strata-two-stream-serial-20261031`，端口 `8080`，
-  health loaded、262144、6 slots / 2 groups；最终 engine `e60a334c...`、config
-  `2c4c7ac6...`、server `bd3e4289...`。最终 RAII 顺序修复后的 launch 到 ready 约
-  `150 s`。A1 回滚身份
-  仍是 server/vision/engine `254299/254303/254308`，engine `105a4171...`、config
+- 运行状态：自 2026-11-01 起生产由已启用的 `strata.service` 管理，不再依赖登录会话中的
+  手动实例。service 使用 `Restart=always`、`RestartSec=15`、无限启动重试和
+  `KillSignal=SIGTERM`；稳定 launcher 为
+  `/opt/ai/bin/run-strata-production.sh`，稳定 config 为
+  `/opt/ai/etc/strata-production.json`（SHA-256 `d76772e7...`，由 A1 config 只改稳定
+  engine 日志路径）。当前 engine `e1208e51...`、稳定 config `d76772e7...`、server
+  `bd3e4289...`；server cwd
+  `/opt/ai/src/strata-two-stream-serial-20261031`，端口 `8080`，health loaded、
+  262144、6 slots / 2 groups。最终验证时 service/engine PID `41769/41789`。
+  普通 `systemctl restart` 通过；受控 `SIGKILL` 后 systemd 自动生成新 PID，
+  `NRestarts=1`，随后再次 ready。A1 回滚身份仍是
+  server/vision/engine `254299/254303/254308`，engine `105a4171...`、config
   `6ece1a13...`。生产 server 实测 env 为
   `STRATA_ADMIT_SHORT_FIRST=2048`、`STRATA_DEFER_TITLE_REQUESTS=1`、
   `STRATA_MP_STAGED_READ_MIN_TOKENS=2048`、`STRATA_PIN_DSH_TOOL_PREFIX=1`。
-  engine env 另有 `STRATA_BATCH_SERIAL_TWO=1` 和三个 CPU-share 生产开关；没有 DEBUG。
+  engine env 另有 `STRATA_BATCH_SERIAL_TWO=1`、三个 CPU-share 生产开关和
+  `STRATA_HC_SPLIT=1`；`STRATA_PIPED_CONCURRENT=1` 现已真实进入独立读线程路径。
+  没有 DEBUG。
 - 本机到生产：`127.0.0.1:18080 -> 127.0.0.1:8080`，SSH relay 端口 `8686`。
   不改用户 DSH profile；实验使用显式 overlay/proxy。
 - 主要验收门：真实触发；1 路不退化，2 路报告第二 TTFT/跨度，4 路不回退 >1%，
@@ -81,5 +98,5 @@
   把双方共享失败判为 `blocked_shared_failures`；后者不能进入性能矩阵或生产。
 - 当前文档：总计划
   [`2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)
-  已完成第四十三次修订；旧平台全局目标仍是 paused，接口不能改写正文，本文件和仓库计划
+  已完成第四十五次修订；旧平台全局目标仍是 paused，接口不能改写正文，本文件和仓库计划
   是当前权威目标。

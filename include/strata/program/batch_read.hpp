@@ -37,6 +37,7 @@ struct ConcurrentReadSetup {
                                     ///< its own; --remote-expert-opt alone is inert on a plain layer split
     bool staged_source = false;     ///< the GGUF source stages its blobs (in place, unbuffered, STRATA_IO_PREFETCH):
                                     ///< it recycles the buffers it hands out, one thread at a time
+    bool staged_prompt_independent = false; ///< the staged source copies prompt experts into caller-owned buffers
     bool other_source = false;      ///< an expert source that is neither the GGUF source nor the arena
 };
 
@@ -47,7 +48,7 @@ inline const char* concurrent_read_off(const ConcurrentReadSetup& s) {
     if (s.fs_slots) return "STRATA_FS_SLOTS";
     if (s.pcie_dma) return "--pcie-mode dma";
     if (s.helper_caches) return "the helper caches (--expert-cache-device1..3)";
-    if (s.staged_source)
+    if (s.staged_source && !s.staged_prompt_independent)
         return "an expert source that stages its blobs (the GGUF in place, unbuffered, STRATA_IO_PREFETCH)";
     if (s.other_source) return "this expert source";
     return nullptr;

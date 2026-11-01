@@ -9,6 +9,8 @@ delay one or two long cold prompts join. Every streamed token's arrival is timed
   stream_tokens_during_join   tokens the decoding streams received from the first joiner's arrival to the last
                            joiner's first token + 1 s
   aggregate_tok_s          the streams' tokens / the run's wall time (throughput of the whole run)
+  wall_s                   the whole scenario, including joins that finish after the streams
+  decode_output_tokens      the two decoding requests' completion_tokens
 
 Two scenarios without decoding streams (#1504's test): `followup` reads a cold 45K prompt alone and sends a short
 prompt 1 s later (followup_ttft_s: how long the short one waits behind the read; long_ttft_s: what the read pays);
@@ -27,6 +29,7 @@ import argparse
 import hashlib
 import http.client
 import json
+import os
 import statistics
 import threading
 import time
@@ -42,7 +45,8 @@ DETERMINISM = ["Count from 1 to 40, comma separated.", "List the planets of the 
                'Translate "good morning, how are you" into French, German and Spanish.',
                "Write a haiku about compilers."]
 # name -> the joins (delay s, size in K tokens) beside decoding streams, or (size, follow-up delay s) with none decoding
-SCENARIOS = {"cold32k": [(6, 32)], "cold64k": [(6, 64)], "two_joiners": [(6, 64), (12, 32)],
+SCENARIOS = {"cold32k": [(6, 32)], "cold64k": [(6, 64)], "cold160k": [(6, 160)],
+             "two_joiners": [(6, 64), (12, 32)],
              "followup": (45, 1.0), "read_alone": (45, 0)}
 _FILES = []
 
@@ -75,7 +79,10 @@ def stream(port, raw, timeout=1800):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     ts, text, usage = [], [], None
     t0 = time.monotonic()
-    c.request("POST", "/v1/chat/completions", raw, {"Content-Type": "application/json", "Connection": "close"})
+    headers = {"Content-Type": "application/json", "Connection": "close"}
+    if os.environ.get("STRATA_API_KEY"):
+        headers["Authorization"] = "Bearer " + os.environ["STRATA_API_KEY"]
+    c.request("POST", "/v1/chat/completions", raw, headers)
     r = c.getresponse()
     if r.status != 200:
         raise RuntimeError("HTTP %d" % r.status)
@@ -116,17 +123,19 @@ def smooth(ts, lo, hi):
 def scenario(port, model, name, n, joins, max_tokens, tag):
     """`n` streams decode; each join (delay s, size in K tokens) then sends a cold prompt of this repository's text."""
     events, joined = {}, {}
+    decode_usage, decode_done = {}, {}
 
     def decode(i):
         content = "Stream %s-%s-%d. %s" % (tag, name, i, CODING[i % len(CODING)])
-        events[i] = stream(port, request(content, max_tokens, model))[0]
+        events[i], _, decode_usage[i], _ = stream(port, request(content, max_tokens, model))
+        decode_done[i] = time.monotonic()
 
     def join(k, delay, size):
         time.sleep(delay)
         text = corpus(int(size * 1024 * 3.3), 7 * size + k + 131 * len(name))
         content = "Join %s-%s-%d.\n%s\nName the file that defines the class above in one line." % (tag, name, k, text)
         ts, _, usage, t0 = stream(port, request(content, 64, model))
-        joined[k] = {"sent": t0, "first": ts[0] if ts else None, "usage": usage}
+        joined[k] = {"sent": t0, "first": ts[0] if ts else None, "done": time.monotonic(), "usage": usage}
 
     t0 = time.monotonic()
     threads = [threading.Thread(target=decode, args=(i,)) for i in range(n)]
@@ -140,7 +149,9 @@ def scenario(port, model, name, n, joins, max_tokens, tag):
     per = [smooth(ts, lo, hi) for _, ts in sorted(events.items())]
     ends = [ts[-1] for ts in events.values() if ts]
     joins_in_order = [v for _, v in sorted(joined.items())]
-    return {"joiner_ttft_s": [round(v["first"] - v["sent"], 3) for v in joins_in_order],
+    return {"wall_s": round(max([*decode_done.values(), *(v["done"] for v in joins_in_order)]) - t0, 3),
+            "decode_output_tokens": [decode_usage[i].get("completion_tokens") for i in sorted(decode_usage)],
+            "joiner_ttft_s": [round(v["first"] - v["sent"], 3) for v in joins_in_order],
             "joiner_prompt_tokens": [v["usage"].get("prompt_tokens") for v in joins_in_order],
             "joiner_cached_tokens": [(v["usage"].get("prompt_tokens_details") or {}).get("cached_tokens")
                                      for v in joins_in_order],
@@ -180,6 +191,12 @@ def alone(port, model, name, size, follow, tag):
     return out
 
 
+def warmup(port, model, tag):
+    """Populate the expert/page caches without touching any measured prompt."""
+    prompt = "Warmup %s: reply with one short sentence about cache locality." % tag
+    stream(port, request(prompt, 24, model), timeout=300)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8080)
@@ -190,12 +207,15 @@ def main():
                     help="comma-separated: " + ", ".join(SCENARIOS))
     ap.add_argument("--repeat", type=int, default=1, help="runs of each scenario (each with its own cold prompts)")
     ap.add_argument("--out")
+    ap.add_argument("--tag", default=None, help="fixed run tag for an A/B; default: current time")
+    ap.add_argument("--warmup", action="store_true", help="send one short request before the first scenario")
     ap.add_argument("--determinism", action="store_true")
     a = ap.parse_args()
-    tag = time.strftime("%H%M%S")
+    tag = a.tag or time.strftime("%H%M%S")
     if a.model is None:
         c = http.client.HTTPConnection("127.0.0.1", a.port, timeout=30)
-        c.request("GET", "/v1/models")
+        headers = {"Authorization": "Bearer " + os.environ["STRATA_API_KEY"]} if os.environ.get("STRATA_API_KEY") else {}
+        c.request("GET", "/v1/models", headers=headers)
         a.model = json.loads(c.getresponse().read())["data"][0]["id"]
         c.close()
     if a.determinism:
@@ -207,6 +227,8 @@ def main():
                          "tokens": usage.get("completion_tokens")})
         print(json.dumps(rows, indent=1))
         return
+    if a.warmup:
+        warmup(a.port, a.model, tag)
     out = {}
     for rep in range(a.repeat):
         for name in a.scenarios.split(","):

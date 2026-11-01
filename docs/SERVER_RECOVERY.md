@@ -1,58 +1,64 @@
 # 恢复手册：这台机器就是我自己
 
-> **状态：操作手册（现行）。** 只在服务不可用时使用；日常的安装/回滚入口是 `tools/server/use-config.sh`。
+> **状态：操作手册（现行）。** 2026-11-01 起生产由 enabled `strata.service` 管理；
+> 只在服务不可用时使用。稳定入口是 `/opt/ai/bin/run-strata-production.sh` 和
+> `/opt/ai/etc/strata-production.json`，仓库源文件在 `tools/server/`。
 
-**为什么单列一份**：本 DSH 会话生成的 token 来自 `192.168.3.14:8080` 的 Strata 服务。
-证据：服务日志里出现本会话的行——`writing a tool call: bash: 755 tokens in 14 s (82.0 tok/s) ... expert cache 98.0% hit`。
-所以**动服务 = 动我自己**。这份手册的存在意义是：即使我的会话断了，下一个我还能把自己救回来。
+**为什么单列一份**：用户通过 SSH relay 使用生产 Strata。动服务会直接影响正在进行的
+vibe coding 会话，所以恢复必须先看进程、实际 config 和 health，再决定是否重启。
 
 ## 1. 30 秒健康检查
 
 ```sh
-ssh atm@192.168.3.14 'systemctl is-active strata; \
+ssh -p 8686 atm@129.28.27.137 'systemctl is-enabled strata; \
+  systemctl is-active strata; \
+  systemctl show strata -p MainPID -p NRestarts -p Restart -p RestartUSec --no-pager; \
   nvidia-smi --query-gpu=index,memory.free,temperature.gpu --format=csv,noheader; \
-  curl -s -m 5 -o /dev/null -w "http=%{http_code} t=%{time_total}s\n" http://127.0.0.1:8080/health; \
-  python3 /opt/ai/bin/probe-gpu-stability.py --boot; \
-  grep -c "MiB of VRAM free" /opt/ai/src/strata-0.2.2/strata-022.log'
+  curl -fsS --max-time 5 http://127.0.0.1:8080/health; \
+  journalctl -k -b --no-pager | grep "NVRM: Xid" | tail -n 20'
 ```
 
 判读：
 
 | 看到 | 含义 | 动作 |
 |---|---|---|
-| `http=200` 且 <0.01 s | 服务活着 | 继续 |
-| `only N MiB of VRAM free ... (#2065)` 且 N < 512 | 驱动可能把显存换页到 RAM，decode 掉到几 tok/s，**一个窗口可能永远跑不完** | 提高 `--vram-reserve-mib` 或降低 `--max-context` / `--batch`（见台账） |
-| `is-active` 不是 active | 服务死了 | §2 恢复 |
-| 请求挂住 >60 s 且 GPU 利用率 100% 不动 | 窗口卡死 | §2 恢复（重启是唯一已知手段） |
-| `NVRM: Xid`、`never rang` 或 engine PID 已变 | 可能是 GPU/驱动执行故障，不是请求参数错误 | 保存整次事故和请求时间；先查 `probe-gpu-stability.py`，不要只重试同一 prompt |
+| `loaded=true`、262144 | 服务已加载 | 可继续使用 |
+| `active/running` 但 health 未 ready | 正在冷加载 | 冷启动约 2–3 分钟，继续等待，不要叠加重启 |
+| `NRestarts` 增加且 MainPID 变化 | systemd 已自动拉起 | 看 `strata-service.log` 与 `strata-engine.log` 找退出原因 |
+| 新 `NVRM: Xid`、`never rang` 或错误 turn | GPU/驱动执行风险 | 保存时间、请求和日志；不要只重试同一请求 |
+| `is-enabled` 不是 enabled | 开机不会自动启动 | 恢复 unit enable 状态 |
 
 ## 2. 恢复顺序（从轻到重，一步不行再下一步）
 
-1. 重启：`ssh atm@192.168.3.14 'echo <sudo 密码> | sudo -S systemctl restart strata'`。
-   普通用户直接 `systemctl restart` 会被 polkit 挡下（`Failed to restart strata.service: Interactive authentication required`）。
-   **实测到可用要 165 s**（unit 起 17:02:39 → `/health` 返回 200 约 17:05:24）。journal 里那个"起 15:41:09 → 引擎起 15:41:29"
-   只是 unit 起 → 引擎进程起，**不代表能服务**。所以：**重启 ≈ 3 分钟没有推理**，别在自己正需要 token 的时候随手重启。
-2. 起不来 → 回退配置：`ls -t /opt/ai/backups/*/strata-022.json.* | head -3`，取最近一份
-   `cp` 回 `/opt/ai/src/strata-0.2.2/strata-022.json`，再 restart。
-3. 还起不来 → 看 `/opt/ai/logs/strata-service.log` 尾部与 `journalctl -u strata -n 30`；
-   已知失败形态：`libstrata_kq.so did not start on GPU 1 (CUDA error 2)` + `cudaMalloc(...) for the weight arena failed`
-   （上游 #3797：多为有进程占着显存，不是分配器 bug）→ 先确认没有第二个进程占显存：
-   `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader`。
-4. 我的会话断了 → 目标 `goal-96ec4721-4579-431f-bf5c-81dfa8e36a2b` 是持久化的；服务恢复后从台账最后一条继续即可。
-   恢复后第一件事：跑一次最小 completion 确认端到端通，再决定要不要继续实验。
+1. 重启：`ssh -tt -p 8686 atm@129.28.27.137 'sudo systemctl restart strata'`。
+   普通用户直接 restart 会被 polkit 挡下。**重启到 health ready 约 2–3 分钟，且会丢失
+   RAM expert cache 与 conversation cache**；不在正需要 token 时随手重启。
+2. 看 systemd：`systemctl show strata -p ActiveState -p SubState -p MainPID -p NRestarts`。
+   `Restart=always` 应在 15 秒后拉起；若持续失败，读
+   `/opt/ai/logs/strata-service.log`、`/opt/ai/logs/strata-engine.log` 和
+   `journalctl -u strata -b -n 100`。
+3. 确认没有第二实例抢 8080：
+
+   ```sh
+   ss -ltnp | grep :8080
+   ps -eo pid,ppid,etime,args | grep -E 'strata.py serve|/strata --serve' | grep -v grep
+   nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader
+   ```
+
+4. 配置或二进制坏掉时，先恢复最近已验证的稳定 config，再 restart。当前已验证 config
+   SHA-256 为 `d76772e7...`、engine `e60a334c...`、launcher `a1e5619e...`。
+5. 服务 ready 后跑一次最小 completion，确认端到端可用，再继续实验。
 
 ## 3. 改配置的规矩
 
-- **只用** `/opt/ai/bin/set-config-key.py <点号路径> <JSON值> --config /opt/ai/src/strata-0.2.2/strata-022.json`。
-  它自动备份到 `/opt/ai/backups/<日期>/`。**必须显式给 `--config`**——它的默认值是 IQ2 那份配置，
-  在这台机器上是个陷阱（脚本自己写了这句警告）。
-- 引擎参数在 `args` 里是一个 **54 元素的字符串 list**：`--vram-reserve-mib` 在索引 42，它的值在索引 43。
-  **不要用 `set-config-key.py args.43 1280`**——实测它把整个 list 换成了 `{"43": 1280}`，54 个引擎参数全丢，
-  下次启动就是坏的（当时服务还在跑，只因为它启动时读过旧配置）。
-  正确做法：**就地替换 JSON 文本里那一个值**，然后 `json.load` 断言 `args` 仍是 54 个字符串、目标值已生效，
-  **检查通过才重启**。值必须是字符串（`"1280"`），写成数字会让 argv 构造出错。
-- 改 env 用 `env.STRATA_XXX`。改 args 里的值用 `args.<索引>`。
-- **改完必须重启才生效**（"The server reads the config when it starts"）。重启前先想清楚 §1 的判读和 §2 的回退。
+- 生产 config 是 `/opt/ai/etc/strata-production.json`，服务用户为 `atm`，文件应为
+  `atm:atm 0600`。不要把含 API key 的完整 config 打印或提交。
+- 改前复制一份带 UTC 时间戳和 SHA-256 的备份；改后先 `jq -e` 检查 JSON、engine
+  `args` 形状、`port=8080` 和关键 env，再 restart。
+- 改 env 用 `env.STRATA_XXX`；`STRATA_HC_SPLIT=1`、CPU-share guard、双卡和
+  262144 context 属于当前生产身份，除非明确实验，不得顺带丢失。
+- 改完必须 restart 才生效。验收看实际 `/proc/<pid>/environ`、engine/config hash、
+  health、6 slots / 2 groups 和新增 Xid，不能只看 old process 的 health 200。
 
 ## 4. 禁令（不可谈判）
 
@@ -82,14 +88,14 @@ ssh atm@192.168.3.14 'systemctl is-active strata; \
 
 ## 6. 工装自己会骗人的三个地方（2026-10-24 实测撞出来的）
 
-- **`/health` 答 200 不代表重启过**。老引擎在被换掉之前一直在答。判断重启要看**引擎 PID 变了**；
-  `use-config.sh` 现在就是这么判的，并且 `sudo` 失败就直接退出，不再把 stderr 丢掉后照样报 READY。
-- **`strata-022.prod.json` 只是某一刻的快照，不是"生产配置"这个概念**。它曾停在 05:09 那份
-  （`--vram-reserve-mib` 还是 960），谁拿它当基准做 A/B，谁就把 L-001 静默回滚了。
-  现在它是 17:02 那份（1280），旧的留成 `strata-022.prod.json.pre-L001-0509`。
-  **动手前先 diff 一下快照与线上**，一行就够。
+- **`/health` 答 200 不代表重启过**。旧引擎在退出前仍可能答 200；判断重启必须同时看
+  systemd `ExecMainStartTimestamp`、MainPID、engine PID 和实际 `/proc` argv/env。
+- **稳定 config 是运行身份，不是任意历史实验快照**。动手前先 hash 并与
+  `/opt/ai/etc/strata-production.json` 对照，确认没有把 HC_SPLIT、CPU-share 或双卡
+  参数静默改回旧值。
 - **别把脚本放在 `/tmp`**。逐位门原来就是 `/tmp/parity.py`，`/tmp` 一清就没了，而 `run-arm.sh`
   照样跑完一臂、留下一份看起来完整的日志。现在门是 `/opt/ai/bin/parity_window.py`
   （repo 里 `tools/server/`），arm 脚本找不到它就拒绝开跑。
-- **`args` 是 54 个字符串的列表**，不是字典。`set-config-key.py args.43 …` 会把整个列表换成
-  `{"43": …}`；`use-config.sh` 现在会先断言形状再装。
+- **`args` 必须是字符串列表，不是字典**。任何点号 setter 改走 `args.<index>` 后都要
+  `jq -e '.args | type == "array" and length > 50 and all(.[]; type == "string")'`；
+  形状不对就不 restart。

@@ -13991,6 +13991,7 @@ int main(int argc, char** argv) {
                     s.helper_caches = prefill_src != srcp;
                     for (int r = 0; r < 3; ++r) s.helper_caches |= o.expert_cache_remote[(size_t) r] > 0;
                     s.staged_source = srcp == &src && src.stages_blobs();
+                    s.staged_prompt_independent = srcp == &src && src.prompt_copies_independent();
                     s.other_source = srcp != &src && srcp != &arena_src;
                     if (const char* why = strata::program::concurrent_read_off(s)) {
                         std::fprintf(stderr, "strata batch: STRATA_PIPED_CONCURRENT is off beside %s\n", why);

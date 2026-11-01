@@ -1,11 +1,11 @@
 # 真实 AI vibe coding 优化计划
 
-日期：2026-10-31（2026-11-01 第四十三次修订）
+日期：2026-10-31（2026-11-01 第四十五次修订）
 
-状态：继续执行。最新严重 DSH 会话在第 5 步以 `verify: layer 11 never rang` 失败，
-同秒 GPU0 记录 8×Xid 13 + Xid 43；`GPU-XID13-STABILITY` 因此重新抢占。
-`AGENT-CURRENT-PROD-COST-REMAP` 暂停：最新长输出会话已确认一个 `15,036` output-token
-step 占 `173.323 s`，但必须先收敛用户可见 GPU 失败。
+状态：继续执行。当前主线是 `AGENT-CURRENT-PROD-COST-REMAP`，从真实长输出 decode
+开始；不重扫已否决的 CPU-share、cold prompt gate、host/head/group 邻域。
+`GPU-XID13-STABILITY` 继续被动监测并保留新事故抢占权；HC_SPLIT 的 27 请求 smoke
+通过不等于硬件修复，也不再无限空等低频故障。
 
 ## 全局目标
 
@@ -39,6 +39,9 @@ step 占 `173.323 s`，但必须先收敛用户可见 GPU 失败。
 - `AGENT-BATCH-PREFILL-CPU-SHARE-GUARD` 部署为 opt-in：生产选项 1/2 路 hot-short
   wall 改善 `11.825%/7.896%`，hot-long `10.991%/8.056%`，均 `3/3` 波胜；质量
   B0/B1 均 `7/7`，6/8 安全通过。
+- `AGENT-PROMPT-STAGING-CONCURRENT` 已部署：冻结约 154K cold prompt 下，两个解码
+  邻居最长静默 `82.059→1.713 s`，整场景 wall `104.843→83.118 s`，joiner TTFT
+  `84.058→72.384 s`；4 路 5 波 `14.0→13.1 s`。
 
 ### 当前成本结构
 
@@ -69,29 +72,40 @@ step 占 `173.323 s`，但必须先收敛用户可见 GPU 失败。
 
 ## 当前主动项
 
-### `GPU-XID13-STABILITY`（当前 P0）
+### `GPU-XID13-STABILITY`（被动监测；新事故抢占）
 
 最新严重会话共 5 步，`task_wall_s=36.31 s`，成功 4 步模型墙 `32.853 s`；第 5 步
 等待 `2.296 s` 后以 error 结束。此前的成本探针只统计成功
 `assistant/message`，把它误报成 4 步；现已把 `assistant/attempt` 计入模型墙，并只保留
 finish kind/error code，不保留正文。专项测试 `9 passed`。
 
-下一步只执行一个变量：
+已完成第一步：
 
 1. 保持 engine/config/Layer split/CPU-share 不变，只增加 `STRATA_HC_SPLIT=1`；
-2. 重启后从 `/proc/<engine>/environ` 验证实际 env，并检查 health、6 slots / 2 groups；
-3. 记录 UTC 起点，先跑固定 greedy 质量和代表 1/2 路任务，再跑更长真实 1/2 路曝光；
-4. 任何新 Xid、错误 turn、质量回退或明显性能回退立即恢复原 config；
-5. 若 `HC_SPLIT=1` 仍有故障，先恢复并单独测试可回滚显存降频；不得同时改多个变量。
+2. `/proc/295955/environ` 已确认变量，health 为 loaded、262144、6 slots / 2 groups；
+3. 两张卡的 engine 日志都出现 split 路径和逐位自检；启动到 ready 约 `138 s`；
+4. 1/2 路各 3 波共 27 请求，零 HTTP/执行错误、零外来请求、期望回复 `27/27`、
+   finish 全 `stop`；
+5. 相对旧生产 B1，六种形状变化为
+   `+0.048%/+0.897%/+0.163%/+0.889%/+0.124%/-0.057%`，均在约 1% 噪声内。
 
-无 Xid 的短窗口只能称“风险缓解候选有效窗口”，不能称 GPU 已修复。
+P0 的有限退出条件：
 
-### `AGENT-CURRENT-PROD-COST-REMAP`（P0 后恢复）
+1. 完整 7 项 coding quality fixture 与旧生产身份对照，不得出现候选回归；
+2. 1/2 路 cold/hot 均无超过 1% 的明确回退；
+3. 4 路不回退超过 1%，6/8 零错误且资源安全；
+4. 至少 60 分钟、覆盖用户实际的 1/2 会话编辑—测试路径和长输出，窗口内无新 Xid；
+5. 达到以上条件后标记为“风险缓解候选通过有限窗口”，恢复
+   `AGENT-CURRENT-PROD-COST-REMAP`，继续被动监测，不改写为“GPU 已修复”；
+6. 未达到则恢复旧 config；若出现新 Xid，再单独测可回滚显存降频，最后才隔离 GPU0。
+   不围绕 HC_SPLIT 邻近开关无限试参。
+
+### `AGENT-CURRENT-PROD-COST-REMAP`（当前主动项）
 
 最新长输出会话 `task_wall_s=202.486 s`，模型 `200.155 s`（`96.799%`），工具 union
 `0.411 s`；一个 `15,036` output-token step 占 `173.323 s`。这确认普通 hot 短步之外，
-长输出 decode 是下一性能大头。GPU P0 收敛后从这里恢复，不重跑 CPU-share、head/group
-或 host 邻域。
+长输出 decode 是下一性能大头。现在从这里继续，不重跑 CPU-share、cold prompt gate、
+head/group 或 host 邻域。
 
 ## 质量、可靠性与长上下文
 
@@ -108,21 +122,25 @@ finish kind/error code，不保留正文。专项测试 `9 passed`。
 
 - 两张 RTX 2080 Ti 的算力解锁已固定：cuBLAS FP16 从 `62.40 TFLOPS` 提升到
   `93.69/94.07 TFLOPS`，当前 boot 两份日志均为 `unlocked=1`。
-- 生产为手动实例，`strata.service` inactive；重启到 ready 约 3 分钟，必须证明收益能覆盖
-  加载、缓存丢失和不可用成本。
-- 当前生产 opt-in 为 server/engine `292517/292525`、端口 `8080`。
+- 生产由 `strata.service` 管理，稳定 launcher/config 位于
+  `/opt/ai/bin/run-strata-production.sh` 和 `/opt/ai/etc/strata-production.json`；
+  unit 为 `Restart=always`、15 秒、无限重试。重启到 ready 约 3 分钟，必须证明收益能
+  覆盖加载、缓存丢失和不可用成本。
+- 当前生产为 service/engine `41769/41789`、端口 `8080`。
 - A1 恢复身份：server/vision/engine `254299/254303/254308`，端口 `8080`。
 - server cwd：`/opt/ai/src/strata-two-stream-serial-20261031`。
-- engine：`/opt/ai/src/strata-batch-prefill-guard-20261101/build-guard-prod/strata`。
-- engine SHA-256：`e60a334c0ca5c1974d79385256aaf90519bcb646e2626f7e66de818d104b0ab7`。
-- config SHA-256：`2c4c7ac6c346c7b64d162502080fc3147b5da232de156a20a9d1db81b521985e`。
+- engine：`/opt/ai/src/strata-batch-prefill-guard-20261101/build-guard-prod/strata`；
+  候选同 hash 构建位于 `build-prompt-concurrent-prod/strata`。
+- engine SHA-256：`e1208e5166b11b541fe110f3ed99c140da20718e981621c9849a5917b582e707`。
+- 当前 config SHA-256：`d76772e7089c18af38c0a8932588d99674a8b6bd8208f386b6c8599fd81c863a`。
+- 回滚 config SHA-256：`2c4c7ac6c346c7b64d162502080fc3147b5da232de156a20a9d1db81b521985e`。
 - A1 回滚 engine/config：`105a4171.../6ece1a13...`。
 - server SHA-256：`bd3e428932c0b9bb645b2ae9f37924b2e440b590333a0322cdd00cd28dd4ed82`。
 - health loaded、262144 context、6 slots / 2 groups。
 - 实测 server env 为 `STRATA_ADMIT_SHORT_FIRST=2048`、
   `STRATA_DEFER_TITLE_REQUESTS=1`、`STRATA_MP_STAGED_READ_MIN_TOKENS=2048`、
   `STRATA_PIN_DSH_TOOL_PREFIX=1`。engine env 含 `STRATA_BATCH_SERIAL_TWO=1` 与三个
-  CPU-share 开关，不含 debug。
+  CPU-share 开关、`STRATA_HC_SPLIT=1`、`STRATA_PIPED_CONCURRENT=1`，不含 debug。
 
 ## 优先级
 
@@ -207,9 +225,10 @@ token/s 和资源利用率只用于解释等待，不替代用户任务时间。
 
 ## 当前断点
 
-**2026-11-01 第四十三次修订。** 最新严重 DSH turn 第 5 步以 GPU0 Xid 同型错误失败；
-失败步骤探头已修正。当前动作是单变量 `STRATA_HC_SPLIT=1` 风险缓解验证，生产暂不混入
-降频或其他 pipeline 开关。成本重排暂停，恢复后优先拆 `173.323 s` 长输出 decode。
+**2026-11-01 第四十五次修订。** 冷 prompt 并发读修复已部署并完成冻结负载、正确性、
+4 路和健康/Xid 门，收益远超 1%。当前不再围绕该 gate 或 HC_SPLIT 邻近参数打转；主动项
+恢复为成本重排，优先拆 `173.323 s` 长输出 decode。HC_SPLIT 与 GPU Xid 保持被动监测，
+新事故抢占。
 
 ## 每轮强制复盘
 
