@@ -89,6 +89,8 @@ def test_dsh_event_summary_counts_calls_errors_and_final(tmp_path):
 def test_every_task_has_a_machine_checkable_prompt():
     for task in BENCH.TASKS.values():
         assert "RESULT=PASS" in task.prompt
+        assert BENCH.FINAL_RULE in task.prompt
+        assert "no summary, explanation, blank line, or extra punctuation" in task.prompt
         assert "without changing tests" in task.prompt or "not the tests" in task.prompt
         assert task.expected_files
         assert task.protected_files
@@ -200,3 +202,115 @@ def test_missing_dsh_patch_is_rejected_before_any_task(tmp_path, monkeypatch, ca
     else:
         raise AssertionError("missing overlay should stop the benchmark")
     assert "does not exist" in capsys.readouterr().err
+
+
+def test_quality_report_records_comparison_identity(tmp_path, monkeypatch):
+    output = tmp_path / "report.json"
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text('{"models":[]}\n', encoding="utf-8")
+
+    def fake_run_task(task, **options):
+        return {
+            "task": task.name,
+            "wall_s": 0.0,
+            "wall_scope": "runner_process; includes client-side post-turn auxiliary work",
+            "returncode": 0,
+            "timed_out": False,
+            "tests_pass": True,
+            "tests_unchanged": True,
+            "final_pass": True,
+            "final_sha256": "",
+            "test_output_sha256": "",
+            "event_errors": 0,
+            "event_warnings": 0,
+            "events": {},
+            "tool_calls": {"apply_patch": 1},
+            "tool_call_count": 1,
+            "tool_errors": 0,
+            "quality_pass": True,
+        }
+
+    monkeypatch.setattr(BENCH, "run_task", fake_run_task)
+    monkeypatch.setenv("STRATA_API_KEY", "test-only")
+    assert BENCH.main(
+        [
+            "--tasks",
+            "apply-patch",
+            "--model-catalog",
+            str(catalog),
+            "--work-root",
+            str(tmp_path / "work"),
+            "--output",
+            str(output),
+        ]
+    ) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["schema"] == 5
+    assert report["provider_url"] == "http://127.0.0.1:18080/v1"
+    assert report["model_catalog"] == str(catalog.resolve())
+    assert report["model_catalog_sha256"] == BENCH.sha256(catalog.read_bytes())
+    assert report["fixture_suite_sha256"] == BENCH.fixture_suite_sha256(["apply-patch"])
+    assert report["prompt_suffix_sha256"] is None
+
+
+def _quality_report(tasks, *, model="model"):
+    rows = []
+    for task, passed in tasks.items():
+        rows.append(
+            {
+                "task": task,
+                "quality_pass": passed,
+                "tool_calls": {"apply_patch": 1} if passed else {},
+                "event_warnings": 0,
+                "event_errors": 0,
+            }
+        )
+    return {
+        "runner": "codex",
+        "runner_profile": "codex-exec",
+        "model": model,
+        "reasoning_effort": "high",
+        "provider_url": "http://127.0.0.1:18080/v1",
+        "model_catalog_sha256": "catalog",
+        "fixture_suite_sha256": "fixture",
+        "prompt_suffix_sha256": None,
+        "tasks": sorted(tasks),
+        "rows": rows,
+    }
+
+
+def test_quality_compare_rejects_identity_mismatch():
+    baseline = _quality_report({"single-file": True})
+    candidate = _quality_report({"single-file": True}, model="other-model")
+    comparison = BENCH.compare_reports(baseline, candidate)
+    assert comparison["verdict"] == "reject_incomparable"
+    assert comparison["identity_mismatches"]["model"] == {
+        "baseline": "model",
+        "candidate": "other-model",
+    }
+
+
+def test_quality_compare_rejects_candidate_regression():
+    baseline = _quality_report({"single-file": True, "cross-file": False})
+    candidate = _quality_report({"single-file": False, "cross-file": True})
+    comparison = BENCH.compare_reports(baseline, candidate)
+    assert comparison["verdict"] == "reject_candidate_regression"
+    assert comparison["candidate_regressions"] == [
+        {"task": "single-file", "reason": "quality pass regressed"}
+    ]
+    assert comparison["candidate_recoveries"] == ["cross-file"]
+
+
+def test_quality_compare_blocks_shared_failures():
+    report = _quality_report({"single-file": True, "cross-file": False})
+    comparison = BENCH.compare_reports(report, report)
+    assert comparison["verdict"] == "blocked_shared_failures"
+    assert comparison["shared_failures"] == ["cross-file"]
+
+
+def test_quality_compare_passes_only_all_candidate_rows():
+    report = _quality_report({"single-file": True, "cross-file": True})
+    comparison = BENCH.compare_reports(report, report)
+    assert comparison["verdict"] == "pass"
+    assert comparison["candidate_regressions"] == []
+    assert comparison["shared_failures"] == []

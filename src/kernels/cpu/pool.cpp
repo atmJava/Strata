@@ -32,6 +32,13 @@ constexpr uint64_t pack_head(uint32_t epoch, uint32_t n, uint32_t i) {
 
 namespace {
 std::atomic<int> g_host_core{(int) HostCore::First};
+bool pool_guard_debug() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_DBG_POOL_GUARD");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    return on;
+}
 }  // namespace
 
 void set_host_core(HostCore where) { g_host_core.store((int) where); }
@@ -734,6 +741,86 @@ ExpertPool::~ExpertPool() {
     stop_workers();
 }
 
+ExpertPool::DecodeWindow::DecodeWindow(ExpertPool& pool) : owner_(&pool) {
+    if (!owner_->batch_prefill_guard()) {
+        owner_ = nullptr;
+        return;
+    }
+    owner_->decode_windows_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+ExpertPool::DecodeWindow::~DecodeWindow() { release(); }
+
+ExpertPool::DecodeWindow::DecodeWindow(DecodeWindow&& other) noexcept
+    : owner_(other.owner_) {
+    other.owner_ = nullptr;
+}
+
+ExpertPool::DecodeWindow& ExpertPool::DecodeWindow::operator=(DecodeWindow&& other) noexcept {
+    if (this != &other) {
+        release();
+        owner_ = other.owner_;
+        other.owner_ = nullptr;
+    }
+    return *this;
+}
+
+void ExpertPool::DecodeWindow::release() {
+    if (owner_ != nullptr) {
+        owner_->decode_windows_.fetch_sub(1, std::memory_order_acq_rel);
+        owner_ = nullptr;
+    }
+}
+
+ExpertPool::PrefillLease::~PrefillLease() { release(); }
+
+ExpertPool::PrefillLease::PrefillLease(PrefillLease&& other) noexcept
+    : owner_(other.owner_) {
+    other.owner_ = nullptr;
+}
+
+ExpertPool::PrefillLease& ExpertPool::PrefillLease::operator=(PrefillLease&& other) noexcept {
+    if (this != &other) {
+        release();
+        owner_ = other.owner_;
+        other.owner_ = nullptr;
+    }
+    return *this;
+}
+
+void ExpertPool::PrefillLease::release() {
+    if (owner_ != nullptr) {
+        owner_->prefill_leased_.store(false, std::memory_order_release);
+        owner_ = nullptr;
+    }
+}
+
+ExpertPool::PrefillLease ExpertPool::try_prefill() {
+    bool expected = false;
+    if (!prefill_leased_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        if (pool_guard_debug())
+            std::fprintf(stderr, "pool guard: prefill lease refused; another prefill lease is active\n");
+        return PrefillLease{};
+    }
+    if (decode_windows_.load(std::memory_order_acquire) != 0) {
+        prefill_leased_.store(false, std::memory_order_release);
+        if (pool_guard_debug())
+            std::fprintf(stderr, "pool guard: prefill lease refused; a batch decode window is active\n");
+        return PrefillLease{};
+    }
+    return PrefillLease(this);
+}
+
+void ExpertPool::lock_guarded_runs(std::unique_lock<std::recursive_mutex>& lock) {
+    if (!batch_prefill_guard()) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    lock.lock();
+    if (!pool_guard_debug()) return;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (ms >= 1.0) std::fprintf(stderr, "pool guard: run dispatch waited %.3f ms\n", ms);
+}
+
 void ExpertPool::stop_workers() {
     stop_.store(true, std::memory_order_release);
     // Bump the epoch so a PARKED worker notices the stop flag rather than sleeping through it.
@@ -1072,6 +1159,8 @@ void ExpertPool::run_phase(int mode, int n_tasks) {
 
 void ExpertPool::run_split(ExpertJob* jobs, int n) {
     if (n <= 0) return;
+    std::unique_lock<std::recursive_mutex> run_lock(run_mu_, std::defer_lock);
+    lock_guarded_runs(run_lock);
     if (n > kMaxSplit || n_ == 1 || expert_oracle_q8_0_enabled()) { run(jobs, n); return; }
     const auto t0 = std::chrono::steady_clock::now();
     jobs_ = jobs;
@@ -1092,6 +1181,8 @@ int ExpertPool::phase_tasks(int64_t rows) const {
 
 void ExpertPool::run_split_multi(ExpertJobMulti* jobs, int n) {
     if (n <= 0) return;
+    std::unique_lock<std::recursive_mutex> run_lock(run_mu_, std::defer_lock);
+    lock_guarded_runs(run_lock);
     if (n > kMaxSplitMulti || expert_oracle_q8_0_enabled()) {
         // one token at a time through the single-token path (the oracle contract has no multi kernel)
         std::vector<ExpertJob> single;
@@ -1131,6 +1222,8 @@ void ExpertPool::run_split_multi(ExpertJobMulti* jobs, int n) {
 
 void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, NativeArithmetic arithmetic) {
     if (n <= 0) return;
+    std::unique_lock<std::recursive_mutex> run_lock(run_mu_, std::defer_lock);
+    lock_guarded_runs(run_lock);
     const auto t0 = std::chrono::steady_clock::now();
     // more distinct experts than buffers: run them in batches
     for (int b0 = 0; b0 < n; b0 += kMaxSplitMulti) {
@@ -1163,6 +1256,8 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
 
 void ExpertPool::run(ExpertJob* jobs, int n) {
     if (n <= 0) return;
+    std::unique_lock<std::recursive_mutex> run_lock(run_mu_, std::defer_lock);
+    lock_guarded_runs(run_lock);
     if (n_ == 1) {   // no workers: run inline, so a single-core machine still produces a token
         for (int i = 0; i < n; ++i) s2_expert_vnni_q(jobs[i].blob, *jobs[i].act, jobs[i].out, scratch_[0]);
         return;

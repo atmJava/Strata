@@ -2,8 +2,11 @@
 
 日期：2026-10-31
 
-状态：暂停验收。默认关闭；构建、路径和正确性门通过，但预注册的绝对 `0.05 s`
-性能门未过，4/6/8 非回退门未完成。按用户要求暂停优化，保留实验证据但不进入生产。
+状态：否决。默认关闭；构建、路径和基本正确性门通过，但逐层审计证明
+`<=32` staged 的 direct-path 覆盖不足：热长轮 `0/48` 层命中，热短轮每波最多
+`1/48` 层命中。原组合 A/B 的名义收益不能归因给本路径，不进入生产，4/6/8
+不再运行。逐层证据和下一项见
+[`AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md`](AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
 
 ## 问题与证据
 
@@ -92,3 +95,15 @@ engine/config hash、health、六 slots / 两 groups、systemd inactive，以及
 4 路 A2 测量在约 `1:44` 时因用户暂停而中止，没有结果文件，6/8 未运行；随后已恢复
 原 A1 生产。完整结果见
 [`AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md`](AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
+
+## 最终判决
+
+覆盖审计使用额外逐层日志的临时构建，在 cold/hot-short/hot-long 三种真实 chunk
+上记录全部 48 层。热长轮只有 layer `35/44/47` 的 native pack 可支持，但三波 staged
+均为 `80–141`，超过 32，实际命中为零；其余 45 层 staged 均为零。热短轮三波只在两次
+命中一层，单次理论差约 `3.8 ms`。因此本候选的真实路径不足以支撑整请求 1%，按预注册
+规则否决，不把组合 A/B 的未归因差值写成机制收益。
+
+三层大搬入量仍值得一个不同机制：由新契约
+[`AGENT_HOT_TURN_STAGED_STREAM_PIPE_CONTRACT-20261101.md`](AGENT_HOT_TURN_STAGED_STREAM_PIPE_CONTRACT-20261101.md)
+单独验证小批 copy/compute 流水；它不是放宽本契约的 `<=32` gate。

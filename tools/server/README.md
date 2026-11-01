@@ -61,14 +61,15 @@ Before changing a script or writing a new one, read [`../../docs/RULES.md`](../.
 | `probe_determinism.py` | is run-to-run spread sampling or the engine | `/opt/ai/runs/probe-determinism.json` |
 | `probe-gpu-utilization.py` | what the GPU hardware counters show during a controlled short decode and cold long prefill; separates SM activity, issue, Tensor, warps and DRAM | `/opt/ai/logs/gpu-util-*/probe.json`, `.nsys-rep` and `.sqlite`; `--check-only` validates the collection path without inference |
 | `probe-gpu-stability.py` | recent NVIDIA `NVRM: Xid` kernel events joined with current clocks, temperatures, power, memory, throttle reasons and owning process; read-only and no restart | JSON named by `--output`; `--require-clean` exits 2 when any Xid is present |
-| `probe-dsh-session-cost.py` | joins privacy-safe DSH session timings and token metadata with Strata `/metrics?requests=all`; separates `task_wall_s`, `turn_union_s`, first stream, model prompt/decode, tools, `post_turn_s` and unmatched title requests | JSON named by `--output` or stdout; reads current DSH v4 `chunk.time` and older `chunk.time0`; never prints prompt, reasoning or tool bodies |
+| `probe-dsh-session-cost.py` | joins privacy-safe DSH session timings and token metadata with Strata `/metrics?requests=all`; separates `task_wall_s`, `turn_union_s`, first stream, model prompt/decode, tools, `post_turn_s` and unmatched title requests | JSON named by `--output` or stdout; counts failed `assistant/attempt` steps by finish kind/code, reads current DSH v4 `chunk.time` and older `chunk.time0`, and never prints prompts, reasoning, error messages or tool bodies |
 | `probe-host-request-path.py` | measures DSH-shaped JSON receipt, Responses conversion, template rendering, PromptEncoder, `Service.prepare` and assembler cost with the production tokenizer/template; no engine or restart | JSON named by `--output`; synthetic text only, with token counts and timings but no message bodies |
 | `agent_budget_ab.py` | agent-shaped A/B with a real tool loop, self-scoring tasks | `/opt/ai/runs/agent-budget-ab-*.json` |
 | `probe-agent-sessions.py` | metadata-only 1/2/4-conversation A/A for shared prompts, continuation turns, latency and cache reuse; no restart | JSON named by `--output` |
 | `probe-codex-sessions.py` | real Codex session token shape: totals, root turns, compaction cache gaps and top uncached events; never prints prompt text or server timing as attribution | JSON named by `--output` or stdout |
 | `agent-shape-proxy.py` | privacy-safe request shape between Codex/DSH and Strata: model, declared tool names/types, context sizes and response metadata; no prompt or response bodies; streams upstream chunks without buffering the whole response; opt-in test flags can defer an auxiliary request, inject the tool-end prefix boundary, or isolate a first-turn token boundary | JSONL named by `--log` |
+| `bench-hot-turn-fixed-cost.py` | DSH-shaped cold, hot-short and hot-long prompts with one runner per arm; `--compare` joins baseline/candidate/control, requires all recorded waves, two-thirds candidate wins, the configured percentage and absolute-wall floors, and checks ordinary 1/2-way cold and hot shapes for regressions | one JSON per arm from run mode; comparator JSON on stdout |
 | `codex-model-catalog.py` | compatibility entry point for `strata codex catalog`; adds or refreshes the current Strata model slug with an atomic write and timestamped backup | JSON status on stdout |
-| `bench-agent-quality.py` | deterministic fresh-repository coding tasks through Codex or DSH (`--runner codex|dsh`); records explicit model/profile labels, optional `--dsh-patch` and test-only `--prompt-suffix`, and scores tests, protected test bytes, final sentinel and tool protocol without retaining prompt or response text; `wall_s` is explicitly the full runner process, not DSH main-turn time | JSON named by `--output`; session ids are retained for cost-probe joins |
+| `bench-agent-quality.py` | deterministic fresh-repository coding tasks through Codex or DSH (`--runner codex|dsh`); records explicit model/profile labels, model-catalog/fixture/prompt hashes and provider URL, optional `--dsh-patch` and test-only `--prompt-suffix`, and scores tests, protected test bytes, final sentinel and tool protocol without retaining prompt or response text; `--compare BASE CANDIDATE` rejects incomparable arms, candidate regressions and shared failures; `wall_s` is explicitly the full runner process, not DSH main-turn time | JSON named by `--output`; comparison JSON on stdout; session ids are retained for cost-probe joins |
 | `quality_eval.py`, `quality_eval_budget.py` | small self-scoring quality eval (the quality gate) | stdout |
 | `effort-cost.py`, `effort_lang_ab.py`, `replay_effort_ab.py` | what a thinking budget costs and changes | jsonl / stdout |
 | `conv_cache_ab.py` | two long conversations alternating: parking and restore costs | stdout |
@@ -158,6 +159,11 @@ probe-gpu-stability.py [--boot | --since TIME] [--cluster-seconds N] [--journal 
 probe-dsh-session-cost.py SESSION... [--metrics FILE] [--match-window S] [--output FILE]
 probe-host-request-path.py --tokenizer DIR [--template FILE] [--contexts 6000,94700,189100] [--reps 7] [--output FILE]
 agent-shape-proxy.py --upstream URL --listen HOST:PORT --log FILE [--pin-tool-prefix] [--pin-first-turn-tokens N]
+bench-hot-turn-fixed-cost.py --arm NAME --levels 1,2 --waves 3 --output FILE
+bench-hot-turn-fixed-cost.py --compare BASE.json CANDIDATE.json CONTROL.json \
+  --compare-baseline BASE --compare-candidate CANDIDATE --compare-control CONTROL \
+  --min-gain-pct 1 --min-wall-s 0.015
+bench-agent-quality.py --compare B0.json B1.json
 run-matrix.py --batch V1 [--src DIR] [--only ID] [--skip ID] # one batch, one matrix run
 check_assert_lock.py <source-tree> <build-dir>   # the 64/256 shape is locked by static_assert
 use-config.sh <config.json>                      # the only install/restore entry, ~156 s
@@ -187,3 +193,19 @@ park_gain_ab.sh [ctx] [sizes] [reps]
 
 `build/` is the production build: do not reconfigure it. A new variant gets its own directory, and if it needs to
 run under `use-config.sh` the binary is copied to a path containing `build/strata` (see the trap in HANDOVER §9.28).
+
+When two arms share the live engine log, slice it remotely by saved byte offsets, record the
+slice size and SHA-256, and prove the slice contains only that arm's window. Use the exact
+regexes `^cpu gate: layer [0-9]+ shared,` and
+`^cpu gate: layer [0-9]+ not shared,`; a loose ` shared,` match counts `not shared` and
+invalidates the path evidence.
+
+For quality comparisons, both arms must use the same `fixture_suite_sha256`. Fixture prompts
+now require the final assistant message to contain only `RESULT=PASS`; a summary followed by
+the sentinel is a test-contract miss, not a valid pass. Change the rule together with the
+fixture hash and rerun both arms instead of retrying one arm until it happens to match.
+
+`probe-decode-concurrency.py` records output hashes for diagnosis; 6/8 safety runs use zero
+errors, token counts, finish reasons, health and resources as the gate. Do not claim that
+every concurrent output had one hash unless the report actually shows one. Exact greedy
+parity belongs to the paired B0/B1 correctness runs, not to a throughput safety sweep.

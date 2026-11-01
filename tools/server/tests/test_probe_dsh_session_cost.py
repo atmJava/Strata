@@ -111,6 +111,71 @@ def test_current_dsh_stream_sits_beside_message():
     }) == 77.5
 
 
+def test_failed_attempt_is_counted_without_retaining_error_text(tmp_path):
+    session = tmp_path / "task" / "session-example"
+    session.mkdir(parents=True)
+    plain = session / "session.jsonl"
+    rows = [
+        {"type": "turn/start", "time": 1000, "data": {"turn": 1}},
+        {"type": "step/start", "time": 1010, "data": {"turn": 1, "step": 1}},
+        {
+            "type": "assistant/attempt",
+            "time": 1210,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "stream": [
+                    {"time": 1100, "chunk": {"type": "block-start"}},
+                    {
+                        "time": 1210,
+                        "chunk": {
+                            "type": "finish",
+                            "reason": {
+                                "kind": "error",
+                                "failure": {
+                                    "message": "private diagnostic must not be retained",
+                                    "code": "PI_AI_ERROR",
+                                },
+                            },
+                        },
+                    },
+                ],
+            },
+        },
+        {"type": "step/end", "time": 1210, "data": {"turn": 1, "step": 1}},
+        {
+            "type": "turn/end",
+            "time": 1250,
+            "data": {"turn": 1, "reason": {"kind": "error"}},
+        },
+    ]
+    plain.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    result = PROBE.summarize_session(plain)
+
+    assert result["steps"] == 1
+    assert result["model_wall_s"] == 0.2
+    assert result["task_wall_s"] == 0.25
+    assert result["step_rows"] == [
+        {
+            "turn": 1,
+            "step": 1,
+            "started_ms": 1010.0,
+            "model_wall_s": 0.2,
+            "time_to_first_stream_s": 0.09,
+            "stream_after_first_s": 0.11,
+            "fresh_input_tokens": 0,
+            "cached_input_tokens": 0,
+            "context_tokens": 0,
+            "output_tokens": 0,
+            "failed": True,
+            "finish_kind": "error",
+            "error_code": "PI_AI_ERROR",
+        }
+    ]
+    assert "private diagnostic" not in json.dumps(result)
+
+
 def test_task_wall_excludes_events_after_the_final_turn(tmp_path):
     session = tmp_path / "task" / "session-example"
     session.mkdir(parents=True)

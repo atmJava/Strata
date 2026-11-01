@@ -8108,7 +8108,16 @@ int main(int argc, char** argv) {
         // STRATA_PREFILL_CPU_SHARE the staged-chunk limit before the chunk below sizes the loans (bytes_needed reads it)
         // #1607: Windows, the commit limit (RAM + page file) is what ends the engine silently; compare what this run plans
         // to allocate on the host from here (the conversation cache, checkpoints) with the commit that is left
-        const bool share_pool = o.batch <= 0 && !o.no_pool;
+        static const bool guarded_batch_share = [] {
+            const char* v = std::getenv("STRATA_PREFILL_CPU_SHARE_BATCH_GUARD");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        const bool share_pool = (o.batch <= 0 || guarded_batch_share) && !o.no_pool;
+        if (guarded_batch_share && o.batch > 0) {
+            pool.set_batch_prefill_guard(true);
+            std::fprintf(stderr, "strata serve: batch CPU-share guard requested; prefill leases one layer only while "
+                                 "no decode window is active\n");
+        }
         bool share_has_work = strata::prefill::share_rules::default_share_has_work(
             (int64_t) xcache.slots(), (int64_t) (g.n_layers * g.n_expert));   // #1595
         if (!share_has_work)
@@ -8116,7 +8125,8 @@ int main(int argc, char** argv) {
                                  "nothing to take, so it is not armed by default (STRATA_PREFILL_CPU_SHARE=auto forces it)\n",
                          (long long) xcache.slots(), (long long) (g.n_layers * g.n_expert));
         if (share_pool && stages.empty() && !multi_gpu && share_has_work && !share_default_ok()) share_has_work = false;   // H11
-        strata::prefill::Prefill::arm_cpu_share(share_pool, share_pool && stages.empty() && !multi_gpu && share_has_work);
+        strata::prefill::Prefill::arm_cpu_share(
+            share_pool, o.batch <= 0 && share_pool && stages.empty() && !multi_gpu && share_has_work);
         void* borrow = nullptr;
         uint64_t borrow_bytes = 0;
         int32_t lend_first = -1;          // the first slot the prompt path may borrow (its largest chunk)
@@ -11432,6 +11442,7 @@ int main(int argc, char** argv) {
             }
             if (batch_mtp && A > 0) next_slot = ((size_t) active[A - 1] + 1) % bs.size();
             if (S == 0) return true;
+            auto pool_decode_window = pool.decode_window();
             const bool was_busy = strata::core::progress().busy.load();
             strata::core::progress().busy.store(true);
             drive.d.layers = 0;
@@ -11848,6 +11859,7 @@ int main(int argc, char** argv) {
         // one turn: serve every running stage, hand finished groups on, start what can start
         auto pump = [&](bool may_start) -> bool {
             ++pipe_tick;
+            auto pool_decode_window = pool.decode_window();
             if (bt_windows == 0 && !pipe_inflight()) {
                 bt_start = Clock::now();
                 bt_wait0 = ver.ms_wait; bt_pool0 = ver.ms_pool;

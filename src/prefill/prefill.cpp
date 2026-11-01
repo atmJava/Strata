@@ -3514,6 +3514,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     std::vector<char> on_cpu;
                     std::vector<const uint8_t*> cpu_blob;   // the CPU experts' blobs, taken on this thread (the source is not thread-safe)
                     double cpu_ms = 0;                    // the thread's time (the measured share)
+                    // Declared before cpu_fut so reverse destruction waits for the future before
+                    // releasing the layer lease on every early return path.
+                    strata::kernels::cpu::ExpertPool::PrefillLease cpu_lease;
                     std::future<bool> cpu_fut;
                     int64_t rows_cpu = 0, n_cpu = 0, n_stream = 0;
                     bool cpu_arm = true;                  // auto: this layer may share (false: the arm without)
@@ -3712,6 +3715,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             ++m.cnt[(size_t) e];
                         }
                         if (cpu_maybe) {
+                            cpu_lease = cpu_pool_->try_prefill();
+                            cpu_maybe = static_cast<bool>(cpu_lease);
+                        }
+                        if (cpu_maybe) {
                             std::vector<std::pair<int32_t, int32_t>> cand;   // (tokens, expert)
                             int64_t nstream = 0;
                             for (int32_t e = 0; e < m.g->n_expert; ++e) {
@@ -3744,6 +3751,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 rows_cpu += cand[i].first;
                                 ++n_cpu;
                             }
+                            if (n_cpu == 0) cpu_lease.release();
                         }
                         // multi-GPU: the rows of the experts the peer computes go last, as one block [rows_local, T*K)
                         const bool pre_mmq = mmq_plan().any && mmq_plan().layer[(size_t) l];
@@ -4552,6 +4560,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     if (cpu_fut.valid()) {   // set_cpu_pool: the CPU's rows into Dm's tail
                         if (cpu_share_env() < 0.0) cudaEventRecord(m.cpu_ev[1], m.cs);   // after the GPU's expert work
                         if (!cpu_fut.get()) { err = "prefill: a CPU expert has no blob"; return false; }
+                        cpu_lease.release();
                         if (cpu_share_env() < 0.0 && n_stream > n_cpu) {
                             m.cpu_pend = true;
                             m.pend_cpu_ms = cpu_ms;

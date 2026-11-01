@@ -1,6 +1,6 @@
 # AI 交接：Strata 2×2080 Ti 当前状态
 
-> 整理时间：2026-11-01（DSH 标题生命周期否决与 resident 覆盖审计恢复后）。
+> 整理时间：2026-11-01（CPU-share guard 已部署；GPU0 Xid 用户可见失败重新抢占）。
 > 本页只描述当前可接手的生产、实验断点、风险和恢复入口。历史交接见
 > [`archive/HANDOVER-through-2026-10-25.md`](archive/HANDOVER-through-2026-10-25.md)。
 > 判断部署不能只看 health 200；必须以实际运行文件的 hash、进程环境和 T-probe 为准。
@@ -12,11 +12,11 @@
 3. [`ROADMAP.md`](ROADMAP.md)：指标、路线和验收门限。
 4. [`WORK_QUEUE.md`](WORK_QUEUE.md)：待做、已完成、否决和搁置项。
 5. [`ITERATION_LOG.md`](ITERATION_LOG.md) 最新两条：最近决策。
-6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-168。
+6. 需要原始数字时读 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md) 的 L-125–L-174。
 
 ## 2. 当前断点
 
-- **全局目标已第三十六次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+- **全局目标已第四十三次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
   Xid、engine 非预期退出或错误结果风险时，立即暂停性能实验并保存事故。没有新事故时，
   不空等低频故障，继续建立代表性任务质量门，再恢复普通单代理编辑—测试循环的性能优化。
   质量、任务成功率、测试正确性和工具协议都是硬门，不能用速度交换失败或严格收口缺失。
@@ -25,8 +25,8 @@
   4 路非回退，6/8 只做安全回归。任何局部候选先算真实触发率后的整任务 1% 上界；没有进入
   用户实际路径的能力只算机制收益。完整计划在
   [`superpowers/plans/2026-10-31-agent-workload-throughput.md`](superpowers/plans/2026-10-31-agent-workload-throughput.md)。
-  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。第三十六版更新后该接口仍以
-  “unfinished goal”拒绝，当前目标接口不能改写文本或恢复它；接手时以本仓库第三十六版计划
+  平台内的旧“2/4/6/8 路引擎”目标仍是 paused。当前目标接口不能改写文本或恢复它；
+  接手时以本仓库第四十三版计划
   为权威，不要回到平台旧目标的状态快照。
 - **DSH 真实路径成本已拆清**：7 个基础/fixture 会话 runner 总墙钟 `197.776 s`，模型
   step `184.332 s`（`93.202%`），工具区间并集 `10.505 s`（`5.312%`）；40/40 个主
@@ -57,14 +57,18 @@
 - **测试口径已修正**：`bench-agent-quality.py` 的 `wall_s` 是完整 runner 进程，包含
   turn 后辅助工作；`probe-dsh-session-cost.py` 同时报告主任务、turn union 和 post-turn
   时间。`agent-shape-proxy.py` 已逐块流式转发，不能再用“先读完 SSE”的代理测 TTFT。
-- **GPU0 是当前抢占风险**：DSH 最终 Responses 请求在 76 个 reasoning token 后
-  因 `verify: layer 11 never rang` 失败；GPU0 `0000:03:00` 同秒记录 8 条 Xid 13 和
-  1 条 Xid 43。精确重建成同一 `input_tokens=15,419` 请求后，约 60 次重放、30 个最终
-  请求全 HTTP 200，未再触发。GPU0 还在 2026-09-25 的另一套 vLLM/驱动栈上发生过
-  Xid 62/154；上游同类改装 22GB 卡报告相同 Xid 13/ESR 并在显存降频后消失。当前高度
-  怀疑显存时序/板级稳定性，但未证明芯片损坏，也未完成修复。测试方法已改为按 UTC 窗口
-  记录新 Xid 与 workload/GPU 状态关联；`--boot` 读取整个 boot，跨秒同设备事件默认聚为
-  一次事故；固定 prompt 不再用于宣称硬件稳定。见
+  路径审计、机制增量和生产回归也必须分开；性能主比较必须同源码、同构建选项、同 config，
+  不能把旧生产对照和候选内部机制差混成一个百分比。质量 fixture 还要求最终 assistant
+  消息只含 `RESULT=PASS`；不得接受“摘要后附 sentinel”，也不得把它误判为代码质量失败。
+- **GPU0 Xid 事件重新成为当前 P0**：最新严重 DSH 会话共 5 步，`task_wall_s`
+  `36.31 s`，成功的 4 步模型墙 `32.853 s`；第 5 步等待 `2.296 s` 后因
+  `verify: layer 11 never rang` 失败，整个 turn 以 error 结束。GPU0 `0000:03:00`
+  同秒记录 8 条 Xid 13 和 1 条 Xid 43。精确重建成同一 `input_tokens=15,419` 请求后，
+  约 60 次重放、30 个最终请求全 HTTP 200，未再触发；固定请求通过仍不能证明硬件稳定。
+  GPU0 还在另一套 vLLM/驱动栈上发生过 Xid 62/154；上游同类改装 22GB 卡报告相同
+  Xid 13/ESR 并在显存降频后消失。当前高度怀疑显存时序/板级稳定性，但未证明芯片损坏。
+  下一实验只改 `STRATA_HC_SPLIT=1`，绕过默认 staged cp.async read；失败即恢复，
+  不得同时降频或关闭多个 pipeline 开关。见
   [事件结果](work/GPU_XID13_INCIDENT_RESULT-20261101.md)。只读探针为
   `tools/server/probe-gpu-stability.py`。
 - **质量对照与最终收口已完成**：用户实际 DSH Web 是
@@ -77,15 +81,30 @@
 - **Codex 工具面历史**：模型 slug 不在目录时只有 9 个工具且没有 `apply_patch`；目录供给
   已产品化为 `strata codex catalog [--apply]`。详见
   [AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT](work/AGENT_CODEX_MODEL_CATALOG_QUALITY_RESULT-20261101.md)。
-- **当前主动项**：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 的 native
-  direct-pointer 路径真实命中，group 级 `11.671 → 7.848 ms/layer`（`1.49x`）。
-  596 fresh、1 路 wall 相对 A1/A2 合并基线改善 `1.862%`，相对 A1 改善 `2.145%`、
-  `32.667 ms`，三波全胜；这符合用户“1% 多也算”的原则，但未过预注册的绝对
-  `0.05 s` 门。94K wall 名义改善 `2.612%` 但 prompt 基本不变，不能归因给 prefill；
-  4 路 A2 在约 `1:44` 后被用户暂停，没有结果，6/8 未跑。候选保持默认关闭，生产仍是
-  A1。当前先只读审计 48 层 `fused_staged` 覆盖和 fallback；没有新增整请求 1% 就关闭，
-  有才补 4/6/8。见
-  [result](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
+- **resident direct-path 与 staged pipe 均已否决**：逐层审计证明热长轮只有
+  layer `35/44/47` native 可支持，staged `80–141`，实际 `0/48` 命中；其余 45 层
+  staged 为 0。随后小批双缓冲在相同源码真实命中三层，但 hot-long wall 慢 `0.721%`、
+  prompt 慢 `0.136%`，9/9 输出虽正确也未达性能门。源码已移除，A1 已恢复。见
+  [审计结果](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md) 与
+  [流水结果](work/AGENT_HOT_TURN_STAGED_STREAM_PIPE_RESULT-20261101.md)。
+- **CPU-share env-only 已判不可达，机制仍有约 2% 信号**：现役 engine 参数含
+  `--batch 6`，源码只在 `o.batch <= 0 && !o.no_pool` 时把 CPU pool 接到 prompt
+  path，因此 `STRATA_PREFILL_CPU_SHARE=auto` 在生产不会生效。无 batch、同 engine/
+  source/config 的隔离 B0/B1 中，B1 hot-short wall 快 `2.987%`/`15.148 ms`，
+  hot-long 快 `1.944%`/`25.585 ms`，9/9 请求正确、零外来请求、零新 Xid。该证据只说明
+  值得审计源码接线，不能冒充生产收益。
+- **CPU-share guard 已完成并部署为 opt-in**：prompt prefill 与 batch decode 共用
+  `ExpertPool`，lease 只协调单层所有权，batch guard 下 `run*` 串行，lease 本身不持
+  派发锁等待 async future。生产选项 engine `e3d25b38...` 的 B0/B1/B0r 判决 `pass`，
+  1 路 hot-short/hot-long wall 改善 `11.825%/10.991%`，2 路 `7.896%/8.056%`，
+  四个比较均 `3/3` 波胜，控制漂移最大 `1.53%`。质量 schema 5 下 B0/B1 均 `7/7`；
+  6/8 共 42 请求零错误。见
+  [结果](work/AGENT_BATCH_PREFILL_POOL_LEASE_RESULT-20261101.md)。
+- **暂停项**：`AGENT-CURRENT-PROD-COST-REMAP`。CPU share 已把普通 hot
+  continuation 降到 `0.52/1.35 s`，但普通 cold 仍约 `11.37 s`。下一步先读取最新真实
+  DSH 会话已确认长输出 decode 是后续最大普通成本：一个 `15,036` output-token step
+  占 `173.323 s`，整任务 `202.486 s`。GPU P0 结束后恢复这一路线；不继续扫描 CPU
+  share 邻域。
 - **算力解锁已核实，不再处理**：项目 TU102 解锁文档的 cuBLAS 测量为锁定 `62.40`、
   双卡 `93.69/94.07 TFLOPS`（约 `1.51x`）；当前 boot 双卡均为 `unlocked=1`、
   `handoff_safe=1`，DKMS 与 initramfs 自动路径固定，功耗墙各为 `280 W`。当前慢不是
@@ -98,15 +117,20 @@
   `5.001 → 1.335 s`（`-73.31%`）。`UTIL-TWO-STREAM-SERIAL` 也已采纳：恰好两路走
   solo 串行，第三条出现时恢复 batch；512-token 两路完成时间 `-15.05%`，64-token
   `-8.18%`，1/4 路不退，6 路安全。
-- **当前运行**：server/vision/engine `232891/232893/232899`。首轮前缀候选已是最终
-  生产实例。server cwd 为
+- **当前运行**：生产 opt-in 已部署，server/engine `292517/292525`，端口 `8080`。
+  server cwd 为 `/opt/ai/src/strata-two-stream-serial-20261031`；engine 为
+  `/opt/ai/src/strata-batch-prefill-guard-20261101/build-guard-prod/strata`，SHA-256
+  `e60a334c...`；config `2c4c7ac6...`。health loaded、262144、6 slots / 2 groups。
+  A1 的回滚身份仍是 server/vision/engine `254299/254303/254308`。A1 server cwd 为
   `/opt/ai/src/strata-two-stream-serial-20261031`；engine 二进制是另一个 build：
   `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。服务监听
-  `127.0.0.1:8080`、health loaded、262144、6 slots / 2 groups；engine `105a4171...`
-  未重建，config `6ece1a13...`、server `bd3e4289...`，server 进程含
-  `STRATA_BATCH_SERIAL_TWO=1`、`STRATA_DEFER_TITLE_REQUESTS=1`、
-  `STRATA_PIN_DSH_TOOL_PREFIX=1`。
-  `strata.service` 仍 inactive/dead；本次重启到 ready 约 `190 s`。engine env 不含
+  engine `105a4171...` 未重建，config `6ece1a13...`、server `bd3e4289...`。生产实测
+  server 进程 env 含
+  `STRATA_ADMIT_SHORT_FIRST=2048`、`STRATA_DEFER_TITLE_REQUESTS=1`、
+  `STRATA_MP_STAGED_READ_MIN_TOKENS=2048`、`STRATA_PIN_DSH_TOOL_PREFIX=1`。
+  engine env 含 `STRATA_BATCH_SERIAL_TWO=1`、CPU-share batch guard、`auto` share 与
+  `1024` cap，不含 debug 开关。`strata.service` 仍 inactive/dead；本次 launch 到 ready
+  约 `150 s`。engine env 不含
   `STRATA_DECODE_TIMING`、`STRATA_VERIFY_PROFILE` 与 `STRATA_PREFILL_STAGED_AHEAD`。
   当前显式引擎参数含 `--ple-inflight 1024`，不含 `--ple-row-cache`；源码默认仍为 256，
   rollback 为同一源码目录 + `4b396f44...` direct config。健康、6 slots / 2 groups、
@@ -338,26 +362,29 @@
   性能筛选门否决。fair batch service 通过了路径和 parity，但完整并发曲线仍在 4/8 路回退，
   因此也已否决。这些记录只用于防重复，不再是当前执行入口；B4 的两路串行已是当前基线。
   普通热续轮 `short_read`、编辑—测试重复测试和 MTP 批量 draft K/V 也已分别否决。
-当前入口是 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`；223K 旧会话仅为低频 p99。
+当前入口是 `GPU-XID13-STABILITY`：最新真实 DSH turn 最后以 GPU0 Xid 同型错误失败，
+先验证单变量 `STRATA_HC_SPLIT=1`。`AGENT-CURRENT-PROD-COST-REMAP` 暂停；CPU-share
+guard 已完成部署，223K 旧会话仅为低频 p99。
 
-## 3. 当前生产
+## 3. 当前运行与恢复基线
 
-生产 `strata.service` 保持 inactive；B4 以手动实例运行，health loaded。以下 PID、hash
-和参数于 2026-11-01 通过 relay 重新核对。
+CPU-share 候选已以生产 opt-in 启动，health loaded。静态表同时保留 A1 回滚基线；不要
+看到 health 200 就认为回滚文件仍相同。以下身份于 2026-11-01 通过 relay 核对。
 
 | 项 | 当前值 |
 |---|---|
 | service | `inactive/dead`、`MainPID=0`、`NRestarts=8`（误触发的失败启动已停止） |
-| server/engine/vision | `232891/232899/232893`，health loaded，监听 `:8080` |
+| A1 回滚身份 | server/engine/vision `254299/254308/254303`，监听 `:8080`，当前已停止 |
+| 当前生产 opt-in | server/engine `292517/292525`，监听 `:8080`，config `2c4c7ac6...` |
 | server cwd | `/opt/ai/src/strata-two-stream-serial-20261031` |
-| engine binary/cwd | `/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`；cwd 为同目录上一级 |
-| current running | engine `105a4171...`，config `6ece1a13...`，server `bd3e4289...` |
-| latest accepted candidates | DSH first-turn shared-prefix pin、title gate opt-in、Codex title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
+| engine binary/cwd | `/opt/ai/src/strata-batch-prefill-guard-20261101/build-guard-prod/strata`；cwd 为同目录上一级 |
+| current running | engine `e60a334c...`，config `2c4c7ac6...`，server `bd3e4289...` |
+| latest accepted candidates | CPU-share batch lease opt-in、DSH first-turn shared-prefix pin、title gate opt-in、Codex title、compaction LRU、system-before-tools、boundary pin、two-stream serial |
 | GPU state | 两张 2080 Ti 均可联合 initialize，均 idle；`vram_free_mib=1005` |
 | host | boot `2026-10-31 02:43:50 UTC`，双卡正常 |
 | 形状 | 双 RTX 2080 Ti、6×256K、groups=2、INT8 KV、parallel=6 |
 
-关键生产开关：
+关键生产开关（按实际归属读取；不能把 config 的 engine env 写成 server env）：
 
 ```text
 STRATA_ADMIT_SHORT_FIRST=2048
@@ -378,6 +405,11 @@ STRATA_SHARED_SLOT_ROPE=1
 STRATA_SM75_PERF=1
 ```
 
+本次实际从 server 进程环境核对到的是 `STRATA_ADMIT_SHORT_FIRST=2048`、
+`STRATA_DEFER_TITLE_REQUESTS=1`、`STRATA_MP_STAGED_READ_MIN_TOKENS=2048` 和
+`STRATA_PIN_DSH_TOOL_PREFIX=1`。`STRATA_BATCH_SERIAL_TWO=1` 来自 A1 config 的
+`env`，由 launcher 传给 engine；路径审计和回滚必须按这个边界核对。
+
 已停止的 fair-service B 只比 A 多了 `STRATA_BATCH_FAIR_SERVE=1`；A2 运行环境没有
 `STRATA_PF_WMMA`、`STRATA_PA_V2T`、`STRATA_SEL_OVERLAP`、
 `STRATA_IDX_FP16_CHECK`、`STRATA_PREFILL_TIMING`、`STRATA_PA_GROUP3`、
@@ -387,8 +419,8 @@ STRATA_SM75_PERF=1
 `STRATA_MMVF_ROWS`、`STRATA_MMVQ_IL_HEAD_GRID`、`STRATA_BATCH_FAIR_SERVE`、
 `STRATA_PROFILE_*` 或
 `STRATA_NCU_*`；`STRATA_POLL_FAST` 已随否决移除。
-`STRATA_ADMIT_SHORT_FIRST` 由 systemd service 环境提供；写进 engine config 的 `env` 只传给
-引擎子进程，不能替代 service drop-in。
+`STRATA_ADMIT_SHORT_FIRST` 必须位于 server 进程环境，不能只写进 engine config 的
+`env`。使用 systemd service 时由 drop-in 提供；当前手动实例已在进程环境中实测到。
 
 当前生产基线是“已通过稳定性、正确性和同 boot 归因的最佳基线”，不是数学意义上的全局最优。
 当前没有基础设施阻塞；如再次需要重启，启动后仍应立即停止 `strata.service`，确认两卡

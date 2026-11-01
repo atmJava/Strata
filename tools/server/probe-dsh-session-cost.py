@@ -90,6 +90,30 @@ def stream_first_time(message: dict[str, Any]) -> float | None:
     return min(times) if times else None
 
 
+def stream_finish(message: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return finish kind/code without retaining stream text or error messages."""
+    events = message.get("stream")
+    if not isinstance(events, list):
+        events = (message.get("message") or {}).get("stream") or []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        chunk = event.get("chunk")
+        if not isinstance(chunk, dict) or chunk.get("type") != "finish":
+            continue
+        reason = chunk.get("reason") or {}
+        if not isinstance(reason, dict):
+            continue
+        kind = reason.get("kind")
+        failure = reason.get("failure") or reason.get("error") or {}
+        code = failure.get("code") if isinstance(failure, dict) else None
+        return (
+            str(kind) if kind is not None else None,
+            str(code) if code is not None else None,
+        )
+    return None, None
+
+
 def tool_span(row: dict[str, Any], calls: dict[str, tuple[float, str]]) -> tuple[float, float, str] | None:
     data = row.get("data") or {}
     message = data.get("message") or {}
@@ -135,7 +159,7 @@ def summarize_session(
     last_ms = float(timed[-1]["time"])
 
     step_start_ms = None
-    assistant: tuple[float, dict[str, Any]] | None = None
+    assistant: tuple[float, dict[str, Any], dict[str, Any], bool] | None = None
     calls: dict[str, tuple[float, str]] = {}
     steps = []
     tool_spans: list[tuple[float, float, str]] = []
@@ -154,11 +178,13 @@ def summarize_session(
         elif kind == "step/start" and isinstance(when, (int, float)):
             step_start_ms = float(when)
             assistant = None
-        elif kind == "assistant/message" and isinstance(when, (int, float)):
-            assistant = (float(when), data, data.get("usage") or {})
+        elif kind in {"assistant/message", "assistant/attempt"} and isinstance(when, (int, float)):
+            usage = data.get("usage") or {}
+            assistant = (float(when), data, usage, kind == "assistant/attempt")
         elif kind == "step/end" and step_start_ms is not None and assistant is not None:
-            ended_ms, envelope, usage = assistant
+            ended_ms, envelope, usage, failed = assistant
             first_stream_ms = stream_first_time(envelope)
+            finish_kind, finish_code = stream_finish(envelope)
             fresh = int(usage.get("inputTokens") or 0)
             cached = int(usage.get("cacheReadTokens") or 0)
             output = int(usage.get("outputTokens") or 0)
@@ -181,8 +207,11 @@ def summarize_session(
                 "cached_input_tokens": cached,
                 "context_tokens": fresh + cached,
                 "output_tokens": output,
+                "failed": failed,
+                "finish_kind": finish_kind,
+                "error_code": finish_code,
             }
-            if requests is not None:
+            if requests is not None and not failed:
                 match = request_matches(step, requests, match_window_s)
                 if match:
                     step["server"] = {

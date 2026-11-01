@@ -8,7 +8,7 @@
 
 ---
 
-## 台账索引（L-000…L-170，按编号）
+## 台账索引（L-000…L-175，按编号）
 
 > 索引判决保留当时口径；当前复盘统一使用 `采纳 / 否决 / 未定`，历史“结论/参考”等标签不重写。
 
@@ -184,6 +184,11 @@
 | L-168 | 11-01 19:4xZ–20:0xZ | 首轮 checkpoint `582→5,463`；干净 boot 顺序 A→B，A2/A3 task 中位 `11.3715 s`、B2/B3 `7.3165 s`（`35.66%`、`4.055 s`）；首步 model wall `6.2–6.4→2.7–3.0 s`。6 fixture、双会话 provider 标题、健康全过；一次可恢复工具参数错误单列并重跑 `1/1` 零错误。最终 PID `232891/232893/232899`、server `bd3e4289...`、重启约 `190 s`、新增 Xid `0` | **DSH-FIRST-TURN-PREFIX-REUSE opt-in 采纳**：精确 DSH shape 固定 system+tools；同 boot ABBA 被持久 checkpoint 污染，正式方法改为干净 boot A→B 且冷启动单列。下一项 `AGENT-DSH-REQUEST-PATH-MAP` |
 | L-169 | 11-01 04:2xZ–05:0xZ | 生产 tokenizer/template 的 6K/94K/189K 热 `Service.prepare` 中位 `6.439/11.527/18.345 ms`；real 6-step DSH 任务 `13.261 s`、模型 `12.112 s`（`91.287%`）、工具并集 `0.991 s`。普通 step 首 token 只比 prompt 多约 `25–26 ms`；标题与 step 2 重叠，首 token 前 `2.681 s` 对 prompt `1.148 s`，额外 `1.533 s` 约占任务 `11.6%`。DSH v4 `data.stream/chunk.time` timing bug 已修复并回归 | **host null result**：关闭 `AGENT-DSH-REQUEST-PATH-MAP`，不修改 server/engine、不重启；下一项 `DSH-TITLE-END-OF-TURN`，按完整多 step turn 做标题隔离 |
 | L-170 | 11-01 05:xZ–06:xZ | 真实 DSH turn 结束时取消仍在等待的标题；标题等待 `9.421 s` 后 `BrokenPipeError/502`。提前 SSE 头与合法 chunked 心跳无效。该轮 task wall `9.598 s`、runner wall `11.628 s`，代码/测试/sentinel 与五个 model step 全过。128/64 cap task wall `12.004/11.490 s` 仍跨两个主 step；固定前缀 D1/D2 `14.161/12.221 s` 且均 `cached=0` | **DSH-TITLE-END-OF-TURN 否决**：标题生命周期归 DSH，服务端不能安全延后；不扫邻近等待、token cap 或 prompt。候选代码已移除，生产未重启；下一项恢复 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` |
+| L-171 | 11-01 | resident direct-path 逐层审计：热长轮 `T=865` 仅 layer `35/44/47` native 可支持且 staged `80–141`，实际 `fused_staged=0/48`；热短轮三波只两次各命中一层，单层理论上限约 `3.8 ms`；9/9 正确、零 Xid | **AGENT-HOT-TURN-RESIDENT-PATH-AUDIT 否决**：原组合 A/B 的 `1.862%` 不能归因该路径；不补 4/6/8，不扫 staging 数量 |
+| L-172 | 11-01 21:2xZ | 三层 16-expert 双缓冲真实命中 layer `35/44/47`，批次 `4–9`，9/9 正确；1 路 hot-long wall `1.511603→1.522504 s`（慢 `0.721%`）、prompt `1395.3→1397.2 ms`（慢 `0.136%`），三波仅胜一波 | **AGENT-HOT-TURN-STAGED-STREAM-PIPE 否决**：路径命中不等于墙钟改善；源码移除、A1 恢复，不扫 batch/ring |
+| L-175 | 11-01 01:26:52–01:27:28 CST | 最新严重 DSH 会话共 5 步、`task_wall_s=36.31 s`；第 5 步 `2.296 s` 后 `layer 11 never rang`，GPU0 同秒 8×Xid 13 + Xid 43。成功 4 步模型墙 `32.853 s`，修正失败步骤后总模型墙 `35.149 s`。另一个长输出会话 `task_wall_s=202.486 s`，一个 15,036-output-token step `173.323 s`，模型 `96.799%` | **GPU-XID13-STABILITY P0 抢占**：成本重排暂停；下一步单变量 `STRATA_HC_SPLIT=1`。会话探针已计入失败 attempt 并只保留 finish/error code |
+| L-174 | 11-01 22:4xZ–23:5xZ | 生产选项 B0/B1/B0r：1 路 hot-short/hot-long wall 改善 `11.825%/10.991%`，2 路 `7.896%/8.056%`，四个比较均 `3/3` 波胜，控制漂移最大 `1.53%`；schema 5 质量 B0/B1 均 `7/7`；6/8 共 42 请求零错误，最终 binary 补跑仍零错误并记录两个输出哈希变体 | **AGENT-BATCH-PREFILL-CPU-SHARE-GUARD 采纳为 opt-in**：真实 CPU gate `3,698`、shared `2,814`；lease refusal/dispatch wait 未命中，不能宣称竞争路径时延；最终 engine `e60a334c...` 已部署 |
+| L-173 | 11-01 21:36Z–21:47Z | CPU-share 隔离 B0/B1 同为 `batch=0`、20,693 slots：hot-short wall `0.507168→0.492020 s`（`2.987%`、`15.148 ms`），hot-long `1.316394→1.290809 s`（`1.944%`、`25.585 ms`），9/9 正确；B1 精确 tail 有 264 gate/128 shared，B0 为 0。生产 `--batch 6` 命中 `o.batch <= 0` 静态门；已恢复 `254299/254303/254308`，无新增 Xid | **env-only 生产候选否决**：约 2% 仅是机制信号；只允许一次 batch prefill/decode `ExpertPool` 所有权审计，无阻塞 lease 即关闭 |
 
 **怎么用**：先看这张表的"判决"列定位相关条目，再读条目正文拿数字与原始日志路径；判决为
 **结论/参考** 的条目**不要重做**，判决为 **否决** 的条目**不要再试**（都已经付过代价）。
@@ -229,6 +234,167 @@ runner wall 或只看一次 task wall 会把“标题已被取消”误判成契
 
 完整结果见
 [`DSH_TITLE_SCHEDULING_RESULT-20261101.md`](work/DSH_TITLE_SCHEDULING_RESULT-20261101.md)。
+
+## L-175 · 失败 attempt 被旧成本探针漏掉；GPU0 用户失败重新抢占
+
+**判定：`GPU-XID13-STABILITY` 重新成为当前 P0；`AGENT-CURRENT-PROD-COST-REMAP`
+暂停。**
+
+最新严重 DSH v4 会话的最终 reason 是
+`server_error: verify: layer 11 never rang (an illegal instruction was encountered)`，
+不是普通模型回答变差。完整 turn 为 5 步、`task_wall_s=36.31 s`；第 5 步
+`2.296 s` 后失败。GPU0 同秒仍对应已保存的 8×Xid 13 + Xid 43。
+
+旧 `probe-dsh-session-cost.py` 只读取 `assistant/message`，把失败
+`assistant/attempt` 整个漏掉，因此同一会话被报成 4 步、模型墙 `32.853 s`。修复后
+`steps=5`、模型墙 `35.149 s`；报告只新增 `failed`、finish kind 和 error code，不保存
+推理/错误正文。专项测试 `9 passed`。
+
+被用户忽略的长输出会话仍提供成本证据：`task_wall_s=202.486 s`，模型 `200.155 s`
+（`96.799%`），工具 union `0.411 s`；一个 `15,036` output-token step 占 `173.323 s`。
+这说明 GPU 故障收敛后，长输出 decode 是普通性能路线，而不是工具或 host。
+
+下一步不改源码：保持当前 engine/config，只增加 `STRATA_HC_SPLIT=1` 并重启，验证默认
+staged cp.async hyper-connection read 是否故障放大器。实际 env、质量、1/2 路、UTC Xid
+窗口和回滚全部记录；短窗口无 Xid 不能称修复。
+
+DSH 会话 SHA-256
+`237b04436f6738674b21f02305c454660ff71ac9d2272d979e188a6fc9d6cb06`；修复后成本报告
+`ae430af0fe1d6a0b3ba9a538161c685cea40d30ee8a21e199ee3a3432d4e0ab6`。
+
+## L-174 · batch CPU-share lease 生产选项通过并部署为 opt-in
+
+**判定：`AGENT-BATCH-PREFILL-CPU-SHARE-GUARD` 采纳为默认关闭、生产 opt-in。**
+
+新建 `build-guard-prod`，显式使用 A1 的 CUDA、MMQ K-quants、TQ overlay、Q6K experts、
+non-portable、external ggml 与 tests 选项。`strata` 主目标构建成功，engine SHA-256
+`e3d25b382bd3f32c8b5d1789fdb768f417028f742238e9549438e1679cecd5a8`。性能与质量矩阵后
+又修正 async future 已启动时早退路径的 RAII 顺序；最终引擎为 `e60a334c...`，正常路径
+不变，最终 binary 只重跑 smoke。完整测试目标仍在
+既有 `prefill_fused_iq_test.cpp` 未声明变量和 MMQ test/bench 的
+`cublasGetStatusString` 链接处失败；没有删除测试来绕过。
+
+同一 63 MB 生产选项 engine 上的 B0/B1/B0r 均为 1/2 路各三波：
+
+| 形状 | B0 wall | B1 wall | 改善 | 绝对节省 |
+|---|---:|---:|---:|---:|
+| 1 hot-short | `0.601550 s` | `0.533364 s` | `11.825%` | `68.186 ms` |
+| 1 hot-long | `1.525526 s` | `1.363801 s` | `10.991%` | `161.725 ms` |
+| 2 hot-short | `1.710871 s` | `1.581258 s` | `7.896%` | `129.613 ms` |
+| 2 hot-long | `3.488948 s` | `3.221261 s` | `8.056%` | `267.686 ms` |
+
+四个比较均 `3/3` 波胜；B0r 最大控制漂移 `1.528%`，1/2 路 cold wall 变化
+`+0.047%/-0.514%`，比较器无 problems。B1 日志有 `3,698` 条 exact CPU gate，其中
+`2,814 shared`、`884 not shared`；lease-refusal 与 `run*` dispatch-wait 均为 0，
+不能把未命中的竞争拒绝分支写成已有时延证据。
+
+质量 fixture 升级为 schema 5。首轮 B1 `6/7` 的 fixture 代码、测试、受保护测试与
+required tool 全对，失败只因最终消息为“摘要 + `RESULT=PASS`”，旧比较器把有效的摘要
+格式误判成候选回退。新规则要求最终 assistant 消息只含 `RESULT=PASS`，fixture suite
+SHA-256 `1295e2af17d1b7be3daa7111173cd7e1931b1c8058826ca17f330ad5c3a70bfd`。重跑
+B0/B1 均 `7/7`，比较器 `pass`。
+
+性能归因 binary 的 6/8 各三波、42 请求零错误；6/8 完成跨度中位
+`17.330/27.798 s`，聚合 `177.263/147.347 tok/s`，每波单一输出哈希、finish 全
+`length`。最终 RAII 修复 binary（`e60a334c...`）另跑 42 请求，零错误、全部 512
+token/`length`、health/6 slots 正常、新增 Xid 0；完成跨度中位
+`17.108/27.578 s`，聚合 `179.567/148.524 tok/s`。最终补跑的 6 路 wave 1 与 8 路 wave 2
+各有一次首个请求得到另一输出哈希；探针只记录而不以并发逐字一致作安全门，所以不能写成
+“每波哈希一致”，质量结论仍只来自同 identity 的 B0/B1 七个 coding fixture 均 `7/7`。
+
+生产部署继续使用 A1 server cwd 和 server hash
+`bd3e428932c0b9bb645b2ae9f37924b2e440b590333a0322cdd00cd28dd4ed82`，只换 engine 与
+config；server/engine `292517/292525`，config SHA-256
+`2c4c7ac6c346c7b64d162502080fc3147b5da232de156a20a9d1db81b521985e`。server 保留 A1
+四项 env；engine 只有预期 CPU-share 开关和 `STRATA_BATCH_SERIAL_TWO=1`，无 debug。
+health loaded、262144、6 slots / 2 groups，最终 binary 部署后 1 路三波 smoke 9/9
+成功，cold/hot-short/hot-long wall `11.381591/0.538837/1.353223 s`，窗口新增 Xid 0。
+
+证据目录：`/opt/ai/logs/agent-batch-prefill-guard-prod-20261101T2308Z/`。完整记录见
+[`AGENT_BATCH_PREFILL_POOL_LEASE_RESULT-20261101.md`](work/AGENT_BATCH_PREFILL_POOL_LEASE_RESULT-20261101.md)。
+下一项为 `AGENT-CURRENT-PROD-COST-REMAP`：cold wall 仍是 hot continuation 的约 8–22 倍，
+先按最新真实会话重排 cold/new-session、hot step、长输出 decode 和工具等待。
+
+## L-173 · CPU-share 有约 2% 机制信号，但 batch 生产不可达
+
+**判定：`AGENT-HOT-TURN-CPU-SHARE-EVAL` 的 env-only 生产候选否决；只保留一次
+`AGENT-BATCH-PREFILL-CPU-SHARE-GUARD` 所有权审计。**
+
+生产 engine 实际含 `--batch 6`，源码创建共享 CPU pool 的条件是：
+
+```cpp
+const bool share_pool = o.batch <= 0 && !o.no_pool;
+```
+
+因此只设置 `STRATA_PREFILL_CPU_SHARE=auto` 和
+`STRATA_PREFILL_CPU_SHARE_MAX=1024` 不会把 CPU pool 接到生产 prompt path。没有为这个
+不可达候选重启生产。
+
+同 engine、同源码、同 layer split 24 的隔离 `batch=0` 实例给出机制信号。两臂 expert
+cache 均为 `20,693` slots：
+
+| 1 路 | B0 | B1 | 改善 |
+|---|---:|---:|---:|
+| hot-short prompt | `395.0 ms` | `380.0 ms` | `3.797%` |
+| hot-short wall | `0.507168 s` | `0.492020 s` | `2.987%`，`15.148 ms` |
+| hot-long prompt | `1207.3 ms` | `1179.2 ms` | `2.328%` |
+| hot-long wall | `1.316394 s` | `1.290809 s` | `1.944%`，`25.585 ms` |
+
+B1 9/9 请求成功、期望回复全对、finish 全 `stop`、零外来请求、零新增 Xid。首波出现反向
+波动，后两波同向；这只能支持进一步审计，不能外推为生产收益。
+
+共享日志第一次截取被外层 shell 提前展开偏移，两个脚本文本污染整份 live log，已作废。
+按远端保存的字节偏移重新截取后：
+
+| arm | bytes | `^cpu gate:` | exact shared | exact not shared | SHA-256 |
+|---|---:|---:|---:|---:|---|
+| B1 | `44,345` | `264` | `128` | `136` | `dd5e701270d9d229404e98b52885cc6bd1b73792a881d39640b984addb9027b8` |
+| B0 | `22,628` | `0` | `0` | `0` | `e6be2f29dd515ef565cb9c8e8ffe8e8902dc8b8a95d978c813bc0757b7d1ee66` |
+
+生产恢复为 server/vision/engine `254299/254303/254308`，health loaded、262144、
+6 slots / 2 groups、systemd inactive；engine/config/server hash 与原 A1 一致，恢复窗口
+无新增 Xid。
+
+证据目录：`/opt/ai/logs/agent-cpu-share-reach-20261031T213602Z/`。完整记录见
+[`AGENT_HOT_TURN_CPU_SHARE_REACH_RESULT-20261101.md`](work/AGENT_HOT_TURN_CPU_SHARE_REACH_RESULT-20261101.md)。
+
+## L-172 · 三层 staged 小批流水真实命中，但热长轮反而变慢
+
+**判定：`AGENT-HOT-TURN-STAGED-STREAM-PIPE` 否决。** 候选只为实际可 native 支持的
+layer `35/44/47` 做 16-expert 双缓冲 copy/compute。B1 三波均覆盖三层，hot-short
+staged `27–38`、hot-long `83–141`，每批不超过 16；9/9 请求正确、finish 全 `stop`、
+零外来请求、零新增 Xid。
+
+| 1 路 hot-long | B0 | B1 | B1 相对 B0 |
+|---|---:|---:|---:|
+| wall | `1.511603 s` | `1.522504 s` | 慢 `0.721%` |
+| prompt | `1395.3 ms` | `1397.2 ms` | 慢 `0.136%` |
+
+两臂使用同源码/构建，只差
+`STRATA_PREFILL_FUSED_STAGED_PIPE=1`。B0/B1 的切臂顺序可能带来冷启动偏差，但 B1 连
+prompt 都没有改善，不能进入 94K、质量或 2/4/6/8 矩阵。分批 launch、event 与更碎 copy
+吃掉了理论上限；源码已移除，不扫描 batch/ring 邻近值。
+
+证据目录：`/opt/ai/logs/agent-staged-pipe-20261101T2122Z/`。B0/B1 result SHA-256 为
+`50f593050d69a72b76c549b74b61c9d8cd9644177f70403028f86f5d64d2c732` /
+`f72008441c380dbbd6169c4015d9c549c335716cf6c8bb215b04a5d29c21a0e9`。完整记录见
+[`AGENT_HOT_TURN_STAGED_STREAM_PIPE_RESULT-20261101.md`](work/AGENT_HOT_TURN_STAGED_STREAM_PIPE_RESULT-20261101.md)。
+
+## L-171 · resident direct-path 只有三层可支持且实际零命中
+
+**判定：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 否决。**
+
+只读审计二进制只增加默认关闭的逐层日志，运行 `1` 路三波 cold/hot-short/hot-long。
+9/9 请求成功、期望回复全对、零外来请求、零新增 Xid，`48/48` 层都有覆盖记录。
+
+热长轮 `T=865` 的三波中，只有 layer `35/44/47` native pack 可支持，非驻留 expert 数
+分别为 `117–141`、`80–132`、`90–123`；三层都超过 `fused_staged <= 32`，所以实际
+`fused_staged=0/48`。其余 45 层 native 不支持且 staged 为零。热短轮三波中只有两次
+各命中一层，单层 group 级差约 `3.823 ms`，最大证据只有约 `3.8 ms`。
+
+这解释了为什么之前 A1/B/A2 的 `1.862%`、`32.667 ms` 组合差值不能归因给 resident
+direct path。没有新的整请求 1% 证据，不补 4/6/8、不扫描 staging 参数。完整记录见
+[`AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md`](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)。
 
 ## L-169 · host 热路径只有毫秒级；标题跨 step 2 仍造成 1.533 秒争用
 
@@ -317,8 +483,10 @@ ABBA 判决。
 生产 server/vision/engine 为 `232891/232893/232899`；server
 `bd3e428932c0b9bb645b2ae9f37924b2e440b590333a0322cdd00cd28dd4ed82`，engine
 `105a4171...` 与 config `6ece1a13...` 未重建。health loaded、262144、6 slots /
-2 groups，三个 server env 为 `STRATA_DEFER_TITLE_REQUESTS=1`、
-`STRATA_BATCH_SERIAL_TWO=1`、`STRATA_PIN_DSH_TOOL_PREFIX=1`。重启到 ready 约
+2 groups。事后按实际进程环境更正：server env 为
+`STRATA_DEFER_TITLE_REQUESTS=1`、`STRATA_PIN_DSH_TOOL_PREFIX=1` 等；
+`STRATA_BATCH_SERIAL_TWO=1` 来自 A1 config 的 `env` 并传给 engine，不是 server
+进程环境。重启到 ready 约
 `190 s`，新增 Xid `0`、swap 约 `11 MiB`；备份为
 `/opt/ai/backups/prod-dsh-prefix-final-20261031T200434Z/`。
 

@@ -25,6 +25,12 @@ server_error: verify: layer 11 never rang (an illegal instruction was encountere
 
 这不是 DSH 的答案检查。Strata 的验证窗口在等待一个前置 CUDA kernel 时发现它已失败。
 
+完整 DSH v4 会话后来重新核算为 5 个 step、`task_wall_s=36.31 s`。前 4 个成功步骤的
+模型墙合计 `32.853 s`；第 5 步从开始到 error 结束共 `2.296 s`，其中首个流事件
+`1.190 s` 后仍因 GPU 错误终止。此 turn 最后的 reason 是 error，不是普通 finish。
+此前的会话探针只读取成功的 `assistant/message`，会漏掉这个 `assistant/attempt`，现已
+修复并加回归测试。
+
 ## GPU 证据
 
 同一秒内核记录了 8 条 Xid 13 和 1 条 Xid 43：
@@ -127,6 +133,10 @@ RTX 2080 Ti 改装 22 GB、相同 ESR `0x4c1eb72`、大量 Xid 13，并指出：
 - server/engine PID、health、6 slots / 2 groups 和重启耗时；
 - 测试前后的 `nvidia-smi` 与 kernel-log 游标。
 
+会话成本探针必须把失败 `assistant/attempt` 计入 `steps` 和 `model_wall_s`，同时只保留
+`failed`、finish kind 与 error code；不能保存 reasoning 或错误正文。否则“最后一步失败”
+会被报成少一步，直接低估用户等待并掩盖 P0。
+
 `NVRM Xid` 行数不等于事故数。一次设备异常可同时产生多条 Xid 13，再接一条 Xid 43；
 汇总必须同时报告原始事件数、事故簇数和原始行。探针默认把同一 PCI 上 5 秒内的事件聚为
 同一事故；这个窗口只用于关联，不用于推断根因。时间缺失的事件不互相合并。
@@ -145,7 +155,7 @@ RTX 2080 Ti 改装 22 GB、相同 ESR `0x4c1eb72`、大量 Xid 13，并指出：
 3. 运行代表性 1/2 路混合负载时同步采集 GPU 状态；固定 prompt、单路、6 路并发和完整
    DSH 回合只用于不同代码路径，不作为硬件稳定性结论。窗口结束后用开始时间作 `--since`
    只读新增事件，避免把历史 Xid 混入本轮；
-4. 只有再次出现 Xid，才进入维护窗口逐级实验。先验证单变量
+4. 当前已有用户可见 Xid 失败，下一次维护窗口先验证单变量
    `STRATA_HC_SPLIT=1` 是否绕开默认 staged cp.async 放大器；若只把 Xid 变成静默
    wedge，仍判失败。随后测试可精确回滚的显存频率降低，最后才考虑 GPU0 单卡隔离；
 5. 不一次性关闭多个 Strata pipeline 开关。它们最多可能是放大器，没有证据支持当前就
@@ -198,6 +208,10 @@ RTX 2080 Ti 改装 22 GB、相同 ESR `0x4c1eb72`、大量 Xid 13，并指出：
   `/opt/ai/logs/incident-gpu0-xid62-20260925-054029.txt`
 - DSH 原始会话：
   `/home/kali/下载/dsh-session-session-da011bbb-afae-4633-944c-01e0eb254800.zip`
+  SHA-256 `237b04436f6738674b21f02305c454660ff71ac9d2272d979e188a6fc9d6cb06`
+- 修复后成本报告：`task_wall_s=36.31 s`、`steps=5`、`model_wall_s=35.149 s`；
+  `/tmp/dsh-da011bbb-cost-r2.json`
+  SHA-256 `ae430af0fe1d6a0b3ba9a538161c685cea40d30ee8a21e199ee3a3432d4e0ab6`
 
 ## 没测什么
 

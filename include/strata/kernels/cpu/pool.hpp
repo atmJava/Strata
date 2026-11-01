@@ -246,6 +246,53 @@ public:
     void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n,
                                 NativeArithmetic arithmetic = NativeArithmetic::Default);
     static constexpr int kMaxSplitMulti = 96;
+
+    /// Batch/pipeline decode marks its whole window active. A prefill layer may borrow the pool only
+    /// while no decode window is active; once decode starts, the next prefill layer fails open.
+    class DecodeWindow {
+    public:
+        explicit DecodeWindow(ExpertPool& pool);
+        ~DecodeWindow();
+        DecodeWindow(const DecodeWindow&) = delete;
+        DecodeWindow& operator=(const DecodeWindow&) = delete;
+        DecodeWindow(DecodeWindow&& other) noexcept;
+        DecodeWindow& operator=(DecodeWindow&& other) noexcept;
+
+    private:
+        void release();
+        ExpertPool* owner_ = nullptr;
+    };
+
+    /// One prefill layer's non-blocking lease. It blocks later prefill layers while decode starts;
+    /// decode may wait only for the leased layer's serialized pool call, never a whole chunk.
+    class PrefillLease {
+    public:
+        PrefillLease() = default;
+        ~PrefillLease();
+        PrefillLease(const PrefillLease&) = delete;
+        PrefillLease& operator=(const PrefillLease&) = delete;
+        PrefillLease(PrefillLease&& other) noexcept;
+        PrefillLease& operator=(PrefillLease&& other) noexcept;
+        explicit operator bool() const { return owner_ != nullptr; }
+        void release();
+
+    private:
+        friend class ExpertPool;
+        explicit PrefillLease(ExpertPool* owner) : owner_(owner) {}
+        ExpertPool* owner_ = nullptr;
+    };
+
+    DecodeWindow decode_window() { return DecodeWindow(*this); }
+    PrefillLease try_prefill();
+    /// Batch mode only: serialize every run* call so a one-layer prefill lease and decode cannot
+    /// re-enter the pool's shared jobs/scratch. Default off, so the solo path keeps its old lock-free dispatch.
+    void set_batch_prefill_guard(bool enabled) {
+        batch_prefill_guard_.store(enabled, std::memory_order_release);
+    }
+    bool batch_prefill_guard() const {
+        return batch_prefill_guard_.load(std::memory_order_acquire);
+    }
+
     /// run_split_multi's phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
     double ms_multi_gu = 0, ms_multi_q = 0, ms_multi_down = 0;
     int64_t multi_bytes = 0;
@@ -281,6 +328,7 @@ public:
     static constexpr std::chrono::seconds kStall{60};
 
 private:
+    void lock_guarded_runs(std::unique_lock<std::recursive_mutex>& lock);
     int phase_tasks(int64_t rows) const;
     int tasks_ = 0;
     void worker(int id);
@@ -347,6 +395,10 @@ private:
     std::chrono::microseconds spin_before_sleep_{kSpinBeforeSleep};
     std::vector<std::thread> threads_;
     std::vector<ExpertScratch> scratch_;   // one per worker: no allocation, no false sharing of the hot data
+    std::recursive_mutex run_mu_;          // batch guard only: every run* call
+    std::atomic<bool> batch_prefill_guard_{false};
+    std::atomic<bool> prefill_leased_{false};
+    std::atomic<uint32_t> decode_windows_{0};
     // run_split state: mode 0 = whole experts, 1 = gate/up row parts, 2 = down row parts
     int mode_ = 0;
     int parts_a_ = 1, parts_b_ = 1;

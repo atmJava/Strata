@@ -1,7 +1,8 @@
 # 优化路线与指标
 
 > 这是动态路线组合，不要求按表从上到下执行。AI 每轮按 `RULES.md` 重新比较价值、成本、信息量和风险。
-> 最后更新：2026-11-01（第三十六次目标修订；严重可靠性抢占、质量与工具协议为硬门）。
+> 最后更新：2026-11-01（第四十三次目标修订；GPU0 用户可见失败抢占，生产可达性、
+> 严重可靠性、质量与工具协议为硬门）。
 
 ## 用户目标
 
@@ -60,10 +61,14 @@
 | M45 | routing-aware expert prefetch 可行性 | staged walk 已在每层 router 后按实际 routed、非驻留专家建序；后续层 routing 依赖当前层输出 | 只读确认 routing 可用时点与跨层可预见性，判断是否已有 selected-only 路径、能否更早预取，并给出整请求上界与回滚 | **已完成并关闭跨层推测**：没有提前获知后续层 routing 的源码路径；554 x top-10 为 `5,540` pairs、每层 512 专家，不是少量专家 |
 | M46 | grouped staged expert lookahead | 当前 grouped staged path 保持 8 个实际传输在前；32-slot ring 与 16-expert gather 的安全上限为 15；stage 2 `wait copy` 中位 `173 ms` | 默认 8 不变，B 只设 `STRATA_PREFILL_STAGED_AHEAD=15`；质量/路径门全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3% | **否决**：路径/质量全过；596 wall `1.510583→1.505333 s`，只快 `0.3475%`、绝对 `5.25 ms`；prompt 慢 `0.5996%`；未跑 94K/并发，A2 已恢复 |
 | M47 | 热续轮 dequant 重复工作审计 | stage 2 `dequant 106 ms`；production 为 native IQ3_XXS、554 fresh token、grouped staged path | 只读证明同一 expert/layout 是否重复转换、真实触发率和生产路径；单一可移除部分须给整请求 wall >=1% 且绝对 >=0.05 s 上界、数值/回滚边界；未过门不构建不重启 | **否决重复假设**：该 phase 实为 native gather 字节搬运；每层只处理唯一 selected expert，每 16 个一次 gather；stage 1/2 不同层，无重复转换；MMQ 固定 stride 不能直读任意 cache slot。未改源码/未重启，不扫参数 |
-| M48 | resident expert 绕开 MMQ gather | stage 1/2 gather 合计约 `183 ms`；group 级 direct path `7.848` 对 MMQ `11.671 ms/layer`（`1.49x`）；596 1 路 wall 改善 `1.862%`（相对 A1 `2.145%`、`32.667 ms`），三波全胜 | group 级上界、路径命中、greedy 和 1/2 路测量已完成；原契约绝对 `0.05 s` 未过，94K prompt 无对应改善，4/6/8 未完成 | **当前只读审计**：用户的 1% 价值原则记录为正向信号，但不静默放宽旧契约；候选默认关闭，已恢复 A1 生产。先统计 48 层 direct-path 覆盖/fallback 和真实缺口，没新增整请求 1% 就关闭 |
+| M48 | resident expert 绕开 MMQ gather | stage 1/2 gather 合计约 `183 ms`；group 级 direct path `7.848` 对 MMQ `11.671 ms/layer`（`1.49x`）；596 1 路 wall 改善 `1.862%`（相对 A1 `2.145%`、`32.667 ms`），三波全胜 | group 级上界、路径命中、greedy 和 1/2 路测量已完成；原契约绝对 `0.05 s` 未过，94K prompt 无对应改善，4/6/8 未完成 | **否决**：热长轮仅 layer `35/44/47` native 可支持且 staged `80–141`，实际 `0/48` 命中；热短轮每波最多命中一层。组合 A/B 差值不能归因，关闭 |
+| M58 | 三层 staged 集合的小批 copy/compute 流水 | 热长轮 `wait copy` 约 `173 ms`，三层 staged `80–141`，理论 compute 可重叠上界 `23.5 ms` | 同源码 B0/B1；三层各批 `<=16` staged，路径与正确性全过；hot-long wall `>=1%`/`>=0.015 s`、prompt 同向 | **否决**：三波真实命中三层、9/9 正确；hot-long wall 慢 `0.721%`，prompt 慢 `0.136%`；候选源码已移除 |
+| M59 | hot-turn CPU expert share | `T=865` 三层需搬 `80–141` expert；源码同类 512/1000-token 路径快 `20–35%`，但 layer split 默认关闭 | 只改 `T<1024` 的 CPU share env；路径证明 CPU 接管；1 路 hot wall `>=1%`/`>=0.015 s`，其他形状不退 | **env-only 否决**：无 batch 隔离实例 hot-short/hot-long wall 快 `2.987%/1.944%`，9/9 正确；但现役 `--batch 6` 命中 `o.batch <= 0` 静态门，生产不可达 |
+| M60 | batch-enabled CPU share ownership guard | 生产 prompt reader 与 batch decode 可能并发使用同一个 `ExpertPool`；现有 `g_cpu_pool_busy` 只保护 layer-split prefill stage | 只读审计并实现默认关闭租约：有 decode 时 prefill 不抢 pool；prefill 持有时新 decode 不阻塞数百毫秒；未取得 lease 走原 GPU 路径；路径/质量/1 路 1% 通过后才补 2/4/6/8 | **采纳为生产 opt-in**：生产选项 B0/B1/B0r 判决 `pass`；1 路 hot wall 改善 `11.825%/10.991%`，2 路 `7.896%/8.056%`，四个比较均 `3/3` 波胜，控制漂移最大 `1.53%`；质量 schema 5 下 B0/B1 均 `7/7`，6/8 共 42 请求零错误、零新 Xid |
 | M49 | Codex 模型目录与 coding 质量 | 无目录时 9 工具且无 `apply_patch`；目录后 14 工具且为 `custom`。Codex/Strata 基础严格 `5/6`、测试 `6/6`、`159.777 s`；`apply_patch` 独立重复 `3/3` | 产品化幂等目录供给；真实工具面无错；基础 fixture 测试不变、最终 sentinel、无事件错误；不改变引擎和量化 | **目录供给完成**：`strata codex catalog [--apply]` 已产品化；Codex 专用 `apply_patch` 与 DSH `edit/write` 分开统计 |
 | M50 | DSH Web 与 terminal 质量对照 | 用户 DSH Web 为 `atm/qwen3.8.../:8888`；旧 `dsh headless` 为 `deepseek-official/deepseek-flash`。显式 overlay 对齐 Qwen/Strata 后，6 个基础测试 `6/6`、严格 `3/6`，事件/工具错误 `0/0`，wall `243.865 s` | 报告不混淆 runner/profile/provider/model；至少重复一次并保留失败类型；不能把另一 hosting 归因当前引擎 | **完成**：旧 DeepSeek `6/6` 剔除；DSH 实际工具面为 `edit/write`，不声明 `apply_patch`；新增 Xid `0` |
-| M51 | GPU0 低频 Xid 稳定性 | DSH 最终 Responses `input=15,419`、31 tools、76 reasoning token 后因 `layer 11 never rang` 失败；GPU0 同秒 8×Xid 13 + Xid 43。约 60 次精确重放、30 个最终请求全 200，无新 Xid；GPU0 另有 Xid 62/154 历史；上游同类板需板卡特异 offset，报告负载不可横比 | 每个真实窗口从 UTC 起点读取新增 NVRM Xid；同一 PCI 5 秒内事件聚簇但保留原始事件数；`--boot` 覆盖整个 boot；固定 prompt 不作硬件稳定性证明；重复事故后先单变量验证 `STRATA_HC_SPLIT=1`，再测可回滚显存降频，最后单卡隔离；无新事故时不空等 | **P0 抢占项**：高度怀疑改装 22GB 卡显存/板级稳定性，未证明本机芯片损坏；只读探针已固化，未改 GPU/engine/config。没有新 Xid 时当前主动项为 M48 |
+| M51 | GPU0 低频 Xid 稳定性 | 最新严重 DSH turn 5 步、`task_wall_s=36.31 s`；第 5 步等待 `2.296 s` 后因 `layer 11 never rang` 失败，GPU0 同秒 8×Xid 13 + Xid 43。成功的 4 步模型墙 `32.853 s`；约 60 次精确重放、30 个最终请求全 200，无新 Xid；GPU0 另有 Xid 62/154 历史；上游同类板需板卡特异 offset，报告负载不可横比 | 每个真实窗口从 UTC 起点读取新增 NVRM Xid；同一 PCI 5 秒内事件聚簇但保留原始事件数；`--boot` 覆盖整个 boot；固定 prompt 不作硬件稳定性证明；先只改 `STRATA_HC_SPLIT=1` 并重启，检查实际 env、质量、1/2 路性能和窗口 Xid；失败即恢复，再单变量测可回滚显存降频，最后才 GPU0 隔离 | **当前 P0 抢占**：失败步骤探头已修正，5 步不得再漏报为 4 步；高度怀疑改装 22GB 卡显存/板级稳定性，未证明本机芯片损坏 |
+| M61 | 最新普通生产成本重排 | 最新长输出 DSH 会话 `task_wall_s=202.486 s`；一个 `15,036` output-token step 占 `173.323 s`，模型总计 `200.155 s`（`96.799%`），工具 union `0.411 s` | 区分 cold/new-session、普通 hot、长输出 decode、工具和标题；选择源码可达且整任务保守上界 >=1% 的机制 | **暂停**：GPU0 用户可见失败优先；恢复后从长输出 decode 开始 |
 | M52 | 严格最终回复契约 | 同 Qwen/Strata DSH 路径，当前 prompt 的基础严格 `3/6`；3 个失败均代码/测试正确但最终多写解释。`transaction-rollback` 当前 prompt `4/5` | 同一失败 fixture 至少 5 次；明确最终 assistant message 的唯一内容与禁止项；代码/测试不退化，其他基础 fixture 不下降；不静默改写输出 | **通过**：候选 `5/5`；完整基础严格 `3/6 -> 6/6`，测试 `6/6`、受保护测试未改、事件/工具错误 `0/0`，新增 Xid `0` |
 | M53 | DSH 实际工具循环成本 | 7 个基础/fixture 会话 runner `197.776 s`；模型 step `184.332 s`（`93.202%`）、工具并集 `10.505 s`（`5.312%`）；40/40 主 step 关联，7 个隐藏标题请求 | 只读关联 DSH 事件与 server metrics；分开 runner 进程、主任务 turn、模型、工具和 turn 后工作；给出真实触发率与绝对秒数 | **已完成**：标题请求约 266 prompt/118 output token、中位 `9.8 s`，与主请求争用 GPU/cache；转 M54 |
 | M54 | DSH 标题争用 | 短任务关闭标题 runner `16.854→14.901 s`（`-10.647%`）、主 turn `14.929→13.001 s`（`-11.843%`），`5/6` 胜；长任务 `0/2` 胜；首组 cache 跨臂污染 | 保留标题，主任务结束后异步生成；6 对短任务 ABBA、2 对长任务；`task_wall_s` 主指标 >=1%，长任务不明显回退，标题不退化；真实流式代理、零错误；两个会话无法安全配对时 fail open | **opt-in 采纳**：生产单会话主 turn `19.629→16.078 s`（`18.091%`）、runner `15.914%`；3/3 质量/provider；双会话 2/2 质量/provider、defer 增量 0；重启 `136 s`、新增 Xid `0` |
@@ -79,8 +84,8 @@
 GPU0 触发 8 条 Xid 13 和 1 条 Xid 43；同一精确请求约 60 次重放没有复现，说明固定
 prompt 不是充分条件。GPU0 在另一套软件栈上还有 Xid 62/154 历史，上游同型号改装
 22GB 卡也报告相同 Xid 13/ESR 并在显存降频后缓解。该故障是最高抢占风险，但低频且没有
-复现器，不能通过无限重放或空等推进；现在保持按时间窗口采集 Xid，同时继续 M56 的请求
-路径固定成本拆解。单次无 Xid soak 不能写成修复。
+复现器，不能通过无限重放或空等推进；现在保持按时间窗口采集 Xid，同时继续当前生产
+成本重排。单次无 Xid soak 不能写成修复。
 
 质量门已收口：DSH Web 的 provider 歧义已消除，同一 Qwen/Strata 路径代码和测试都是
 `6/6`，明确最终消息契约后严格从 `3/6` 提到 `6/6`。DSH/DeepSeek 直连 `6/6` 只作为
@@ -89,9 +94,9 @@ prompt 不是充分条件。GPU0 在另一套软件栈上还有 Xid 62/154 历�
 
 标题争用和连续新会话首轮固定前缀已分别解决：标题 opt-in 延后使生产主 turn
 `19.629→16.078 s`；首轮 system+tools checkpoint 使稳态 task 中位
-`11.3715→7.3165 s`。这两项都进入了真实 DSH 路径，不是局部微基准。当前主要模型等待
-转向每个普通热续轮仍存在的请求路径固定成本，尤其 94K/189K 高度 cached 下仍有
-`2.09/2.43 s` prompt。先建请求内 phase map，避免再在未知 kernel 小项上打转。
+`11.3715→7.3165 s`。这些进入了真实 DSH 路径。普通请求的 host 路径随后判 null；
+当前模型等待是唯一主成本，任何新候选必须先证明在 batch slots、layer split 和真实
+DSH 请求中可达。
 
 第十八次复盘修正了优先级。整任务 trace 的工具 union `123,693 s` 是 35 文件快照的根任务
 主体，普通单路模型 union `66,228 s` 是第二大块；恰好两路只有 `171 s`。普通热续轮
@@ -112,10 +117,15 @@ lookahead 8→15 随后通过质量门，但 596 wall 只改善 `0.3475%`、绝�
 反慢 `0.5996%`，因此该参数轴关闭。随后只读审计确认 `dequant 106 ms` 实际是 native
 group gather：每层只处理唯一 selected expert，stage 1/2 是不同层，路径互斥，没有同一
 expert/layout 的重复转换；MMQ 固定 stride 也不能直接读取任意 cache slot。重复工作假设
-关闭。`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 随后证明 group 级 direct path 快 `1.49x`，
-596 的 1 路 wall 有 `1.86%` 正向信号，但绝对节省只有 `32.667 ms`，94K prompt 没有
-对应改善，4/6/8 未完成。按用户要求暂停，候选保持默认关闭；恢复时先审计 direct-path
-的逐层覆盖率和 fallback 原因。
+关闭。`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 后来证明 group 级 direct path 快 `1.49x`，
+但热长轮只有三层可走 native fused，实际命中 `0/48`，原 `1.86%` 组合差值不能归因；
+staged-pipe 虽真实命中三层，hot-long wall 反而慢 `0.721%`。两条源码路线均已否决。
+CPU share 随后在无 batch 隔离实例得到 hot-short/hot-long wall `2.987%/1.944%` 的
+信号，但现役 `--batch 6` 使 env-only 生产候选静态不可达。M60 随后补齐单层 lease 和
+guard-only 派发串行，生产选项 B0/B1/B0r 判决 `pass`；1/2 路 hot wall 改善
+`11.825%/10.991%` 与 `7.896%/8.056%`，质量 B0/B1 均 `7/7`，已部署为 opt-in。
+当前普通 cold wall 仍为 `11.37 s`，而 hot-short/hot-long 只有 `0.52/1.35 s`；
+下一项从最新真实 DSH 会话重排整任务成本，不继续扫 CPU share 邻域。
 
 隔天旧会话仍是 p99 尾部：223,114 prompt token、cached `0`、TTFT `113.014 s`。但 34 个
 有效会话只有 1 个超过 24h，现有 session file 又不支持 layer split 和 batch。该方向保留
@@ -174,8 +184,12 @@ sigmoid/combine 融合。两卡独立 parity 和 B/A2 冻结 greedy 全过，但
 合并中位为 `+8.901%/-5.121%/+2.114%/-2.612%`，4/8 回退超过 1%，2 路 A 漂移
 `-7.067%`，6 路仅 4/6 胜，因此否决并恢复 A2。下一项继续拆末级约 `8.5%` 的 `waitA`
 内部组成：host expert-plan 计算、flag 发布后的 spin，以及 GPU consume；不再尝试改变
-跨 stage 服务顺序。
-P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。
+跨 stage 服务顺序。这些更早的局部参数和内核结果继续作为防重复基线。
+P7 只有 NCU 证明 Tensor 管线是直接瓶颈时才恢复，恢复后必须从全新 A1 重跑。M60 已
+完成生产选项构建、B0/B1/B0r 性能、schema 5 质量、6/8 安全和 opt-in 部署；质量比较
+确认零候选回归。当前主动项转为 `GPU-XID13-STABILITY`：最新严重 DSH turn 最后以 GPU0
+Xid 同型错误失败，先单变量验证 `STRATA_HC_SPLIT=1`。成本重排暂停，恢复后从
+`173.323 s` 的长输出 decode 开始。
 
 ## 候选路线
 

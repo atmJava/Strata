@@ -3,6 +3,104 @@
 > 每次形成判决后，在最上方追加一条复盘。格式见 [`RULES.md`](RULES.md) §6。
 > 完整证据在 [`EVIDENCE_LEDGER.md`](EVIDENCE_LEDGER.md)；当前断点在 [`STATE.md`](STATE.md)。
 
+## I-20261101-146 · 失败会话重排确认 GPU0 用户失败，P0 重新抢占
+
+- 目标 / 指标：复盘最新两个真实 DSH 导出，判断当前最大用户风险，并决定 GPU 稳定性与
+  继续提速的先后；主指标仍是任务成功率和 `task_wall_s`，不能以短请求成功替代故障结论。
+- 假设与预期：上一轮 CPU-share 部署窗口零错误，但用户说第二个会话“非常严重”，需要检查
+  是否存在被成本探针漏掉的失败步骤，而不是继续按普通长输出优化。
+- 为什么选这条路线：用户最后收到任务错误比 `1–10%` 的局部提速优先级高；错误又已有同秒
+  GPU0 Xid 证据，继续性能实验会混入硬件故障。
+- 改动与实验：重新解析两个 DSH v4 会话；修复 `probe-dsh-session-cost.py` 对
+  `assistant/attempt` 的漏计，并增加“不保留错误正文”的回归测试；核对失败 turn、
+  工具、模型墙和生产身份。
+- 结果：严重会话实际有 5 步，`task_wall_s=36.31 s`，成功 4 步模型墙 `32.853 s`；
+  第 5 步等待 `2.296 s` 后因 `verify: layer 11 never rang` 失败，turn reason 为 error。
+  GPU0 同秒记录 8×Xid 13 + Xid 43。另一个被用户忽略的会话 `task_wall_s=202.486 s`，
+  一个 `15,036` output-token step 占 `173.323 s`、模型总计 `96.799%`，说明普通长输出
+  decode 仍是后续性能大头。
+- 判决：`GPU-XID13-STABILITY` 重新成为当前 P0；`AGENT-CURRENT-PROD-COST-REMAP` 暂停。
+  先在现役 binary/config 上只增加 `STRATA_HC_SPLIT=1` 并重启，验证是否绕开默认 staged
+  cp.async read；失败即恢复，不与其他 pipeline/clock 变量混测。
+- 预期被推翻：原成本探针把失败会话报告为 4 步、模型 `32.853 s`，漏掉了最后 2.296 s
+  失败等待。只看成功 `assistant/message` 会系统性低估“最后失败”的用户成本。
+- 测试方法修正：`assistant/attempt` 必须作为模型 step 进入 `steps` 和 `model_wall_s`；
+  报告只保存 `failed`、finish kind 与 error code，不保存 reasoning 或错误正文。专项测试
+  `9 passed`。6/8 并发哈希是诊断字段，不是质量证明；最终 binary 补跑已如实记录两个
+  哈希变体。
+- 生产状态与回滚：未因复盘重启；生产仍为 server/engine `292517/292525`，engine
+  `e60a334c...`、config `2c4c7ac6...`；health loaded。A1 回滚身份不变。
+- 证据：L-175、[GPU 事件](work/GPU_XID13_INCIDENT_RESULT-20261101.md)、
+  [CPU-share result](work/AGENT_BATCH_PREFILL_POOL_LEASE_RESULT-20261101.md)。
+- 下一步与理由：执行单变量 `GPU-XID13-HC-SPLIT` 重启与验证。没有新的安全窗口或可解释
+  的同口径故障率改善前，只能称风险缓解候选，不能宣称 GPU 修复。
+
+## I-20261101-145 · CPU-share 生产选项通过；先把质量评测歧义修掉
+
+- 目标 / 指标：确认 batch CPU-share 在 A1 生产构建选项下仍达到真实热轮收益，并守住质量、
+  并发安全和可回滚部署。
+- 假设与预期：单层非阻塞 lease 能让 prompt prefill 在无 decode 时借用 CPU pool；同源码
+  1/2 路 hot wall 应保持至少 1%，同时 6/8 只剩安全回归。
+- 为什么选这条路线：此前的 env-only 信号被 `--batch 6` 挡住；所有权协议补齐后，它是
+  已进入真实 DSH 热轮路径、且理论收益远高于局部 launch/head 微优化的候选。
+- 改动与实验：实现 decode window、单层 `PrefillLease`、guard-only `run*` 串行；新增
+  lease 单测和非死锁测试；建立与 A1 相同 CMake 选项的 engine；跑 B0/B1/B0r、
+  7 个 Codex fixture、6/8 和部署后 smoke。
+- 结果：生产选项 1 路 hot-short/hot-long wall 改善 `11.825%/10.991%`，2 路
+  `7.896%/8.056%`，四个比较均 `3/3` 波胜；控制漂移最大 `1.53%`，cold 无 >1% 回退。
+  质量 schema 5 下 B0/B1 均 `7/7`；6/8 42 请求零错误；生产窗口新增 Xid 0。
+- 判决：**采纳为默认关闭、生产 opt-in**。只启用 batch guard、`auto` share 和 1024 cap；
+  debug 开关不进入生产。
+- 预期被推翻：首轮 B1 `6/7` 不是代码回退。模型完成实现和测试后输出“摘要 + sentinel”，
+  旧评分按完全相等拒绝。把规则改为最终 assistant 消息只含 `RESULT=PASS` 并升级 fixture
+  hash 后，B0/B1 同身份均 `7/7`。
+- 测试方法修正：质量报告必须保留 fixture hash；最终消息歧义不能被误当成候选回归，也
+  不能通过单次重试挑结果。生产构建必须验证主 engine 目标、运行二进制 hash 和实际 env。
+- 生产状态与回滚：server/engine `292517/292525`，A1 server source/cwd，最终 engine
+  `e60a334c...`、config `2c4c7ac6...`；health loaded、6 slots / 2 groups。回滚使用 A1
+  engine `105a4171...` 与 config `6ece1a13...`。
+- 证据：L-174；
+  [result](work/AGENT_BATCH_PREFILL_POOL_LEASE_RESULT-20261101.md)。
+- 下一步与理由：cold wall 仍约 `11.37 s`，明显高于 hot-short/hot-long 的
+  `0.52/1.35 s`。执行 `AGENT-CURRENT-PROD-COST-REMAP`，从最新真实会话重排整任务成本，
+  不继续扫描 CPU share 的 cap/chunk/worker 邻域。
+
+## I-20261101-144 · 先证生产可达性；CPU-share 只保留一次所有权审计
+
+- 目标 / 指标：复盘最近三条热轮路线，并决定 CPU expert share 是否值得继续。唯一主指标
+  仍是真实 DSH 整任务 `task_wall_s`；隔离 hot-turn 只作机制筛选。
+- 假设与预期：resident direct-path 的 group 级 `1.49x` 和 CPU-share 的约 2% 热轮信号
+  都可能有价值，但只有进入现役 `--batch 6`、layer split 和真实 DSH 路径才可能转化成
+  至少 1% 整任务收益。
+- 为什么选这条路线：真实 DSH 的模型 step 占 `93.202%`，继续在不可达 env、无覆盖
+  staging 或相邻参数上试验不会解决用户的主要等待。
+- 改动与实验：逐层审计 resident direct-path；实现并实测三层 staged 小批流水；在无 batch
+  隔离实例对 CPU-share 做同源码 B0/B1；核对生产 engine argv 与源码静态门；修正热轮
+  comparator，使其参数化臂名和 `1% + 绝对秒数`门，要求全部波、三分之二胜场，并检查
+  1/2 路 cold/hot 非回退。
+- 结果：direct-path 在热长轮只有 layer `35/44/47` native 可支持，实际
+  `fused_staged=0/48`；staged pipe 真实命中三层，但 hot-long wall 慢 `0.721%`、prompt
+  慢 `0.136%`。CPU-share 的 hot-short/hot-long wall 在隔离实例快
+  `2.987%/1.944%`、9/9 正确，但生产 `--batch 6` 被
+  `share_pool = o.batch <= 0 && !o.no_pool` 挡住，env-only 不可达。
+- 判决：resident direct-path 和 staged pipe 否决；CPU-share env-only 否决，仅允许一次
+  batch prefill/decode `ExpertPool` 所有权审计。没有无阻塞 lease 或整任务保守收益不足
+  1% 就关闭。
+- 预期被推翻：机制日志命中不等于生产路径可达；无 batch 实例的 2% 不能外推到 batch
+  生产。小批流水也证明路径命中不等于墙钟改善。
+- 测试方法修正：路径审计、机制增量、生产回归必须分开；共享 engine 日志按远端字节偏移
+  截取并记录大小/SHA-256，精确区分 `shared,` 和 `not shared,`；缺波和 cold 回退不再
+  能被热轮 comparator 忽略。
+- 生产状态与回滚：手动实例恢复为 server/vision/engine `254299/254303/254308`，
+  health loaded、262144、6 slots / 2 groups、systemd inactive，恢复窗口无新增 Xid；
+  engine/config/server hash 与 A1 一致。
+- 证据：L-171、L-172、L-173；
+  [resident](work/AGENT_HOT_TURN_RESIDENT_PATH_RESULT-20261031.md)、
+  [staged pipe](work/AGENT_HOT_TURN_STAGED_STREAM_PIPE_RESULT-20261101.md)、
+  [CPU-share](work/AGENT_HOT_TURN_CPU_SHARE_REACH_RESULT-20261101.md)。
+- 下一步与理由：只读审计 prompt reader、batch pump、`ExpertPool` 和所有调用 owner，
+  判断能否无阻塞租约。若不能，关闭该机制并从真实 DSH 模型等待中重选最大成本。
+
 ## I-20261101-143 · 标题生命周期不可由服务端延后；转回 resident 覆盖审计
 
 - 目标 / 指标：确认 DSH 隐藏标题能否安全延后到完整主 turn 结束，再决定是否值得用生产

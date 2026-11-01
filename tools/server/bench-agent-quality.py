@@ -25,10 +25,114 @@ DEFAULT_MODEL = "qwen3.8-flash-next-iq3_xxs-abliterated"
 TOOL_RULE = (
     " Use the provided tools normally and never print an XML tool-call block."
 )
+FINAL_RULE = (
+    " When the tests pass, your final assistant message must contain only the exact "
+    "text `RESULT=PASS`: no summary, explanation, blank line, or extra punctuation."
+)
 
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def fixture_suite_sha256(names: list[str]) -> str:
+    suite = []
+    for name in names:
+        task = TASKS[name]
+        suite.append(
+            {
+                "name": task.name,
+                "prompt": task.prompt,
+                "expected_files": task.expected_files,
+                "protected_files": task.protected_files,
+                "required_tool": task.required_tool,
+            }
+        )
+    encoded = json.dumps(
+        suite, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return sha256(encoded)
+
+
+def compare_reports(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    identity_fields = (
+        "runner",
+        "runner_profile",
+        "model",
+        "reasoning_effort",
+        "fixture_suite_sha256",
+        "prompt_suffix_sha256",
+        "model_catalog_sha256",
+        "provider_url",
+    )
+    identity_mismatches = {
+        field: {
+            "baseline": baseline.get(field),
+            "candidate": candidate.get(field),
+        }
+        for field in identity_fields
+        if baseline.get(field) != candidate.get(field)
+    }
+    if sorted(baseline.get("tasks", [])) != sorted(candidate.get("tasks", [])):
+        identity_mismatches["tasks"] = {
+            "baseline": baseline.get("tasks", []),
+            "candidate": candidate.get("tasks", []),
+        }
+
+    baseline_rows = {row["task"]: row for row in baseline.get("rows", [])}
+    candidate_rows = {row["task"]: row for row in candidate.get("rows", [])}
+    task_names = sorted(set(baseline_rows) | set(candidate_rows))
+    rows = []
+    regressions = []
+    shared_failures = []
+    recoveries = []
+    for task in task_names:
+        before = baseline_rows.get(task)
+        after = candidate_rows.get(task)
+        if before is None or after is None:
+            regressions.append({"task": task, "reason": "missing row"})
+            continue
+        before_pass = bool(before.get("quality_pass"))
+        after_pass = bool(after.get("quality_pass"))
+        if before_pass and not after_pass:
+            regressions.append({"task": task, "reason": "quality pass regressed"})
+        elif after_pass and not before_pass:
+            recoveries.append(task)
+        elif not before_pass and not after_pass:
+            shared_failures.append(task)
+        rows.append(
+            {
+                "task": task,
+                "baseline_quality_pass": before_pass,
+                "candidate_quality_pass": after_pass,
+                "baseline_tool_calls": before.get("tool_calls", {}),
+                "candidate_tool_calls": after.get("tool_calls", {}),
+                "baseline_event_warnings": before.get("event_warnings"),
+                "candidate_event_warnings": after.get("event_warnings"),
+                "baseline_event_errors": before.get("event_errors"),
+                "candidate_event_errors": after.get("event_errors"),
+            }
+        )
+
+    if regressions:
+        verdict = "reject_candidate_regression"
+    elif identity_mismatches:
+        verdict = "reject_incomparable"
+    elif shared_failures:
+        verdict = "blocked_shared_failures"
+    else:
+        verdict = "pass"
+    return {
+        "schema": 1,
+        "scope": "paired quality comparison; no prompt or response text retained",
+        "identity_fields": identity_fields,
+        "identity_mismatches": identity_mismatches,
+        "rows": rows,
+        "candidate_regressions": regressions,
+        "candidate_recoveries": recoveries,
+        "shared_failures": shared_failures,
+        "verdict": verdict,
+    }
 
 
 def write(root: pathlib.Path, relative: str, text: str) -> pathlib.Path:
@@ -54,8 +158,7 @@ TASKS: dict[str, Task] = {
             "Work directly in the current repository. Fix the implementation bug without "
             "changing tests or signatures. Run `python -m pytest -q` until it passes. "
             + TOOL_RULE
-            + " "
-            "Reply exactly `RESULT=PASS` only when the tests pass."
+            + FINAL_RULE
         ),
         expected_files=("calculator.py",),
         protected_files=("tests/test_calculator.py",),
@@ -67,8 +170,7 @@ TASKS: dict[str, Task] = {
             "modules while preserving the existing public functions, and without changing "
             "tests. Run `python -m pytest -q` until it passes."
             + TOOL_RULE
-            + " Reply exactly `RESULT=PASS` "
-            "only when the tests pass."
+            + FINAL_RULE
         ),
         expected_files=("orders/repository.py", "orders/service.py"),
         protected_files=("tests/test_orders.py",),
@@ -80,8 +182,7 @@ TASKS: dict[str, Task] = {
             "the delimiter while blank lines and malformed records still behave as the "
             "tests require without changing tests. Run `python -m pytest -q` until it passes. "
             + TOOL_RULE
-            + " Reply "
-            "exactly `RESULT=PASS` only when the tests pass."
+            + FINAL_RULE
         ),
         expected_files=("config_parser.py",),
         protected_files=("tests/test_config_parser.py",),
@@ -93,7 +194,7 @@ TASKS: dict[str, Task] = {
             "fix the implementation, not the tests. Keep the public API and retry count. Run "
             "`python -m pytest -q` until it passes."
             + TOOL_RULE
-            + " Reply exactly `RESULT=PASS` only when the tests pass."
+            + FINAL_RULE
         ),
         expected_files=("retry.py",),
         protected_files=("tests/test_retry.py",),
@@ -106,7 +207,7 @@ TASKS: dict[str, Task] = {
             "reservations keep their existing behavior. Do not change tests or public "
             "signatures. Run `python -m pytest -q` until it passes without changing tests."
             + TOOL_RULE
-            + " Reply exactly `RESULT=PASS` only when the tests pass."
+            + FINAL_RULE
         ),
         expected_files=("inventory.py",),
         protected_files=("tests/test_inventory.py",),
@@ -118,7 +219,7 @@ TASKS: dict[str, Task] = {
             "money totals implementation according to the compatibility rules there without "
             "changing tests or public signatures. Run `python -m pytest -q` until it passes."
             + TOOL_RULE
-            + " Reply exactly `RESULT=PASS` only when the tests pass."
+            + FINAL_RULE
         ),
         expected_files=("money.py",),
         protected_files=("tests/test_money.py",),
@@ -129,8 +230,8 @@ TASKS: dict[str, Task] = {
             "Work directly in the current repository. Use the declared `apply_patch` tool to "
             "fix the implementation bug without changing tests or signatures. Do not edit "
             "source files through a shell command. Run `python -m pytest -q` until it passes. "
-            "Reply exactly `RESULT=PASS` only when the tests pass and never print an XML "
-            "tool-call block."
+            + TOOL_RULE
+            + FINAL_RULE
         ),
         expected_files=("calculator.py",),
         protected_files=("tests/test_calculator.py",),
@@ -606,6 +707,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--tasks", default=",".join(TASKS))
     parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("BASELINE", "CANDIDATE"),
+        help="compare two completed quality reports without running a task",
+    )
+    parser.add_argument(
         "--work-root",
         type=pathlib.Path,
         default=pathlib.Path("/tmp/strata-agent-quality"),
@@ -619,16 +726,24 @@ def main(argv: list[str] | None = None) -> int:
     model = options.model or DEFAULT_MODEL
     if options.dsh_patch and not options.dsh_patch.is_file():
         parser.error(f"--dsh-patch does not exist: {options.dsh_patch}")
+    names = [name.strip() for name in options.tasks.split(",") if name.strip()]
+    unknown = set(names) - set(TASKS)
+    if not names or unknown:
+        parser.error(f"unknown tasks: {', '.join(sorted(unknown)) or '(none selected)'}")
+    if options.compare:
+        baseline_path, candidate_path = map(pathlib.Path, options.compare)
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        comparison = compare_reports(baseline, candidate)
+        print(json.dumps(comparison, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if comparison["verdict"] == "pass" else 2
+
     if (
         options.runner == "codex"
         and options.provider_url
         and not os.environ.get(options.api_key_env)
     ):
         parser.error(f"{options.api_key_env} is required")
-    names = [name.strip() for name in options.tasks.split(",") if name.strip()]
-    unknown = set(names) - set(TASKS)
-    if not names or unknown:
-        parser.error(f"unknown tasks: {', '.join(sorted(unknown)) or '(none selected)'}")
     raw_root = options.work_root / "raw"
     rows = []
     for name in names:
@@ -657,7 +772,7 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     result = {
-        "schema": 3,
+        "schema": 5,
         "scope": (
             "deterministic coding fixtures through an agent CLI; "
             "no prompt or response text retained; wall_s is the full runner process"
@@ -673,6 +788,21 @@ def main(argv: list[str] | None = None) -> int:
         "model": options.model_label
         or (model if options.runner == "codex" else None),
         "reasoning_effort": options.reasoning_effort,
+        "provider_url": (
+            options.provider_url if options.runner == "codex" else None
+        ),
+        "model_catalog": (
+            str(options.model_catalog.resolve()) if options.model_catalog else None
+        ),
+        "model_catalog_sha256": (
+            sha256(options.model_catalog.read_bytes()) if options.model_catalog else None
+        ),
+        "fixture_suite_sha256": fixture_suite_sha256(names),
+        "prompt_suffix_sha256": (
+            sha256(options.prompt_suffix.encode("utf-8"))
+            if options.prompt_suffix
+            else None
+        ),
         "tasks": names,
         "rows": rows,
         "summary": {

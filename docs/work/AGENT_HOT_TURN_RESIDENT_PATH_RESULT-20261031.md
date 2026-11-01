@@ -2,7 +2,8 @@
 
 日期：2026-10-31
 
-状态：机制有正向信号，未采纳；因用户要求暂停优化，4 路非回退门未完成。
+状态：覆盖审计完成，机制不采纳。原 4 路非回退门未运行；审计证明当前
+`fused_staged <= 32` 路径没有足够真实覆盖，不能把组合 A/B 的名义差归因给该路径。
 
 ## 结论
 
@@ -106,3 +107,53 @@ cached 为 `0`，B cold cached 中位为 `4236`。该差值是缓存状态污染
 
 如果覆盖审计不能解释差距，关闭 resident direct 路线，不再扫描 staging 数量或
 邻近参数。
+
+## 2026-11-01 逐层覆盖审计
+
+审计使用当前仓库 HEAD 的临时构建，仅在 `prefill.cpp` 增加默认关闭的逐层日志；它不是
+性能候选。二进制 SHA-256 为
+`38c54ce27ee81e0666a3232b8692c2dcf416ba56fd882b26e66d7b0d6d09e814`，实际运行 env 为：
+
+```text
+STRATA_PF_FUSED=1
+STRATA_PREFILL_FUSED_STAGED=1
+STRATA_PREFILL_FUSED_STAGED_AUDIT=1
+```
+
+在隔离端口 `18081` 跑 `1` 路、`3` 波 cold/hot-short/hot-long，共 `9` 个请求；全部
+HTTP/engine 成功、期望回复 `9/9`、finish 全 `stop`、零外来请求，窗口新增 Xid `0`。
+审计日志共 `693` 行，覆盖每次 prefill 的所有实际 stage。
+
+热长轮 `T=865` 的 `48/48` 层都有记录：
+
+| 结果 | 层数 | 说明 |
+|---|---:|---|
+| native pack 可支持 | `3` | layer `35/44/47` |
+| `fused_staged` 命中 | `0` | 三层非驻留专家均超过 32 |
+| 其余层 | `45` | native pack 不支持，保持原 MMQ/fused 路径 |
+
+三波的热长轮中，`35/44/47` 的非驻留专家数分别为
+`117/123/114`、`130/132/141`、`92/80/90`。其余 45 层 staged 全部为 `0`，说明
+`wait copy` 集中在三层，不能靠普适调度改动解决。
+
+热短轮 `T=68` 同样每波记录 `48/48` 层，但三波中只有两次命中且每次仅 `1` 层：
+wave 1 的 layer `44` 为 `32` 个 staged，wave 2 的 layer `47` 为 `31` 个，wave 3
+零命中。按 group 级单层 `3.823 ms` 差，单次最大证据只有约 `3.8 ms`，远低于
+热长轮整请求的 1% 门槛，也解释不了此前组合 A/B 的 `32.667 ms`。因此原
+`STRATA_PREFILL_FUSED_STAGED=1` 候选关闭，不补 4/6/8；此前名义差保留为未归因信号。
+
+冷 prefill 的实际块为 `T=4236/6253/6400`，每波 45 层显式记录为 native unsupported；
+另外 3 个 supported 层走现有自动 native fused 路径。没有发现新的冷块覆盖缺口。
+
+这次审计不改变生产源码或默认路径。生产已按 A1 config 恢复为
+server/vision/engine `246832/246839/246862`，health loaded、262144、6 slots /
+2 groups、systemd inactive；engine/config/server hash 与审计前一致，新增 Xid `0`。
+
+## 下一项
+
+三层真实搬入量为 `80–141` 个专家，而 full-layer native fused compute 只有约
+`7.848 ms/layer`。当前 grouped staged 路径中 copy 仍留下约 `173 ms` 的
+`wait copy`。下一项不是放宽原 `<=32` gate，而是单独预注册
+`AGENT-HOT-TURN-STAGED-STREAM-PIPE`：只为这 3 个 native 层按小批 copy、当前批 wait、
+fused compute 和批后释放做流水。保守重叠上界约 `23.5 ms`，即热长轮 wall 的
+`1.55%`；必须由同源码 B0/B1 实测，不能引用审计结果作为加速。

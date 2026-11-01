@@ -7,7 +7,7 @@
 
 ## 当前决策前沿
 
-0. **全局目标已第三十六次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
+0. **全局目标已第四十三次修订并继续执行**：严重 GPU/运行时故障有最高抢占权；出现新
    Xid、engine 非预期退出或错误结果风险时，暂停性能实验并保存事故。没有新事故时，不把
    “等待低频故障”当作主线，继续处理真实用户的质量与等待。
    - `AGENT-DSH-REAL-PATH-COST` 已完成：模型 step 占 `93.202%`，工具并集占 `5.312%`；
@@ -25,13 +25,36 @@
      客户端；提前 SSE/心跳后标题仍等 `9.421 s` 再被取消，代理记录
      `BrokenPipeError/502`。标题上限 128/64 仍跨两个主 step；固定首消息前缀连续两次
      `cached=0`。不再扫描邻近等待时间、输出额度或提示词参数。
-   - 当前主动项：`AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`。已有 group 级 direct path
-     `7.848` 对 MMQ `11.671 ms/layer`、596 fresh 热长轮 `1.862%` 的 1 路正向信号；
-     先只读审计 48 层 `fused_staged` 覆盖、逐层 fallback 和 `1.86%` 与乐观上界之间的
-     缺口。只有新缺口能给出保守整请求 `>=1%`，才补 4/6/8；否则关闭该路线。
-   - 测试口径：runner 进程 wall 和主任务 `task_wall_s` 分开；代理必须逐块流式转发；
+   - `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT` 已否决：热长轮三层 native 可支持，
+     但 staged `80–141`，实际 `0/48` 命中；其余 45 层 staged 为 0。原组合 A/B
+     的 `1.862%` 不能归因给 direct path。
+   - `AGENT-HOT-TURN-STAGED-STREAM-PIPE` 已否决：三层路径真实命中、9/9 请求正确，
+     但同源码 hot-long wall 慢 `0.721%`、prompt 慢 `0.136%`，未达 1%。
+   - `AGENT-HOT-TURN-CPU-SHARE-EVAL` env-only 候选否决：无 batch 的同源码隔离实例
+     hot-short/hot-long wall 真实快 `2.987%/1.944%`（绝对 `15.148/25.585 ms`），
+     9/9 正确；但现役 `--batch 6` 被源码 `o.batch <= 0` 静态门挡住，没有生产路径。
+   - `AGENT-BATCH-PREFILL-CPU-SHARE-GUARD` 已完成并部署为 opt-in。生产选项 engine 的
+     B0/B1/B0r 判决 `pass`：1 路 hot-short/hot-long wall 改善 `11.825%/10.991%`，
+     2 路 `7.896%/8.056%`，四个比较均 `3/3` 波胜，控制漂移最大 `1.53%`；质量 schema 5
+     下 B0/B1 均 `7/7`；6/8 共 42 请求零错误、零新 Xid。
+   - 当前主动项：`GPU-XID13-STABILITY`。最新严重 DSH turn 5 步、`task_wall_s=36.31 s`；
+     第 5 步等待 `2.296 s` 后以 `layer 11 never rang` 失败，GPU0 同秒 8×Xid 13 +
+     Xid 43。下一步只改 `STRATA_HC_SPLIT=1`，验证实际 env、质量、1/2 路性能和窗口
+     Xid；失败即恢复。不得同时降频或关闭多个 pipeline 开关。
+   - 暂停项：`AGENT-CURRENT-PROD-COST-REMAP`。最新长输出会话 `task_wall_s=202.486 s`，
+     一个 `15,036` output-token step 占 `173.323 s`，模型 `96.799%`；GPU P0 结束后
+     从长输出 decode 恢复。
+   - 测试口径：runner 进程 wall 和主任务 `task_wall_s` 分开；路径审计、机制增量和生产
+     回归也分开，性能主比较必须同源码/选项/config；代理必须逐块流式转发；
+     热轮 comparator 必须使用三臂记录的全部波，候选至少赢三分之二波，配置
+     `1% + 绝对秒数`双门，并检查普通 1/2 路 cold/hot 非回退；
      会写持久缓存 checkpoint 的候选不能用未验证的同 boot ABBA，必须独立 boot 或把不可逆
      顺序明确写成 A→B 并单列冷启动，同时保留标题质量/长任务非回退门。
+     质量配对还必须固定 runner/profile/model/reasoning、模型目录哈希、fixture suite
+     哈希、prompt suffix 和 provider URL；候选从通过变失败即否决，B0/B1 共同失败记为
+     `blocked_shared_failures`，不得进入 6/8 或生产。
+     最终消息必须只含 `RESULT=PASS`；代码/测试正确但输出“摘要 + sentinel”属于评测提示词
+     歧义，必须升级 fixture hash 后重跑双方，不能直接算候选回归。
    - 质量项已完成：用户 DSH Web 实际走 Qwen/Strata relay；旧 headless 是 DeepSeek
      官方，不能混用。同一 Qwen/Strata 路径 6 个基础 fixture 代码/测试 `6/6`，当前
      prompt 严格 `3/6`，明确最终消息契约后严格 `6/6`；连续 fixture `4/5 -> 5/5`。
@@ -41,7 +64,7 @@
      窗口保存 workload、PID、GPU 状态和新增 NVRM Xid。任何新 Xid 立即抢占；重复事故后
      才做单变量 `STRATA_HC_SPLIT=1`、显存降频或 GPU0 隔离。
    - 速度候选仍排在质量和可靠性门之后。1% 以上改善计入，但必须进入真实 1/2 路路径、
-     报告绝对秒数和第二请求 TTFT，并覆盖 4 路非回退、6/8 路安全。
+     报告绝对秒数和第二请求 TTFT，并覆盖 4 路非回退、全部质量 fixture 通过和 6/8 路安全。
 
 > 下面的编号 1–37 是历史决策索引，只用于防止重跑；当前执行顺序只以本段、候选表和
 > `ROADMAP.md` 为准。旧条目里的“当前转为”均已过时，完整数字见 `EVIDENCE_LEDGER.md`。
@@ -190,7 +213,7 @@
 
 | ID | 项 | 验收条件 | 状态 | 证据 | 备注 |
 |---|---|---|---|---|---|
-| GPU-XID13-STABILITY | 定位并收敛会让真实 DSH 任务失败的低频 GPU0 Xid 13 | 每个真实窗口从 UTC 起点读取新增 NVRM Xid；同一 PCI 5 秒内事件聚簇但保留原始事件数；`--boot` 覆盖整个 boot；固定 prompt 只做代码路径回归；重复事故才进入单卡隔离或可回滚显存降频；不得用固定请求多次成功宣称硬件修复 | 进行中 | DSH 最终请求 input `15,419`、31 tools、76 reasoning token 后失败；GPU0 8×Xid 13 + Xid 43；约 60 次重放、30 个最终请求 HTTP 200，无新 Xid；GPU0 历史 Xid 62/154；上游同类改装卡降显存频率后缓解 | **P0 抢占项**：新 Xid 立即停下质量/性能实验；无新事故时不空等。只读探针已固化，当前未证明损坏、未完成缓解；不能归为模型质量 |
+| GPU-XID13-STABILITY | 定位并收敛会让真实 DSH 任务失败的低频 GPU0 Xid 13 | 先只改 `STRATA_HC_SPLIT=1` 并重启；实际 env、质量、1/2 路性能和 UTC 窗口新增 Xid 全记录；失败即恢复。只有单变量完成后才测显存降频，最后才 GPU0 隔离；固定 prompt 不能宣称硬件修复 | 进行中 | 最新严重 DSH turn 5 步、`task_wall_s=36.31 s`；第 5 步 `2.296 s` 后 `layer 11 never rang`，GPU0 8×Xid 13 + Xid 43；失败步骤探头已修正。约 60 次重放、30 个最终请求 200，无新 Xid；GPU0 历史 Xid 62/154 | **当前 P0**：用户最后收到 error，不是“少检查”；风险缓解必须长窗口且可回滚，不能把短 soak 写成修复 |
 | AGENT-CODEX-MODEL-CATALOG-QUALITY | 修复 Codex 缺失模型目录造成的工具面缩减 | 真实请求声明 `apply_patch`；服务无未声明工具；基础 coding fixture 测试/测试不变/最终 sentinel 全过；`apply_patch` 至少 3 次独立稳定；目录幂等可回滚；不改生产引擎 | 进行中 | L-159/L-160：无目录 9 工具、有目录 14 工具；Codex/Strata 基础严格 `5/6`、测试 `6/6`，`apply_patch` 独立重复 `3/3`；最终回复契约在 DSH L-164 已验证 | 质量是硬门；Codex 与 DSH 工具面分开；不把 DeepSeek 官方或其他 hosting 归咎当前引擎 |
 | AGENT-CODEX-CATALOG-PROVISION | 让产品安装/连接流程幂等供给 Codex 模型目录 | 不覆盖用户配置；目录匹配实际模型 slug；重复运行不重复添加；失败可恢复；模板缺 freeform `apply_patch` 时拒绝；检查和写入分离 | 已完成 | `strata codex catalog` 默认只检查，`--apply` 原子写入并先备份；重复运行 `unchanged`；Terminal/catalog/bench tests 通过 | 不改 GPU、engine 或生产 config；文档改为产品命令；Codex 修改目录后需重启客户端 |
 | AGENT-TERMINAL-QUALITY-COMPARISON | 用同一 Schema 3 fixture 对照 Codex/Strata 与 DSH，并消除模型/provider 混淆 | 报告明确 runner/model/provider 标签；6 个基础 fixture 均保留测试、测试字节、最终 sentinel、工具错误和 wall；DSH 至少可重复一次；判断 DSH 能否配置到 Strata endpoint；不能用混合 hosting 结果归因引擎 | 已完成 | L-163：DSH Web `atm/qwen.../:8888`；旧 headless 为 DeepSeek 官方。显式 overlay 后 6 个基础测试 `6/6`、严格 `3/6`，事件/工具错误 `0/0`，wall `243.865 s` | **完成**；旧 DSH/DeepSeek `6/6` 不再作当前路径基线；不改用户 profile |
@@ -223,7 +246,11 @@
 | AGENT-HOT-TURN-ROUTING-PREFETCH-AUDIT | 判断能否只预取本 chunk 实际选中专家 | 只读源码/日志；证明 routing 在 copy 前何时可用、当前 lookahead 的等待来源、最坏路由密度和额外 bookkeeping；据 596/94K 给出 wall >=1% 且绝对 >=0.05 s 的整请求保守上界；说明 bitwise/数值影响、生产命中率与 env 回滚 | 已完成 | 每层 router 完成后才建 routed order；staged 路径已经只拷贝本层选中非驻留专家；后续层 routing 依赖当前层输出。554 x top-10 有 `5,540` 个 pairs、每层 512 专家 | **跨层推测预取关闭**；当前真实可动项是 grouped staged lookahead 默认 8、安全上限 15，转下一项；未重启 |
 | AGENT-HOT-TURN-STAGED-PREFETCH | 把 grouped staged expert lookahead 从 8 提到安全上限 15 | 默认 8 不变；B 只加 `STRATA_PREFILL_STAGED_AHEAD=15`；实际 env、6/2、health、greedy/smoke 全过；596/94K 至少一个 wall 改善 >=1% 且绝对 >=0.05 s，两形状不反向，A 漂移 <=3%；1 路通过后报告 2 路第二 TTFT/跨度，4 路非回退，6/8 安全 | 否决 | L-156：路径、质量、健康、资源全过；596 wall `1.510583→1.505333 s`，改善 `0.3475%`、绝对 `5.25 ms`；prompt `1384.3→1392.6 ms`，慢 `0.5996%` | 双门未过；按停止门未跑 94K/并发；A2 已恢复；不扫邻近深度、stager thread/batch/ring 或 stream threshold |
 | AGENT-HOT-TURN-DEQUANT-AUDIT | 判断 stage 2 的 `dequant 106 ms` 是否能消除重复工作 | 只读追踪 production native IQ3_XXS 554-token grouped staged path；明确同一 expert/layout 是否跨 stage、gather 或 kernel 重复转换、真实命中率和生产可达性；单一可移除部分须给整请求 wall >=1% 且绝对 >=0.05 s 保守上界、数值/回滚边界 | 否决 | L-157：该 phase 实为 native `gather_native_group` 字节搬运，不是 FP16 反量化；每层 order 只含唯一 selected expert，每 16 个一次 gather；stage 1/2 不同层，staged/streamed/fused/peer 互斥，未发现同一 expert/layout 重复转换；MMQ 固定 stride 不能直接读任意 cache slot | 重复工作假设关闭；不构建、不重启，不扫 dequant/group/profiler 参数；转 AGENT-HOT-TURN-RESIDENT-PATH-AUDIT |
-| AGENT-HOT-TURN-RESIDENT-PATH-AUDIT | 判断 resident expert 能否用已有 direct-pointer/fused 路径绕开 MMQ gather | group 级/端到端；真实路径命中、greedy/finish 全过，596/94K 不反向；原契约要求至少一个 wall `>=1%` 且绝对 `>=0.05 s`，1 路通过后补 4/6/8 | 进行中 | L-158：group 级 MMQ/direct 为 `11.671/7.848 ms/layer`（`1.49x`）；596 1 路 wall 相对 A1/A2 为 `-1.862%`（相对 A1 `-2.145%`、`-32.667 ms`），3/3 胜；2 路 hot-long `+0.705%`；94K wall `1.438884→1.401311 s` 但 prompt `1251.5→1251.2 ms`；A1/B/A2 固定 greedy 全等 | **当前**：先只读统计 48 层 `fused_staged` 覆盖和 fallback，再判断 `1.86%` 与 group 级上界之间是否有可安全覆盖缺口；没有新的整请求 1% 收益就关闭，有才补 4/6/8 |
+| AGENT-HOT-TURN-RESIDENT-PATH-AUDIT | 判断 resident expert 能否用已有 direct-pointer/fused 路径绕开 MMQ gather | group 级/端到端；真实路径命中、greedy/finish 全过，596/94K 不反向；原契约要求至少一个 wall `>=1%` 且绝对 `>=0.05 s`，1 路通过后补 4/6/8 | 否决 | L-171：热长轮 `T=865` 只有 layer `35/44/47` native 可支持，staged `80–141`，`fused_staged=0/48`；其余 45 层 staged 为 0。热短轮三波只两次命中一层，理论差约 `3.8 ms`。原组合 A/B 差值不能归因给 direct path | 不补 4/6/8；不扫描 staging 数量。三层大搬入转向 staged-pipe 独立候选 |
+| AGENT-HOT-TURN-STAGED-STREAM-PIPE | 对三层大 staged 集合做 16-expert 双缓冲 copy/compute 流水 | 只改独立默认关闭 env；三层真实命中且每批 staged `<=16`；同源码 B0/B1 的 hot-long wall `>=1%`/`>=0.015 s`、prompt 同向；正确性和资源门全过 | 否决 | L-172：三波均命中 layer `35/44/47`，批次 `4–9`，9/9 请求正确、零 Xid；但热长轮 wall `1.511603→1.522504 s`（慢 `0.721%`）、prompt `1395.3→1397.2 ms`（慢 `0.136%`），三波只胜一波 | 源码已移除，A1 已恢复；不扫 8/24/32 等 batch 大小 |
+| AGENT-HOT-TURN-CPU-SHARE-EVAL | 用空闲 CPU expert pool 接管 hot-turn 的部分 non-resident expert | 只加 CPU share env；真实路径、1 路收益、质量与生产可达性全过 | 否决 | L-173：B1 路径真实命中；hot-short/hot-long wall 快 `2.987%/1.944%`、9/9 正确；但无 batch 实例不是现役几何，生产 `batch=6` 被 `o.batch <= 0` 静态门挡住 | **env-only 生产候选否决**；机制有约 2% 信号，值得一次源码接线审计，不扫份额 |
+| AGENT-BATCH-PREFILL-CPU-SHARE-GUARD | 让 batch 生产在无并发 decode 时安全借用 CPU pool | 只读证明所有 pool 调用 owner；实现默认关闭 lease 后，有 decode 时 prefill 不抢 pool，prefill 持有时新 decode 不阻塞数百毫秒，未租到走原 GPU；路径/质量/1 路 `>=1%` 后才测 2/4/6/8 | 已完成 | 生产选项 B0/B1/B0r：1 路 hot-short/hot-long wall 改善 `11.825%/10.991%`，2 路 `7.896%/8.056%`，均 `3/3` 波胜、控制漂移 `<=1.53%`；质量 B0/B1 均 `7/7`；6/8 42 请求零错误；真实 shared `2,814`、not-shared `884` | **生产 opt-in 已部署**；lease-refusal/dispatch-wait 未命中，4 路仍是同源码隔离证据 |
+| AGENT-CURRENT-PROD-COST-REMAP | 用当前生产与最新真实会话重排整任务最大成本 | 只读关联 DSH/Codex 会话与 provider；分开 cold/new-session、普通 hot step、长输出 decode、工具和标题；输出实际秒数、p50/p90/p99、触发率与 >=1% 保守上界；选一个不同机制或明确 null | 暂停 | 最新长输出 DSH `task_wall_s=202.486 s`，单个 15,036-token step `173.323 s`；cold 约 `11.37 s`，hot-short/hot-long `0.52/1.35 s` | **不丢弃**：GPU P0 结束后从长输出 decode 恢复；继续禁止 CPU share 邻域 |
 | AGENT-HISTORY-STATE-RESIDENCY | 跨进程恢复隔天旧会话，避免 113 秒冷 prefill | 先只读证明多 stage KV/checkpoint 可序列化；测 223K 状态大小、写放大、恢复时间和 RAM 峰值；真实旧会话等待至少减少 1% 且保存成本不转移到每轮；有指纹、失效、安全删除和精确回滚 | 搁置 | 真实 223K resume `113.014 s`；当前 session file 明确拒绝 `--layer-split`、`--peer-device`、`--batch`、`--prompt-cache 0`，不能直接用于双卡六槽生产 | **低频 p99**；34 个有效会话仅 1 个超过 24h；普通热续轮、首工具/首修改和重复测试优先；不实现、不重启 |
 | AGENT-REAL-DECODE-SHAPE | 按真实形状拆模型 decode 成本 | 只读汇总 output/reasoning 尺寸、请求类型、1/2 路并发和模型区间；不改服务、不输出正文；至少重放三种真实尺寸；只有真实触发率后的整任务 >=1% 上界才预注册一个机制 | 已完成 | 35 文件、152 root、14,768 请求；output/reasoning `10,343,967/3,347,547` token；单路模型 union `69,064.894 s`、两路 `171.303 s`；416/1490/4483 单路 `4.240/14.347/45.451 s`，两路 `8.199/28.919/85.701 s`；4483 出现提前 `stop` | **诊断完成，长输出稳定性未完全过门**；现役配置同时开着 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`，生产仪器开销成为下一项 |
 | AGENT-PROFILE-HYGIENE | 移除生产 decode 计时与 GPU 剖析器 | 当前 B4 形状 A1-B-A2-B2；B 只移除 `STRATA_DECODE_TIMING` 与 `STRATA_VERIFY_PROFILE`；416/1490/4483 各 3 波；至少一个主要尺寸中位改善 >=1%，4483 不回退 >1%，A2 漂移 <=3%，finish/hash/health/6 slots 全过；失败精确恢复 | 已完成 | 416/1490/4483 A adjacent median `4.188/14.395/42.322 s`，B `3.911/13.620/37.230 s`；416/1490 改善 `6.61%/5.38%`，A2 漂移 `-2.45%/+0.66%`；4483 漂移 `-13.77%` 不用于加速归因 | **已采纳并留在生产**；B2 engine env 无两个 profiling 变量，health loaded、6 slots、64-token smoke 过；4483 在 B/A2 都有提前 `stop`，独立保留 |

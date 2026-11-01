@@ -1,10 +1,11 @@
 # 真实 AI vibe coding 优化计划
 
-日期：2026-10-31（2026-11-01 第三十六次修订）
+日期：2026-10-31（2026-11-01 第四十三次修订）
 
-状态：继续执行。当前断点从 DSH 标题调度转回已有正向证据的 resident direct-path。
-本轮先做 48 层覆盖/fallback 审计；只有新的整任务保守收益至少 1% 时，才补 4/6/8
-非回退和生产重启。标题延迟、标题输出上限和标题前缀 pin 已连续否决，不再换邻近参数。
+状态：继续执行。最新严重 DSH 会话在第 5 步以 `verify: layer 11 never rang` 失败，
+同秒 GPU0 记录 8×Xid 13 + Xid 43；`GPU-XID13-STABILITY` 因此重新抢占。
+`AGENT-CURRENT-PROD-COST-REMAP` 暂停：最新长输出会话已确认一个 `15,036` output-token
+step 占 `173.323 s`，但必须先收敛用户可见 GPU 失败。
 
 ## 全局目标
 
@@ -17,6 +18,10 @@
 
 当前工作负载通常是 1 个主代理、偶尔 2 个，峰值 1 主 3 子代理。模型服务的 1/2 路是
 主要场景；4 路不退化；6/8 只做安全回归。`2/4/6/8` 表示同时在途请求，不是会话数。
+
+每轮选择候选时先回答“它是否改善整任务最大可改成本”。源码路径、隔离实例、微基准或
+单层机制只能提供方向；没有现役 batch/slot、layer split、真实 DSH 触发和保守绝对秒数，
+不得进入生产矩阵。已经证明不可达的相邻参数不重扫。
 
 ## 当前结论
 
@@ -31,6 +36,9 @@
 - PLE `--ple-inflight 1024`：真实 223K 旧会话三组配对的 prompt/wall 中位改善
   `2.87%/1.09%`。
 - 生产 decode 剖析器已移除；416/1490 token 的 decode wall 改善 `6.61%/5.38%`。
+- `AGENT-BATCH-PREFILL-CPU-SHARE-GUARD` 部署为 opt-in：生产选项 1/2 路 hot-short
+  wall 改善 `11.825%/7.896%`，hot-long `10.991%/8.056%`，均 `3/3` 波胜；质量
+  B0/B1 均 `7/7`，6/8 安全通过。
 
 ### 当前成本结构
 
@@ -61,28 +69,29 @@
 
 ## 当前主动项
 
-### `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`（恢复）
+### `GPU-XID13-STABILITY`（当前 P0）
 
-已有真实正向信号：
+最新严重会话共 5 步，`task_wall_s=36.31 s`，成功 4 步模型墙 `32.853 s`；第 5 步
+等待 `2.296 s` 后以 error 结束。此前的成本探针只统计成功
+`assistant/message`，把它误报成 4 步；现已把 `assistant/attempt` 计入模型墙，并只保留
+finish kind/error code，不保留正文。专项测试 `9 passed`。
 
-- group 级 native direct-pointer `7.848 ms/layer` 对 MMQ gather `11.671 ms/layer`，
-  `1.49x`；
-- 596 fresh-token 热长轮 A1/B/A2 wall 中位
-  `1.522684/1.490017/1.513878 s`；
-- B 相对 A1/A2 合并基线改善 `1.862%`、绝对 `32.667 ms`，三波全胜；
-- 固定 greedy 逐字一致，finish 全为 `stop`；
-- 候选默认关闭，当前生产未包含它。
+下一步只执行一个变量：
 
-之前因绝对 `0.05 s` 门暂停。用户已明确“1% 多也算”，所以本轮继续，但先回答：
+1. 保持 engine/config/Layer split/CPU-share 不变，只增加 `STRATA_HC_SPLIT=1`；
+2. 重启后从 `/proc/<engine>/environ` 验证实际 env，并检查 health、6 slots / 2 groups；
+3. 记录 UTC 起点，先跑固定 greedy 质量和代表 1/2 路任务，再跑更长真实 1/2 路曝光；
+4. 任何新 Xid、错误 turn、质量回退或明显性能回退立即恢复原 config；
+5. 若 `HC_SPLIT=1` 仍有故障，先恢复并单独测试可回滚显存降频；不得同时改多个变量。
 
-1. 48 层中多少层实际进入 `fused_staged`；
-2. 每层 fallback 的真实原因：pack 类型、非驻留 expert 数量、peer/CPU 分摊、段大小、
-   graph 条件或其他；
-3. 1.86% 与 group 级 12.1% 乐观上界之间，是否存在可安全覆盖的真实缺口；
-4. 新缺口能否给出整请求至少 1%、绝对秒数明确的保守收益。
+无 Xid 的短窗口只能称“风险缓解候选有效窗口”，不能称 GPU 已修复。
 
-审计不改生产、不重启、不扫邻近 staging/cache 参数。若没有可覆盖缺口，关闭 resident
-direct 路线；若有，预注册一个源码或接线候选，再补 4/6/8 非回退。
+### `AGENT-CURRENT-PROD-COST-REMAP`（P0 后恢复）
+
+最新长输出会话 `task_wall_s=202.486 s`，模型 `200.155 s`（`96.799%`），工具 union
+`0.411 s`；一个 `15,036` output-token step 占 `173.323 s`。这确认普通 hot 短步之外，
+长输出 decode 是下一性能大头。GPU P0 收敛后从这里恢复，不重跑 CPU-share、head/group
+或 host 邻域。
 
 ## 质量、可靠性与长上下文
 
@@ -101,15 +110,19 @@ direct 路线；若有，预注册一个源码或接线候选，再补 4/6/8 非
   `93.69/94.07 TFLOPS`，当前 boot 两份日志均为 `unlocked=1`。
 - 生产为手动实例，`strata.service` inactive；重启到 ready 约 3 分钟，必须证明收益能覆盖
   加载、缓存丢失和不可用成本。
-- server/vision/engine：`232891/232893/232899`。
+- 当前生产 opt-in 为 server/engine `292517/292525`、端口 `8080`。
+- A1 恢复身份：server/vision/engine `254299/254303/254308`，端口 `8080`。
 - server cwd：`/opt/ai/src/strata-two-stream-serial-20261031`。
-- engine：`/opt/ai/src/strata-freeze-throughput-20261029T0812Z/build75/strata`。
-- engine SHA-256：`105a4171af4d62ff0f3824a4ce2a35b7f0c3085b1290824ade1b288fb3799dc3`。
-- config SHA-256：`6ece1a13f4ac2d875bdafd903c7aba23fdce6be5ccc387e17b987a130a486811`。
+- engine：`/opt/ai/src/strata-batch-prefill-guard-20261101/build-guard-prod/strata`。
+- engine SHA-256：`e60a334c0ca5c1974d79385256aaf90519bcb646e2626f7e66de818d104b0ab7`。
+- config SHA-256：`2c4c7ac6c346c7b64d162502080fc3147b5da232de156a20a9d1db81b521985e`。
+- A1 回滚 engine/config：`105a4171.../6ece1a13...`。
 - server SHA-256：`bd3e428932c0b9bb645b2ae9f37924b2e440b590333a0322cdd00cd28dd4ed82`。
 - health loaded、262144 context、6 slots / 2 groups。
-- server env 含 `STRATA_DEFER_TITLE_REQUESTS=1`、`STRATA_BATCH_SERIAL_TWO=1`、
-  `STRATA_PIN_DSH_TOOL_PREFIX=1`。
+- 实测 server env 为 `STRATA_ADMIT_SHORT_FIRST=2048`、
+  `STRATA_DEFER_TITLE_REQUESTS=1`、`STRATA_MP_STAGED_READ_MIN_TOKENS=2048`、
+  `STRATA_PIN_DSH_TOOL_PREFIX=1`。engine env 含 `STRATA_BATCH_SERIAL_TWO=1` 与三个
+  CPU-share 开关，不含 debug。
 
 ## 优先级
 
@@ -141,6 +154,27 @@ token/s 和资源利用率只用于解释等待，不替代用户任务时间。
 
 - 主任务使用首个 `turn/start` 到最后一个 `turn/end` 的 `task_wall_s`；runner 进程 wall
   只作次指标，并注明包含 turn 后辅助工作。
+- 路径审计、机制归因和端到端性能是三种不同证据。审计二进制只回答路径/fallback，不给
+  加速判决；性能主比较必须在同一源码、同一构建选项和同一 config 内完成。
+- 候选动手前先做生产可达性门：核对真实进程参数和代码控制流。`env` 存在、源码有同名
+  分支或隔离实例能启动，都不等于现役生产能走到该分支。
+- 热轮三臂比较必须记录相同波数并要求全部波齐全；候选至少在三分之二的波胜出，必须同时
+  达到配置的百分比与绝对 wall 门。普通 1/2 路 cold、hot-short、hot-long 都不得回退超过
+  同一百分比门；缺波、臂名错误、外来请求、错误 finish 或期望回复不符直接失败。
+- batch prefill lease 必须单独测“async pool call 在 lease 持有期间完成”；lease 持有
+  派发锁再等待 `cpu_fut` 是死锁，不是保守实现。默认关闭 guard 时 decode window 必须
+  不计数、`run*` 不加锁，这一默认路径要与候选保护路径分开记录。
+- resident 路线的正确比较顺序是：审计源码证明真实层覆盖；同源码 `fused_staged` 基线
+  B0；只增加批间流水开关的 B1；生产臂 A 只用于回归和外部有效性。禁止把“B1 对旧生产
+  A”的差值全部归因给批间流水，也禁止把候选整体相对 A 的 1.86% 当成流水增量。
+- 逐层审计至少记录 `layer/T/use_mmq/native/native_supported/pp/cpu/peer/sort/routed/
+  staged/fused_staged`；必须覆盖 cold、hot-short、hot-long 三种真实 chunk 形状，并核对
+  48 层都有记录。只有一次性聚合日志不算覆盖证据。
+- 批次流水候选在实现前必须证明：copy 事件仍按实际发出顺序等待；ring slot 不会在后批
+  compute 前复用；最后一个 fused launch 后才记录释放事件；固定 greedy 与基线逐字一致。
+- 共享 engine 日志必须按远端保存的字节偏移截取，记录实际大小和 SHA-256；截取后核对
+  文件只含本臂窗口。`not shared` 不能被宽松的 ` shared,` 正则误算。热轮 comparator
+  必须显式参数化 baseline/candidate/control 和 gain/absolute thresholds。
 - 流式代理必须逐块转发；不得先读完整 SSE 再冒充 TTFT。
 - 辅助请求实验必须同时记录客户端请求到达、代理释放、上游开始、上游完成、turn 结束和
   客户端断开；只记录 task wall 不足以证明隔离成功。
@@ -148,6 +182,15 @@ token/s 和资源利用率只用于解释等待，不替代用户任务时间。
   区间与每个主 step 的重叠。
 - 多步 A/B 必须配对并有足够重复；工具数、模型输出量和质量不同时，不能把 wall 差归因给
   候选。
+- 质量 fixture 的最终 assistant 消息必须只含 `RESULT=PASS`。若实现/测试正确但消息是
+  “摘要 + sentinel”，应修测试提示词并记录 fixture hash，不能把它判成代码质量回退；
+  新 suite 必须让 B0/B1 使用同一哈希重新对照。
+- 质量报告必须记录并比较 runner/profile、模型、reasoning、模型目录 SHA-256、fixture
+  suite SHA-256、prompt suffix SHA-256 和 provider URL。B0→B1 候选从通过变失败即否决；
+  双方共享失败只能证明“不是候选回归”，结论必须是阻断采纳，不能写成质量通过。
+- 质量全过后才跑 6/8 安全回归；6/8 只作零错误、health、资源与 Xid 检查，不用单次
+  吞吐波动替代质量门。并发输出哈希只用于诊断；报告必须如实保留一个或多个变体，不能
+  在没有逐行核对时写“哈希一致”。固定 greedy 逐字 parity 属于成对正确性实验。
 - 任何被拒代码在文档判决后从工作树移除；测试工装只保留能服务后续真实判定的部分。
 
 ## 已否决方向（不要重复）
@@ -164,11 +207,9 @@ token/s 和资源利用率只用于解释等待，不替代用户任务时间。
 
 ## 当前断点
 
-**2026-11-01 第三十六次修订。** 标题调度方向已关闭；生产仍为
-`232891/232893/232899`，环境、health、6 slots / 2 groups 未变，无新 Xid。当前主动项
-恢复为 `AGENT-HOT-TURN-RESIDENT-PATH-AUDIT`：先只读统计 48 层 direct-path 覆盖和
-fallback。没有新的整请求 1% 缺口就关闭该路线；有则预注册 4/6/8 验证，再决定是否值得
-重启生产。
+**2026-11-01 第四十三次修订。** 最新严重 DSH turn 第 5 步以 GPU0 Xid 同型错误失败；
+失败步骤探头已修正。当前动作是单变量 `STRATA_HC_SPLIT=1` 风险缓解验证，生产暂不混入
+降频或其他 pipeline 开关。成本重排暂停，恢复后优先拆 `173.323 s` 长输出 decode。
 
 ## 每轮强制复盘
 

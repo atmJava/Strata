@@ -358,13 +358,38 @@ def wave_medians(rows: list[dict], level: int, turn: str, field: str) -> dict[in
     return output
 
 
-def compare(paths: list[pathlib.Path]) -> tuple[dict, list[str]]:
+def compare(
+    paths: list[pathlib.Path],
+    *,
+    baseline_arm: str = "A64",
+    candidate_arm: str = "B0",
+    control_arm: str = "A64r",
+    min_gain_pct: float = 1.0,
+    min_wall_s: float = 0.15,
+) -> tuple[dict, list[str]]:
     runs = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
     by_arm = {run["arm"]: run for run in runs}
-    required = {"A64", "B0", "A64r"}
+    required = {baseline_arm, candidate_arm, control_arm}
     problems: list[str] = []
+    if len(required) != 3:
+        return {}, ["baseline, candidate and control arm names must be distinct"]
     if set(by_arm) != required:
         return {}, [f"arms must be exactly {sorted(required)}, got {sorted(by_arm)}"]
+    wave_counts = {
+        arm: run.get("args", {}).get("waves")
+        for arm, run in by_arm.items()
+    }
+    if any(
+        not isinstance(count, int) or count < 3
+        for count in wave_counts.values()
+    ):
+        return {}, [
+            "each arm must record args.waves as an integer of at least 3"
+        ]
+    if len(set(wave_counts.values())) != 1:
+        return {}, [f"arms must use the same wave count, got {wave_counts}"]
+    expected_waves = next(iter(wave_counts.values()))
+    required_wins = (2 * expected_waves + 2) // 3
     for arm, run in by_arm.items():
         if run["request_accounting"]["foreign"]:
             problems.append(f"{arm}: {run['request_accounting']['foreign']} foreign requests")
@@ -400,36 +425,46 @@ def compare(paths: list[pathlib.Path]) -> tuple[dict, list[str]]:
                 if not common:
                     problems.append(f"level {level} {turn} {field}: no complete waves")
                     continue
+                if len(common) != expected_waves:
+                    problems.append(
+                        f"level {level} {turn} {field}: "
+                        f"{len(common)}/{expected_waves} complete waves"
+                    )
+                    continue
                 medians = {
                     arm: statistics.median(arm_waves[arm][wave] for wave in common)
                     for arm in required
                 }
                 drift = (
-                    abs(medians["A64r"] - medians["A64"]) / medians["A64"] * 100
-                    if medians["A64"] else float("inf")
+                    abs(medians[control_arm] - medians[baseline_arm]) / medians[baseline_arm] * 100
+                    if medians[baseline_arm] else float("inf")
                 )
                 reference_waves = {
-                    wave: statistics.median([arm_waves["A64"][wave], arm_waves["A64r"][wave]])
+                    wave: statistics.median(
+                        [arm_waves[baseline_arm][wave], arm_waves[control_arm][wave]]
+                    )
                     for wave in common
                 }
                 reference = statistics.median(reference_waves.values())
                 change = (
-                    (reference - medians["B0"]) / reference * 100
+                    (reference - medians[candidate_arm]) / reference * 100
                     if reference else float("-inf")
                 )
-                wins = sum(medians["B0"] < reference_waves[wave] for wave in common)
+                wins = sum(medians[candidate_arm] < reference_waves[wave] for wave in common)
                 comparison[level_key][turn][field] = {
-                    "A64": medians["A64"],
-                    "B0": medians["B0"],
-                    "A64r": medians["A64r"],
-                    "A64r_drift_pct": drift,
+                    "arms": {
+                        baseline_arm: medians[baseline_arm],
+                        candidate_arm: medians[candidate_arm],
+                        control_arm: medians[control_arm],
+                    },
+                    "control_drift_pct": drift,
                     "paired_change_pct": change,
-                    "B0_wins": wins,
+                    "candidate_wins": wins,
                     "waves": len(common),
                 }
                 if drift > 3:
                     problems.append(
-                        f"level {level} {turn} {field}: A64r drift {drift:.3f}%"
+                        f"level {level} {turn} {field}: {control_arm} drift {drift:.3f}%"
                     )
 
     hot_rows = [
@@ -440,21 +475,40 @@ def compare(paths: list[pathlib.Path]) -> tuple[dict, list[str]]:
     ]
     gains = [
         row for row in hot_rows
-        if row[0] in (1, 2) and row[3]["paired_change_pct"] >= 1 and row[3]["B0_wins"] >= 2
+        if row[0] in (1, 2)
+        and row[3]["paired_change_pct"] >= min_gain_pct
+        and row[3]["candidate_wins"] >= required_wins
     ]
     absolute_savings = [
-        abs(row[3]["A64"] - row[3]["B0"])
+        abs(
+            row[3]["arms"][baseline_arm]
+            - row[3]["arms"][candidate_arm]
+        )
         for row in gains
         if row[2] == "wall_s"
     ]
     if not gains:
-        problems.append("no ordinary hot-turn class reached a 1% median gain with 2/3 waves")
-    elif not absolute_savings or max(absolute_savings) < 0.15:
-        problems.append("no passing wall class saved at least 0.15 s")
-    for level, turn, field, result in hot_rows:
-        if result["paired_change_pct"] < -1:
+        problems.append(
+            "no ordinary hot-turn class reached a "
+            f"{min_gain_pct:g}% median gain with "
+            f"{required_wins}/{expected_waves} waves"
+        )
+    elif not absolute_savings or max(absolute_savings) < min_wall_s:
+        problems.append(
+            f"no passing wall class saved at least {min_wall_s:g} s"
+        )
+    ordinary_rows = [
+        (int(level), turn, field, result)
+        for level, turns in comparison.items()
+        for turn in ("cold", "hot_short", "hot_long")
+        for field, result in turns[turn].items()
+        if int(level) in (1, 2)
+    ]
+    for level, turn, field, result in ordinary_rows:
+        if result["paired_change_pct"] < -min_gain_pct:
             problems.append(
-                f"level {level} {turn} {field}: regressed {result['paired_change_pct']:.3f}%"
+                f"level {level} {turn} {field}: "
+                f"regressed {result['paired_change_pct']:.3f}%"
             )
     verdict = {
         "pass": not problems,
@@ -489,10 +543,24 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--output")
     parser.add_argument("--compare", nargs=3, metavar="JSON")
+    parser.add_argument("--compare-baseline", default="A64")
+    parser.add_argument("--compare-candidate", default="B0")
+    parser.add_argument("--compare-control", default="A64r")
+    parser.add_argument("--min-gain-pct", type=float, default=1.0)
+    parser.add_argument("--min-wall-s", type=float, default=0.15)
     args = parser.parse_args()
 
+    if args.min_gain_pct < 0 or args.min_wall_s < 0:
+        parser.error("comparison thresholds must not be negative")
     if args.compare:
-        verdict, problems = compare([pathlib.Path(path) for path in args.compare])
+        verdict, problems = compare(
+            [pathlib.Path(path) for path in args.compare],
+            baseline_arm=args.compare_baseline,
+            candidate_arm=args.compare_candidate,
+            control_arm=args.compare_control,
+            min_gain_pct=args.min_gain_pct,
+            min_wall_s=args.min_wall_s,
+        )
         print(json.dumps(verdict, ensure_ascii=False, indent=1, sort_keys=True))
         return 0 if not problems else 1
     if not args.arm or not args.output:
