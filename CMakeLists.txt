@@ -133,6 +133,11 @@ if(STRATA_BUILD_TESTS)
   target_include_directories(split_rules_test PRIVATE include)
   add_test(NAME split_rules_test COMMAND split_rules_test)
 
+  # verifier tap cleanup: a non-writing split stage allocates no dump-only GPU buffers
+  add_executable(tap_dump_plan_test tests/core/tap_dump_plan_test.cpp)
+  target_include_directories(tap_dump_plan_test PRIVATE include)
+  add_test(NAME tap_dump_plan_test COMMAND tap_dump_plan_test)
+
   # #3797: the out-of-memory report at start (per card free/total, the largest other programs): the text is a pure
   # function; the driver query (NVML, loaded at run time) is only checked to be safe to call. No GPU needed.
   add_executable(gpu_report_test tests/program/gpu_report_test.cpp)

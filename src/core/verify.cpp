@@ -9,6 +9,7 @@
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/spec_prob.hpp"
 #include "strata/core/spec_proposal.hpp"
+#include "strata/core/tap_dump_plan.hpp"
 
 #include "strata/core/native_head.hpp"
 #include "strata/core/on_device.hpp"
@@ -743,10 +744,16 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         tap_slot_.assign((size_t) g.n_layers, -1);
         for (size_t i = 0; i < tap_layers_.size(); ++i) tap_slot_[(size_t) tap_layers_[i]] = (int) i;
         const size_t nt = tap_layers_.size();
-        if (nt > 0) {
+        const bool whole_model = lb_ == 0 && le_ == g.n_layers;
+        const TapDumpPlan tap_plan = tap_dump_plan(tap_path != nullptr, tap_path_per_stage_, lb_, le_, g.n_layers,
+                                                   !tap_req_.empty());
+        if (nt > 0 && !tap_plan.record) {
+            // Nothing reads these layers and no file can write them. Keep this stage's dump-only buffers unallocated;
+            // the explicit warning below still tells a STRATA_TAP_FILE user how to enable one.
+        } else if (nt > 0) {
             if (cudaMalloc((void**) &tap_dev_, (size_t) T * nt * N * 4) != cudaSuccess ||
-                (tap_path != nullptr && (cudaMalloc((void**) &tap_scratch_, (size_t) HC * N * 4) != cudaSuccess ||
-                                         !mapped((size_t) T * nt * N * 4, (void**) &h_tap_, (void**) &m_tap_)))) {
+                (tap_plan.dump_copy && (cudaMalloc((void**) &tap_scratch_, (size_t) HC * N * 4) != cudaSuccess ||
+                                        !mapped((size_t) T * nt * N * 4, (void**) &h_tap_, (void**) &m_tap_)))) {
                 err = "verify: the DFlash2 tap buffers could not be allocated";
                 return false;
             }
@@ -754,7 +761,6 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             // last one's records, and a split stage's records are its own layers only, so a shared file would hold a
             // subset with no marker.  A layer split must use "%d" (one file per stage); this stage then says so below
             // instead of silently writing nothing.
-            const bool whole_model = lb_ == 0 && le_ == g.n_layers;
             if (tap_path != nullptr && !tap_path_per_stage_ && !whole_model)
                 std::fprintf(stderr, "strata: STRATA_TAP_FILE %s: this stage's layers [%lld, %lld) record no dump (a layer split "
                                      "needs a \"%%d\" in the path: one file per stage)\n", tap_file_path.c_str(),

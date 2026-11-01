@@ -136,7 +136,7 @@ IQ3_XXS。**两者不可直接相减**，本文件只比"机制"不比"数字"�
 | # | 优化项 | fork 位置 | 声称收益与口径† | 原理 | Strata 状态 | 证据 |
 |---|---|---|---|---|---|---|
 | 55 | 选路一次性 INFO（FA2 graph wrapper、barrier、SM75 spec prefill） | `flashinfer.py:1358-1366`、`scheduler.py:340-345`、`compilation.py:1420-1427` | 无数字 | 启动时把"走了哪条路"说清 | **已有等价实现** | `sm75_series.hpp` 的 7.5 默认 banner + 各子系统启动行；相位耗时表 `generate.cpp:2509` |
-| 56 | 逐窗 dump / 对比工具 | `VLLM_DFLASH_TRACE_STEPS`、`VLLM_DFLASH_VERIFIER_TRACE_STEPS`（`spec_decode/utils.py`） | 无数字 | 限步数打印，便于定位接受率 | **已有等价实现** | `STRATA_TAP_FILE=/tmp/t%d.stap` + `tools/server/tap_parity.py compare / merge`（`869c1224`、`483c53f5`，14 例单测） |
+| 56 | 逐窗 dump / 对比工具 | `VLLM_DFLASH_TRACE_STEPS`、`VLLM_DFLASH_VERIFIER_TRACE_STEPS`（`spec_decode/utils.py`） | 无数字 | 限步数打印，便于定位接受率 | **已有等价实现** | `STRATA_TAP_FILE=/tmp/t%d.stap` + `tools/server/tap_parity.py compare / merge`（`869c1224`、`483c53f5`，17 例单测） |
 
 ### 1.12 工程层（非引擎）
 

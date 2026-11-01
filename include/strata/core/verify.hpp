@@ -628,13 +628,14 @@ private:
     int32_t* h_commit_ = nullptr; int32_t* m_commit_ = nullptr; // [n_keep, n_keep-1, pos_0 .. pos_{T-1}]
     float* h_ple_ = nullptr;     float* m_ple_ = nullptr;       // T * n_embd
     int32_t* h_out_ = nullptr;   int32_t* m_out_ = nullptr;     // T argmax ids
-    // STRATA_TAP_FILE (off by default; nothing is allocated or captured without it): the DFlash2 experiment's hook.
+    // STRATA_TAP_FILE (off by default; nothing is allocated or captured for it without it): the DFlash2 experiment's hook.
     // After each layer in STRATA_TAP_LAYERS (default 5,15,25,35,45) the window copies the layer's completed output
     // (the residual with its pending FFN write applied, the mean of the hc streams) per row; run() appends
     // (pos, token, taps) records to the file.  A "%d" in the path is replaced by the stage's layer_lo (0: whole model),
     // so a layer split writes one file per stage and every stage appends its own records; no "%d": the path as given,
-    // and ONLY the whole model writes (a stage of a layer split records no dump - it says so at init; a split needs
-    // "%d", because every stage truncating one shared path would leave only the last one's rows).
+    // and ONLY the whole model writes (a stage of a layer split records no dump and allocates no dump-only buffers -
+    // it says so at init; a split needs "%d", because every stage truncating one shared path would leave only the last
+    // one's rows).
     bool tap_on_ = false;
     bool tap_path_per_stage_ = false;             ///< STRATA_TAP_FILE held "%d": each stage's own file, so every stage appends
     std::vector<int> tap_req_;                    ///< set_taps

@@ -12,6 +12,11 @@
 > `STRATA_PF_FUSED_SM75` 从 HEAD:14 移到工作区:18）。
 > 证据标记：**[实跑]** = 本次命令输出；**[nm]** = 目标文件符号；**[静态]** = 读码/逐行对比，未运行。
 
+> **当前状态（2026-11-01 补记）**：下文第 0、1 节保留评审时快照，不是当前 HEAD 的阻断清单。M1、M2、M4、M5
+> 已按第 9 节处理；M3 在 `640471fe` 补齐“只有整模型写、切分要 `%d`、会提示”后，又移除了不会写 dump 的切分
+> stage 的 GPU 记录缓冲分配，并新增 `tap_dump_plan_test`。`PORT_AUDIT_COVERAGE.md` 的 tap 测试计数也已从 14
+> 修正为实测 17。剩余建议项（CPU-only transcription 标签、real 模式绝对相等断言）不影响当前的默认路径或生产。
+
 ---
 
 ## 0. 结论
@@ -523,7 +528,7 @@ $ python -m pytest tools/server/tests/test_tap_parity.py -q   # 17 passed
 |---|---|---|---|
 | M1 | **改声明、不改代码** | `session_bytes`(5 参)/`session_init`(7 参) 的旧符号确实已恢复；`Dflash2Drafter::load` 的 3 参符号**不补**——类布局已变（`b009fab5` 加成员、`SessionState` 加 `rope_donor`），补符号只会把链接失败换成静默 UB。`PORT_AUDIT_DEFAULTS.md` §3.4 与 `VLLM_PORT_PLAN.md` §6.1 都已按这个结论改写，并写明升级必须清旧 `.o`/增量目录 | `8dbd89da` 之后的 `PORT_AUDIT_DEFAULTS.md` 修订 + `VLLM_PORT_PLAN.md` §6.1 |
 | M2 | **数字已按 `PORT_AUDIT_MEASUREMENTS.md` 逐格改** | P3b：R=12 → 8.0/8.5/7.5（1905 MHz 时 10.4）、R=626 → 36.5/32.2/26.9，并补测量口径；P4 冷启动 → scores 44.8/45.0（+2.6）、topk 32.8/30.9（−2.8）；摘要 18.1/4.6 → 12.1/2.6；"低估 25%"改为"层每行 15.3→17.3→20.3 µs（+33%）"；§6.1 的校正归属改成 `e7f35829` | `e7f35829`→本次文档修订 |
-| M3 | **保留"只有整模型写"，补提示、改口径** | 代码行为不变（切分必须用 `%d`），该 stage 在 init 时打印"本 stage 不 dump，层切分要给 %d"；`verify.hpp`、`verify.cpp` 两处注释与 §6.1 的"末 stage"说法全部改掉 | `640471fe` |
+| M3 | **保留"只有整模型写"，补提示、改口径，并取消无效分配** | `640471fe` 让该 stage 在 init 时打印"本 stage 不 dump，层切分要给 %d"，并同步 `verify.hpp`、`verify.cpp` 与 §6.1 的"末 stage"说法；后续 `tap_dump_plan` 让这种 stage 不再分配 `tap_dev_`/scratch/mapped dump 缓冲，也不把 `tap_on_` 打开。DFlash2 的 `set_taps` 请求仍独立保留 `tap_dev_`，纯策略测试 `tap_dump_plan_test` 覆盖六种组合 | `640471fe` + 本次修复 |
 | M4 | **加了三个 launch 计数器，测试有牙** | 每个 case 断言"rows 子进程恰好多 1 次 rows、halve 不变；默认子进程反之"；负向验证（把 rows 分支改成 `if (false && …)`）确实失败 | `de033a41` |
 | M5 | **文档改回真话 + 解析对齐** | `moe_fused_iq.hpp` / `DETAILS.md` 改成"只在被请求时 setup、不请求时无 `cudaFuncSetAttribute`/无 banner"，并写明 `STRATA_PF_FUSED_SM75=1` 单独仍是 MMQ；`fused_asked` 从 `atoi != 0` 改成 `v[0]=='1'`，与 `requested()`/`native_supported` 一致 | `640471fe` |
 
