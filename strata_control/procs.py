@@ -220,7 +220,11 @@ def _signal_verified(record: dict, sig: int) -> bool:
     return True
 
 
-def end_one(record: dict, *, grace: float = 8.0) -> str:
+def end_one(record: dict, *, grace: float = 8.0, settle: float = 10.0, say=None) -> str:
+    """End one verified leftover: a polite signal where the OS has one, then a kill after `grace` seconds, then up to
+    `settle` seconds for it to be gone (#4051: an engine holding tens of GB of pinned memory can take longer than the
+    10 s that were enough for a small process; `say` is told every ~10 s while it is waited for).
+    Returns 'gone' (already not running), 'ended' or 'stuck'."""
     pid = record["pid"]
     if not is_same(pid, record["token"], record["cmd"]):
         drop_record(pid)
@@ -231,16 +235,22 @@ def end_one(record: dict, *, grace: float = 8.0) -> str:
         time.sleep(0.1)
     if start_token(pid) == record["token"]:
         _signal_verified(record, signal.SIGKILL)
-    deadline = time.monotonic() + 10
+    started = time.monotonic()
+    deadline = started + settle
+    told = 0
     while time.monotonic() < deadline and start_token(pid) == record["token"]:
         time.sleep(0.1)
+        waited = int((time.monotonic() - started) // 10)
+        if say is not None and waited > told:
+            told = waited
+            say(f"[strata] still waiting for process {pid} to give its memory back ({told * 10} s)")
     if start_token(pid) == record["token"]:
         return "stuck"
     drop_record(pid)
     return "ended"
 
 
-def end_leftovers(profile: str | None = None, *, grace: float = 8.0, say=None) -> dict:
+def end_leftovers(profile: str | None = None, *, grace: float = 8.0, settle: float = 10.0, say=None) -> dict:
     to_end, unverifiable = leftovers(profile)
     result = {
         "ended": [],
@@ -249,7 +259,7 @@ def end_leftovers(profile: str | None = None, *, grace: float = 8.0, say=None) -
         "unverifiable": [{"pid": r["pid"], "role": r.get("role")} for r in unverifiable],
     }
     for record in sorted(to_end, key=lambda item: item["written_at"], reverse=True):
-        outcome = end_one(record, grace=grace)
+        outcome = end_one(record, grace=grace, settle=settle, say=say)
         result[outcome].append(
             {"pid": record["pid"], "role": record.get("role"), "profile": record.get("profile")}
         )
@@ -291,7 +301,7 @@ def orphans_of(engine_exe: str) -> list[Ident]:
     return found
 
 
-def end_orphans(engine_exe: str, *, grace: float = 8.0, say=None) -> list[dict]:
+def end_orphans(engine_exe: str, *, grace: float = 8.0, settle: float = 10.0, say=None) -> list[dict]:
     ended = []
     for ident in orphans_of(engine_exe):
         record = {
@@ -301,7 +311,7 @@ def end_orphans(engine_exe: str, *, grace: float = 8.0, say=None) -> list[dict]:
             "role": "engine",
             "written_at": 0,
         }
-        outcome = end_one(record, grace=grace)
+        outcome = end_one(record, grace=grace, settle=settle, say=say)
         ended.append({"pid": ident.pid, "outcome": outcome})
         if say is not None and outcome != "gone":
             say(f"[strata] an engine left behind by an earlier run (pid {ident.pid}) {outcome}")
