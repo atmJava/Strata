@@ -112,6 +112,7 @@ against.
 |---|---|---|
 | W4.1 | A `sm_75` default for the Turing series, or a report that asks for one | an issue or PR text with the A-B-A numbers and the T2 result |
 | W4.2 | The TP patch: port it or close it | a branch with T2 behind it, or a recorded decision not to |
+| W4.3 | The prefill `Xid 13` crash of 2026-11-02: report it or close it | an issue text with the kernel log, the cgroup evidence and what would confirm the cause |
 
 ### W5 — The instrument
 
@@ -201,6 +202,7 @@ Updated at the end of every round. `done`, `closed`, `open`, `blocked — <reaso
 | W3.2 | **open — reopened with W3.1** | It assumed the measured gain needs a Q2_0 pack. The gains on record are gfx12 (IQ3_XXS +15.7%, +19-20% with the attention work) and sm_120; for a native pack the only engine numbers are IQ2_XS on an RTX 5070, +8% at 4K and 0% at 32K (`src/prefill/prefill.cpp:256`). For this pack the one quality measurement went the other way — first-token KL 0.00340 with MMQ against 0.00388 fused over 24 prompts on an R9700, which is why that flag stayed opt-in ([AMD_HIP.md](AMD_HIP.md)). So the gain here is unknown, not known-and-unavailable |
 | W4.1 | done | [UPSTREAM_REPORT_SM75.md](UPSTREAM_REPORT_SM75.md): ready-to-post issue with the A-B-A table, the T2 exactness result and what was not tested. Not posted: no network route to GitHub from this machine |
 | W4.2 | closed | not ported: `STRATA_TP_GDN` needs `--batch 0` (single stream), while this box was moved to `parallel 4` on measurement; the gain measured in the record is single-stream (+3.8% projection, +7.5% weighted), and the patch leaves ~293 MiB free on CUDA1. Footprint and re-open condition in [SERVER_TUNING_PLAN.md](SERVER_TUNING_PLAN.md#the-tensor-parallel-patch-closed-not-ported) |
+| W4.3 | done | [UPSTREAM_REPORT_XID13.md](UPSTREAM_REPORT_XID13.md): ready-to-post crash report — 202 `Xid 13` and one `Xid 43` in one second on CUDA0, `prefill copy_i32` as the reporting site, no OOM and no throttle, the first occurrence in four boots. Not posted: the text waits for the issue form |
 | W5.1 | done | `/opt/ai/bin/run-arm.sh`, `apply-arm.sh`, `cold-prefill.py` |
 | W5.2 | done | across the soak and the cache counters: `evictions 0` over 1,120 parks / 1,119 restores, conversation-cache bytes flat at 589.8 MB, MemAvailable low water 23.3 GiB (historically 4.1 GiB), RSS +148 MB over 39 minutes. A day of real traffic is not available; this is the best sample there is |
 | W6.1 | open | costs one start-up log read and one device query, and neither has been done: no log on the box has been read for the tile line, and the two shared-memory attributes are not recorded in [SERVER_HW.md](SERVER_HW.md) |
