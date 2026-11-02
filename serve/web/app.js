@@ -213,9 +213,9 @@ function render(m) {
 
 // #596: the conversation cache - the prompt's state the engine keeps between requests (always), and the whole
 // conversations it parks in RAM when "--conversation-cache-mib N" is in the run config's args (opt-in)
-function since(t) {
-  if (!t) return "";
-  const s = Math.max(0, Date.now() / 1000 - t);
+function since(timestamp) {
+  if (!timestamp) return "";
+  const s = Math.max(0, Date.now() / 1000 - timestamp);
   return s < 60 ? t("since.now") : s < 3600 ? t("since.min", {n: fmt(s / 60)}) : t("since.hour", {n: fmt(s / 3600, 1)});
 }
 function renderConvCache(c) {
