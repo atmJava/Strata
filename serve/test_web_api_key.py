@@ -24,6 +24,7 @@ const field = {{value: ""}};
 const notices = [];
 const $ = () => field;
 const toast = (...args) => notices.push(args);
+const t = (k) => k;                     // serve/web/i18n.js words; this test only checks the toast kinds
 const localStorage = {{
   getItem(k) {{
     if ({json.dumps(blocked)}) throw new Error("Storage blocked");
