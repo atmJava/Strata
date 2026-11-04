@@ -443,7 +443,7 @@ class SplitArtifactTests(unittest.TestCase):
             paths = split_model(root, split_layer=False)
             rc, log = run_pack(paths[0], root / "pack")
             self.assertEqual(rc, 0, log)
-            head, line0, line1 = (root / "pack" / "native_experts.txt").read_text().splitlines()
+            head, _, line1 = (root / "pack" / "native_experts.txt").read_text().splitlines()
             self.assertTrue(head.startswith("# strata native experts v3: layer gu_type d_type offset blob_bytes "
                                             "gate_off up_off down_off [shard] (n_expert 4, total "), head)
             self.assertEqual(line1.split()[8:], [paths[2].name])

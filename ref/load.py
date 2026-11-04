@@ -168,7 +168,7 @@ class Gguf:
         t = self.info(name)
         if len(t.shape) != 2:
             raise ValueError(f"{name}: rows() needs a 2-D tensor, got shape {t.shape}")
-        el, by = GEOM[t.type_name]
+        el, _ = GEOM[t.type_name]
         width = t.shape[0]
         if width % el:
             raise ValueError(f"{name}: row width {width} is not a multiple of block {el}")

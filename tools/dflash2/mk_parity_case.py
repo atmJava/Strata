@@ -56,7 +56,7 @@ def main():
     embed = Embed({anchor: torch.from_numpy(emb[0]), mask_id: torch.from_numpy(emb[1])})
     d = R.Drafter(st, cfgp, embed, torch.from_numpy(head_dq), threads=6)
     d.set_context(torch.from_numpy(taps))
-    path, _ = d.draft(n_ctx, anchor, 8)           # runs the forward; the tail below redoes the selector with the token map
+    _, _ = d.draft(n_ctx, anchor, 8)           # runs the forward; the tail below redoes the selector with the token map
     fn = d.last_all.clone()                       # [8][H]
     out_rows = fn[1:]
     logits = out_rows @ torch.from_numpy(head_dq).T

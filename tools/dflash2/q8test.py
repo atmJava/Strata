@@ -27,7 +27,7 @@ def q8_0(w):
 def run(name, b, tag):
     seqj = json.load(open(W / "p" / ("%s.seq.json" % name)))
     seq = seqj["prompt"] + seqj["out"]
-    layers, pos, tok, taps = R.read_taps(str(W / "taps" / ("%s.bin" % name)))
+    _, pos, _, taps = R.read_taps(str(W / "taps" / ("%s.bin" % name)))
     keep = pos < len(seq)
     pos, taps = pos[keep], taps[keep]
     feats = np.zeros((int(pos.max()) + 1, taps.shape[1]), np.float32)

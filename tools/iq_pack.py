@@ -408,7 +408,7 @@ def index_from_base(a, src, base, out, g, T, mm) -> int:
     bg = G.GGUFFile(base_src)
     BT = {t.name: t for t in bg.tensors}
     bmm = np.memmap(base_src, dtype=np.uint8, mode="r")
-    header, rows = read_index(base / "index.txt")
+    _, rows = read_index(base / "index.txt")
     new_rows, extra = [], []
     served = 0
     for name, f in rows.items():
