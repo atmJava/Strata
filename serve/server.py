@@ -6489,6 +6489,12 @@ class BadBody(Exception):
 
 
 def make_handler(svc: Service):
+    """The request-handler class for one running server, closed over its Service.
+
+    BaseHTTPRequestHandler runs one Handler instance per connection (HTTP/1.0: answers end by closing,
+    which is also how SSE ends), so the per-request state below starts fresh on every request.  The
+    verbs live here as do_GET / do_POST / do_OPTIONS; bodies are read once by the handler that answers.
+    """
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
 
@@ -6770,6 +6776,12 @@ def make_handler(svc: Service):
             return False
 
         def do_GET(self):
+            """The read-only surface: the web app's own files (/web/, /fonts/, the pages at "" and
+            /api-monitor), the numbers a person or a dashboard watches (/metrics, /metrics/prometheus,
+            /v1/telemetry, /status, /v1/status, /health), the llama-server-shaped views a router or
+            client polls (/v1/models, /props, /slots), what the web page switches and shows (/settings
+            shared defaults, /config run-config keys, /mcp servers), generated pictures
+            (/v1/images/files/) and the request log when the monitor is on (/api/requests, /api/health)."""
             path = self.path.split("?")[0].rstrip("/")
             if path.startswith("/fonts/"):
                 # the web app's font (Outfit, OFL: serve/web/fonts); the page falls back to the system font
