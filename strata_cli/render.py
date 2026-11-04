@@ -446,6 +446,8 @@ def render_view(snapshot: dict, view: str, width: int = 80, height: int = 24,
         if state == "connected" and (age is None or age > 5 or age < -5):
             state = "stale"
         if state != "connected":
+            # a view shows only rates the connection actually delivered: without a fresh snapshot the
+            # rates are blanked (--), never zeroed or estimated
             rates = {**rates, "answer_tok_s": None, "prefill_tok_s": None,
                      "aggregate_output_tok_s": None, "answer_window_s": None,
                      "aggregate_window_s": None}
@@ -486,6 +488,8 @@ def render_view(snapshot: dict, view: str, width: int = 80, height: int = 24,
     if (snapshot.get("quality") or {}).get("telemetry") == "unavailable":
         lines.append("Telemetry unavailable; status only")
     if width < 70 or height < 20:
+        # too small for the full layout: keep the three lines every view shares, add the one line this
+        # view is about, and if even that does not fit, cut it and point at strata status --json
         lines += [_line(f"Model {safe(model.get('id'), width-17)} {model_state}", width),
                   f"In flight {number(work.get('active'))}  Slots {number(work.get('occupied_slots'))}/{number(work.get('slots_effective'))}",
                   f"Engine waiting {number(work.get('waiting'))}  Pre-admit {number(work.get('queued'))}"]
@@ -576,6 +580,8 @@ def render_view(snapshot: dict, view: str, width: int = 80, height: int = 24,
     if view == "serving" and width >= 100 and height >= 24 and serving_pane == "devices" and not detail:
         return _wide_serving(lines, snapshot, width, height, filter_text, selected, connect)
     if view == "overview":
+        # the full layout: each view builds only its own lines, and every reading that does not exist
+        # prints as -- (number()), which is what keeps the "no fake rates" promise
         lines += [f"Answer speed  {number(rates.get('answer_tok_s'), ' tok/s', 1)} [engine, {number(rates.get('answer_window_s'), ' s', 1)} window]",
                   f"Prompt reading {number(rates.get('prefill_tok_s'), ' tok/s', 1)} [reported mean]",
                   f"First engine token {number(recent[0].get('first_engine_token_s') if recent else None, ' s', 3)} [last completed, since queue entry]",
