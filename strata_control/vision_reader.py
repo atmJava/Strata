@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CPU_READER = "strata-vision"
-GPU_READER = CPU_READER
 
 
 def default_mode(vram_gb: float | None = None) -> str:

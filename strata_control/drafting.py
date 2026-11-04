@@ -19,16 +19,11 @@ REPO = "incoai/Qwen3.8-Flash-Next-DFlash2"
 REVISION = "a22a1744e85c17364dcc54a6a420af7135d4c7f6"
 PACK_NAME = "qwen3.8-flash-next-dflash2.q8.pack"
 FOLDER = "dflash2"
-DOWNLOAD_GB = 1.2
-PACK_GB = 0.76
-VRAM_GB = 1.2
-
 ENGINE_SERVES_DFLASH2 = True
 
 DIDNT_FIT = "DFlash2 didn't fit"
 NOT_SUPPORTED = "DFlash2 is for Qwen3.8-Flash-Next only"
 NOT_DOWNLOADED = "the DFlash2 drafter isn't downloaded yet"
-REASONS = (DIDNT_FIT, NOT_SUPPORTED, NOT_DOWNLOADED)
 
 SUPPORTED_FAMILIES = ("qwen", "gyro")
 _SUPPORTED_NAME = re.compile(

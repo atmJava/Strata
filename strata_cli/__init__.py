@@ -3,8 +3,6 @@
 import re
 from pathlib import Path
 
-SCHEMA_VERSION = 1
-
 #: The command-line product version. ``version()`` below is the files'
 #: engine build number, which compatibility checks compare.
 PRODUCT_VERSION = "0.2.6"

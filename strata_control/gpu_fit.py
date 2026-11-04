@@ -36,7 +36,6 @@ def _round1(x: float) -> float:
 
 BACKEND_VENDOR = {"cuda": "nvidia"}
 VENDOR_NAME = {"nvidia": "NVIDIA"}
-SECOND_MODEL_SENTENCE = "This server distribution runs models on NVIDIA CUDA cards only."
 
 
 def vendor_of_backend(backend: str | None) -> str | None:
