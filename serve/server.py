@@ -7129,6 +7129,14 @@ def make_handler(svc: Service):
                 self._json(e.status, {"error": {"type": "invalid_request_error", "message": str(e)}})
 
         def _post(self):
+            """The write surface: the three chat spellings (/v1/chat/completions, /v1/messages with
+            /v1/messages/count_tokens, /v1/responses - whose retrieve/cancel/compact subpaths answer
+            404 because nothing is stored), image generation (/v1/images/generations), the model's
+            life (/unload, /load, their /v1/ spellings, /v1/vram to give VRAM back or take it), the
+            saved conversations (/slots/), and the web page's own switches (/settings shared
+            defaults, /config run-config keys). Those switches answer JSON to the page only: a plain
+            form POST from any other site must not unload the model or overwrite a saved
+            conversation."""
             if not self._authorized():
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
