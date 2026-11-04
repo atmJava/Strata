@@ -403,8 +403,6 @@
     "mp.state.queued":{en: "queued", zh: "排队中"},
     "mp.state.generating":{en: "generating", zh: "生成中"},
     "mp.state.reading":{en: "reading", zh: "读取中"},
-    // the header language button
-    "lang.name":     {en: "Chinese", zh: "中文"},
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem("strata." + k); return v === null ? d : v; } catch (e) { return d; } },
