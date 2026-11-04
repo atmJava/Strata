@@ -120,7 +120,7 @@ def rttime_limit_note() -> str:
     the fix, or "" when the limit is unlimited, the platform has no such limit or it cannot be read."""
     try:
         import resource
-        soft, hard = resource.getrlimit(resource.RLIMIT_RTTIME)
+        _, hard = resource.getrlimit(resource.RLIMIT_RTTIME)
     except (ImportError, AttributeError, OSError, ValueError):
         return ""
     if hard == resource.RLIM_INFINITY:

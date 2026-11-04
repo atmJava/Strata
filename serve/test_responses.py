@@ -485,7 +485,7 @@ class OverHttp(Server):
     def test_effort_none_does_not_think(self):
         self.engine.scripts = [self.tok.encode("Hello.<|im_end|>", parse_special=True)]
         self.engine.script = self.engine.scripts[0]
-        code, r = self.post({"model": "m", "input": "hi", "reasoning": {"effort": "none"}})
+        _, r = self.post({"model": "m", "input": "hi", "reasoning": {"effort": "none"}})
         self.assertEqual([o["type"] for o in r["output"]], ["message"])
         self.assertIn("<think>\n\n</think>", self.tok.decode(self.engine.last_prompt))
 
@@ -517,7 +517,7 @@ class OverHttp(Server):
         self.assertEqual(self.post({"model": "m", "input": "hi"})[0], 401)
         self.assertEqual(self.post({"model": "m", "input": "hi"}, headers={"Authorization": "Bearer s3cret"})[0], 200)
         self.svc.api_key = None
-        code, r = self.post({"model": "m", "input": "hi"}, headers={"Origin": "https://evil.example.com"})
+        code, _ = self.post({"model": "m", "input": "hi"}, headers={"Origin": "https://evil.example.com"})
         self.assertEqual(code, 403)
 
     def test_a_foreign_page_cannot_name_a_file_as_an_image(self):
@@ -976,7 +976,7 @@ class CodexCompactionOverHttp(Server):
         plain, code, r = self.compaction({}, long, max_output_tokens=64)
         self.assertEqual(code, 200, r)
         fits = len(self.engine.last_prompt) + 64 + 8     # the request as sent, its output, CTX_SLACK
-        shown, code, r = self.compaction(codex_meta("compaction"), long, max_output_tokens=64)
+        _, code, r = self.compaction(codex_meta("compaction"), long, max_output_tokens=64)
         self.assertGreater(len(self.engine.last_prompt) + 64 + 8, fits)   # with the kept tools it would not fit
         self.engine.max_context = fits
         again, code, r = self.compaction(codex_meta("compaction"), long, max_output_tokens=64)

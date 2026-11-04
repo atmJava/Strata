@@ -429,7 +429,7 @@ class MaxTokens(unittest.TestCase):
             over = pa - pt0                          # the Anthropic template may differ slightly
             with self.subTest(api=api, room=5):     # a few tokens left: the budget is exactly those
                 text = "y" * (CTX - CTX_SLACK - overhead - over - 5)
-                s, b, pt, ct = self.call(api, text=text, max_tokens=-1)
+                s, b, _, ct = self.call(api, text=text, max_tokens=-1)
                 self.assertEqual(s, 200, b)
                 self.assertEqual(self.engine.last_max_new, 5)
                 self.assertEqual(ct, 5)
@@ -476,12 +476,12 @@ class FitMaxTokens(unittest.TestCase):
     def test_overshoot_is_clamped_to_the_room(self):
         for api in ("openai", "anthropic"):
             with self.subTest(api=api):
-                s, b, pt, ct = self.call(api, max_tokens=CTX)
+                s, b, pt, _ = self.call(api, max_tokens=CTX)
                 self.assertEqual(s, 200, b)
                 self.assertEqual(self.engine.last_max_new, CTX - CTX_SLACK - pt)
 
     def test_a_budget_that_fits_is_unchanged(self):
-        s, b, _, ct = self.call("openai", max_tokens=50)
+        s, b, _, _ = self.call("openai", max_tokens=50)
         self.assertEqual(s, 200, b)
         self.assertEqual(self.engine.last_max_new, 50)
 
@@ -3518,7 +3518,7 @@ class WebApp(unittest.TestCase):
         data = json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}).encode()
         urllib.request.urlopen(urllib.request.Request(self.base + "/v1/chat/completions", data=data,
                                                       headers={"Content-Type": "application/json"}), timeout=10).read()
-        code, ctype, body = self.get("/metrics")
+        code, _, body = self.get("/metrics")
         self.assertEqual(code, 200)
         m = json.loads(body)
         for key in ("engine", "live", "requests", "hardware", "hardware_static", "history"):
@@ -4059,7 +4059,7 @@ class SharingTheGpu(unittest.TestCase):
         self.svc.min_free_vram_mib = 8000
         self.svc.free_vram_mib = lambda: 20000
         self.svc.unload()
-        status, headers, body = self._raw_chat()
+        status, headers, _ = self._raw_chat()
         self.assertEqual(status, 503)
         self.assertTrue(int(headers["Retry-After"]) > 0)
         self.assertEqual(self.engine.starts, 0)
@@ -4075,7 +4075,7 @@ class SharingTheGpu(unittest.TestCase):
         self.svc.before_load_strict = True
         self.svc.unload()
         t0 = time.time()
-        status, headers, body = self._raw_chat()
+        status, _, body = self._raw_chat()
         self.assertEqual(status, 503)
         self.assertLess(time.time() - t0, 10)
         self.assertIn("before_load_timeout_s", body["error"]["message"])
@@ -4324,16 +4324,16 @@ class ThinkingBudget(unittest.TestCase):
 
     def test_the_answer_room_has_its_limits(self):
         self.engine.THOUGHT = "Let me think step by step about two plus two. " * 40
-        code, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 300,        # below the floor: as before
+        _, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 300,        # below the floor: as before
                                                      "messages": [{"role": "user", "content": "2+2?"}]})
         self.assertEqual(b["choices"][0]["finish_reason"], "length")
         self.assertFalse(b["choices"][0]["message"]["content"])
         self.svc.answer_room = False                               # the config's "answer_room": false
-        code, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 1024,
+        _, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 1024,
                                                      "messages": [{"role": "user", "content": "2+2?"}]})
         self.assertEqual(b["choices"][0]["finish_reason"], "length")
         self.svc.answer_room = True
-        code, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 1024, "reasoning_effort": "none",
+        _, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 1024, "reasoning_effort": "none",
                                                      "messages": [{"role": "user", "content": "2+2?"}]})
         self.assertEqual(len(self.engine.prompts), 3)              # thinking off: no budget, one prompt each
 
@@ -4349,16 +4349,16 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(len(self.engine.prompts), 2)
 
     def test_a_budget_the_thinking_stays_under(self):
-        code, b = self.openai(reasoning_budget_tokens=10_000)
+        _, b = self.openai(reasoning_budget_tokens=10_000)
         self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT)
         self.assertEqual(len(self.engine.prompts), 1)
 
     def test_the_config_default_and_a_request_that_turns_it_off(self):
         self.svc.reasoning_budget_tokens = 20
-        code, b = self.openai()
+        _, b = self.openai()
         self.assertEqual(len(self.engine.prompts), 2)
         self.assertTrue(b["choices"][0]["message"]["reasoning_content"].startswith(ThinkingEngine.THOUGHT[:20] + "\n"))
-        code, b = self.openai(reasoning_budget_tokens=0)
+        _, b = self.openai(reasoning_budget_tokens=0)
         self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT)
         self.assertEqual(len(self.engine.prompts), 3)
 
@@ -4407,7 +4407,7 @@ class ThinkingBudget(unittest.TestCase):
     def test_a_budget_well_below_max_tokens_is_not_capped(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code, b = self.openai(max_tokens=3000, reasoning_budget_tokens=20)
+            _, b = self.openai(max_tokens=3000, reasoning_budget_tokens=20)
         self.assertNotIn("thinking capped", out.getvalue())
         self.assertEqual(len(self.engine.prompts), 2)
         self.assertTrue(b["choices"][0]["message"]["reasoning_content"].startswith(ThinkingEngine.THOUGHT[:20] + "\n"))
@@ -4436,7 +4436,7 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(len(self.engine.prompts), 1)
 
     def test_no_room_left_to_answer(self):
-        code, b = self.openai(reasoning_budget_tokens=20, max_tokens=40)    # 20 thought + the wrap-up > 40
+        _, b = self.openai(reasoning_budget_tokens=20, max_tokens=40)    # 20 thought + the wrap-up > 40
         self.assertEqual(b["choices"][0]["finish_reason"], "length")
         self.assertEqual(len(self.engine.prompts), 1)
         self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT[:20])

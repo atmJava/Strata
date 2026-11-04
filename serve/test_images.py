@@ -395,7 +395,7 @@ class OverHttp(unittest.TestCase):
         self.assertFalse(self.svc.fifo.locked())
 
     def test_listed(self):
-        code, data, _ = self.get("/v1/models")
+        _, data, _ = self.get("/v1/models")
         ids = [m["id"] for m in json.loads(data)["data"]]
         self.assertIn("qwen-image-2.1-turbo", ids)
         st = json.loads(self.get("/v1/status")[1])

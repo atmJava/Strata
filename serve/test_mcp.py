@@ -620,7 +620,7 @@ class ToolLoop(unittest.TestCase):
         own = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {
             "q": {"type": "string"}}}}}]
         self.start(call_script("lookup", q="x"), "</think>\n\nnever")
-        code, text = self.post({"strata_mcp": True, "tools": own})
+        _, text = self.post({"strata_mcp": True, "tools": own})
         cs = self.chunks(text)
         calls = [tc for c in cs for tc in c["choices"][0]["delta"].get("tool_calls") or []]
         self.assertEqual(calls[0]["function"]["name"], "lookup")
@@ -631,7 +631,7 @@ class ToolLoop(unittest.TestCase):
 
     def test_tool_error_is_a_result(self):
         self.start(call_script("fake__fail"), "</think>\n\nIt failed.")
-        code, text = self.post({"strata_mcp": True})
+        _, text = self.post({"strata_mcp": True})
         mcp = [c["strata_mcp"] for c in self.chunks(text) if "strata_mcp" in c]
         self.assertEqual((mcp[-1]["ok"], mcp[-1]["text"]), (False, "error: it failed on purpose"))
         self.assertIn("<tool_response>\nerror: it failed on purpose\n</tool_response>", self.engine.prompt_text(1))
@@ -646,7 +646,7 @@ class ToolLoop(unittest.TestCase):
 
     def test_max_rounds(self):
         self.start(call_script("fake__echo", text="again"))          # the model never stops calling
-        code, text = self.post({"strata_mcp": True})
+        _, text = self.post({"strata_mcp": True})
         mcp = [c["strata_mcp"] for c in self.chunks(text) if "strata_mcp" in c]
         self.assertEqual(len(self.engine.prompts), 3)                # 2 rounds of tools, then the limit
         self.assertEqual(sum(m["event"] == "call" for m in mcp), 2)
