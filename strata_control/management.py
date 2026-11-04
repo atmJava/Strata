@@ -114,7 +114,14 @@ def runtime_action(
     if_source_sha256: str | None = None,
     die_with_pid: int | None = None,
 ) -> dict:
-    """Execute one validated owner operation and return its result."""
+    """Execute one validated owner operation and return its result.
+
+    plan=True previews and changes nothing.  A real run accepts the values a --plan returned earlier
+    as preconditions (if_profile_revision, if_source_sha256, if_owner_id, if_instance_id): the operation
+    is refused, not guessed at, when the profile, the model file, the owner or the instance changed
+    between the plan and the run.  Every run is written to the journal before it starts, so an
+    interrupted start stays visible as an uncertain completion instead of looking like it never ran.
+    """
     runtime._name(profile)
     if type(plan) is not bool:
         raise ProfileError("plan must be true or false")
@@ -140,6 +147,8 @@ def runtime_action(
             launch, source_sha256 = runtime._start_candidate(profile)
             repeated_launch, repeated_digest = runtime._start_candidate(profile)
             if launch != repeated_launch or source_sha256 != repeated_digest:
+                # built twice on purpose: a profile or model file that moves during the preview makes the
+                # preview untrustworthy, so it is refused instead of returned
                 raise ProfileError(
                     "start candidate changed during preview; retry", 6
                 )
@@ -155,6 +164,7 @@ def runtime_action(
             }
         revision = profiles.load(profile)[1]
         if if_profile_revision is not None or if_source_sha256 is not None:
+            # the plan was made earlier: recompute the start candidate and refuse if it moved
             runtime._check_start_candidate(
                 profile, if_profile_revision, if_source_sha256
             )

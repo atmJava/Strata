@@ -468,6 +468,13 @@ def _serve(a: argparse.Namespace) -> int:
 
 
 def _profile_command(a: argparse.Namespace) -> int:
+    """`strata profile …`: read or change a saved launch profile.
+
+    create/list/history/rollback read and write plainly.  use-config and set propose against the
+    profile's current revision first and refuse to save if the profile moved in between, so the plan
+    a person reviewed is the plan that gets saved.  Nothing here touches a running instance: the
+    profile file changes and the instance keeps what it started with.
+    """
     machine = a.output == "json"
     if a.profile_command == "create":
         saved, revision = profiles.create(a.name, a.from_config)
@@ -498,6 +505,7 @@ def _profile_command(a: argparse.Namespace) -> int:
                 "profile changed during source preview; plan it again", 6
             )
         if a.if_revision is not None and a.if_revision != previous:
+            # --if-revision carries the revision an earlier plan printed: a moved profile is refused, not merged
             raise ProfileError(
                 "profile changed after preview; plan it again before "
                 "selecting a config",
