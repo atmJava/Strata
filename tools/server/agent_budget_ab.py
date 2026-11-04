@@ -308,7 +308,6 @@ def main():
     shape = ("-long" if long_mode else "") + ("-reason" if reason_mode else "")
     tag = os.environ.get("AB_TAG", "")
     out = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.json" % (shape, tag))
-    log = pathlib.Path("/opt/ai/runs/agent-budget-ab%s%s.log" % (shape, tag))
     print("mode %s  %d tasks  context %d chars  arms %s  reps %d"
           % (shape or "short", len(tasks), len(CTX_TEXT) if long_mode else 0,
              specs, reps), flush=True)

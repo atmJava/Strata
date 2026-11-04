@@ -74,7 +74,7 @@ def main() -> int:
 
     if not options.offline:
         try:
-            health = fetch(options.base_url, "/health", options.api_key)
+            fetch(options.base_url, "/health", options.api_key)          # the request itself is the check: it raises when the server is down
             metrics = fetch(options.base_url, "/metrics", options.api_key)
             engine = metrics.get("engine", {})
             print(f"server: health ok, engine={engine.get('version')} slots={engine.get('batch_slots')}")

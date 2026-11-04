@@ -273,7 +273,7 @@ def run_single(label, exe, xargs, env_extra):
         out, info = gen(p, ids_for(name), NEW)
         t1 = time.time()
         d = kv_of(info)
-        g, dms = d.get("generated"), d.get("decode_ms")
+        dms = d.get("decode_ms")
         rows.append({"kind": name, "gen": len(out), "tok_s": (len(out) / float(dms) * 1000.0) if dms else None, "ids": out, "info": info,
                      "sha": hashlib.sha256(",".join(map(str, out)).encode()).hexdigest()[:16], "gpu": SMP.window(t0, t1)})
     for n in PPS:

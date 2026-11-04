@@ -9,7 +9,6 @@ nearby start time.  It never prints prompts, reasoning, tool input or results.
 from __future__ import annotations
 
 import argparse
-import collections
 import json
 import pathlib
 import shutil

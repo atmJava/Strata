@@ -31,7 +31,6 @@ import os
 import pathlib
 import secrets
 import shutil
-import signal
 import sqlite3
 import statistics
 import subprocess
@@ -40,7 +39,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from typing import Any
 
 

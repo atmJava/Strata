@@ -112,6 +112,6 @@ for p in range(1, PAIRS + 1):
 if rows:
     import statistics
     d = [(r[1] - r[2]) / r[1] * 100 for r in rows]
-    print(f"\n  唯一 vs 重复（引擎读 ms）：" + "  ".join(f"对{p}: {u} → {r}（{dd:+.1f}%）" for p, u, r, dd in zip([r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows], d)))
+    print("\n  唯一 vs 重复（引擎读 ms）：" + "  ".join(f"对{p}: {u} → {r}（{dd:+.1f}%）" for p, u, r, dd in zip([r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows], d)))
     print(f"  重复块省下的中位：{statistics.median(d):+.1f}%")
     print("  解读：省得多 → 固定成本在为新 token 路由的专家 staging；省得少（<3%）→ 在每轮固定动作（upload 预留 / PLE 表 / chunk 计划）")

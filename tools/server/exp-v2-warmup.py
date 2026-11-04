@@ -11,7 +11,6 @@ in V0 (ledger L-056).
 Usage: exp-v2-warmup.py [base_url] [corpus_file]
 """
 import json
-import os
 import sys
 import threading
 import time

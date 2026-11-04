@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """One cold 8K prompt, then print the engine lines it produced (read time vs prefill timeline)."""
 import json
-import re
 import sys
 import time
 import urllib.request

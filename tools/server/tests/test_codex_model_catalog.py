@@ -1,5 +1,4 @@
 import json
-import pathlib
 
 from strata_control import codex_catalog as CATALOG
 

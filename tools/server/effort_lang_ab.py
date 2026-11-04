@@ -85,7 +85,6 @@ def main():
                 continue
             msg = d["choices"][0]["message"]
             content = msg.get("content") or ""
-            reason = msg.get("reasoning_content") or msg.get("reasoning") or ""
             prose = strip_code(content)
             cjk = len(CJK.findall(prose))
             lat = len(re.findall(r"[A-Za-z]", prose))

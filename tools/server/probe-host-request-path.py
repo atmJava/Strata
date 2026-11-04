@@ -20,7 +20,6 @@ import hashlib
 import json
 import math
 import pathlib
-import statistics
 import sys
 import threading
 import time

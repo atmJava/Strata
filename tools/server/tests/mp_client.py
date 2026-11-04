@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.error
 import urllib.request
 
 BASE_URL = os.environ.get("MP_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
