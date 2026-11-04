@@ -4,7 +4,6 @@
 
 Covers tools/hip/dll_closure.py and setup.hip_runtime_beside_exe on a fake engine folder.
 """
-import os
 import struct
 import sys
 import tempfile

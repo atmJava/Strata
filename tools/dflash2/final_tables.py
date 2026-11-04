@@ -1,4 +1,3 @@
-import json
 import numpy as np
 import sys
 sys.path.insert(0, r"C:\dflash2-work")
