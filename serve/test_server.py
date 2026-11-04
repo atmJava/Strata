@@ -23,7 +23,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
-from serve.server import (ANSWER_RESERVE_MIN, CTX_SLACK, ByteTokenizer, EngineDied, EngineNonFinite, GpuBusy, MockEngine,  # noqa: E402
+from serve.server import (ANSWER_RESERVE_MIN, CTX_SLACK, ByteTokenizer, EngineDied, EngineNonFinite, MockEngine,  # noqa: E402
                           PP_DONE_TAIL, Service, is_dsh_title_request,
                           StrataEngine, api_key_of, engine_args, key_matches, layer_split_value, prompt_progress,
                           prompt_tokens_seen,
@@ -493,9 +493,10 @@ class FitMaxTokens(unittest.TestCase):
         self.assertIn("no room to answer", b["error"]["message"])
 
 
-class VisionTempFiles(unittest.TestCase):
+class VisionRequestTempFiles(unittest.TestCase):
     """A request's combined image file (req-*.sve, ~10 MB a picture) goes with the request: one refused after prepare()
-    wrote it (the engine starting, no room) or whose answer never started left it in the vision directory for good."""
+    wrote it (the engine starting, no room) or whose answer never started left it for good - in shared memory when
+    /dev/shm has room (#914), in the vision directory otherwise."""
 
     MSGS = [{"role": "user", "content": [{"type": "text", "text": "what is it?"},
                                          {"type": "image", "source": "x.png"}]}]
@@ -517,13 +518,15 @@ class VisionTempFiles(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no room to answer"):
                 svc.prepare(self.MSGS, None, {})
             engine.max_context = CTX
+            svc.fit_max_tokens = False                             # strict mode: an over-long max_tokens is refused, not shortened (#545)
             with self.assertRaisesRegex(ValueError, "exceeds the context"):
                 svc.prepare(self.MSGS, None, {}, CTX)
             self.assertEqual(self.leftovers(d), [])
             svc.prepare(self.MSGS, None, {}, 16)                     # one that fits has it
-            self.assertEqual(len(self.leftovers(d)), 1)
+            written = Path(svc.embeddings.path)                       # shared memory when it has room (#914), the vision directory otherwise
+            self.assertTrue(written.is_file())
             svc.drop_embeddings()                                    # ... until the request is done
-            self.assertEqual(self.leftovers(d), [])
+            self.assertFalse(written.exists())
 
     def test_over_http(self):
         import serve.server as server
@@ -6313,8 +6316,6 @@ class EngineStartRollback(unittest.TestCase):
         return mock.patch.object(threading.Thread, "start", autospec=True, side_effect=start)
 
     def test_a_narrator_thread_failure_closes_the_log_before_spawning(self):
-        import serve.server as server
-
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "engine.log"
             engine = object.__new__(StrataEngine)
@@ -6464,7 +6465,6 @@ class PrepareCancelled(unittest.TestCase):
                 self.assertLess(time.perf_counter() - t0, 3)
 
     def test_cancel_between_pictures_stops_the_next_encode(self):
-        import tempfile
         from serve.server import ClientGone, Vision
         cancel, seen = threading.Event(), []
         v = Vision.__new__(Vision)

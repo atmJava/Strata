@@ -33,7 +33,6 @@ import base64
 import hashlib
 import hmac
 import codecs
-import ctypes
 import json
 import math
 import os
@@ -1431,6 +1430,10 @@ class StrataEngine:
         self.info = {**info, **self.info}
 
     def _parse_done(self, line):
+        """The engine's DONE line into self.last.  The fields are positional and every engine adds new ones at the
+        end (generate.cpp prints them in this order), so the later fields are read by how long the line is, and the
+        last two are matched by name: --lookup-chain puts five more numbers where chunk= and experts_streamed=
+        would otherwise sit."""
         f = line.split()
         self.last = {"generated": int(f[1]), "prompt_tokens": int(f[2]), "prompt_ms": float(f[3]),
                      "decode_ms": float(f[4]), "finish": f[5]}
@@ -4831,7 +4834,7 @@ class Service:
         def scaled(v, unit, digits=0):
             return round(v / unit, digits) if isinstance(v, (int, float)) else None
 
-        busy, ctx = bool(s.get("busy")), self.reported_ctx()
+        ctx = self.reported_ctx()
         images = self.vision is not None
         return {
             "service": "strata", "model": self.model,
@@ -8413,7 +8416,7 @@ def check_request_sampling(req) -> None:
                     num = int(value)
             except (ValueError, OverflowError):
                 raise ValueError(f"{key}: {'an integer' if integer else 'a number'}") from None
-            if num != num or num in (float("inf"), float("-inf")):
+            if math.isnan(num) or math.isinf(num):
                 raise ValueError(f"{key}: {'an integer' if integer else 'a number'}")
             req[key] = value = num
         if isinstance(value, bool) or not isinstance(value, int if integer else (int, float)):
@@ -8473,8 +8476,7 @@ def with_component_engine(cfg: dict) -> dict:
     cfg = dict(cfg)
     cfg["exe"] = _component_exe(cfg["exe"], cfg)
     cfg["lib_dirs"] = [*engine_component.package_lib_dirs(Path(cfg["exe"]).parent), *(cfg.get("lib_dirs") or [])]
-    cfg = with_current_reader(cfg, Path(cfg["exe"]).parent)
-    return cfg
+    return with_current_reader(cfg, Path(cfg["exe"]).parent)
 
 
 def _component_exe(reference: str, cfg: dict) -> str:
