@@ -8,7 +8,6 @@ benchmarking, calibration or model-market operations.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import math
 import re

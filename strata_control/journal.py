@@ -80,6 +80,8 @@ def _lock_name(profile: str) -> str:
 
 
 def _validate_direct_intent(kind: str, intent: object) -> dict:
+    """One direct operation request: the exact field set that kind accepts, every timeout inside its range, the
+    digests and identities in the shape they are stored in.  Anything else is a ProfileError with code 5."""
     if kind not in DIRECT_KINDS or not isinstance(intent, dict):
         raise ProfileError("direct operation kind or intent is unsupported", 5)
     expected = {

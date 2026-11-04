@@ -73,10 +73,7 @@ def _name(value: str) -> str:
 def runtime_dir() -> Path:
     _supported()
     override = os.environ.get("STRATA_RUNTIME_DIR")
-    if override:
-        base = Path(override).expanduser()
-    else:
-        base = paths.state_base() / "runtime"
+    base = Path(override).expanduser() if override else paths.state_base() / "runtime"
     if not base.is_absolute():
         raise ProfileError("STRATA_RUNTIME_DIR must be absolute")
     private_mkdir(base, parents=True, exist_ok=True)
@@ -124,8 +121,7 @@ def active_managed_instances() -> list[dict]:
 
 def _paths(name: str) -> tuple[Path, Path, Path]:
     directory = runtime_dir()
-    digest = hashlib.sha256((str(directory) + "\0" + name).encode("utf-8")).hexdigest()[:16]
-    address = owner_transport.address_for(directory, name)
+    address = owner_transport.address_for(directory, name)      # the socket path hashes the same pair itself
     return directory / f"{name}.json", address, directory / f"{name}.host.log"
 
 

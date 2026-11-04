@@ -185,10 +185,8 @@ def set_role(roles: dict[int, str], cards: list[dict], idx: int, role: str) -> t
                 out[nxt[0]] = "main"
                 note = f"promoted:{nxt[0]}"
     on = _on(out)
-    if len(on) == 1:
-        out[on[0]] = "main"
-    elif on and not any(out[i] == "main" for i in on):
-        out[on[0]] = "main"
+    if len(on) == 1 or (on and not any(out[i] == "main" for i in on)):
+        out[on[0]] = "main"                                        # a lone card on is the Main card, whatever its role said
     return out, note
 
 

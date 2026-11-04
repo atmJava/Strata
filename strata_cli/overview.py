@@ -12,6 +12,7 @@ last request's; the speed is the live rate while generating, else the last reque
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -37,7 +38,7 @@ SOLID_ACCENT, SOLID_BLUE, SOLID_AMBER, SOLID_RED, SOLID_TRACK = "bright_green", 
 def _num(v: Any) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    if v != v or v in (float("inf"), float("-inf")):
+    if math.isnan(v) or math.isinf(v):
         return None
     return float(v)
 
