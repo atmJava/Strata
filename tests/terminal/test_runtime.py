@@ -854,7 +854,7 @@ class RuntimeTests(unittest.TestCase):
                 cfg["api_key"] = key
             self.config.write_text(json.dumps(cfg))
             with mock.patch.dict(os.environ, {"STRATA_API_KEY": ""}):
-                plan, args = _launch_plan("local")
+                plan, _ = _launch_plan("local")
             self.assertEqual(plan["effective"]["host"], "0.0.0.0")
 
     def test_lazy_model_is_verified_as_unloaded_without_generation(self):
@@ -1100,7 +1100,7 @@ class RuntimeTests(unittest.TestCase):
     def test_a_marker_left_by_a_killed_app_is_cleaned_up_when_its_number_belongs_to_a_later_program(self):
         victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         try:
-            state_path, marker = self._stale_host(victim.pid)
+            _, marker = self._stale_host(victim.pid)
             old = time.time() - 3600
             os.utime(marker, (old, old))                                  # written an hour ago: the victim started after it
             started = runtime.start("local", wait=10, shutdown_timeout=2)

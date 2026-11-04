@@ -66,7 +66,7 @@ class Procs(unittest.TestCase):
         self.assertEqual(procs.records(), [], "the record goes with the process")
 
     def test_a_child_with_a_live_starter_is_never_touched(self):
-        starter, child = self.recorded_pair()
+        _, child = self.recorded_pair()
         result = procs.end_leftovers(grace=1)
         self.assertEqual((result["ended"], result["stuck"]), ([], []))
         self.assertIsNone(child.poll())
