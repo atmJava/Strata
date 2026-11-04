@@ -105,20 +105,6 @@ def acquire_activity_lease(*, shared: bool) -> int:
         raise
 
 
-def active_managed_instances() -> list[dict]:
-    """Inspect private owner records, including stale or uncertain instances."""
-    directory = runtime_dir()
-    names = [path.stem for path in directory.glob("*.json") if profiles.PROFILE_ID.fullmatch(path.stem)]
-    if len(names) > 64:
-        raise ProfileError("too many managed runtime records to verify exclusive access", 6)
-    active = []
-    for name in names:
-        current = status(name)
-        if current.get("state") != "stopped":
-            active.append({"profile": name, "state": current.get("state", "unknown")})
-    return active
-
-
 def _paths(name: str) -> tuple[Path, Path, Path]:
     directory = runtime_dir()
     address = owner_transport.address_for(directory, name)      # the socket path hashes the same pair itself

@@ -76,15 +76,6 @@ class Decision:
         return self.allowed
 
 
-class OfflineViolation(RuntimeError):
-    """A fetch was attempted under a policy that forbids it."""
-
-    def __init__(self, url: str, reason: str) -> None:
-        super().__init__(f"offline policy forbids fetching {url!r}: {reason}")
-        self.url = url
-        self.reason = reason
-
-
 def check_url(url: str, *, offline: bool) -> Decision:
     """May this URL be fetched?
 
@@ -108,13 +99,6 @@ def check_url(url: str, *, offline: bool) -> Decision:
             return Decision(True, f"{host} is this machine")
         return Decision(False, f"{scheme or 'http'} to {host or 'an unnamed host'} would leave this machine")
     return Decision(False, f"the {scheme} scheme is not local")
-
-
-def require_url(url: str, *, offline: bool) -> None:
-    """`check_url`, as an exception. Used where a refusal must stop the operation."""
-    decision = check_url(url, offline=offline)
-    if not decision.allowed:
-        raise OfflineViolation(url, decision.reason)
 
 
 def child_environment(*, offline: bool, base: Mapping[str, str] | None = None) -> dict[str, str]:

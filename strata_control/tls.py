@@ -65,20 +65,5 @@ def explain(host: str | None = None) -> str:
             "web scanning or a company or school proxy. " + TRY)
 
 
-class CertificateProblem(OSError):
-    """A download stopped because the server's certificate was not accepted. str() is the plain explanation."""
-
-    def __init__(self, host: str | None = None):
-        super().__init__(explain(host))
-        self.host = host
-
-
-def host_of(url: str) -> str | None:
-    try:
-        return url.split("/")[2]
-    except IndexError:
-        return None
-
-
 if __name__ == "__main__":                                 # python -m strata_control.tls: what this process would use
     print(install(), sys.version.split()[0])

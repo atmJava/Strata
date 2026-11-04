@@ -90,15 +90,6 @@ def other_vendor_note(cards: list[dict], vendor: str | None) -> str | None:
             "but this server distribution supports NVIDIA CUDA cards only.")
 
 
-def memory_needed(variant: dict) -> float:
-    """RAM + VRAM the model asks for (native-fit.ts memoryNeeded)."""
-    if isinstance(variant.get("memory_gb"), (int, float)):
-        return float(variant["memory_gb"])
-    if variant.get("mem_total") and isinstance(variant.get("ram_needed_gb"), (int, float)):
-        return float(variant["ram_needed_gb"])
-    return _round1(float(variant.get("experts_gb") or variant.get("ram_needed_gb") or 0) + DENSE_EXTRA_GB)
-
-
 def fit(memory_gb: float, ram_gb: float | None, vram_gb: float) -> dict[str, Any]:
     """native-fit.ts `fitOn` for a given memory need: where the weights go. Keys: vram_use_gb, ram_use_gb, spill_gb, spare_ram_gb, known."""
     vram = float(vram_gb or 0)
@@ -236,9 +227,3 @@ def options(memory_gb: float, ram_gb: float | None, cards: list[dict], vendor: s
     best["recommended"] = True
     out["options"], out["recommended"] = opts, best["key"]
     return out
-
-
-def recommended_cards(memory_gb: float, ram_gb: float | None, cards: list[dict], vendor: str | None = None) -> list[int]:
-    """The card numbers of the recommended option (empty: no usable card)."""
-    res = options(memory_gb, ram_gb, cards, vendor)
-    return next((o["cards"] for o in res["options"] if o["recommended"]), [])

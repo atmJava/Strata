@@ -133,14 +133,6 @@ def decide(mode: Any, *, klass: str, model_name: str | None = None,
     ))
 
 
-def needs_pack(mode: Any, *, klass: str, model_name: str | None = None,
-               family: str | None = None, data_dir: str | Path | None = None) -> bool:
-    asked = normalize(mode)
-    wanted = suggest(klass) if asked == "auto" else asked
-    return (wanted == "dflash2" and ENGINE_SERVES_DFLASH2
-            and supported_model(model_name, family) and not pack_ready(data_dir))
-
-
 DRAFT_FLAGS = frozenset(("--draft", "--draft-model"))
 
 
@@ -187,14 +179,6 @@ def fallback_note(log_text: str) -> str:
         return ""
     reason = DIDNT_FIT
     return mtp_line(reason)
-
-
-def summary_line(decision: Decision, engine_note: str = "") -> str:
-    if engine_note:
-        return engine_note
-    if decision.note:
-        return mtp_line(decision.note)
-    return f"Drafting: {LABELS.get(decision.drafter, decision.drafter)}"
 
 
 def remember_note(note: str) -> None:

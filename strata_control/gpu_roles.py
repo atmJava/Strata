@@ -61,11 +61,6 @@ def short_name(c: dict) -> str:
     return n.strip()
 
 
-def gpu_label(c: dict) -> str:
-    """The number the screens show: GPU 1 is card 0 (Monitor, the model picker, the loaded list)."""
-    return f"GPU {_idx(c) + 1}"
-
-
 def rows(cards: list[dict], vendor: str | None = None) -> list[dict]:
     """The cards shown as rows: every card the engine's make can name, in card order. The other make is `gpu_fit.for_vendor(...)[1]` (a muted line)."""
     vendor = vendor or gpu_fit.pick_vendor(cards)
@@ -272,11 +267,6 @@ def from_legacy(gpu: Any, cards: list[dict], gpu_order: str | None = None, speed
     return roles
 
 
-def is_recommended(roles: dict[int, str], cards: list[dict], vendor: str | None = None) -> bool:
-    rec = recommend(cards, vendor)["roles"]
-    return {i: r for i, r in roles.items() if i in rec} == rec
-
-
 # ---- warnings: only what a person could not know -------------------------------------------------------------------------------------------
 
 def warnings(roles: dict[int, str], cards: list[dict], *, spill_gb: float = 0.0, engine_runs_cpu_only: bool = False) -> list[dict]:
@@ -313,23 +303,6 @@ def spill_for(roles: dict[int, str], cards: list[dict], memory_gb: float | None,
     on = [cs[i] for i in _on(roles) if i in cs and not _shares(cs[i])]
     vram = sum(_mem(c) for c in on) - gpu_fit.SPLIT_CARD_OVERHEAD_GB * max(0, len(on) - 1)
     return float(gpu_fit.fit(float(memory_gb), float(ram_gb), max(0.0, vram))["spill_gb"])
-
-
-def note_text(code: str | None, cards: list[dict]) -> str:
-    """The quiet line for a `set_role` code."""
-    if not code:
-        return ""
-    cs = {_idx(c): c for c in cards}
-    kind, _, arg = code.partition(":")
-    c = cs.get(int(arg)) if arg.isdigit() else None
-    name = short_name(c) if c else "That card"
-    if kind == "old_main_helper":
-        return f"{name} is now a Helper."
-    if kind == "promoted":
-        return f"{name} is now Main."
-    if kind == "only_main":
-        return "The only card that is on has to be Main."
-    return ""
 
 
 # ---- the sentence above the cards ----------------------------------------------------------------------------------------------------------
@@ -423,48 +396,3 @@ def describe(roles: dict[int, str], cards: list[dict]) -> str:
         if names:
             parts.append(f"{word}: {', '.join(names)}.")
     return " ".join(parts)
-
-
-# ---- speed of each card (the same measure the engine orders a split by: multiprocessors x max clock) ------------------------------------
-
-def nvidia_speeds(timeout: float = 20.0) -> dict[int, float]:
-    """{nvidia-smi number: SMs x max clock} from the CUDA driver API in a child process (no toolkit needed); {} when it cannot say."""
-    import os
-    import subprocess
-    import sys
-    code = ("import ctypes\n"
-            "lib=ctypes.CDLL('libcuda.so.1')\n"
-            "assert lib.cuInit(0)==0\n"
-            "n=ctypes.c_int()\n"
-            "assert lib.cuDeviceGetCount(ctypes.byref(n))==0\n"
-            "for i in range(n.value):\n"
-            "    d=ctypes.c_int()\n"
-            "    assert lib.cuDeviceGet(ctypes.byref(d),i)==0\n"
-            "    sm=ctypes.c_int(); mhz=ctypes.c_int()\n"
-            "    lib.cuDeviceGetAttribute(ctypes.byref(sm),16,d)\n"
-            "    lib.cuDeviceGetAttribute(ctypes.byref(mhz),13,d)\n"
-            "    print(i,sm.value,mhz.value)\n")
-    try:
-        env = dict(os.environ)
-        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        env.pop("CUDA_VISIBLE_DEVICES", None)
-        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=timeout, env=env)
-        out = {}
-        for line in r.stdout.splitlines():
-            i, sm, khz = (int(x) for x in line.split())
-            if sm > 0 and khz > 0:
-                out[i] = float(sm) * float(khz)
-        return out
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return {}
-
-
-def add_speeds(gpus: list[dict]) -> None:
-    """Puts "speed" on the NVIDIA cards of a hardware report (in place); a card it cannot measure keeps none."""
-    nv = [g for g in gpus if str(g.get("vendor")) == "nvidia"]
-    if not nv:
-        return
-    sp = nvidia_speeds()
-    for g in nv:
-        if g.get("index") in sp:
-            g["speed"] = sp[g["index"]]
