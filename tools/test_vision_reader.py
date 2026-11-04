@@ -138,7 +138,7 @@ class Fallback(unittest.TestCase):
     def test_missing_or_empty_cuda_start_also_retries_cpu(self):
         for outcome in (FileNotFoundError("strata-vision"), ""):
             with self.subTest(outcome=type(outcome).__name__):
-                vision, started, _, error = self.run_start([outcome, "READY 2048\n"])
+                _, started, _, error = self.run_start([outcome, "READY 2048\n"])
                 self.assertIsNone(error)
                 self.assertEqual(len(started), 2)
 
@@ -158,7 +158,7 @@ class Fallback(unittest.TestCase):
 
     def test_config_without_fallback_does_not_retry(self):
         cfg = {key: value for key, value in self.CFG.items() if key != "cpu_exe"}
-        vision, started, log, error = self.run_start(["ERR nope\n"], cfg)
+        _, started, log, error = self.run_start(["ERR nope\n"], cfg)
         self.assertIsNotNone(error)
         self.assertEqual(len(started), 1)
         self.assertEqual(log, "")

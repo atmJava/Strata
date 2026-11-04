@@ -107,13 +107,13 @@ class SetupRerun(unittest.TestCase):
         for mib in ("1024", "256"):
             edited = [*written]
             edited[edited.index("--vram-reserve-mib") + 1] = mib
-            code, out, cfg, _ = self.run_setup("--context", "131072", configs=[("strata-q2_0.json", {**first, "args": edited, "args_written": written})])
+            _, _, cfg, _ = self.run_setup("--context", "131072", configs=[("strata-q2_0.json", {**first, "args": edited, "args_written": written})])
             self.assertEqual(value(cfg["args"], "--vram-reserve-mib"), mib)
 
     def test_the_vision_default_is_not_taken_for_a_choice(self):
         first = self.first()                                                               # pictures on the GPU write 700 themselves
         self.assertEqual(value(first["args"], "--vram-reserve-mib"), "700")
-        code, out, cfg, _ = self.run_setup("--context", "131072", "--vision", "cpu", configs=[("strata-q2_0.json", first)])
+        _, _, cfg, _ = self.run_setup("--context", "131072", "--vision", "cpu", configs=[("strata-q2_0.json", first)])
         self.assertNotIn("user_args", cfg)
         self.assertNotIn("--vram-reserve-mib", cfg["args"])                                # the CPU reader needs no reserve
 
@@ -126,12 +126,12 @@ class SetupRerun(unittest.TestCase):
         self.assertEqual(value(cfg["args"], "--vram-reserve-mib"), "256")
 
     def test_a_first_install_with_a_reserve_records_it(self):
-        code, out, cfg, _ = self.run_setup("--vram-reserve-mib", "300")
+        _, _, cfg, _ = self.run_setup("--vram-reserve-mib", "300")
         self.assertEqual(cfg["user_args"], ["--vram-reserve-mib", "300"])
 
     def test_setup_writes_args_written_and_a_rerun_with_no_edit_makes_no_user_args(self):
         first = self.first()
-        code, out, cfg, _ = self.run_setup("--context", "131072", configs=[("strata-q2_0.json", {**first, "args_written": first["args"]})])
+        _, _, cfg, _ = self.run_setup("--context", "131072", configs=[("strata-q2_0.json", {**first, "args_written": first["args"]})])
         self.assertNotIn("user_args", cfg)
 
 

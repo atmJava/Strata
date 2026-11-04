@@ -54,7 +54,7 @@ def test_two_identical_files_compare_equal(tmp_path):
     rows = {(0, 7): {5: (1.0, 2.0), 15: (3.0, 4.0)}, (1, 8): {5: (5.0, 6.0), 15: (7.0, 8.0)}}
     a = make(tmp_path / "a.stap", [5, 15], rows)
     b = make(tmp_path / "b.stap", [5, 15], rows)
-    compared, differing, worst, notes = tp.compare(tp.read_dump(a), tp.read_dump(b), 1e-6)
+    compared, differing, worst, _ = tp.compare(tp.read_dump(a), tp.read_dump(b), 1e-6)
     assert (compared, differing, worst) == (2, 0, 0.0)
 
 
@@ -129,7 +129,7 @@ def test_compare_of_a_merge_with_a_single_stage_file_is_the_parity_check(tmp_pat
 def test_a_file_with_an_extra_layer_is_not_the_same_measurement(tmp_path):
     a = make(tmp_path / "a.stap", [5], {(0, 7): {5: (1.0, 2.0)}})
     b = make(tmp_path / "b.stap", [5, 15], {(0, 7): {5: (1.0, 2.0), 15: (3.0, 4.0)}})
-    compared, differing, _, notes = tp.compare(tp.read_dump(a), tp.read_dump(b), 1e-6)
+    _, differing, _, notes = tp.compare(tp.read_dump(a), tp.read_dump(b), 1e-6)
     assert differing == 1, "a dump missing a tap layer must not pass"
     assert any("only in the second file" in n for n in notes)
     assert tp.main(["compare", str(a), str(b)]) == 1

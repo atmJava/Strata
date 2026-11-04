@@ -69,7 +69,7 @@ class ResearchRun(unittest.TestCase):
         self.go("--prefix", "off")
         self.assertTrue(all("strata_prefix" not in s for s in self.engine.samplings))
         self.engine.samplings.clear()
-        code, out, _ = self.go("--prefix", "on", "--layout", "joined", "--parallel", "2")
+        code, _, _ = self.go("--prefix", "on", "--layout", "joined", "--parallel", "2")
         self.assertEqual(code, 0)
         self.assertTrue(all(s["strata_prefix"]["tokens"] > 0 for s in self.engine.samplings))
 

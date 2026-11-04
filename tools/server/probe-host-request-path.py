@@ -208,7 +208,7 @@ def responses_prepare(service: Service, req: dict[str, Any]) -> tuple[list[dict[
 def render_and_encode(service: Service, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
                       kwargs: dict[str, Any]) -> tuple[float, float, int, int]:
     """Measure render and PromptEncoder separately against the same prepared request."""
-    render_ms, rendered = timed_ms(lambda: service.render_prompt(messages, tools, kwargs))
+    render_ms, _ = timed_ms(lambda: service.render_prompt(messages, tools, kwargs))
     marked, marked_tools, changed = mark_think_literals(messages, tools, service.literals)
     marked_prompt = service.render_prompt(marked, marked_tools, kwargs)
     plain: tuple = ()

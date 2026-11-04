@@ -91,7 +91,7 @@ class Entrypoint(unittest.TestCase):
             self.assertIn(want, line)
         self.assertNotIn("a-long-enough-key", line)                      # the key is passed by environment, never on a command line
         self.assertIn("key-env=a-long-enough-key-123456", log)
-        code, out, err = self.stop(p)
+        code, _, err = self.stop(p)
         self.assertEqual(code, 0, err)
         self.assertIn("launch --stop --preset office", self.log.read_text())
         self.assertIn("stopped", self.log.read_text())
@@ -118,7 +118,7 @@ class Entrypoint(unittest.TestCase):
         log = self.wait_for("--show-key")
         self.assertIn("--save-preset docker", self.launch_line(log))
         self.assertNotIn("--model ", self.launch_line(log))
-        code, out, err = self.stop(p)
+        _, _, err = self.stop(p)
         self.assertIn("No MODEL was set", err)
         self.assertIn("made one", err)                                   # no API_KEY given: told how to show the generated key
 
@@ -142,7 +142,7 @@ class Entrypoint(unittest.TestCase):
     def test_short_key_and_old_variables_warn(self):
         p = self.start(API_KEY="short", HOST="0.0.0.0", MODEL="Q2_0")
         self.wait_for("--show-key")
-        code, out, err = self.stop(p)
+        _, _, err = self.stop(p)
         self.assertIn("API_KEY is short", err)
         self.assertIn("HOST is from the older image", err)
 
@@ -154,7 +154,7 @@ class Entrypoint(unittest.TestCase):
         p = self.start(MODEL="Q2_0", GPU="1")
         line = self.launch_line(self.wait_for("--show-key"))
         self.assertIn("--gpu 1", line)
-        code, out, err = self.stop(p)
+        _, out, _ = self.stop(p)
         self.assertIn("making them again", out)
         self.assertFalse((install / "strata-q2_0.json").exists())          # card 3 -> 1: made again from the files
         self.assertTrue((install / "strata-iq3_s.json").exists())          # already card 1: kept
@@ -181,7 +181,7 @@ class Entrypoint(unittest.TestCase):
         ino = shard.stat().st_ino
         p = self.start(MODEL="IQ3_XXS")
         self.wait_for("--show-key")
-        code, out, err = self.stop(p)
+        _, out, _ = self.stop(p)
         new = data / "Strata-data"
         moved = new / "models" / "Qwen3.8-Flash-Next-IQ3_XXS" / "a-00001-of-00002.gguf"
         self.assertEqual(moved.read_text(), "weights")
@@ -217,7 +217,7 @@ class Entrypoint(unittest.TestCase):
         (install / "strata-bad.json").write_text("not json")
         p = self.start(MODEL="IQ3_XXS")
         self.wait_for("--show-key")
-        code, out, err = self.stop(p)
+        _, out, _ = self.stop(p)
         self.assertFalse((install / "strata-a.json").exists())
         self.assertTrue((install / "strata-b.json").exists())
         self.assertTrue((install / "strata-c.json").exists())
@@ -260,7 +260,7 @@ class Entrypoint(unittest.TestCase):
         (self.tmp / "g" / "m-00001-of-00001.gguf").write_text("x")
         p = self.start(MODEL_PATH=str(self.tmp / "g"))
         self.wait_for("--show-key")
-        code, out, err = self.stop(p)
+        _, out, _ = self.stop(p)
         self.assertIn("Starting Strata: the model files in " + str(self.tmp / "g"), out)
 
     def test_other_commands_run_instead_of_the_server(self):
