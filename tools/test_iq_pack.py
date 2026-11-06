@@ -1,4 +1,7 @@
-"""Focused pack compatibility tests; run .venv/bin/python -m unittest discover -s tools -p test_iq_pack.py."""
+"""Focused pack compatibility tests; run .venv/bin/python -m unittest discover -s tools -p test_iq_pack.py.
+
+They need llama.cpp's gguf-py (tools/_paths.py: STRATA_GGUF_PY, third_party/llama.cpp/gguf-py or STRATA_INSTALL_DIR).
+Without it every case here is skipped, so a run over the whole tree still reports the tests it can run."""
 import contextlib
 import hashlib
 import io
@@ -14,8 +17,24 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # runnable from the repo root too
 
 from _paths import add_gguf_py
-add_gguf_py()
-from gguf import GGUFWriter, GGMLQuantizationType as Q, quants
+
+
+class _NoGguf:
+    """Stands in for gguf's names while its checkout is missing: only a default argument reads them (split_model)."""
+
+    def __getattr__(self, name):
+        return None
+
+
+GGUF_MISSING = ""
+try:
+    add_gguf_py()
+    from gguf import GGUFWriter, GGMLQuantizationType as Q, quants
+except (ImportError, SystemExit) as e:            # gguf_py() stops with the reason; an empty folder is an ImportError
+    GGUF_MISSING = str(e) or "llama.cpp's gguf-py was not found"
+    GGUFWriter = Q = quants = _NoGguf()
+
+needs_gguf = unittest.skipIf(bool(GGUF_MISSING), "needs llama.cpp's gguf-py: " + GGUF_MISSING)
 import iq_pack
 
 
@@ -36,6 +55,7 @@ def write_gguf(path, tensors, split=None, arch=True):
     writer.close()
 
 
+@needs_gguf
 class CompatibilityTests(unittest.TestCase):
     def test_bf16_halfway_rounds_to_even(self):
         values = np.array([0x3F808000, 0x3F818000, 0xBF808000, 0xBF818000], dtype=np.uint32)
@@ -249,6 +269,7 @@ def stored(rows, dense, name, dtype):
     return np.frombuffer(dense[int(row[3]):int(row[3]) + int(row[4])], dtype=dtype)
 
 
+@needs_gguf
 class ConversionTests(unittest.TestCase):
     """CS2: FORM decides the engine's form; exact F32->BF16 by default, rounding only with --compat-bf16, the PLE
     conv F32 -> F16 by the loader (index kind 3), non-finite values refused, every conversion in conversions.json."""
@@ -405,6 +426,7 @@ def expected_experts(model):
     return b"".join(parts)
 
 
+@needs_gguf
 class SplitArtifactTests(unittest.TestCase):
     def test_four_shards_and_a_layer_split_per_role(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -635,6 +657,9 @@ class SplitArtifactTests(unittest.TestCase):
             (pack / "experts.bin").write_bytes(stale)
             rc, log = run_pack(paths[0], pack, "--experts-bin")
             self.assertEqual((pack / "experts.bin").read_bytes(), want)
+
+
+@needs_gguf
 class LegacyFormatRejectionTests(unittest.TestCase):
     """The sm_75 packer accepts only the production expert formats and never emits rotation sidecars."""
 
