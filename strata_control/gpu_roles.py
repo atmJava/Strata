@@ -36,6 +36,12 @@ def _mem(c: dict) -> float:
 
 
 def _speed(c: dict) -> float:
+    """How fast this card is, as the caller's hardware report measured it.  This module is pure, so it never asks
+    the machine: a report that cannot measure a card leaves the key out and the card reads 0.0, and a report whose
+    cards are all 0.0 makes these rules fall back to memory, which pick_main says out loud with why="memory".
+    serve/server.py's gpu_speed_scores() measures this same number (multiprocessors x max clock) for the engine's
+    own card order.  Do not read the missing producer as a dead consumer: the rules that read this value are the
+    ones the app's gpu-roles.ts mirrors, and both run tests/data/gpu_roles_vectors.json."""
     v = c.get("speed")
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else 0.0
 
