@@ -502,13 +502,20 @@ class VisionRequestTempFiles(unittest.TestCase):
                                          {"type": "image", "source": "x.png"}]}]
 
     @staticmethod
-    def leftovers(d):
-        return sorted(p.name for p in Path(d).glob("req-*.sve"))
+    def leftovers(*dirs):
+        """The combined picture files still lying in these directories: the vision directory's req-*.sve, and this
+        process's files in shared memory (#914), which carry this process's number in their name."""
+        out = []
+        for d in dict.fromkeys(Path(x) for x in dirs):        # one directory with no shared memory serves both jobs
+            out += [p.name for p in Path(d).glob("req-*.sve")]
+            out += [p.name for p in Path(d).glob(f"strata-vision-{os.getpid()}-req-*.sve")]
+        return sorted(out)
 
     def test_a_refused_request_writes_none(self):
-        from serve.server import EngineStarting
+        from serve.server import EngineStarting, combined_embeddings_path
         tok = ByteTokenizer()
         with tempfile.TemporaryDirectory() as d:
+            landing = combined_embeddings_path(Path(d), 1).parent      # where a picture file actually lands (#914)
             engine = MockEngine(tok, "ok", max_context=0)
             svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
                           vision=ImageMarkers.FakeVision(d))
@@ -521,17 +528,20 @@ class VisionRequestTempFiles(unittest.TestCase):
             svc.fit_max_tokens = False                             # strict mode: an over-long max_tokens is refused, not shortened (#545)
             with self.assertRaisesRegex(ValueError, "exceeds the context"):
                 svc.prepare(self.MSGS, None, {}, CTX)
-            self.assertEqual(self.leftovers(d), [])
+            self.assertEqual(self.leftovers(d, landing), [])           # nothing left in either place
             svc.prepare(self.MSGS, None, {}, 16)                     # one that fits has it
             written = Path(svc.embeddings.path)                       # shared memory when it has room (#914), the vision directory otherwise
             self.assertTrue(written.is_file())
+            self.assertEqual(self.leftovers(d, landing), [written.name])   # the one file it wrote, where it wrote it
             svc.drop_embeddings()                                    # ... until the request is done
             self.assertFalse(written.exists())
+            self.assertEqual(self.leftovers(d, landing), [])
 
     def test_over_http(self):
         import serve.server as server
         tok = ByteTokenizer()
         with tempfile.TemporaryDirectory() as d:
+            landing = server.combined_embeddings_path(Path(d), 1).parent
             engine = MockEngine(tok, "</think>\n\nok", max_context=0)
             svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
                           vision=ImageMarkers.FakeVision(d))
@@ -568,7 +578,7 @@ class VisionRequestTempFiles(unittest.TestCase):
                             post(path)
                 for path in paths:
                     self.assertEqual(post(path), 200)
-                self.assertEqual(self.leftovers(d), [])
+                self.assertEqual(self.leftovers(d, landing), [])
             finally:
                 httpd.shutdown()
                 httpd.server_close()
