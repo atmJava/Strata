@@ -20,10 +20,10 @@ Strata has three parts:
   start, or installs a file the user already has. The Mac dmg keeps its small Metal engine inside.
 - **The Terminal** (`strata.py`, `strata_cli/`, `strata_control/`): the `strata` command. It sets up a model, serves
   it and watches it. Agents use this part.
-- **The engine and the server** (`src/`, `include/`, `metal/`, `sycl/` for the C++/CUDA/HIP/SYCL/Metal engine;
-  `serve/` for the Python server with an OpenAI- and Anthropic-compatible API and a web page). `setup.py`, started by
-  `START-HERE.bat` or `setup.sh`, is setup from a source checkout, for developers. The release paths are the
-  installer and `strata launch`.
+- **The engine and the server** (`src/`, `include/` and `cmake/` for the CUDA `sm_75` engine; `serve/` for the Python
+  server with an OpenAI- and Anthropic-compatible API and a web page). Build it with CMake
+  as [README.md](README.md#build) says. This checkout has no `setup.py`, `START-HERE.bat` or `setup.sh`; a model is
+  set up and served with `strata launch`.
 
 ## Installing Strata for a user
 
@@ -60,22 +60,24 @@ short version is:
 4. Connect the user's apps: `strata connect` lists them, `strata connect <app> --check` sends one prompt and one tool
    call the way that app does.
 
-Keep the server on `127.0.0.1` unless the user asks for more. Beyond it an API key is recommended: `--access lan` makes one for you, and `--no-api-key` serves without one (a warning, never a refusal; on a public tunnel the warning is stronger). Source setup (`START-HERE.bat`, `setup.sh`) is the fallback for a developer or for a system with no release package; it is
-documented in [docs/SOURCE_INSTALL.md](docs/SOURCE_INSTALL.md). Those wrappers exist in a source checkout, not in the
-released app. Do not tell an app user to find a `.bat` file.
-Source setup does not make an unsupported model or backend compatible. Strata's MCP server ([docs/MCP_SERVER.md](docs/MCP_SERVER.md)) offers the same steps as tools.
+Keep the server on `127.0.0.1` unless the user asks for more. Beyond it an API key is recommended: `--access lan` makes one for you, and `--no-api-key` serves without one (a warning, never a refusal; on a public tunnel the warning is stronger). This checkout carries no source-setup wrapper: `setup.py`, `START-HERE.bat` and `setup.sh` are
+not here, and [docs/SOURCE_INSTALL.md](docs/SOURCE_INSTALL.md) describes the ones the upstream tree has. Strata's MCP
+server ([docs/MCP_SERVER.md](docs/MCP_SERVER.md)) offers the same steps as tools.
 
 ## Working on the code
 
 - How the engine works, every measured number, the API and all settings: [docs/DETAILS.md](docs/DETAILS.md) and
   the [paper](docs/paper/Strata-Paper.pdf).
 - The Terminal: [docs/TERMINAL.md](docs/TERMINAL.md) and [docs/TERMINAL_LAUNCH.md](docs/TERMINAL_LAUNCH.md). The app,
-  the packages and the update feed: [packaging/README.md](packaging/README.md) and [packaging/UPDATES.md](packaging/UPDATES.md).
+  the packages and the update feed are not in this checkout: `apps/` and `packaging/` hold no tracked files.
 - AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md);
-  Mac (Metal): [docs/MAC.md](docs/MAC.md).
+  Mac (Metal): [docs/MAC.md](docs/MAC.md). Those three pages describe the upstream tree: this checkout builds the
+  CUDA `sm_75` engine only, and the build refuses HIP, SYCL and Metal ([README.md](README.md#build)).
 - Tests: the Terminal and Control tests are in `tests/terminal` (`python -m pytest tests/terminal`). The app's UI
-  tests run with `npm test` in `apps/host`. Setup's own tests run without a GPU or downloads:
-  `python tools/test_setup_<name>.py` (for example `tools/test_setup_amd.py`, `tools/test_setup_choices.py`).
+  tests are not here either. The server probes' tests are in `tools/server/tests` (`python -m pytest
+  tools/server/tests`). The tools' own tests run without a GPU or downloads: `python tools/test_<name>.py` (for
+  example `tools/test_shards.py`, `tools/test_gguf_paths.py`); the pack tests need llama.cpp's gguf-py and skip
+  without it.
 - Keep the docs' style: plain words, short sentences, written for non-technical users first. Give measured numbers
   with what they were measured on. Make no claim without a measurement.
 
