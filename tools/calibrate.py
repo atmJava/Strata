@@ -1,4 +1,4 @@
-"""Tune the engine's hardware-dependent settings on this PC (setup's --calibrate).
+"""Tune the engine's hardware-dependent settings on this PC, by hand: `python tools/calibrate.py strata-q2_0.json`.
 
 Three settings depend on the machine more than on the model, and the defaults are right for the PC they were
 measured on (a Ryzen 5 7600 + RTX 5070 on PCIe 5):
@@ -31,7 +31,7 @@ path streams every expert whatever they say.
 A setting is kept only when it beats the default by more than MIN_GAIN in an interleaved re-measurement - the
 adaptive expert tier and the OS make single measurements noisy by a few percent.
 
-    python tools/calibrate.py strata-q2_0.json        # measure and print; setup.py --calibrate also saves it
+    python tools/calibrate.py strata-q2_0.json        # measure and print the settings as JSON; nothing is written
 """
 from __future__ import annotations
 
@@ -116,18 +116,9 @@ def worker_candidates(default: int, extra=()) -> list[int]:
 
 
 def host_worker_extras() -> list[int]:
-    """P-cores - 1 (hybrid CPU) and one socket's cores - 1 (several sockets) of this PC: more counts to try."""
-    try:
-        import setup
-        out = []
-        cores, sockets = setup.cpu_cores(), setup.cpu_sockets()
-        if cores:
-            out.append(cores[0] - 1)
-        if sockets and sockets[0] >= 2:
-            out.append(sockets[1] - 1)
-        return out
-    except Exception:
-        return []
+    """More worker counts to try than the config names.  The probe that read this PC's P-cores and sockets lived in
+    setup.py, which this tree no longer has, so there are no extras until something here can read the topology again."""
+    return []
 
 
 def doc_prompt(tok):

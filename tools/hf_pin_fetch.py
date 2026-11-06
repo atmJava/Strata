@@ -5,7 +5,6 @@ Nothing is downloaded: https://huggingface.co/api/models/<repo>/tree/<revision>?
 
     python tools/hf_pin_fetch.py ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF ed59f92082b1e93c0e96d60a8b11aab089b52f09
     python tools/hf_pin_fetch.py --json <repo> <revision>     # {path: [size, sha256]} as JSON
-    python tools/hf_pin_fetch.py --setup                      # every repository in setup.py's HF_REVISIONS, as JSON
 """
 from __future__ import annotations
 
@@ -35,11 +34,6 @@ def tree(repo: str, revision: str) -> dict:
 
 
 def main(argv: list) -> int:
-    if argv and argv[0] == "--setup":
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        import setup
-        print(json.dumps({r: {p: list(v) for p, v in tree(r, rev).items()} for r, rev in setup.HF_REVISIONS.items()}, indent=1))
-        return 0
     as_json = bool(argv) and argv[0] == "--json"
     repo, revision = argv[1:3] if as_json else argv[:2]
     t = tree(repo, revision)

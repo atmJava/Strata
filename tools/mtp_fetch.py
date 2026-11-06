@@ -163,8 +163,8 @@ def get(url, start=None, end=None, retries=6):
 
 
 class Progress:
-    """One line a couple of seconds, `MTP draft layer: 1.23 / 5.04 GB (24%)`: the form of setup's own download line, so the app's
-    progress parser (tools/strata_mcp.py install_progress) shows it.  `done` counts what an earlier run already has."""
+    """One line a couple of seconds on stderr, `MTP draft layer: 1.23 / 5.04 GB (24%)`, beside the download's own output.
+    `done` counts what an earlier run already has."""
     LABEL = "MTP draft layer"
 
     def __init__(self, total, done=0, every=2.0, out=None):
