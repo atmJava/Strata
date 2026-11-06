@@ -77,6 +77,9 @@ def url_prefix(value: str) -> str:
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # urllib calls redirect_request when a response redirects; returning None makes the 3xx surface as
+    # the HTTPError the caller maps below, so a redirect cannot make urllib resend the bearer token to
+    # another host (urllib carries the request's headers onto the redirected request).
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         return None
 

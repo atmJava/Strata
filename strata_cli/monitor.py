@@ -64,6 +64,8 @@ def _fresh_rate_sample(snapshot: dict) -> bool:
 
 
 class MonitorApp(App):
+    # textual drives this class by name: compose() builds the widgets, the on_* methods receive messages,
+    # and every BINDINGS name picks its action_* method; nothing here calls them directly.
     TITLE = "Strata Monitor"
     CSS = """
     Screen { background: #0e1113; color: #eef1f3; }
