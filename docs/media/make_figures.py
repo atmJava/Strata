@@ -43,6 +43,8 @@ text,.ink{fill:#eef1f3}.bg{fill:#0e1113}.card{fill:#161a1d;stroke:#2a3036}.soft{
 def icon(name, x, y, size=28, cls="icon"):
     """A sprite icon at (x, y), `size` px, drawn in the class's color (the icons use currentColor)."""
     m = re.search(r'<symbol id="%s"[^>]*>(.*?)</symbol>' % name, SPRITE, re.S)
+    if m is None:                                       # a sprite edit that drops a symbol must name it, not crash here
+        raise SystemExit(f"serve/web/sprite.svg has no <symbol id=\"{name}\">: this script draws it")
     return (f'<g class="{cls}" transform="translate({x},{y}) scale({size / 24:.4f})">{m.group(1)}</g>')
 
 
@@ -172,7 +174,7 @@ def guess_and_check():
 
 
 if __name__ == "__main__":
-    (OUT / "how-it-works.svg").write_text(how_it_works(), encoding="utf-8")
-    (OUT / "guess-and-check.svg").write_text(guess_and_check(), encoding="utf-8")
+    (OUT / "how-it-works.svg").write_text(how_it_works() + "\n", encoding="utf-8")      # the repo's files end with a newline
+    (OUT / "guess-and-check.svg").write_text(guess_and_check() + "\n", encoding="utf-8")
     for f in ("how-it-works.svg", "guess-and-check.svg"):
         print(f, (OUT / f).stat().st_size, "bytes")
