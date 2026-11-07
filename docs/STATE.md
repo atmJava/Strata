@@ -104,3 +104,6 @@
 - 当前文档：旧总计划已归档为
   [`2026-10-31-agent-workload-throughput.md`](archive/2026-10-31-agent-workload-throughput.md)；
   本文件是当前运行状态的权威入口。旧平台全局目标仍为 paused，接口不能改写正文。
+- 上游移植（规划，未执行）：sm_75 可用的上游提速候选、排除清单与验收门见
+  [`SM75_UPSTREAM_PORT_PLAN-20261107.md`](work/SM75_UPSTREAM_PORT_PLAN-20261107.md)；
+  第一项是零移植的 chunk-major A/B（`STRATA_PREFILL_LAYER_MAJOR=0`）。
