@@ -666,6 +666,12 @@ if(STRATA_ENABLE_CUDA)
     target_link_libraries(lm_kernels_parity PRIVATE strata_prefill )
     add_test(NAME lm_kernels_parity COMMAND lm_kernels_parity)
     set_tests_properties(lm_kernels_parity PROPERTIES SKIP_RETURN_CODE 77)
+    # the FP16 weight cache (STRATA_PF_W16_CACHE_MIB) against the uncached Gemm::native, bitwise, on the engine's
+    # 32M-element scratch, dense shapes and quantization types (GPU, synthetic, no model; exit 77 without a GPU)
+    add_executable(gemm_w16_parity src/prefill/gemm_w16_parity.cu)
+    target_link_libraries(gemm_w16_parity PRIVATE strata_prefill )
+    add_test(NAME gemm_w16_parity COMMAND gemm_w16_parity)
+    set_tests_properties(gemm_w16_parity PROPERTIES SKIP_RETURN_CODE 77)
   endif()
   # native_expert_grouped's group stride and fused SwiGLU + q8_1, bitwise vs the launches before them (GPU, synthetic,
   # no model; --bench adds v1/new timings of a window's 48 calls in a graph)

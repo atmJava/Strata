@@ -78,6 +78,7 @@ const uint16_t* Gemm::unpad_x(const uint16_t* X, int64_t T, int64_t K, int64_t l
 }
 
 Gemm::~Gemm() {
+    for (W16Entry& e : w16_) if (e.d) (void) cudaFree(e.d);
     if (handle_) cublasDestroy((cublasHandle_t) handle_);
     if (tc_w_) cudaFree(tc_w_);
     if (tc_x_) cudaFree(tc_x_);
@@ -368,6 +369,79 @@ void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float*
                              "copied unpadded (no device memory)\n", (long long) ldx, (long long) K);
         std::exit(1);
     }
+#ifndef STRATA_USE_HIP
+    // STRATA_PF_W16_CACHE_MIB=N: the FP16 weight kept on the device after its first dequant, so a repeat prompt GEMM
+    // skips the dequant.  The cached form runs the same full-N GEMM as the uncached form for every shape that fits the
+    // engine's scratch (all dense projections: the largest, attn_q, is 31.5M of 32M elements), so the bits are the same.
+    // The budget is read once; "auto" and the engine's default keep kW16AutoReserve free afterwards (the MTP capture,
+    // the batch windows and a long prompt's buffers are allocated later, out of that room).  A negative or unreadable
+    // value turns it off; the resolution is said once so a run that never caches is not silent.
+    if (w16_budget_ < 0) {
+        const char* v = std::getenv("STRATA_PF_W16_CACHE_MIB");
+        int64_t mib = 0;
+        if (v != nullptr && std::strcmp(v, "auto") == 0) {
+            w16_budget_ = 16ll << 30;
+            w16_reserve_ = kW16AutoReserve;
+        } else if (v != nullptr) {
+            mib = (int64_t) std::atoll(v);
+            if (mib < 0) mib = 0;
+            w16_budget_ = mib * (1ll << 20);
+            w16_reserve_ = 2ll << 30;
+        } else {
+            w16_budget_ = w16_auto_default_().load() ? (16ll << 30) : 0;
+            w16_reserve_ = kW16AutoReserve;
+        }
+        if (!w16_logged_) {
+            w16_logged_ = true;
+            if (w16_budget_ > 0)
+                std::fprintf(stderr, "strata serve: FP16 weight cache on: %lld MiB budget, %lld MiB kept free\n",
+                             (long long) (w16_budget_ >> 20), (long long) (w16_reserve_ >> 20));
+            else
+                std::fprintf(stderr, "strata serve: FP16 weight cache off (STRATA_PF_W16_CACHE_MIB=%s)\n",
+                             v != nullptr ? v : "unset");
+        }
+    }
+    if (w16_budget_ > 0) {
+        const int64_t bytes = N * K * 2;
+        uint16_t* cw = nullptr;
+        for (const W16Entry& e : w16_)
+            if (e.p == W_blocks && e.type == ggml_type && e.n == N && e.k == K) { cw = e.d; break; }
+        // Only a weight the uncached path would also dequantize whole: a larger one takes the sliced form there and one
+        // full-N GEMM here, which need not round alike (upstream 88a79a7e).
+        if (cw == nullptr && N * K <= scratch_elems_ && w16_used_ + bytes <= w16_budget_) {
+            size_t fb = 0, tb = 0;
+            const bool info = cudaMemGetInfo(&fb, &tb) == cudaSuccess;
+            bool made = false;
+            if (info && fb > (size_t) bytes + (size_t) w16_reserve_) {
+                if (cudaMalloc((void**) &cw, (size_t) bytes) == cudaSuccess) {
+                    made = true;
+                } else {
+                    (void) cudaGetLastError();
+                }
+            } else if (!info) {
+                (void) cudaGetLastError();
+            }
+            if (made) {
+                strata::kernels::dequant_f16(ggml_type, W_blocks, 0, N, K, cw, stream_);
+                w16_.push_back({W_blocks, ggml_type, N, K, cw});
+                w16_used_ += bytes;
+            } else {
+                cw = nullptr;
+                w16_budget_ = w16_used_ > 0 ? w16_used_ : 0;   // out of room: stop trying
+                if (!w16_declined_) {
+                    w16_declined_ = true;
+                    std::fprintf(stderr, "strata serve: FP16 weight cache: no room for %lld MiB (free %zu MiB, %lld MiB "
+                                         "must stay free); the cache stays off for this run\n",
+                                 (long long) (bytes >> 20), (size_t) (fb >> 20), (long long) (w16_reserve_ >> 20));
+                }
+            }
+        }
+        if (cw != nullptr) {
+            f16(X, cw, Y, T, N, K, ldy, beta);
+            return;
+        }
+    }
+#endif
     if (N * K > scratch_elems_) {
         // Too large for the scratch at once: in row slices.
         const int64_t rows = scratch_elems_ / K;
