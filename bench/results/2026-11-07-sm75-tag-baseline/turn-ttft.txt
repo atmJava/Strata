@@ -1,0 +1,23 @@
+  标签 run  上下文≈45000  新增 [300, 1200, 3000]  每档 3 轮  生成 300
+  预热 …
+  建上下文：ctx=45017 token  18.7s  墙钟 18.8s
+
+  --- 每轮新增 ≈300 token ---
+    turn 1: ctx= 45478 reused= 45010 read=  468 首字= 1.35s decode=  58.4 tok/s 墙钟=  6.4s
+    turn 2: ctx= 46230 reused= 45772 read=  458 首字= 0.91s decode=  71.5 tok/s 墙钟=  5.1s
+    turn 3: ctx= 46990 reused= 46223 read=  767 首字= 1.49s decode=  88.2 tok/s 墙钟=  4.5s
+    >>> 新增 300: 重读中位 468 token，首字中位 1.35s，decode 中位 71.5 tok/s
+
+  --- 每轮新增 ≈1200 token ---
+    turn 1: ctx= 49084 reused= 47249 read= 1835 首字= 2.19s decode= 101.5 tok/s 墙钟=  2.8s
+    turn 2: ctx= 50981 reused= 49146 read= 1835 首字= 2.21s decode=  75.1 tok/s 墙钟=  2.3s
+    turn 3: ctx= 52822 reused= 50987 read= 1835 首字= 2.21s decode=  73.0 tok/s 墙钟=  2.3s
+    >>> 新增 1200: 重读中位 1835 token，首字中位 2.21s，decode 中位 75.1 tok/s
+
+  --- 每轮新增 ≈3000 token ---
+    turn 1: ctx= 57363 reused= 52828 read= 4535 首字= 4.56s decode=  35.2 tok/s 墙钟=  4.6s
+    turn 2: ctx= 61899 reused= 57364 read= 4535 首字= 4.60s decode=  36.5 tok/s 墙钟=  4.7s
+    turn 3: ctx= 66435 reused= 61900 read= 4535 首字= 4.60s decode=  35.7 tok/s 墙钟=  4.7s
+    >>> 新增 3000: 重读中位 4535 token，首字中位 4.60s，decode 中位 35.7 tok/s
+
+  结果已追加到 /opt/ai/logs/turn-ttft.jsonl

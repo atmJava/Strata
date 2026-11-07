@@ -1,0 +1,4 @@
+  cold prefill  label=cold-32k  target≈32768 tokens  reps=2
+   1  34003 tok  15.16 s  2243 tok/s
+   2  31576 tok  14.27 s  2213 tok/s
+  prefill median: 2243 tok/s   (2 valid: [2213, 2243])

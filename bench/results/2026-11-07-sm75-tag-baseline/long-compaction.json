@@ -1,0 +1,22 @@
+{
+  "target": "long history then Codex compaction",
+  "history_words": 145000,
+  "turn_output_tokens": 16,
+  "compaction_output_tokens": 256,
+  "turn": {
+    "input": 208536,
+    "cached": 0,
+    "output": 8,
+    "wall_s": 73.625244,
+    "status": "incomplete",
+    "finish": "max_output_tokens"
+  },
+  "compaction": {
+    "input": 208558,
+    "cached": 208531,
+    "output": 256,
+    "wall_s": 5.641489,
+    "status": "incomplete",
+    "finish": "max_output_tokens"
+  }
+}
