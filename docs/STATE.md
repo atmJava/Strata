@@ -8,6 +8,15 @@
 
 - 全局目标：**保持现有生产稳定可用**，只处理明确的故障、数据正确性问题或用户重新授权
   的变更。速度优化不再是当前目标；1% 历史收益保留在证据中，但不再为此启动实验。
+- 代码树：`freeze/server-adapt-0.2.7` 已由 `331f30bf`（2026-10-27）收敛为 sm_75 CLI +
+  server 发行树，删除 `4,091` 个文件、约 `994,000` 行。其后 2026-11-04..07 的 32 个提交
+  清理了裁剪残留（死导入/未用变量、指向已删文件的引用、测试与文档标注），末提交
+  `ad297d35` 已推送到 `origin`。
+- 清理门禁已复核：2026-11-07 在本机（无 GPU、无 `nvcc`）`pytest tools` 为
+  `402 passed / 51 skipped / 0 errors`、`52.62 s`；`pytest serve tests/terminal
+  tools/server/tests` 为 `1,457 passed / 64 skipped / 10,910 subtests`、`514.49 s`，两轮
+  均 exit 0。详见 [清理门禁结果](work/FREEZE_027_CLEANUP_GATE_RESULT-20261107.md)。
+  CUDA 构建、`ctest` 与真实服务器 smoke 未在本机验证。
 - 未完成采纳项：21
 - 当前项：AGENT-CURRENT-PROD-COST-REMAP（暂停，无主动执行）。模型/槽数比较及所有新
   候选均停止；未完成采纳项只表示历史队列，不授权继续执行。
