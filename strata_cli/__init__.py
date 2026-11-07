@@ -5,7 +5,7 @@ from pathlib import Path
 
 #: The command-line product version. ``version()`` below is the files'
 #: engine build number, which compatibility checks compare.
-PRODUCT_VERSION = "0.2.6"
+PRODUCT_VERSION = "0.2.7"
 
 
 def version() -> str:
