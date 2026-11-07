@@ -5,7 +5,8 @@ The rule (owner decision):
 2. Only when that does not fit, or would be too tight, offer to add the second card as a layer split.
 3. Let the person choose: every option comes with plain numbers and a recommended one is pre-selected (recommend, never force).
 
-The memory arithmetic is native-fit.ts `fitOn` (apps/host/src/lib/native-fit.ts) with the same constants (a test keeps them equal):
+The memory arithmetic is the app's native-fit.ts `fitOn` (upstream's apps/host/src/lib/native-fit.ts; the app is not in
+this checkout) with the same constants:
 the experts are held first in the graphics memory beyond about DENSE_GB (the dense weights, buffers and a 32K cache), then in RAM beyond
 about SYSTEM_ROOM_GB left for the system; whatever is left would be read from the SSD (`spill_gb`). A split adds the memory of the extra
 cards but every extra card holds its own dense layers and prompt buffers, so each one costs SPLIT_CARD_OVERHEAD_GB of that (an estimate:
@@ -21,10 +22,10 @@ from typing import Any
 
 DENSE_GB = 5.0                 # = native-fit.ts DENSE_GB
 SYSTEM_ROOM_GB = 10.0          # = native-fit.ts SYSTEM_ROOM_GB
-DENSE_EXTRA_GB = 1.0           # = native-fit.ts DENSE_EXTRA_GB
+DENSE_EXTRA_GB = 1.0           # = upstream's native-fit.ts DENSE_EXTRA_GB
 SPLIT_CARD_OVERHEAD_GB = 2.0   # each extra card of a split: its own dense layers and prompt buffers
-SPLIT_MIN_VRAM_GB = 8.0        # setup.py SPLIT_MIN_VRAM_GB: a card sharing a model needs this much
-SPLIT_PROMPT_VRAM_GB = 12.0    # setup.py SPLIT_PROMPT_VRAM_GB (#448): a smaller second card caps the prompt chunk
+SPLIT_MIN_VRAM_GB = 8.0        # upstream's setup.py SPLIT_MIN_VRAM_GB: a card sharing a model needs this much
+SPLIT_PROMPT_VRAM_GB = 12.0    # upstream's setup.py SPLIT_PROMPT_VRAM_GB (#448): a smaller second card caps the prompt chunk
 MIN_CARD_GB = 4.0              # under this a card cannot hold the dense weights: ignored (an iGPU, a display card)
 FITS_SPARE_RAM_GB = 4.0        # RAM left beyond the experts below which "fits" becomes "tight"
 SPLIT_PROMPT_GAIN = "about 20% faster"   # setup.py's own words for prompts read on two cards (docs/MULTI_GPU.md)

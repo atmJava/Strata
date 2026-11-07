@@ -180,7 +180,7 @@ class MonitorApp(App):
 
     def _paint(self, size=None) -> None:
         size = self.screen.size if size is None else size
-        if self.view >= len(VIEWS):          # the Connect view belongs to the launch-aware monitor (strata_cli/launch/monitor_ext.py)
+        if self.view >= len(VIEWS):          # the Connect view belongs to the launch-aware monitor
             return
         snapshot = {**self.displayed, "recent": (self.displayed.get("recent") or [])[:self.requests]}
         snapshot["activity_continuity"] = self.displayed_activity_continuity

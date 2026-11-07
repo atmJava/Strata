@@ -4,6 +4,7 @@
 Run this on each target OS/Python before release. It checks the client and the
 local bundle lifecycle. --interactive also checks packaged Textual rendering.
 Neither mode exercises the engine or GPU drivers.
+The bundle steps call packaging/monitor_bundle.py, which this checkout does not carry; the fake-server checks run here.
 """
 
 from __future__ import annotations

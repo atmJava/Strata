@@ -1,6 +1,7 @@
 """Versioned, owner-editable serving profiles separate from setup's run config.
 
-The source JSON belongs to setup.py; this small layer keeps operator overrides in
+The source JSON comes from the setup that wrote it (upstream's setup.py did; here it is `strata launch`); this small
+layer keeps operator overrides in
 the user's configuration directory so an installer update cannot silently erase
 them. It deliberately does not start processes or contact a network service.
 """

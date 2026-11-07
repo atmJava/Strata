@@ -1,5 +1,9 @@
 # Security
 
+This page covers the whole Strata product. The update machinery it names (`strata_control/feed.py`, `signing.py`,
+`transfer.py`, `update_keys.json`, `strata_cli/update_cmd.py`) lives in the full source tree; this checkout is the
+sm_75 server distribution and builds none of it.
+
 ## Reporting a vulnerability
 
 Please report anything that should not be public until it is fixed **privately**, through GitHub's private
@@ -67,7 +71,7 @@ the model. The section above is about the engine's HTTP server. This is what the
   one it accepted (a replayed old feed) or expired, and checks every engine package against its SHA-256, its signed manifest and the
   card in your PC before it test-starts it and switches to it. Any failure keeps the engine you had. The app installer itself is signed
   with a separate key (Tauri's minisign key) that the app and the Terminal both check. The private keys are kept offline by the owner.
-  See [packaging/UPDATES.md](packaging/UPDATES.md).
+  See `packaging/UPDATES.md` in the full source tree.
 
 ### How far to trust `curl | sh` and `irm | iex`
 

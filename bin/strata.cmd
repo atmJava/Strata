@@ -3,7 +3,7 @@ rem Strata Terminal launcher for Windows (cmd.exe, double-click, PATH).
 rem It finds a Python in a fixed order and hands over to strata.py. It installs nothing and downloads nothing.
 rem   1. %STRATA_PYTHON%                       an explicit override, always wins
 rem   2. <root>\python\python.exe              the private runtime shipped in the terminal archive
-rem   3. <root>\.venv\Scripts\python.exe       a source checkout set up by SETUP.bat
+rem   3. <root>\.venv\Scripts\python.exe       a developer's own venv in a source checkout
 rem   4. py -3 / python on PATH, 3.10 or newer a developer convenience, never a requirement
 setlocal
 rem UTF-8 text in Python, not the Windows code page: folders with Cyrillic or other letters stay intact (#3202)

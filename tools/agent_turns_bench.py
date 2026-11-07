@@ -2,7 +2,7 @@
 
     python tools/agent_turns_bench.py strata-iq2_xs.json base: hcq8:STRATA_HC_Q8=2 [--rounds 2]
 
-The workload is five simulated coding-agent sessions over this repository's own files (README, serve/, setup.py, the
+The workload is five simulated coding-agent sessions over this repository's own files (README, serve/, strata.py, the
 expert cache, the hyper-connection kernels, the tokenizer): a system prompt, four tools, a task (three in English, two
 in French), then tool calls whose results are the real files, at most 2,000 lines per read as agents' read tools
 return them.  Every point right after a tool result is one turn the model continues - 23 turns from ~2.5K to ~100K
@@ -74,10 +74,10 @@ SESSIONS = [
       ("grep", "adapt_every", "Searching for the adaptive swap logic."),
       ("read_file", "src/core/expert_source.cpp", "The dispatch that consults the cache is in expert_source.cpp.")]),
     ("installer-fr",
-     "Dans l'installateur, la détection de la RAM disponible se trompe parfois sous Windows quand un autre programme "
+      "Dans le Terminal, la détection de la RAM disponible se trompe parfois sous Windows quand un autre programme "
      "réserve beaucoup de mémoire. Trouve où elle est faite, corrige-la, ajoute un test et explique la correction en "
      "français.",
-     [("read_file", "setup.py", "Je commence par lire l'installateur."),
+      [("read_file", "strata.py", "Je commence par lire le point d'entrée du Terminal."),
       ("grep", "def .*ram", "Je cherche les fonctions qui mesurent la RAM."),
       ("read_file", "docs/INSTALL.md", "Je vérifie ce que la documentation promet sur la RAM."),
       ("read_file", "docs/MODELS.md", "Le choix du modèle dépend de la RAM ; je lis cette page aussi.")]),

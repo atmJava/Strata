@@ -5515,8 +5515,8 @@ int main(int argc, char** argv) {
         }
         const std::string e = strata::core::device_code_error();
         if (!e.empty()) {
-            std::fprintf(stderr, "strata generate: this engine has no code for %s (sm_%d%d): %s - rebuild it for this "
-                                 "card (setup does: START-HERE.bat --setup)\n", name, p.major, p.minor, e.c_str());
+            std::fprintf(stderr, "strata generate: this engine has no code for %s (sm_%d%d): %s - this build targets "
+                                 "sm_75 alone; build it for this card with CMake\n", name, p.major, p.minor, e.c_str());
             return 1;
         }
     }
@@ -5908,7 +5908,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: no VRAM is left for the expert cache: it needs at least %lld slots "
                                  "(%lld MiB), about %lld MiB more than this card has free. To make room: a smaller "
                                  "--max-context (the session, mostly its KV cache, takes %lld MiB at %lld tokens), "
-                                 "--kv q4_0, the English draft subset (setup --draft-vocab en; the draft head takes "
+                                 "--kv q4_0, the English draft subset (--draft-vocab en in the run config's args; the draft head takes "
                                  "%lld MiB now)%s, images on the CPU, or close other programs that use the GPU\n",
                          (long long) min_slots, (long long) ((min_slots * blob) >> 20), (long long) short_mib,
                          (long long) session_mib, (long long) o.max_context, (long long) (mtp_bind >> 20),

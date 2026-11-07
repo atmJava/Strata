@@ -2,7 +2,7 @@
 # It installs nothing and downloads nothing.
 #   1. $env:STRATA_PYTHON                  an explicit override, always wins
 #   2. <root>\python\python.exe            the private runtime shipped in the terminal archive
-#   3. <root>\.venv\Scripts\python.exe     a source checkout set up by SETUP.bat
+#   3. <root>\.venv\Scripts\python.exe     a developer's own venv in a source checkout
 #   4. py -3 / python on PATH, 3.10+       a developer convenience, never a requirement
 # If scripts are blocked on this PC, use bin\strata.cmd, or:  powershell -ExecutionPolicy Bypass -File bin\strata.ps1 ...
 $ErrorActionPreference = 'Stop'

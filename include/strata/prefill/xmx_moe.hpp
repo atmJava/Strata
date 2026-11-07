@@ -1,4 +1,5 @@
-// A770 port: grouped FP16 XMX GEMM for the prompt path's experts (STRATA_PF_XMX=1).  See sycl/src/prefill/xmx_moe.dp.cpp.
+// A770 port: grouped FP16 XMX GEMM for the prompt path's experts (STRATA_PF_XMX=1).  Upstream kept the SYCL kernel in
+// sycl/src/prefill/xmx_moe.dp.cpp; this build has no SYCL.
 #pragma once
 #include <cstdint>
 

@@ -7,7 +7,8 @@ A card has one of three roles:
 
 The engine takes the cards in stage order (`"gpu": [helper, ..., main]` with `"gpu_order": "as_given"`), so the Main card is the LAST one. This
 module turns roles into that list (and back), recommends roles, and words the few warnings a person could not work out alone.
-The app has the same rules in apps/host/src/lib/gpu-roles.ts; both run tests/data/gpu_roles_vectors.json.
+Upstream's app has the same rules in apps/host/src/lib/gpu-roles.ts (the app is not in this checkout);
+tests/data/gpu_roles_vectors.json is the vector set both of them run.
 
 Pure functions, no I/O.
 """
@@ -41,7 +42,7 @@ def _speed(c: dict) -> float:
     cards are all 0.0 makes these rules fall back to memory, which pick_main says out loud with why="memory".
     serve/server.py's gpu_speed_scores() measures this same number (multiprocessors x max clock) for the engine's
     own card order.  Do not read the missing producer as a dead consumer: the rules that read this value are the
-    ones the app's gpu-roles.ts mirrors, and both run tests/data/gpu_roles_vectors.json."""
+    ones upstream's gpu-roles.ts mirrors, and tests/data/gpu_roles_vectors.json is the vector set for both."""
     v = c.get("speed")
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else 0.0
 

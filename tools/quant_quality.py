@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The quant quality yardstick (MODEL-UPDATE.md, Phase 0): teacher-forced top-1 agreement and KL of a quant against
 Q8_0, on one fixed text set (data/quant_quality/v1: code, docs, English, other languages, an agent transcript).
+This checkout does not carry that set (the 0.2.7 prune removed data/quant_quality/): point --set and --ids at a copy.
 
     python tools/quant_quality.py ids --tokenizer DIR [--set data/quant_quality/v1] [--out set.ids.json]
         tokenizes the set (each segment cut to --seg-tokens, default 1000) - the ids file is committed with the set

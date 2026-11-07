@@ -215,7 +215,7 @@ def lock_folder(out, wait=900.0):
 
 
 def exit_with_parent():
-    """STRATA_EXIT_WITH_PARENT=1 (set by setup.py for the tools it runs): end when the process that started this one ends, so a cancelled
+    """STRATA_EXIT_WITH_PARENT=1 (upstream's setup.py set it for the tools it ran; nothing here sets it): end when the process that started this one ends, so a cancelled
     or killed setup does not leave a download running on its own (#3257: taskkill /T does not reach a grandchild whose parent is gone)."""
     if (os.environ.get("STRATA_EXIT_WITH_PARENT") or "").strip() != "1":
         return

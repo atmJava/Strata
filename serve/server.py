@@ -6456,7 +6456,7 @@ def anthropic_collect(events) -> dict:
             msg["usage"].update(e["usage"])
             if e.get("strata_rejected_tool_calls"):
                 msg["strata_rejected_tool_calls"] = e["strata_rejected_tool_calls"]
-    for i in range(len(blocks) - 1):    # a turn with no </think> (serve/dsml.py): the text is the answer; it is not also a thinking block
+    for i in range(len(blocks) - 1):    # a turn with no </think>: the text is the answer; it is not also a thinking block
         a, b = blocks[i], blocks[i + 1]
         if a.get("type") == "thinking" and b.get("type") == "text" and a.get("thinking", "").strip() == b.get("text", "").strip():
             del blocks[i]

@@ -1,5 +1,6 @@
 'use strict';
-// GitHub-side handlers for intake.yml, reopen.yml and the 5-day sweep.
+// GitHub-side handlers for upstream's intake.yml and reopen.yml and the 5-day sweep (this checkout ships the scripts
+// but not the workflows).
 // They take the actions/github-script objects ({ github, context, core }) and never touch PR code:
 // everything comes from the event payload and the REST API.
 

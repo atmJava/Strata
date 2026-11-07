@@ -33,7 +33,7 @@ body:
       options:
         - Desktop app (Windows, Linux or Mac)
         - Terminal (the `strata` command)
-        - Source (START-HERE.bat, setup.sh or a build)
+        - Source (a build from this repository)
         - Docker
         - Other
     validations:

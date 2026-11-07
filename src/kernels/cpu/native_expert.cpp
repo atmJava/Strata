@@ -145,7 +145,7 @@ void init_once() {
 bool native_experts_available() noexcept { return true; }
 
 // The "is this format handled by that kernel" questions, answered here and not next to the kernels: iq_avx512.cpp is
-// compiled for AVX-512 and iq_avx2.cpp / kq_avx2.cpp for AVX2, and native_gu_rows asks these on every CPU before it
+// compiled for AVX-512 and iq_avx2.cpp for AVX2, and native_gu_rows asks these on every CPU before it
 // has checked what the CPU can run.  A function in a wide-ISA file may use that ISA anywhere in its body, so an
 // answer that is only a comparison must not come from one (#795).
 bool iq512_supported(int type) noexcept {
@@ -342,8 +342,8 @@ void native_gu_rows_impl(const NativeFmt& f, const uint8_t* blob, const void* co
     // AVX-2 kernel, STRATA_NO_IQ256 drops the AVX-2 kernel; ggml-cpu's single-token vec_dot is reached only with
     // both set (and on a CPU without AVX-512, STRATA_NO_IQ512 changes nothing).
     static const bool avx512 = cpu_avx512_ok() && std::getenv("STRATA_NO_IQ512") == nullptr;
-    // STRATA_NO_IQ256 drops the AVX-2 kernel.  cpu_avx2_ok() is ALSO required: iq_avx2.cpp and kq_avx2.cpp
-    // are compiled /arch:AVX2 and use AVX2 and FMA3, so calling them on a CPU without either is an
+    // STRATA_NO_IQ256 drops the AVX-2 kernel.  cpu_avx2_ok() is ALSO required: iq_avx2.cpp
+    // is compiled /arch:AVX2 and uses AVX2 and FMA3, so calling it on a CPU without either is an
     // illegal instruction, not a slow path.  The gate sat next to `avx512` above, which does test
     // cpu_avx512_ok(), and that asymmetry is what let a pre-Haswell CPU reach iq256_gu_rows.
     // Without it this falls through to ggml-cpu's vec_dot below, which is compiled for whatever baseline the build

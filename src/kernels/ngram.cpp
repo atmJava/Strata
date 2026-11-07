@@ -184,7 +184,7 @@ const PleFormatInfo kPleFormats[] = {
     // BF16 (#586): the checkpoint's own table at full precision, 320-byte rows; self-describing, so no scale and no
     // metadata to trust (tools/ple_fp8_pack.py writes the FP8 form of the same table)
     {PleFormat::BF16, "BF16", "BF16", PLE_ROW_BYTES_BF16, false, dequant_bf16},
-    // NVFP4 x16 (NVIDIA's Qwen3.8-Flash-Next-FP4-Local, tools/nvfp4_local_pack.py ple): 90-byte rows, I8 bytes marked
+    // NVFP4 x16 (NVIDIA's Qwen3.8-Flash-Next-FP4-Local, packed upstream by tools/nvfp4_local_pack.py ple): 90-byte rows, I8 bytes marked
     // strata.ple.format = nvfp4x16 with strata.ple.scale. The tensor is [90, rows]: ne0 is the row's byte count.
     {PleFormat::NVFP4, "NVFP4", "I8", PLE_ROW_BYTES_NVFP4, true, dequant_nvfp4},
 };

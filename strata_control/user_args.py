@@ -119,7 +119,7 @@ def stamp(cfg: dict, user: list[str] | None = None) -> None:
 
 def dropped_by_setup(old_args: Any, new_args: Any, setup_flags: set[str] | frozenset[str], skip=frozenset()) -> list[str]:
     """For an old config with no ``args_written``: its options that the new arguments do not have and that setup never
-    writes (``setup_flags``: every option setup.py names), plus the control vector options.  These were added by hand."""
+    writes (``setup_flags``: every option the setup writes), plus the control vector options.  These were added by hand."""
     have = {flag_of(g) for g in groups(new_args)}
     out = [g for g in groups(old_args) if flag_of(g) and flag_of(g) not in have and flag_of(g) not in skip
            and (flag_of(g) not in setup_flags or flag_of(g) in USER_KEPT_FLAGS)]

@@ -1,6 +1,7 @@
 'use strict';
 // Format check for issues and pull requests (see CONTRIBUTING.md and .github/ISSUE_TEMPLATE/*.yml).
-// Pure functions only: no network, no filesystem. Used by intake.yml and reopen.yml through reset-bot.js.
+// Pure functions only: no network, no filesystem. Upstream's intake.yml and reopen.yml call it through reset-bot.js;
+// this checkout ships the scripts but not the workflows.
 
 const AREAS = ['Engine', 'GUI', 'TUI', 'Benchmark', 'Docs', 'Other'];
 const TITLE_RE = new RegExp('^\\[(' + AREAS.join('|') + ')\\] \\S');

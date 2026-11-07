@@ -10,7 +10,7 @@ sizes with the files setup installs (data/gguf_fingerprints.json):
     python tools/strata_inspect.py D:/models/my-copy-00001-of-00002.gguf                  # a local file or folder
     python tools/strata_inspect.py https://example.com/x-00001-of-00002.gguf              # one URL (that shard only)
 
-ms: is ModelScope, hf: Hugging Face (HF_ENDPOINT is honoured).  setup.py --inspect runs the same.
+ms: is ModelScope, hf: Hugging Face (HF_ENDPOINT is honoured).  Upstream's setup.py --inspect ran the same.
     python tools/strata_inspect.py --fingerprints data/gguf_fingerprints.json             # remake the table
 """
 from __future__ import annotations

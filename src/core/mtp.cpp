@@ -594,10 +594,9 @@ void draft_head_hint(int64_t n_tokens, int64_t row_bytes) {
             opts += b;
         }
     if (!opts.empty())
-        std::fprintf(stderr, "strata mtp: hint: a smaller draft vocabulary needs less VRAM: %s. Start once with it - "
-                             "START-HERE.bat --draft-vocab en (Windows) or ./setup.sh --draft-vocab en - and the model "
-                             "keeps it (\"draft_vocab\" in its strata-*.json config); or a smaller --context in "
-                             "setup.\n",
+        std::fprintf(stderr, "strata mtp: hint: a smaller draft vocabulary needs less VRAM: %s. Start the engine once "
+                             "with it - --draft-vocab en - and the model keeps it (\"draft_vocab\" in its strata-*.json "
+                             "config); or a smaller --context.\n",
                      opts.c_str());
     else
         std::fprintf(stderr, "strata mtp: hint: this is already the smallest shipped draft vocabulary: a smaller "

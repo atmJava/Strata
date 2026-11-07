@@ -78,7 +78,7 @@ struct Geo {
 };
 
 // random blocks with a sane fp16 scale `d` at each block's start (every format here begins with it): scales chosen so
-// STRATA_PF_F16=1: the covered formats run on F16 weights (moe_f16_kq.cu, native_f16_kernel), not the int8 kernels
+// STRATA_PF_F16=1: the covered formats run on F16 weights, not the int8 kernels
 bool f16_on() {
     const char* v = std::getenv("STRATA_PF_F16");
     return v != nullptr && v[0] == '1';
