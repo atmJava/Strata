@@ -1,5 +1,7 @@
 # Strata on an Intel Arc: the SYCL engine
 
+This page describes the Intel (SYCL) build. This checkout builds the CUDA sm_75 engine on Linux only: CMakeLists.txt refuses STRATA_ENABLE_SYCL. The sycl/ folder and the scripts inside it are not here.
+
 This page is for people who build the Intel Arc engine from source or run it in a container, and for those who maintain the
 port. For the released Linux engine package, start with [INTEL_ARC.md](INTEL_ARC.md).
 

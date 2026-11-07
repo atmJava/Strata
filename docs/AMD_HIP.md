@@ -1,5 +1,7 @@
 # AMD Radeon: the HIP backend
 
+This page describes the AMD (HIP) build. This checkout builds the CUDA sm_75 engine on Linux only: CMakeLists.txt refuses STRATA_ENABLE_HIP. The HIP scripts, tuning tables and result folders it names (tools/hip/, packaging/build_hip_linux.sh, packaging/stage_tuning.py, bench/results/) are not here.
+
 Strata runs on AMD Radeon cards through its HIP backend, the same engine as on NVIDIA compiled for AMD. This page is for
 people with an RX 6000, 7000 or 9000 card or a Radeon AI PRO R9700, and for anyone building the engine from source.
 The Ryzen AI Max "Strix Halo" APU has its own page: [STRIX_HALO.md](STRIX_HALO.md). Integrated Radeon chips in mini PCs are

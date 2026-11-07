@@ -1,5 +1,7 @@
 # Strata engine and server reference
 
+The bench/results/ folders and the launchers this page cites are from the full source tree; this checkout carries neither. Its numbers stay as they were measured.
+
 This page is the technical reference for the Qwen engine and its server: measured speed, the HTTP API, the settings in
 `strata-<model>.json`, memory modes and the speed switches. It is for people who run Strata from a source checkout, tune
 an installation or connect their own software. It describes the current release. Dated measurements are in

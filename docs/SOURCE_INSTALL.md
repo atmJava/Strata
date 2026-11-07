@@ -1,5 +1,7 @@
 # Install and build from a source checkout
 
+This page describes the full source tree's setup (setup.py, START-HERE.bat, setup.sh, SETUP.bat, UPDATE.bat, update.sh), and this checkout has none of them. Build here with CMake, the way README.md's Build section says.
+
 Use this guide to work on Strata's code or maintain a source-based installation. It is for developers.
 To just use Strata (version 0.2.5), install the [desktop app or the Terminal](INSTALL.md). Installed apps do not use `START-HERE.bat`.
 

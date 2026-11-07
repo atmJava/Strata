@@ -1,5 +1,7 @@
 # NVFP4 routed experts
 
+The kernels and packers this page names (src/kernels/cpu/nvfp4_avx2.cpp, nvfp4_avx512.cpp, src/prefill/mmq_nvfp4_w4a4.cu, mmq_nvfp4_w4a8.cu, tools/nvfp4_convert.py, nvfp4_local_pack.py, nvfp4_verify.py, nvfp4_verify_gguf.py) are not in this checkout. What stays here is the NVFP4 n-gram table, read by src/kernels/ngram.cpp.
+
 This page is for people who run, convert or test Qwen3.8-Flash-Next packs whose routed experts are NVFP4. They need an
 NVIDIA card. For the choice between the three versions, see [MODELS.md](MODELS.md#nvfp4).
 
@@ -201,7 +203,7 @@ What the checkpoint holds, and what `tools/nvfp4_local_pack.py` does with it:
 | MTP head: NVFP4 experts, BF16 rest | A Q2_0 draft layer built with `mtp_pack.py` / `mtp_rt.py` (88.7% of drafts accepted over 225 test requests). |
 | Vision tower | Not converted. Pictures are read by the original model's picture reader (the shared `mmproj` file that setup downloads); the dense GGUF supplies the vocabulary. |
 
-`python tools/nvfp4_local_pack.py prepare --model <checkpoint> --out <dir>` runs every step (setup does this): the n-gram
+`python tools/nvfp4_local_pack.py prepare --model <checkpoint> --out <dir>` runs every step (the full source tree's setup did this): the n-gram
 table, the dense GGUF (no experts), the pack (experts written straight from the checkpoint) and the draft layer. It needs
 about 110 GB of free disk beside the 102 GB download, which can be deleted afterwards. On a Threadripper PRO with the
 files on NVMe it took about 12 minutes.

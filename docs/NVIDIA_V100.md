@@ -1,5 +1,7 @@
 # NVIDIA Tesla V100 / Titan V (Volta, sm_70)
 
+This page keeps measurements from a card this build does not target: it builds sm_75 only. Read it as history.
+
 This page is for people running Strata on a V100 or Titan V. Volta uses the experimental CUDA 12 engine, which current releases
 provide as an engine component through the app installer or the Terminal ([INSTALL.md](INSTALL.md)). CUDA 13 cannot run Volta.
 How setup selects the CUDA 12 engine and the driver requirements are in [OLDER_GPUS.md](OLDER_GPUS.md). Speeds below were

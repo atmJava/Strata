@@ -1,5 +1,7 @@
 # Radeon 780M / 760M (Ryzen 7040 / 8040, gfx1103): build from source on Linux
 
+This page keeps measurements from a card this build does not target: it builds sm_75 only. Read it as history.
+
 The Radeon 780M (Phoenix / Hawk Point, RDNA3, `gfx1103`) runs Strata through the same HIP backend as the Radeon
 cards in [AMD_HIP.md](AMD_HIP.md). **Status: experimental and opt-in** (`STRATA_EXPERIMENTAL_GFX1103=1`): the port
 is measured on one machine (the numbers below), the maintainers have not run one, and the chip is not Strix Halo.

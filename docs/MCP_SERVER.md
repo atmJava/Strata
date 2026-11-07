@@ -1,5 +1,7 @@
 # Strata's MCP server: let your AI assistant install and run Strata
 
+This page is about tools/strata_mcp.py and its test, which are in the full source tree and not here. What this checkout has is the other direction: serve/mcp.py lets the server's chats use someone else's MCP server.
+
 This page is for people who use an AI assistant and want it to install, start, stop and check Strata. `tools/strata_mcp.py`
 is an [MCP](https://modelcontextprotocol.io) server for the assistant you already use (Claude Code, Claude Desktop,
 Cursor, VS Code, Codex ...). Add it once ([Quick start](#add-it)), then ask in plain words:

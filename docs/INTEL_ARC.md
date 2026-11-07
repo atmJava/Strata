@@ -1,5 +1,7 @@
 # Intel Arc on Linux
 
+This page describes the Intel (SYCL) build. This checkout builds the CUDA sm_75 engine on Linux only: CMakeLists.txt refuses STRATA_ENABLE_SYCL. sycl/ is not here.
+
 Strata runs on Intel Arc cards on Linux through its own engine ported to SYCL (Intel oneAPI). This page is for people with
 an Arc A-series (Alchemist) or B-series (Battlemage) card. It covers the released Terminal route, what you need, how to
 build the engine from source, and which cards were tested. The port's workflow and measurements are in [INTEL.md](INTEL.md).

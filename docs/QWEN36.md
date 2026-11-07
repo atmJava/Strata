@@ -1,5 +1,7 @@
 # Qwen3.6-35B-A3B: pictures, several requests at once and speed
 
+The gate and probe scripts this page names (tools/q36_batch_gate.py, q36_cmp_gate.py, q36_interleave_probe.py, q36_mtmd_dump.cpp, q36_par_bench.py, q36_proto_edge.py, q36_serve_handoff.py, q36_serve_par.py, q36_solo_gate.py, q36_vision_cmp.py, q36_vision_proto.py, q36_vision_serve.py) are not in this checkout. Its numbers are what those scripts measured.
+
 This page is for people who run [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (35B mixture of
 experts, 3B active, 256 experts, top-8) with Strata and want to know how pictures, parallel requests and the prompt
 chunk behave. For sizes and memory, see [MODELS.md](MODELS.md).

@@ -1,5 +1,7 @@
 # Unsloth's K-quants and Q8_0: formats, kernels and quality
 
+This checkout does not carry the yardstick's text set (data/quant_quality/v1): point tools/quant_quality.py's --set and --ids at a copy of it.
+
 This page covers Unsloth's files of the model ([unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF),
 revision `38bb39e`; the repository's head `766911a` has the same files, byte for byte): what each file stores in
 each layer, which of Strata's kernels run those formats on each kind of hardware, and how close each file comes to

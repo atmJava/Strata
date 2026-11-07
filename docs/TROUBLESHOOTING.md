@@ -1,5 +1,7 @@
 # Troubleshooting
 
+The launchers and packages this page names (SETUP.bat, START-HERE.bat, UPDATE.bat, update.sh, setup.py, setup.sh, packaging/mac/) belong to the full source tree; this checkout does not carry them.
+
 This page is for anyone whose install or startup fails. Find your symptom below. Each entry gives one fix.
 Start from the route you installed: [desktop app or Terminal](INSTALL.md), or [source checkout](SOURCE_INSTALL.md).
 The normal release uses the app or `strata launch` and needs no `.bat` file. Detailed engine errors are in the

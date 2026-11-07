@@ -1,5 +1,7 @@
 # Is Strata safe and private?
 
+The app and packaging code this page names (apps/host/, apps/desktop/, packaging/, strata_control/feed.py, signing.py, transfer.py, update_keys.json, strata_cli/update_cmd.py, tools/strata_mcp.py) lives in the full source tree. This checkout is the sm_75 server distribution and builds none of it.
+
 This page says what Strata downloads, where from, when it uses the internet, what stays on your PC and how the downloads
 are checked. Everything here comes from reading the code of this version. Each section names the files, so you or anyone
 you trust can check it. Where Strata does less than you might hope, the page says so.

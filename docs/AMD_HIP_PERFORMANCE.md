@@ -1,5 +1,7 @@
 # RX 7900 XTX support and performance evidence
 
+The HIP build and the bench/results/ folders it cites are not in this checkout (This checkout builds the CUDA sm_75 engine on Linux only: CMakeLists.txt refuses STRATA_ENABLE_HIP.). The numbers below are what the HIP build measured.
+
 This opt-in Linux `gfx1100` backend supersedes the initial support in
 [PR #94](https://github.com/Niko1221/Strata/pull/94). It retains HIP runtime and
 wave32 integer-dot compatibility, native mmap layout validation, and MTP, then

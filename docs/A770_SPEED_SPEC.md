@@ -1,5 +1,7 @@
 # A770 decode optimization specification
 
+This page measures the Intel (SYCL) build. This checkout builds the CUDA sm_75 engine on Linux only: CMakeLists.txt refuses STRATA_ENABLE_SYCL. Its numbers stay as they were measured.
+
 ## Objective and completion criteria
 
 Achieve **at least 20 generated tokens/second in decode on the local Intel Arc

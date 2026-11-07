@@ -1,5 +1,7 @@
 # Strata in Docker
 
+This page describes the Docker images. This checkout does not carry docker/ or the packaging scripts the image runs (packaging/package_engine.py, packaging/binary_deps.py).
+
 Run Strata in a container with a prebuilt engine. Install Docker, the host GPU driver and the GPU-access
 requirements in the table below. NVIDIA and AMD images can download and prepare a model on first start;
 Intel Arc needs prepared model files. Keep the data volume to reuse downloads and settings.

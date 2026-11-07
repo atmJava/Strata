@@ -1,5 +1,7 @@
 # Strata on a Mac (Apple Silicon, Metal)
 
+This page describes the Mac (Metal) build. This checkout builds the CUDA sm_75 engine on Linux only; metal/, strata_control/mac_fit.py and packaging/mac/ are not here.
+
 This page is for people with an Apple Silicon Mac (M1 or newer). Strata runs there on its own Metal engine: the NVIDIA kernels
 are replaced by Metal ones (`metal/`), and the host code and the server are the PC's. Intel Macs cannot run it.
 

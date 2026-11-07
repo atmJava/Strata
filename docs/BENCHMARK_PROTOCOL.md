@@ -1,5 +1,7 @@
 # Strata standard benchmark protocol
 
+The bench/ scripts and result folders it names are not in this checkout.
+
 **Status: draft, implemented in `strata bench run`; pilot validation pending.** Protocol ID: `strata-qwen38-thinking-v1-draft.1`.
 Result format: `strata-standard-benchmark`, schema version `1`.
 

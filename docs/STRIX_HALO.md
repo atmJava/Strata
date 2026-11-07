@@ -1,5 +1,7 @@
 # Strix Halo (Ryzen AI Max, gfx1151)
 
+This page keeps measurements from a card this build does not target: it builds sm_75 only. Read it as history.
+
 This page is for people with a Ryzen AI Max "Strix Halo" PC (Radeon 8060S / 8050S, RDNA 3.5, `gfx1151`, one pool of LPDDR5X
 shared by the CPU and the GPU). Strata runs there through the same HIP backend as the Radeon cards in [AMD_HIP.md](AMD_HIP.md).
 **Status: experimental.**

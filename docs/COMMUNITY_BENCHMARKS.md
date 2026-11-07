@@ -1,5 +1,7 @@
 # Community benchmark results
 
+The bench/results/ submissions it cites are not in this checkout; the rows keep each number with the settings its author measured on.
+
 Share measurements from your own hardware so other users can judge how Strata
 might run on a similar machine. This guide suggests a report format and a pull
 request workflow; a single model, GPU, or context length is enough to contribute.
