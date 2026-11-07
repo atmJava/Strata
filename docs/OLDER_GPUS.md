@@ -147,7 +147,7 @@ application clock is 759 MHz and a layer split leaves each die idle most of a wi
 (`nvidia-smi -i <dies> -ac 715,1050` as administrator). And a second engine pinned to the same logical CPUs halves this one's
 decode; keep two engines on different logical CPUs.
 
-`tools/q8_sm60_check.cu` checks the kernel against a CPU reference on these shapes (1-8 columns).
+Upstream's `tools/q8_sm60_check.cu` checked the kernel against a CPU reference on these shapes (1-8 columns); this build targets sm_75 and does not carry that check.
 
 ## Tesla P40 (sm_61): what was measured and changed
 
