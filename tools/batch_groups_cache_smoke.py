@@ -2,7 +2,7 @@
 """#1604: with --batch N --batch-groups N on a layer split, two long conversations that alternate must reuse their slot
 (or the conversation cache) on every later turn instead of reading their prompt from token 0.
 
-  python3 tools/batch_groups_cache_test.py CFG OUT.json
+  python3 tools/batch_groups_cache_smoke.py CFG OUT.json
   STRATA_EXTRA_ARGS="--batch 2 --batch-groups 2 --prompt-cache 4 --conversation-cache-mib 4096 --conversation-cache-slots 3"
 
 Three rounds; each round runs conversation A and conversation B at the same time (so both go through the batch slots),

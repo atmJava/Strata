@@ -7,7 +7,7 @@
 A3 must reuse the whole of A and its answer from the live session; without the fix the cancelled A2 had taken
 the parked entry and A3 fell back to the turn checkpoint (the prompt, not the answer).
 
-  python3 tools/cancel_park_test.py CFG   # CFG: a run config json (as tools used by smoke); needs a conversation cache:
+  python3 tools/cancel_park_smoke.py CFG   # CFG: a run config json (as tools used by smoke); needs a conversation cache:
   STRATA_EXTRA_ARGS="--prompt-cache 4 --conversation-cache-mib 2048 --conversation-cache-slots 3"
 Prints PASS / FAIL and the reused token counts.  Exit status 0 on PASS.
 """

@@ -3,8 +3,8 @@
 // against one call per row, as verify.cpp makes them without the switch.  Every slot has its own indexer keys, page
 // table and K/V pools (fp16, int8, q4_0 and int8-K/q4_0-V) and its own context length; scores, selected ids and the
 // attention output must be bitwise identical.  Synthetic data, no model.  Run it once more with
-// STRATA_ATTN_LANECELL=1 for the lane-cell kernels.  Where a launcher declines by design (STRATA_SCORES_MULTI=0, the
-// pre-sm_75 attention, the gfx906 query swizzle) the engine keeps its per-row calls and the test skips (77).
+// STRATA_ATTN_LANECELL=1 for the lane-cell kernels.  Where a launcher declines by design (STRATA_SCORES_MULTI=0, or
+// STRATA_ATTN_DAILY=1's PR #540 attention) the engine keeps its per-row calls and the test skips (77).
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/qsa.hpp"
@@ -154,8 +154,8 @@ Result check(int fmt, int m, const int64_t* ctx, uint32_t seed) {
     const float* dead[k::kQsaAttnMaxSlots];
     k::QsaAttnSlotPools px;
     for (int t = 0; t < m; ++t) { pooled[t] = slots[t].pooled; dead[t] = slots[t].dead; px.p[t] = slots[t].pools; }
-    // a declined launch is no failure: the engine runs the per-row calls there (STRATA_SCORES_MULTI=0, the pre-sm_75
-    // attention, the gfx906 query swizzle)
+    // a declined launch is no failure: the engine runs the per-row calls there (STRATA_SCORES_MULTI=0, or
+    // STRATA_ATTN_DAILY=1's PR #540 attention)
     Result res = kPass;
     if (!k::qsa_block_scores_slots(pooled, dead, d_qidx, d_steps, m, max_blocks, s, sc[1], nullptr)) {
         std::puts("SKIP: qsa_block_scores_slots declined (STRATA_SCORES_MULTI=0); the engine keeps the per-row calls");
@@ -163,8 +163,8 @@ Result check(int fmt, int m, const int64_t* ctx, uint32_t seed) {
     } else {
         k::qsa_block_topk(sc[1], d_steps, m, max_blocks, cap, s, sel[1], nullptr);
         if (!k::qsa_decode_attn_slots(d_qcur, px, sel[1], d_steps, cap, s, scratch[1], attn[1], m, nullptr)) {
-            std::puts("SKIP: qsa_decode_attn_slots declined (the pre-sm_75 or gfx906 query-swizzle attention); the "
-                      "engine keeps the per-row calls");
+            std::puts("SKIP: qsa_decode_attn_slots declined (STRATA_ATTN_DAILY=1's PR #540 attention); the engine "
+                      "keeps the per-row calls");
             res = kSkip;
         }
     }
@@ -210,7 +210,7 @@ int main() {
     }
     // contexts per row: under and over the selection width (2048 cells), partial and complete indexer blocks
     const int64_t ctx[8] = {1500, 37, 9000, 2049, 32768, 300, 20001, 4096};
-    int cases = 0, skipped = 0;   // the gfx906 query swizzle declines only the int8 K/V format
+    int cases = 0, skipped = 0;   // the slots launchers decline on their env switches and geometry checks, not on a case's KV format
     for (int fmt = 0; fmt < 4; ++fmt)
         for (int m : {1, 2, 4, 8}) {
             const Result res = check(fmt, m, ctx, 1000u * (uint32_t) fmt + (uint32_t) m);

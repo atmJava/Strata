@@ -24,7 +24,7 @@ Both are off unless set.
 | --- | --- |
 | `mk_prompts.py` | Builds chat-template prompt ids with the server's own tokenizer and template. |
 | `orch.py <prompt> <max_new> [gen,genf,genfm,tap]` | Drives `run_one.ps1` on the test box: free generation (ids and MTP statistics), the same text with MTP only, and the teacher-forced tap dump with oracle drafts (`--spec 8 --spec-oracle --spec-follow`, a 2-token prompt, because a native pack never starts the speculative loop from a 1-token prompt). |
-| `dflash2_ref.py` | Plain-torch port of z-lab's `DFlash2DraftModel`, with the target's embedding and head dequantized from the GGUF. `test_port.py` checks it against the original. |
+| `dflash2_ref.py` | Plain-torch port of z-lab's `DFlash2DraftModel`, with the target's embedding and head dequantized from the GGUF. |
 | `run_eval.py` | Walks the tap file with a few block sizes. |
 | `run_all2.py` | Evaluates every position, resumable: per-anchor correctness and the selector's confidences. |
 | `analyze2.py`, `final_tables.py` | Policies, and speed estimates from the measured window costs. |

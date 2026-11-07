@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SAVE / RESTORE round trip with parked conversations holding the host RAM (#1572 / #1573).
 
-  python3 tools/session_pressure_test.py CFG OUTFILE
+  python3 tools/session_pressure_smoke.py CFG OUTFILE
   STRATA_EXTRA_ARGS="--prompt-cache 4 --conversation-cache-mib 3072 --conversation-cache-slots 4
                      --conversation-cache-min-free-mib <floor> [--session-save-reclaim]"
 

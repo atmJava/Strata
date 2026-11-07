@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A client that stops reading a streamed answer early must not leave its tokens to the next request.
 
-  STRATA_KEY=... python3 tools/early_close_test.py http://127.0.0.1:8090
+  STRATA_KEY=... python3 tools/early_close_smoke.py http://127.0.0.1:8090
 """
 import json, os, sys, threading, urllib.request
 
