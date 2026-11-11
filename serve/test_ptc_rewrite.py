@@ -81,6 +81,31 @@ class PtcRewriteTests(unittest.TestCase):
         self.assertEqual([c.name for c in calls_of(events)], ["run_code", "run_code"])
 
 
+class PrefixSpellings(unittest.TestCase):
+    """The model writes the programmatic prompt's own spelling: `tools.edit`, `tools edit` and the bare `tools`."""
+
+    def body(self, name):
+        return ("<tool_call>\n<function=" + name + ">\n<parameter=file_path>\na.txt\n</parameter>\n"
+                "</function>\n</tool_call>")
+
+    def test_the_dotted_spelling_is_the_tool(self):
+        _, events = parse(self.body("tools.edit"), rewrite={"read": "run_code", "edit": "run_code"})
+        calls = calls_of(events)
+        self.assertEqual([c.name for c in calls], ["run_code"])
+        self.assertIn('"edit"', calls[0].arguments["code"])
+        self.assertIn("a.txt", calls[0].arguments["code"])
+
+    def test_the_space_spelling_is_the_tool(self):
+        _, events = parse(self.body("tools edit"), rewrite={"read": "run_code", "edit": "run_code"})
+        self.assertEqual([c.name for c in calls_of(events)], ["run_code"])
+
+    def test_the_dotted_spelling_of_the_wrapper_itself_is_not_wrapped_twice(self):
+        _, events = parse(self.body("tools.run_code"), rewrite={"read": "run_code"})
+        calls = calls_of(events)
+        self.assertEqual([c.name for c in calls], ["run_code"])
+        self.assertEqual(calls[0].arguments, {"file_path": "a.txt"})    # its own arguments, not a wrapper
+
+
 class DshDetectionTests(unittest.TestCase):
     def body(self, max_output_tokens):
         return {"model": "m", "stream": True, "max_output_tokens": max_output_tokens,
