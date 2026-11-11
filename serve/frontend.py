@@ -930,12 +930,28 @@ class OutputParser:
         for name in self.schemas:
             if isinstance(name, str) and "__" in name:
                 aliases.setdefault(name.replace("__", "_"), set()).add(name)
+        # #5281: a namespaced MCP tool called by the member after its last `__` is that tool when exactly one
+        # declared name ends that way (`get_asset_info` for `mcp__assets__get_asset_info`); two endings alike are
+        # not guessed, and an exactly declared name always wins.
+        by_member = {}
+        for name in self.schemas:
+            if isinstance(name, str) and "__" in name:
+                by_member.setdefault(name.rsplit("__", 1)[1], set()).add(name)
+        for member, names in by_member.items():
+            if len(names) == 1 and member not in self.schemas:
+                aliases.setdefault(member, set()).add(next(iter(names)))
         self.aliases = {alias: next(iter(names)) for alias, names in aliases.items()
                         if len(names) == 1 and alias not in self.schemas}
         # opt-in (the config's "ptc_tool_rewrite"): a call for a tool the request did not declare, written in the
         # wrapper's own name, is delivered as a call of the declared wrapper instead (ptc_wrapped_call).  The
         # arguments are the model's own, so this invents nothing; it only moves the call into the tool that runs it.
         self.rewrite = {k: v for k, v in (rewrite or {}).items() if isinstance(k, str) and isinstance(v, str)}
+        # DSH's programmatic prompt spells its tools `tools.name` (the object a run_code program calls), and the model
+        # writes that spelling into the <tool_call> in three ways: `tools.name`, `tools name` (a space for the dot)
+        # and the bare `tools`.  All three are the tool they name at every place a name is read.
+        for _name in list(self.schemas) + list(self.rewrite):
+            if isinstance(_name, str) and _name and f"tools.{_name}" not in self.schemas:
+                self.aliases.setdefault(f"tools.{_name}", _name)
         self.unread = 0              # #3441: `<tool_call>` blocks that opened like a call and were returned as text
         self.unread_names: list[str] = []   # the names (first few) of those that named a tool the request did not declare
         # stream_tools: a tool call is also reported while it is being written - "tool_start" (its name and id) as
@@ -972,12 +988,49 @@ class OutputParser:
         self.fence, self.line, self.ticks = snap
         return ok
 
+    PREFIXES = ("tools", "functions", "default_api")   # the namespaces a programmatic prompt spells its tools in
+
+    def _declared(self, name: str) -> bool:
+        """A spelling of a declared tool (its own name, an alias of it, or a rewrite candidate)."""
+        return name in self.schemas or name in self.aliases or name in self.rewrite
+
+    def _prefixish(self, name: str) -> bool:
+        """`tools`, or `tools something`: a name in the programmatic prompt's spelling either way."""
+        parts = name.split(None, 1)
+        return bool(parts) and parts[0] in self.PREFIXES
+
+    def _space_form(self, name: str) -> str | None:
+        """`tools actio` is the tool `actio` when that is a declared tool's spelling (#5409)."""
+        parts = name.split(None, 1)
+        if len(parts) != 2 or parts[0] not in self.PREFIXES:
+            return None
+        return parts[1] if self._declared(parts[1]) else None
+
+    def _fits(self, name: str, args: dict) -> bool:
+        """Whether `args` is a call of the declared `name`: every argument it declares, none it does not."""
+        params = (self.schemas.get(name) or {}).get("parameters") or {}
+        props = params.get("properties") or {}
+        required = params.get("required") or []
+        return all(k in props for k in args) and all(r in args for r in required)
+
+    def _bare_fit(self, args: dict) -> str | None:
+        """The one declared tool the bare `tools` call fits (#5409: it is the prefix alone)."""
+        fits = [name for name in self.schemas if self._fits(name, args)]
+        return fits[0] if len(fits) == 1 else None
+
+    def _tool_name(self, name: str) -> str:
+        """The tool a written name means: its aliases, and the `tools name` spelling of #5409."""
+        name = self.aliases.get(name, name)
+        return self._space_form(name) or name
+
     def _callable(self, name: str) -> bool:
         """#3075: may a call for `name` be a call?  A tool the request declared (or its Responses spelling); with
         none declared, only where `declared_only` is off."""
         if not self.schemas:
-            return not self.declared_only
-        return name in self.schemas or name in self.aliases or name in self.rewrite
+            return not self.declared_only and not self._prefixish(name)
+        if self._declared(name) or self._space_form(name):
+            return True
+        return name in self.PREFIXES and self.recover
 
     def _loose_open(self, after: str):
         """#3441: `after` (text after a `<tool_call>`, whitespace dropped) opens a call in a drifted form that names a
@@ -1030,7 +1083,7 @@ class OutputParser:
                 gt = self.buf.find(">", p)
                 raw_name = self.buf[p + len(FUNC_START):gt if gt >= 0 else len(self.buf)]
                 name = raw_name.strip()
-                name = self.aliases.get(name, name)
+                name = self._tool_name(name)
                 if gt < 0 and re.fullmatch(r"\s*[^<>\s]*\s*", raw_name):
                     return p, False
                 if gt >= 0 and name in self.schemas:
@@ -1167,9 +1220,11 @@ class OutputParser:
                     return out
                 raw_name = rest[a + 10:b]
                 name = raw_name.strip()
-                name = self.aliases.get(name, name)
+                name = self._tool_name(name)
                 if raw_name != raw_name.strip() and name not in self.schemas:
                     return out
+                if name in self.PREFIXES and not self._declared(name):
+                    return out          # the bare prefix: which tool it is needs the arguments, so it is held to the end
                 if name not in self.schemas and name in self.rewrite:
                     return out          # delivered as the declared wrapper once whole: these arguments are not its own
                 self.scall = ToolCall(name=name, arguments={})
@@ -1290,7 +1345,7 @@ class OutputParser:
                     call = None
                     try:
                         name = body[:end].strip()[len("<function="):].split(">", 1)[0].strip()
-                        name = self.aliases.get(name, name)
+                        name = self._tool_name(name)
                         if name in self.schemas:
                             call = parse_tool_call(body[:end], self.schemas.get(name))
                             call.name = name
@@ -1449,14 +1504,14 @@ class OutputParser:
                     continue
                 if kind == "wait":
                     after = ""
-                is_call = re.match(r"<function=(\s*[^<>\s]+\s*)>", after)
+                is_call = re.match(r"<function=(\s*[^<>]*?)\s*>", after)
                 if is_call:
                     raw_name = is_call.group(1)
                     name = raw_name.strip()
-                    name = self.aliases.get(name, name)
+                    name = self._tool_name(name)
                     if raw_name != raw_name.strip() and name not in self.schemas:
                         is_call = None     # only declared names gain whitespace normalization
-                is_partial = FUNC_START.startswith(after) or re.fullmatch(r"<function=\s*[^<>\s]*\s*", after)
+                is_partial = FUNC_START.startswith(after) or re.fullmatch(r"<function=\s*[^<>]*\s*", after)
                 if not is_call and not is_partial:
                     out.append(Event("content", self._track(self.buf[:i + len(CALL_START)])))
                     self.buf = self.buf[i + len(CALL_START):]
@@ -1590,12 +1645,21 @@ class OutputParser:
         parse is the text it is instead of an error that ends the request."""
         raw_name = body.strip()[len(FUNC_START):].split(">", 1)[0]
         name = raw_name.strip()
-        name = self.aliases.get(name, name)
+        name = self._tool_name(name)
+        bare_prefix = name in self.PREFIXES and not self._declared(name)
         bare, self.bare = self.bare, False
         try:
+            if not self.schemas and self._prefixish(name):
+                raise ValueError("no tool is declared to run a prefix call")   # the prefix names nothing here
             if raw_name != raw_name.strip() and name not in self.schemas:
                 raise ValueError("whitespace tool name is not declared")
             call = parse_tool_call(body, self.schemas.get(name))
+            if bare_prefix:                     # #5409: the prefix alone is the one declared tool the call fits
+                picked = self._bare_fit(call.arguments)
+                if picked is None:
+                    raise ValueError("the bare prefix fits no single tool")
+                call = ToolCall(name=picked, arguments=call.arguments)
+                name = picked
             call.name = name
             target = self.rewrite.get(name) if name not in self.schemas else None
             if target and target in self.schemas:
