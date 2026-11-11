@@ -613,6 +613,8 @@ def is_dsh_title_request(req: dict) -> bool:
     )
 
 
+DSH_MAX_OUTPUT_TOKENS = (32000, 32768)      # DSH's default; the desktop profile sends the model's maxTokens
+
 DSH_MAIN_TOOLS = (
     "bash", "create_goal", "edit", "exit_plan_mode", "get_goal", "glob", "grep",
     "interrupt_agent", "job_kill", "job_list", "job_output", "list_agents", "read",
@@ -636,7 +638,7 @@ def is_dsh_main_request(req: dict) -> bool:
     )
     return (
         req.get("stream") is True
-        and req.get("max_output_tokens") == 32000
+        and req.get("max_output_tokens") in DSH_MAX_OUTPUT_TOKENS
         and not req.get("instructions")
         and not req.get("client_metadata")
         and names == sorted(DSH_MAIN_TOOLS)
@@ -3970,6 +3972,9 @@ class Service:
         # call finish before the title competes for the GPU and prompt cache.
         self.defer_title_requests = os.environ.get("STRATA_DEFER_TITLE_REQUESTS") == "1"
         self.pin_dsh_tool_prefix = os.environ.get("STRATA_PIN_DSH_TOOL_PREFIX") == "1"
+        # DSH's programmatic mode advertises only run_code; a model that writes a direct <tool_call> for one of the
+        # tools run_code can reach gets a run_code call carrying that same call (frontend.ptc_wrapped_call). Opt-in.
+        self.ptc_tool_rewrite = os.environ.get("STRATA_DSH_PTC_TOOL_REWRITE") == "1"
         self.dsh_tool_prefix_key = None
         self.dsh_tool_prefix_lock = threading.Lock()
         grace_ms = _timeout_env("STRATA_DEFER_TITLE_GRACE_MS", 250.0) or 0.0
@@ -5076,8 +5081,26 @@ class Service:
         for k, v in spec.items():
             if not isinstance(v, int) or isinstance(v, bool) or v < (0 if k == "message" else 1):
                 raise ValueError(f"strata_prefix.{k}: a whole number ({'0' if k == 'message' else '1'} or more)")
-        if has_images:
+        def images_before(k: int) -> bool:
+            """Whether a picture sits in the messages the prefix covers (an image is an item of type image)."""
+            for m in messages[:max(0, k)]:
+                content = m.get("content")
+                if isinstance(content, list) and any(isinstance(it, dict) and it.get("type") == "image"
+                                                     for it in content):
+                    return True
+            return False
+
+        # A picture only rules out the prefix it would sit in: every later message may carry one (DSH sends
+        # screenshots), and the pinned head is then still the same tokens (the pin is a token boundary, and the
+        # picture's embeddings come after it).
+        if "tokens" in spec and has_images:
             print("[strata] strata_prefix ignored: the request has images", flush=True)
+            return {}
+        if "messages" in spec and images_before(spec["messages"]):
+            print(f"[strata] strata_prefix ignored: the first {spec['messages']} message(s) have an image", flush=True)
+            return {}
+        if "message" in spec and images_before(spec["message"]):
+            print(f"[strata] strata_prefix ignored: message {spec['message']} is preceded by an image", flush=True)
             return {}
         what = ",".join(f"{k}={v}" for k, v in spec.items())
 
@@ -5228,8 +5251,13 @@ class Service:
                 print(f"[strata] thinking capped at {max_new - reserve} of max_tokens {max_new} to leave room for "
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
+        rewrite = None
+        if self.ptc_tool_rewrite:
+            declared = {t.get("name") for t in tools or [] if isinstance(t, dict)}
+            if "run_code" in declared:          # the wrapper DSH's programmatic mode declares
+                rewrite = {name: "run_code" for name in DSH_MAIN_TOOLS if name not in declared}
         parser = self.parser_cls(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
-                                 declared_only=declared_only)
+                                 declared_only=declared_only, rewrite=rewrite)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
