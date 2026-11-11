@@ -17,8 +17,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import responses  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.responses import (ENCRYPTED_PREFIX, ResponsesError, collect, input_messages, prompt_made,  # noqa: E402
-                             prompt_tools, request_tools, template_kwargs, text_format, thread_title_events)
+from serve.responses import (ENCRYPTED_PREFIX, ResponsesError, collect, dsh_prompt_made,  # noqa: E402
+                             dsh_prompt_tools, input_messages, prompt_made, prompt_tools, request_tools,
+                             template_kwargs, text_format, thread_title_events)
 from serve.server import DSH_MAIN_TOOLS, ByteTokenizer, MockEngine, Service, is_dsh_main_request, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -996,6 +997,57 @@ class CodexCompactionOverHttp(Server):
         again, code, r = self.compaction(codex_meta("compaction"), between=fails)
         self.assertEqual(code, 200, r)
         self.assertEqual(again, before)                  # so A's compaction still starts as A's turn
+
+
+class DshCompactionTools(unittest.TestCase):
+    """A DSH compaction sends no tools; the tools its conversation's last prompt used are rendered again."""
+
+    def setUp(self):
+        with responses._kept_dsh_tools_lock:
+            responses._kept_dsh_tools.clear()
+
+    def test_the_conversations_tools_render_its_compaction(self):
+        main = [{"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "fix it"},
+                {"role": "assistant", "content": "ok"}]
+        dsh_prompt_made(main, TOOLS)
+        compaction = main + [{"role": "user", "content": "summarize"}]
+        self.assertEqual(dsh_prompt_tools(compaction, []), TOOLS)
+        own = [{"type": "function", "name": "own"}]
+        self.assertEqual(dsh_prompt_tools(compaction, own), own)   # a request with tools keeps its own
+
+    def test_another_conversation_is_not_rendered_with_them(self):
+        dsh_prompt_made([{"role": "system", "content": "A"}, {"role": "user", "content": "one"}], TOOLS)
+        self.assertEqual(dsh_prompt_tools([{"role": "system", "content": "B"},
+                                           {"role": "user", "content": "two"}], []), [])
+
+    def test_a_request_without_tools_does_not_replace_them(self):
+        main = [{"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "fix it"}]
+        dsh_prompt_made(main, TOOLS)
+        dsh_prompt_made(main, [])                                  # the compaction itself
+        self.assertEqual(dsh_prompt_tools(main + [{"role": "user", "content": "more"}], []), TOOLS)
+
+    def test_input_messages_keeps_the_key_across_a_compaction(self):
+        dev = {"type": "message", "role": "developer",
+               "content": [{"type": "input_text", "text": "You are a coding agent."}]}
+        user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix it"}]}
+        answer = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+        later = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "summarize"}]}
+        main = input_messages({"input": [dev, user, answer]})
+        compaction = input_messages({"input": [dev, user, answer, later]})
+        dsh_prompt_made(main, TOOLS)
+        self.assertEqual(dsh_prompt_tools(compaction, []), TOOLS)
+
+    def test_a_picture_does_not_change_the_key(self):
+        text = {"type": "input_text", "text": "look"}
+        image = {"type": "input_image", "image_url": "data:image/png;base64,AA"}
+        dev = {"role": "system", "content": "You are a coding agent."}
+        self.assertEqual(responses.dsh_tools_key([dev, {"role": "user", "content": [text, image]}]),
+                         responses.dsh_tools_key([dev, {"role": "user", "content": [text]}]))
+
+    def test_a_non_chat_first_message_has_no_key(self):
+        self.assertIsNone(responses.dsh_tools_key([{"role": "user", "content": "hi"}]))
 
 
 if __name__ == "__main__":

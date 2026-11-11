@@ -3970,6 +3970,9 @@ class Service:
         # call finish before the title competes for the GPU and prompt cache.
         self.defer_title_requests = os.environ.get("STRATA_DEFER_TITLE_REQUESTS") == "1"
         self.pin_dsh_tool_prefix = os.environ.get("STRATA_PIN_DSH_TOOL_PREFIX") == "1"
+        # DSH's compaction re-sends the conversation with no tools; render it with the conversation's tools so the
+        # prompt it reads again starts as the cached one did (responses.dsh_prompt_tools).  Opt-in.
+        self.keep_dsh_compaction_tools = os.environ.get("STRATA_KEEP_DSH_COMPACTION_TOOLS") == "1"
         self.dsh_tool_prefix_key = None
         self.dsh_tool_prefix_lock = threading.Lock()
         grace_ms = _timeout_env("STRATA_DEFER_TITLE_GRACE_MS", 250.0) or 0.0
@@ -7812,7 +7815,14 @@ def make_handler(svc: Service):
             svc.load()
             # #924 (opt-in): a Codex compaction request is rendered with its conversation's tools, so its prompt
             # starts as the cached one did; the parser and the response keep the request's own tools
-            shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
+            shown = tools
+            if svc.codex_compaction_cache:
+                shown = responses_api.prompt_tools(req, tools)
+            if (shown is tools and svc.keep_dsh_compaction_tools and not tools
+                    and not req.get("instructions") and len(messages) >= 8):
+                # DSH's compaction: no tools, no instructions, a long history; the tools its conversation's last
+                # prompt was rendered with make its prompt start there instead of at the developer text.
+                shown = responses_api.dsh_prompt_tools(messages, tools)
             try:
                 try:
                     ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0, req=req,
@@ -7830,6 +7840,8 @@ def make_handler(svc: Service):
                     from None
             if svc.codex_compaction_cache:
                 responses_api.prompt_made(req, shown)
+            if svc.keep_dsh_compaction_tools and tools and not req.get("instructions"):
+                responses_api.dsh_prompt_made(messages, tools)
             _debug_req("responses", req, messages, tools, max_new, thinking, len(ids))
             include = req.get("include") if isinstance(req.get("include"), list) else []
             asm = responses_api.Assembler(req, svc.model_for(req), len(ids), names,
