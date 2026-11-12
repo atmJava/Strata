@@ -1688,6 +1688,13 @@ class OutputParser:
                 call = ToolCall(name=picked, arguments=call.arguments)
                 name = picked
             call.name = name
+            # The wrapper schema requires a description; a model that wrote only "code" is still a call, and a
+            # generic one is better than a validation failure at the client.
+            if (name in self.schemas and isinstance(call.arguments, dict)
+                    and "description" not in call.arguments
+                    and "description" in (((self.schemas.get(name) or {}).get("parameters") or {})
+                                          .get("properties") or {})):
+                call.arguments["description"] = f"{name} call"
             target = self.rewrite.get(name) if name not in self.schemas else None
             if target is None and name not in self.schemas:
                 target = self.rewrite.get("*")     # the wrapper the programmatic preset declares, for any name
