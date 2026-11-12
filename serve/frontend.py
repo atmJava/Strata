@@ -999,12 +999,33 @@ class OutputParser:
         parts = name.split(None, 1)
         return bool(parts) and parts[0] in self.PREFIXES
 
-    def _space_form(self, name: str) -> str | None:
-        """`tools actio` is the tool `actio` when that is a declared tool's spelling (#5409)."""
-        parts = name.split(None, 1)
-        if len(parts) != 2 or parts[0] not in self.PREFIXES:
+    def _prefix_name(self, name: str) -> str | None:
+        """What a name written in the programmatic prompt's spelling means: `tools.read`, `tools read`,
+        `tools["read"]`, `tools['read']`, `tools[read]` and `tools.read()` are all `read`."""
+        m = re.match(r"^(?:tools|functions|default_api)\s*(?:\.|\[|\s)\s*(.*)$", name.strip())
+        if not m:
             return None
-        return parts[1] if self._declared(parts[1]) else None
+        rest = re.sub(r"\(\s*\)\s*;?\s*$", "", m.group(1).strip()).strip()
+        if rest.endswith("]"):
+            rest = rest[:-1].strip()
+        for quotes in ('"', "'", "`"):
+            if len(rest) >= 2 and rest[0] == rest[-1] == quotes:
+                rest = rest[1:-1].strip()
+                break
+        rest = rest.rstrip(");").strip()
+        for quotes in ('"', "'", "`"):
+            if len(rest) >= 2 and rest[0] == rest[-1] == quotes:
+                rest = rest[1:-1].strip()
+                break
+        return rest or None
+
+    def _space_form(self, name: str) -> str | None:
+        """The tool a prefixed spelling names, when that is a declared tool's spelling (#5409, #5281).  A name that
+        is itself a tool (`functions.exec`) wins: the prefix is only a prefix when what it holds is not a tool."""
+        if self._declared(name):
+            return None
+        pre = self._prefix_name(name)
+        return pre if pre and self._declared(pre) else None
 
     def _fits(self, name: str, args: dict) -> bool:
         """Whether `args` is a call of the declared `name`: every argument it declares, none it does not."""
@@ -1019,8 +1040,10 @@ class OutputParser:
         return fits[0] if len(fits) == 1 else None
 
     def _tool_name(self, name: str) -> str:
-        """The tool a written name means: its aliases, and the `tools name` spelling of #5409."""
+        """The tool a written name means: its aliases, and the prefixed spellings of #5409/#5281."""
         name = self.aliases.get(name, name)
+        if self._declared(name):
+            return name
         return self._space_form(name) or name
 
     def _callable(self, name: str) -> bool:
