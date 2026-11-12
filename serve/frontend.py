@@ -949,7 +949,9 @@ class OutputParser:
         # DSH's programmatic prompt spells its tools `tools.name` (the object a run_code program calls), and the model
         # writes that spelling into the <tool_call> in three ways: `tools.name`, `tools name` (a space for the dot)
         # and the bare `tools`.  All three are the tool they name at every place a name is read.
-        for _name in list(self.schemas) + list(self.rewrite):
+        self.rewritten = 0           # calls the parser moved into the declared wrapper
+        self.rewritten_names = set()
+        for _name in list(self.schemas) + [k for k in self.rewrite if k != "*"]:
             if isinstance(_name, str) and _name and f"tools.{_name}" not in self.schemas:
                 self.aliases.setdefault(f"tools.{_name}", _name)
         self.unread = 0              # #3441: `<tool_call>` blocks that opened like a call and were returned as text
@@ -1052,6 +1054,8 @@ class OutputParser:
         if not self.schemas:
             return not self.declared_only and not self._prefixish(name)
         if self._declared(name) or self._space_form(name):
+            return True
+        if "*" in self.rewrite and name not in self.schemas:   # the wrapper takes any undeclared name
             return True
         return name in self.PREFIXES and self.recover
 
@@ -1248,7 +1252,7 @@ class OutputParser:
                     return out
                 if name in self.PREFIXES and not self._declared(name):
                     return out          # the bare prefix: which tool it is needs the arguments, so it is held to the end
-                if name not in self.schemas and name in self.rewrite:
+                if name not in self.schemas and (name in self.rewrite or "*" in self.rewrite):
                     return out          # delivered as the declared wrapper once whole: these arguments are not its own
                 self.scall = ToolCall(name=name, arguments={})
                 props = ((self.schemas.get(name) or {}).get("parameters") or {}).get("properties") or {}
@@ -1685,8 +1689,12 @@ class OutputParser:
                 name = picked
             call.name = name
             target = self.rewrite.get(name) if name not in self.schemas else None
+            if target is None and name not in self.schemas:
+                target = self.rewrite.get("*")     # the wrapper the programmatic preset declares, for any name
             if target and target in self.schemas:
                 call = ptc_wrapped_call(name, call.arguments, target)
+                self.rewritten += 1
+                self.rewritten_names.add(name)
         except ValueError:
             if not self.recover:
                 raise
