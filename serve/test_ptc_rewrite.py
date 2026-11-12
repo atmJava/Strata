@@ -121,13 +121,15 @@ class PrefixSpellings(unittest.TestCase):
         _, events = parse(self.body('tools["run_code"]'), rewrite={"read": "run_code"})
         calls = calls_of(events)
         self.assertEqual([c.name for c in calls], ["run_code"])
-        self.assertEqual(calls[0].arguments, {"file_path": "a.txt"})
+        self.assertEqual({k: v for k, v in calls[0].arguments.items() if k != "description"},
+                         {"file_path": "a.txt"})
 
     def test_the_dotted_spelling_of_the_wrapper_itself_is_not_wrapped_twice(self):
         _, events = parse(self.body("tools.run_code"), rewrite={"read": "run_code"})
         calls = calls_of(events)
         self.assertEqual([c.name for c in calls], ["run_code"])
-        self.assertEqual(calls[0].arguments, {"file_path": "a.txt"})    # its own arguments, not a wrapper
+        self.assertEqual({k: v for k, v in calls[0].arguments.items() if k != "description"},
+                         {"file_path": "a.txt"})    # its own arguments, not a wrapper
 
 
 class AnyUndeclaredName(unittest.TestCase):
@@ -145,7 +147,21 @@ class AnyUndeclaredName(unittest.TestCase):
 
     def test_a_declared_tool_is_still_called_as_declared(self):
         _, events = parse(self.body("run_code"), rewrite={"*": "run_code"})
-        self.assertEqual(calls_of(events)[0].arguments, {"file_path": "a.txt"})
+        call = calls_of(events)[0]
+        self.assertEqual({k: v for k, v in call.arguments.items() if k != "description"},
+                         {"file_path": "a.txt"})
+
+
+class WrapperArguments(unittest.TestCase):
+    def test_a_missing_description_is_filled(self):
+        _, events = parse('<tool_call>\n<function=run_code>\n<parameter=code>\nconst x = 1;\n</parameter>\n'
+                          '</function>\n</tool_call>')
+        self.assertIn("description", calls_of(events)[0].arguments)
+
+    def test_a_written_description_is_kept(self):
+        _, events = parse('<tool_call>\n<function=run_code>\n<parameter=code>\nconst x = 1;\n</parameter>\n'
+                          '<parameter=description>\nmine\n</parameter>\n</function>\n</tool_call>')
+        self.assertEqual(calls_of(events)[0].arguments["description"], "mine")
 
 
 class PromptToolNames(unittest.TestCase):
