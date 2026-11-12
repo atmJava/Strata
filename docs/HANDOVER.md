@@ -75,6 +75,11 @@
   [HC_SPLIT 结果](work/GPU_XID13_HC_SPLIT_RESULT-20261101.md) 与
   [事件结果](work/GPU_XID13_INCIDENT_RESULT-20261101.md)。只读探针为
   `tools/server/probe-gpu-stability.py`。
+- **11-12 08:19:42Z GPU0 Xid 复发**：`HC_SPLIT=1` 在跑，两路 ~`99k` prompt，
+  141×Xid 13 + 1×Xid 43，同 ESR `0x4c1eb72`；engine 退出 1、约 `117 s` 重启。该候选
+  未过真实长曝光；显存锁频在 GeForce 上不可用，改降功率上限。见
+  [11-12 事件](work/GPU_XID13_INCIDENT-20261112.md)。已将两卡功率上限降到默认 `250 W`
+  并固化为 `strata-gpu-tune.service`；显存锁频在 GeForce 上不可用。
 - **质量对照与最终收口已完成**：用户实际 DSH Web 是
   `atm -> qwen3.8-flash-next-iq3_xxs-abliterated -> 129.28.27.137:8888`；旧
   `dsh headless` 基准是 DeepSeek 官方，不能归因当前 Qwen/Strata。显式 overlay 对齐后，
