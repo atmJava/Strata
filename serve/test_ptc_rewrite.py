@@ -99,6 +99,29 @@ class PrefixSpellings(unittest.TestCase):
         _, events = parse(self.body("tools edit"), rewrite={"read": "run_code", "edit": "run_code"})
         self.assertEqual([c.name for c in calls_of(events)], ["run_code"])
 
+    def test_the_bracket_spelling_is_the_tool(self):
+        # Seen live: <function=tools["read"]> — the JavaScript property access the model writes in a run_code program.
+        for name in ('tools["read"]', "tools['read']", "tools[read]", 'tools["read"]()', 'tools [ "read" ]',
+                     'tools[`read`]'):
+            _, events = parse(self.body(name), rewrite={"read": "run_code"})
+            calls = calls_of(events)
+            self.assertEqual([c.name for c in calls], ["run_code"], name)
+            self.assertIn('"read"', calls[0].arguments["code"], name)
+            self.assertIn("a.txt", calls[0].arguments["code"], name)
+
+    def test_the_bracket_spelling_streams_whole(self):
+        # It arrived streamed; every cut must give the same single run_code call and no XML in the answer.
+        for width in (1, 2, 7, 13):
+            _, events = parse(self.body('tools["read"]'), rewrite={"read": "run_code"}, width=width)
+            self.assertEqual([c.name for c in calls_of(events)], ["run_code"], width)
+            self.assertFalse([e for e in events if e.kind == "content" and "tool_call" in (e.text or "")], width)
+
+    def test_the_bracket_spelling_of_the_wrapper_itself(self):
+        _, events = parse(self.body('tools["run_code"]'), rewrite={"read": "run_code"})
+        calls = calls_of(events)
+        self.assertEqual([c.name for c in calls], ["run_code"])
+        self.assertEqual(calls[0].arguments, {"file_path": "a.txt"})
+
     def test_the_dotted_spelling_of_the_wrapper_itself_is_not_wrapped_twice(self):
         _, events = parse(self.body("tools.run_code"), rewrite={"read": "run_code"})
         calls = calls_of(events)
