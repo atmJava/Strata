@@ -25,6 +25,7 @@ import base64
 import collections
 import copy
 import json
+import re
 import threading
 import time
 import uuid
@@ -417,6 +418,31 @@ def prompt_made(req: dict, tools):
             _kept_prompt_tools.move_to_end(conversation)
             while len(_kept_prompt_tools) > _PROMPT_TOOLS_LIMIT:
                 _kept_prompt_tools.popitem(last=False)
+
+
+_PTC_CALL = re.compile(r'tools(?:\.|\[\s*["\'`]?)([A-Za-z_][A-Za-z0-9_]*)')
+
+
+def ptc_tool_names(req) -> set:
+    """The tools a programmatic prompt names: every `tools.<name>` and `tools["<name>"]` in the request's own
+    developer instructions.  In DSH's programmatic mode the request declares only run_code and these names live in
+    the prompt text, so the prompt is what says which tools a direct call may name."""
+    texts = []
+    instructions = req.get("instructions")
+    if isinstance(instructions, str):
+        texts.append(instructions)
+    for item in req.get("input") or []:
+        if not isinstance(item, dict) or item.get("role") not in ("developer", "system"):
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(p.get("text") for p in content if isinstance(p, dict) and isinstance(p.get("text"), str))
+    names = set()
+    for text in texts:
+        names.update(_PTC_CALL.findall(text))
+    return names
 
 
 def text_format(req: dict):
