@@ -241,6 +241,19 @@ class AdmitOrderTest(unittest.TestCase):
             e.ctl.release()
         self.assertGreater(e.slot_cv.notifications, 0)
 
+    def test_a_request_cancelled_before_an_idle_control_line_is_not_admitted(self):
+        """Cancellation wins even when the control line becomes available without a wait: the caller must not
+        send a prompt read after its client has gone."""
+        e = engine_without_process()
+        cancel = threading.Event()
+        cancel.set()
+        wait = e._take_control(cancel, [1] * 100, new=True)
+        with self.assertRaises(StopIteration) as stopped:
+            next(wait)
+        self.assertFalse(stopped.exception.value)
+        self.assertTrue(e.ctl.acquire(blocking=False), "a cancelled admission must not retain the control lines")
+        e.ctl.release()
+
     def test_the_short_work_boundary_is_inclusive(self):
         now = time.monotonic()
         prompt_at, prompt_over = [1] * 5_000, [2] * 5_000

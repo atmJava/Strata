@@ -1933,6 +1933,8 @@ class StrataEngine:
         beat = time.monotonic()
         try:
             while True:
+                if cancel.is_set():
+                    return False
                 deadline = getattr(cancel, "_strata_queue_deadline", None)
                 if deadline is not None and time.monotonic() >= deadline:
                     raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
@@ -1947,6 +1949,9 @@ class StrataEngine:
                         turn = self._admit_next() is entry
                 left = deadline - time.monotonic() if deadline is not None else 0.5
                 if turn and left > 0 and self.ctl.acquire(timeout=min(0.5, left)):
+                    if cancel.is_set():
+                        self.ctl.release()
+                        return False
                     if new and ADMIT_SHORT_FIRST > 0:
                         with self.slot_cv:              # a shorter one came while this one waited in acquire()
                             first = self._admit_next() is entry
@@ -1969,8 +1974,6 @@ class StrataEngine:
                 if not turn:
                     with self.slot_cv:
                         self.slot_cv.wait(timeout=min(0.5, max(0, left)))
-                if cancel.is_set():
-                    return False
                 if time.monotonic() - beat >= 10.0:     # a heartbeat every 10 s, as the engine's own wait
                     beat = time.monotonic()
                     yield None
