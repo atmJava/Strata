@@ -3,6 +3,7 @@
 #include "strata/core/pin_budget.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
 #include "strata/core/coupled_draft.hpp"
+#include "strata/core/diag.hpp"
 #include "strata/core/spec_prob.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/progress.hpp"
@@ -69,17 +70,9 @@ constexpr int GGML_Q4_0 = 2;
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
-inline bool diag_on() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_DIAG");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
-    return on;
-}
-
 void diag_edge(const char* what, const char* edge, int T, int64_t p, int a, int n_out, int n_force, int n_early,
                int j, int device, cudaGraphExec_t graph, cudaStream_t stream, cudaError_t result, bool have_result) {
-    if (!diag_on()) return;
+    if (!diag::enabled()) return;
     const cudaError_t peek = cudaPeekAtLastError();
     if (have_result) {
         std::fprintf(stderr,
@@ -1498,7 +1491,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     const int max_steps = (int) std::min<int64_t>(std::min(max_t_ - 1, max_drafts_), st_.max_cells - (p + a));
     for (int j = 1; j < max_steps; ++j)
         if (!capture_step(j, cp, err)) return false;
-    const bool trace = diag_on();
+    const bool trace = diag::enabled();
     auto draft_edge = [&](const char* what, const char* edge, int j, cudaGraphExec_t graph, cudaError_t result,
                           bool have_result) {
         diag_edge(what, edge, T, p, a, max_steps, 0, 0, j, device_, graph, cs_, result, have_result);
@@ -1758,7 +1751,7 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     for (int j = 1; j < n_out; ++j)
         if (step_exec_[j] == nullptr) { err = "mtp: chain graphs not prepared"; return false; }
     const Clock::time_point t0 = Clock::now();
-    const bool trace = diag_on();
+    const bool trace = diag::enabled();
     auto launch_graph = [&](const char* what, int j, cudaGraphExec_t graph) {
         diag_edge(what, "before", T, p, a, n_out, n_force, n_early, j, device_, graph, cs_, cudaSuccess, false);
         const cudaError_t rc = cudaGraphLaunch(graph, cs_);
@@ -1862,15 +1855,8 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
 int MtpDrafter::chain_poll(std::string& err) {
     if (!chain_live_) return 1;
     const OnDevice on_device(device_);
-    if (diag_on()) {
-        const cudaError_t peek = cudaPeekAtLastError();
-        std::fprintf(stderr,
-                     "strata diag mtp: chain_poll before dev=%d n_out=%d seen=%d early=%d event=%p peek=%s(%d)\n",
-                     device_, chain_n_, steps_seen_, chain_early_, (void*) ev_chain_, cudaGetErrorString(peek),
-                     (int) peek);
-    }
     const cudaError_t q = cudaEventQuery(ev_chain_);
-    if (diag_on() && q != cudaErrorNotReady) {
+    if (diag::enabled() && q != cudaErrorNotReady) {
         const cudaError_t peek = cudaPeekAtLastError();
         std::fprintf(stderr,
                      "strata diag mtp: chain_poll after dev=%d n_out=%d seen=%d early=%d event=%p query=%s(%d) peek=%s(%d)\n",

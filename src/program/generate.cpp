@@ -20,6 +20,7 @@
 #include "strata/core/batch_telemetry.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/device.hpp"
+#include "strata/core/diag.hpp"
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/conversation_snapshot.hpp"
@@ -284,14 +285,6 @@ void rss_probe(const char* where) {
 bool refill_blocking() {
     static const bool v = std::getenv("STRATA_REFILL_BLOCKING") != nullptr;
     return v;
-}
-
-bool diag_on() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_DIAG");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
-    return on;
 }
 
 using Clock = std::chrono::steady_clock;
@@ -4152,7 +4145,7 @@ int main(int argc, char** argv) {
     // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
     const strata::program::mtp_placement::Inputs mtp_layout{mtp_first_ok, o.pipeline_windows, stages.size(), o.batch};
     const bool mtp_first = strata::program::mtp_placement::on_first_stage(mtp_layout);
-    if (diag_on()) {
+    if (strata::core::diag::enabled()) {
         const int mtp_dev =
             strata::program::mtp_placement::drafter_device(mtp_layout, last_st != nullptr ? last_st->dev : 0);
         std::fprintf(stderr,
@@ -5838,7 +5831,7 @@ int main(int argc, char** argv) {
 #if defined(STRATA_HAVE_DFLASH2)
         if (use_df2 && native_head.loaded()) mtp_bind += (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) + (48 << 20);   // DFlash2's own draft head and logits, bound after this
 #endif
-        if (diag_on())
+        if (strata::core::diag::enabled())
             std::fprintf(stderr,
                          "strata diag placement: expert cache draft-head reservation=%lld MiB mtp_first=%d mtp_dev=%d\n",
                          (long long) (mtp_bind >> 20), mtp_first,
@@ -11674,7 +11667,7 @@ int main(int argc, char** argv) {
             auto is_eos = [&](int32_t y) {
                 return std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
             };
-            if (diag_on()) {
+            if (strata::core::diag::enabled()) {
                 std::string rows;
                 for (int t = 0; t < G.S; ++t) {
                     if (t != 0) rows += ',';
@@ -11708,7 +11701,7 @@ int main(int argc, char** argv) {
                 bt_tokens += blk.n - 1;   // (proposals checked)
                 blks.push_back(blk);
             }
-            if (diag_on()) {
+            if (strata::core::diag::enabled()) {
                 for (const Blk& blk : blks)
                     std::fprintf(stderr,
                                  "strata diag pmtp: verdict block slot=%d first=%d rows=%d keep=%d dev=%d stream=%p\n",
@@ -11717,7 +11710,7 @@ int main(int argc, char** argv) {
             }
             for (int k = 0; k < n_pipe; ++k) {
                 strata::core::Verifier& sv = stage_verifier(k);
-                if (diag_on()) {
+                if (strata::core::diag::enabled()) {
                     std::fprintf(stderr,
                                  "strata diag pmtp: verdict commit_begin stage=%d dev=%d stream=%p hbase=%d S=%d\n",
                                  k, sv.device(), (void*) sv.stream(), G.hbase, G.S);
@@ -11727,7 +11720,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR %s\n", err.c_str());
                     return false;
                 }
-                if (diag_on()) {
+                if (strata::core::diag::enabled()) {
                     const cudaError_t peek = cudaPeekAtLastError();
                     std::fprintf(stderr,
                                  "strata diag pmtp: verdict commit_end stage=%d dev=%d stream=%p peek=%s(%d)\n",
@@ -11789,7 +11782,7 @@ int main(int argc, char** argv) {
                 const float* src = vk.final_R_all() + (size_t) blk.f * stride;
                 const int mtp_device = slot_mtp[(size_t) blk.b]->device();
                 cudaStream_t mtp_stream = slot_mtp[(size_t) blk.b]->stream();
-                if (diag_on())
+                if (strata::core::diag::enabled())
                     std::fprintf(stderr,
                                  "strata diag pmtp: chain.rows_copy before slot=%d rows=%d keep=%d src_dev=%d dst_dev=%d src=%p dst=%p bytes=%zu copy_stream=%p mtp_stream=%p\n",
                                  blk.b, blk.n, blk.keep, vk.device(), mtp_device, (const void*) src,
@@ -11798,7 +11791,7 @@ int main(int argc, char** argv) {
                 const cudaError_t copy = cudaMemcpyAsync(slot_mtp_rows[(size_t) blk.b].get(), src,
                                                          (size_t) blk.n * stride * sizeof(float),
                                                          cudaMemcpyDeviceToDevice, vk.stream());
-                if (diag_on()) {
+                if (strata::core::diag::enabled()) {
                     const cudaError_t peek = cudaPeekAtLastError();
                     std::fprintf(stderr, "strata diag pmtp: chain.rows_copy after slot=%d result=%s(%d) peek=%s(%d)\n",
                                  blk.b, cudaGetErrorString(copy), (int) copy, cudaGetErrorString(peek), (int) peek);
@@ -11808,11 +11801,11 @@ int main(int argc, char** argv) {
                     std::printf("ERR batch MTP slot %d: %s\n", blk.b, "the proposal's chain did not start");
                     return false;
                 }
-                if (diag_on())
+                if (strata::core::diag::enabled())
                     std::fprintf(stderr, "strata diag pmtp: chain.copy_event before slot=%d event=%p stream=%p\n",
                                  blk.b, (void*) pm_copied[(size_t) blk.b], (void*) vk.stream());
                 const cudaError_t recorded = cudaEventRecord(pm_copied[(size_t) blk.b], vk.stream());
-                if (diag_on()) {
+                if (strata::core::diag::enabled()) {
                     const cudaError_t peek = cudaPeekAtLastError();
                     std::fprintf(stderr,
                                  "strata diag pmtp: chain.copy_event after slot=%d event=%p result=%s(%d) peek=%s(%d)\n",
@@ -11824,13 +11817,13 @@ int main(int argc, char** argv) {
                     std::printf("ERR batch MTP slot %d: %s\n", blk.b, "the proposal's chain did not start");
                     return false;
                 }
-                if (diag_on())
+                if (strata::core::diag::enabled())
                     std::fprintf(stderr,
                                  "strata diag pmtp: chain.copy_wait before slot=%d event=%p wait_stream=%p mtp_stream=%p\n",
                                  blk.b, (void*) pm_copied[(size_t) blk.b], (void*) vk.stream(), (void*) mtp_stream);
                 const cudaError_t waited =
                     cudaStreamWaitEvent(mtp_stream, pm_copied[(size_t) blk.b], 0);
-                if (diag_on()) {
+                if (strata::core::diag::enabled()) {
                     const cudaError_t peek = cudaPeekAtLastError();
                     std::fprintf(stderr,
                                  "strata diag pmtp: chain.copy_wait after slot=%d event=%p result=%s(%d) peek=%s(%d)\n",
@@ -11842,7 +11835,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR batch MTP slot %d: %s\n", blk.b, "the proposal's chain did not start");
                     return false;
                 }
-                if (diag_on())
+                if (strata::core::diag::enabled())
                     std::fprintf(stderr,
                                  "strata diag pmtp: chain_launch begin slot=%d T=%d p=%lld a=%d n_out=%d dev=%d stream=%p\n",
                                  blk.b, blk.n, (long long) G.pos[blk.f], blk.keep - 1, pm_drafts, mtp_device,
@@ -11853,7 +11846,7 @@ int main(int argc, char** argv) {
                                 err.empty() ? "the proposal's chain did not start" : err.c_str());
                     return false;
                 }
-                if (diag_on()) {
+                if (strata::core::diag::enabled()) {
                     const cudaError_t peek = cudaPeekAtLastError();
                     std::fprintf(stderr, "strata diag pmtp: chain_launch end slot=%d dev=%d stream=%p peek=%s(%d)\n",
                                  blk.b, mtp_device, (void*) mtp_stream, cudaGetErrorString(peek), (int) peek);

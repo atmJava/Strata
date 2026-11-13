@@ -2,6 +2,7 @@
 #include "strata/core/batch_rows.hpp"
 #include "strata/core/sm75_series.hpp"
 #include "strata/core/verify.hpp"
+#include "strata/core/diag.hpp"
 #include "strata/core/window_evict.hpp"
 #include "strata/core/pin_budget.hpp"
 #include "strata/core/host_graph_launch.hpp"
@@ -165,14 +166,6 @@ inline bool g_batch_side_mixer() {
 inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
-inline bool diag_on() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_DIAG");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
-    return on;
-}
-
 std::string diag_key(const std::vector<int>& key) {
     std::string out;
     for (size_t i = 0; i < key.size(); ++i) {
@@ -185,7 +178,7 @@ std::string diag_key(const std::vector<int>& key) {
 void diag_launch(const char* edge, const char* what, int device, int S, int hbase, const std::vector<int>& key,
                  const int32_t* tokens, const int64_t* pos, cudaGraphExec_t graph, cudaStream_t stream,
                  cudaError_t launch, bool have_launch) {
-    if (!diag_on()) return;
+    if (!diag::enabled()) return;
     const cudaError_t peek = cudaPeekAtLastError();
     if (have_launch) {
         std::fprintf(stderr,
@@ -2512,7 +2505,7 @@ bool Verifier::launch_head_split_peer(int T, std::string& err) {
     }
     const int peer = head_->peer_device();
     const OnDevice on_peer(peer);
-    if (diag_on()) {
+    if (diag::enabled()) {
         const cudaError_t peek = cudaPeekAtLastError();
         std::fprintf(stderr,
                      "strata diag verify: peer_head before T=%d dev=%d graph=%p stream=%p peek=%s(%d)\n",
@@ -2520,7 +2513,7 @@ bool Verifier::launch_head_split_peer(int T, std::string& err) {
                      (int) peek);
     }
     const cudaError_t le = cudaGraphLaunch(head_split_exec_[T], head_split_stream_);
-    if (diag_on()) {
+    if (diag::enabled()) {
         const cudaError_t peek = cudaPeekAtLastError();
         std::fprintf(stderr,
                      "strata diag verify: peer_head after T=%d dev=%d graph=%p stream=%p launch=%s(%d) peek=%s(%d)\n",
@@ -3885,7 +3878,7 @@ bool Verifier::batch_commit_rows(const int* rows, int S, int hbase, const int* k
         for (int64_t j = 0; j < max_t_; ++j) c[2 + j] = j < n ? (int32_t) pos[first + j] : -1;
     }
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (diag_on()) {
+    if (diag::enabled()) {
         std::string ks;
         for (int t = 0; t < S; ++t) {
             if (t != 0) ks += ',';
@@ -3898,7 +3891,7 @@ bool Verifier::batch_commit_rows(const int* rows, int S, int hbase, const int* k
                      (void*) it->second, (void*) cs_, cudaGetErrorString(peek), (int) peek);
     }
     const cudaError_t le = cudaGraphLaunch(it->second, cs_);
-    if (diag_on()) {
+    if (diag::enabled()) {
         const cudaError_t peek = cudaPeekAtLastError();
         std::fprintf(stderr,
                      "strata diag verify: batch_commit_rows after dev=%d S=%d hbase=%d key=[%s] graph=%p stream=%p launch=%s(%d) peek=%s(%d)\n",
@@ -4241,7 +4234,7 @@ bool Verifier::commit_slot_prefixes(const int* keep, std::string& err) {
         diag_launch("after", "commit_slot_prefixes", device_, S, row_base_, key, last_tokens_, last_pos_b_,
                     commit_bm_[key], cs_, le, true);
         if (le != cudaSuccess) { err = std::string("verify: batch commit launch: ") + cudaGetErrorString(le); return false; }
-        if (diag_on()) {
+        if (diag::enabled()) {
             const cudaError_t peek = cudaPeekAtLastError();
             std::fprintf(stderr,
                          "strata diag verify: commit_slot_prefixes sync before dev=%d S=%d hbase=%d stream=%p peek=%s(%d)\n",
@@ -4249,7 +4242,7 @@ bool Verifier::commit_slot_prefixes(const int* keep, std::string& err) {
             std::fflush(stderr);
         }
         const cudaError_t se = cudaStreamSynchronize(cs_);
-        if (diag_on()) {
+        if (diag::enabled()) {
             const cudaError_t peek = cudaPeekAtLastError();
             std::fprintf(stderr,
                          "strata diag verify: commit_slot_prefixes sync after dev=%d S=%d hbase=%d stream=%p result=%s(%d) peek=%s(%d)\n",
