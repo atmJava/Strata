@@ -2456,9 +2456,9 @@ class StrataEngine:
     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
     # Why a slot was chosen, so a run says whether reuse was lost by the choice or because the history was gone: a
     # prefix hit is a slot whose held tokens are the start of this prompt, no_prefix is a slot picked empty or by
-    # least-recent-use instead, all_busy is every slot in flight, group_fill is the pipelined-groups order (which keeps
+    # least-recent-use instead, no_free_slot_polls counts the polls that found every slot in flight (one per poll, not
     # no idle slot as a cache on purpose).  Read at /metrics; not a tuning knob.
-    pick_stats = {"prefix_hits": 0, "prefix_tokens": 0, "no_prefix": 0, "all_busy": 0, "group_fill": 0}
+    pick_stats = {"prefix_hits": 0, "prefix_tokens": 0, "no_prefix": 0, "no_free_slot_polls": 0, "group_fill": 0}
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
     def pick_slot(self, prompt: list[int]) -> int | None:
@@ -2472,7 +2472,7 @@ class StrataEngine:
             stats = self.pick_stats = dict(type(self).pick_stats)
         free = [b for b in self.slot_order if not self.slot_busy[b]]
         if not free:
-            stats["all_busy"] += 1
+            stats["no_free_slot_polls"] += 1
             return None
         gs = getattr(self, "slot_gs", 0)
         if gs > 1:

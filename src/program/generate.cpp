@@ -5253,15 +5253,15 @@ int main(int argc, char** argv) {
     // STRATA_PIPED_MTP is decided again now that the slots that fit and the groups are final.  Recommend, never force: when
     // it cannot run it is said and left off, and --batch-mtp goes on as it would without it.
     if (piped_mtp) {
-        const char* why = nullptr;
+        // A batch window keeps its own rows here (self-commit, verify.cpp), so a pipelined MTP window - which would
+        // have to hand its rows to the commit graph - never combines with it.  A more specific reason, if one applies,
+        // replaces this one below.
+        const char* why = "the batch window keeps its rows itself (self-commit), so a pipelined MTP window cannot";
         char buf[160];
-        const char* sc = std::getenv("STRATA_BATCH_SELF_COMMIT");
         if (o.batch < 2 || o.batch_groups <= 1) {
-            std::snprintf(buf, sizeof buf, "it needs 2 or more pipelined groups and %d slot%s in %d group%s are left", o.batch,
+            std::snprintf(buf, sizeof buf, "it needs 2 or more pipelined groups and %d slot%s in %d group%s are left",
                           o.batch == 1 ? "" : "s", o.batch_groups, o.batch_groups == 1 ? "" : "s");
             why = buf;
-        } else if (sc != nullptr && sc[0] != '\0' && sc[0] != '0') {
-            why = "it does not combine with STRATA_BATCH_SELF_COMMIT (the window would keep its rows itself)";
         } else if ((o.batch / o.batch_groups) * (1 + pm_drafts) > (int) strata::kernels::kVerifyMaxT) {
             std::snprintf(buf, sizeof buf, "a group's window would hold %d rows (%d slots x %d), more than %d",
                           (o.batch / o.batch_groups) * (1 + pm_drafts), o.batch / o.batch_groups, 1 + pm_drafts,

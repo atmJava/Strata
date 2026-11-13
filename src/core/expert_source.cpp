@@ -4410,15 +4410,8 @@ namespace {
 // explicit environment value is read once; the serve start-up (generate.cpp) sets the CUDA default where it applies.
 std::atomic<int> g_tail_skip_rank{-1};   // -1: not resolved yet
 }  // namespace
-int tail_skip_rank() {
-    int r = g_tail_skip_rank.load(std::memory_order_relaxed);
-    if (r < 0) {
-        const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP");
-        r = v != nullptr ? std::atoi(v) : 0;
-        r = r > 0 && r < 10 ? r : 0;
-        g_tail_skip_rank.store(r, std::memory_order_relaxed);
-    }
-    return r;
+int tail_skip_rank() {   // off: every expert is resident on this box, so the skip has no miss to skip (generate.cpp)
+    return g_tail_skip_rank.load(std::memory_order_relaxed) > 0 ? g_tail_skip_rank.load(std::memory_order_relaxed) : 0;
 }
 void set_tail_skip_rank(int r) { g_tail_skip_rank.store(r > 0 && r < 10 ? r : 0, std::memory_order_relaxed); }
 
