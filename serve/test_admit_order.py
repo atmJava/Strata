@@ -122,6 +122,13 @@ class AdmitOrderTest(unittest.TestCase):
         self.e.slot_held[0] = prompt[:9_500]
         self.assertEqual(self.e._known_prompt_work(prompt), (9_500, 500))
 
+    def test_a_completed_staged_read_has_no_work_left(self):
+        """BRDY holds the read in the engine, not in a slot; waiting to adopt it must rank as zero work."""
+        prompt = list(range(10_000))
+        self.e.slot_held[0] = prompt[:1_000]
+        self.assertEqual(self.e._known_prompt_work(prompt), (1_000, 9_000))
+        self.assertEqual(self.e._known_prompt_work(prompt, read_complete=True), (10_000, 0))
+
     def test_ranking_uses_reuse_a_free_slot_can_provide_now(self):
         """A busy slot's prefix cannot make a request short while an empty slot is available."""
         prompt = list(range(10_000))

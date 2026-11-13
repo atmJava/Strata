@@ -1894,8 +1894,14 @@ class StrataEngine:
         """Work an admission asks the engine for: the prompt tokens no known slot prefix covers."""
         return max(0, int(prompt_tokens) - max(0, int(known_reuse)))
 
-    def _known_prompt_work(self, prompt: list[int]) -> tuple[int, int]:
-        """The prompt prefix a slot already holds and the tokens the engine still has to read."""
+    def _known_prompt_work(self, prompt: list[int], read_complete: bool = False) -> tuple[int, int]:
+        """The prompt prefix a slot already holds and the tokens the engine still has to read.
+
+        A staged read owns the prompt in the engine rather than in a slot, so once it reports BRDY the remaining
+        admission work is zero even when no slot yet holds those tokens.
+        """
+        if read_complete:
+            return len(prompt), 0
         reused = self._known_prompt_reuse(prompt)
         return reused, self._tokens_left_to_read(len(prompt), reused)
 
@@ -2214,7 +2220,8 @@ class StrataEngine:
                                 # loop in _run, not run(): a ("ping", None) here reaches the detokenizer as a token)
                                 yield None
                             if not holding:
-                                prompt_reuse, prompt_work = self._known_prompt_work(prompt)
+                                prompt_reuse, prompt_work = self._known_prompt_work(
+                                    prompt, read_complete=staged_ready is not None)
                                 ok = yield from self._take_control(cancel, len(prompt), reused=prompt_reuse)
                                 if not ok:
                                     return
