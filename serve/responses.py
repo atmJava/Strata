@@ -450,8 +450,9 @@ def prompt_made(req: dict, tools):
 # them (the template writes the tools at the top: without them the prompt shares no prefix with the one the engine
 # holds, and the longest prompt is read again).  DSH sends no purpose metadata; its stable shape is the first
 # message, the developer prompt every request of a conversation starts with.  Keep that conversation's tools and
-# render its later no-tools request with them; only the prompt, as for Codex.  Opt-in:
-# STRATA_KEEP_DSH_COMPACTION_TOOLS=1.  A different first message is a different conversation; a restart loses it.
+# render its later no-tools request with them; only the prompt, as for Codex.  Always on here (it is gated by the
+# shape: no tools, no instructions, a long history): a compaction that re-reads its prompt from scratch costs tens of
+# seconds.  A different first message is a different conversation; a restart loses it.
 _DSH_TOOLS_LIMIT = 12                                # matches the configured conversation-cache slot count
 _kept_dsh_tools: "collections.OrderedDict[str, str]" = collections.OrderedDict()
 _kept_dsh_tools_lock = threading.Lock()

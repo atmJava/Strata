@@ -332,13 +332,14 @@ ENGINE_STALL_S = _timeout_env("STRATA_ENGINE_STALL_S", 90.0)
 # in the same round it reads the line, and the request is already ending
 BCANCEL_DRAIN_S = 10.0
 # --batch: new requests take the control lines (one prompt read at a time) short prompts first: a prompt of at most
-# STRATA_ADMIT_SHORT_FIRST tokens goes before longer ones (opt-in; unset or 0: whoever gets the lock first), and a
-# longer one that waited STRATA_ADMIT_MAX_WAIT_S (default 30) counts as short.  A chat question then waits for the one
-# read in progress, not for every agent read that came before it.
-try:
-    ADMIT_SHORT_FIRST = max(0, int(os.environ.get("STRATA_ADMIT_SHORT_FIRST") or 0))
-except ValueError:
-    ADMIT_SHORT_FIRST = 0
+# ADMIT_SHORT_FIRST tokens goes before longer ones, and a longer one that waited ADMIT_MAX_WAIT_S (default 30) counts
+# as short.  A chat question then waits for the one read in progress, not for every agent read that came before it.
+#
+# 2048 tokens, and not a setting: this deployment answers a chat turn (a few hundred tokens of question behind a long
+# history) beside agent reads of tens of thousands, so the order is what keeps the question from queueing behind every
+# agent turn.  It is this box's default because that is what the box is for (AGENTS.md: the default path is the
+# adapted path; no environment variable or tuning flag for performance).
+ADMIT_SHORT_FIRST = 2048
 ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
 STALL_CPU_EPS_S = 0.5       # CPU seconds the engine may use in the whole stall window and still count as frozen
 STALL_IO_EPS_B = 1 << 20    # bytes read or written in that window
@@ -1870,8 +1871,8 @@ class StrataEngine:
     def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
-        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these)."""
-        entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: STRATA_ADMIT_SHORT_FIRST)
+        `new`: the request's first admission (ADMIT_SHORT_FIRST orders only these)."""
+        entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: ADMIT_SHORT_FIRST)
         with self.slot_cv:
             self.waiting += 1
             self.wait_lens.append(entry)
@@ -1926,10 +1927,10 @@ class StrataEngine:
         return True
 
     def _admit_next(self):
-        """STRATA_ADMIT_SHORT_FIRST=<tokens> (the caller holds slot_cv): the new request that takes the control lines
-        next - one whose prompt is at most that long (it reads little) before a longer one, in arrival order within
-        each; a longer one that has waited STRATA_ADMIT_MAX_WAIT_S counts as short (it is never held back for good).
-        Off (unset or 0): whoever gets the lock first, as before.  Only the order changes, never what is read."""
+        """ADMIT_SHORT_FIRST tokens (the caller holds slot_cv): the new request that takes the control lines next -
+        one whose prompt is at most that long (it reads little) before a longer one, in arrival order within each; a
+        longer one that has waited ADMIT_MAX_WAIT_S counts as short (it is never held back for good).  At 0: whoever
+        gets the lock first.  Only the order changes, never what is read."""
         now = time.monotonic()
         ordered = [e for e in self.wait_lens if len(e) > 2 and e[2]]
         if not ordered:
@@ -4029,17 +4030,20 @@ class Service:
         self.queue_timeouts = 0
         self.client_disconnect_cancels = 0
         self.draining = False
-        # DSH emits its title request beside the first main request. The wire
-        # shape is exact, but has no purpose field. This opt-in lets the main
-        # call finish before the title competes for the GPU and prompt cache.
-        self.defer_title_requests = os.environ.get("STRATA_DEFER_TITLE_REQUESTS") == "1"
-        self.pin_dsh_tool_prefix = os.environ.get("STRATA_PIN_DSH_TOOL_PREFIX") == "1"
+        # These four are what this deployment always wants, so they are defaults rather than settings (AGENTS.md).
+        # Each one is gated by a shape check of its own - a DSH title request, a DSH main request, a declared
+        # run_code, DSH's tools-less compaction - so a request of another shape is not affected.
+        #
+        # DSH emits its title request beside the first main request: the wire shape is exact but has no purpose
+        # field, and deferring it lets the main call finish before the title competes for the GPU and prompt cache.
+        self.defer_title_requests = True
+        self.pin_dsh_tool_prefix = True
         # DSH's programmatic mode advertises only run_code; a model that writes a direct <tool_call> for one of the
-        # tools run_code can reach gets a run_code call carrying that same call (frontend.ptc_wrapped_call). Opt-in.
-        self.ptc_tool_rewrite = os.environ.get("STRATA_DSH_PTC_TOOL_REWRITE") == "1"
+        # tools run_code can reach gets a run_code call carrying that same call (frontend.ptc_wrapped_call).
+        self.ptc_tool_rewrite = True
         # DSH's compaction re-sends the conversation with no tools; render it with the conversation's tools so the
-        # prompt it reads again starts as the cached one did (responses.dsh_prompt_tools).  Opt-in.
-        self.keep_dsh_compaction_tools = os.environ.get("STRATA_KEEP_DSH_COMPACTION_TOOLS") == "1"
+        # prompt it reads again starts as the cached one did (responses.dsh_prompt_tools).
+        self.keep_dsh_compaction_tools = True
         self.dsh_tool_prefix_key = None
         self.dsh_tool_prefix_lock = threading.Lock()
         grace_ms = _timeout_env("STRATA_DEFER_TITLE_GRACE_MS", 250.0) or 0.0

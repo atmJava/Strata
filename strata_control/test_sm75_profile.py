@@ -33,10 +33,9 @@ class Sm75Profile(unittest.TestCase):
 
     def check(self, cfg, process_env=None, fill_env=True):
         if fill_env:
-            cfg["env"] = {key: value for key, value in self.env.items()
-                          if key != "STRATA_ADMIT_SHORT_FIRST"}
+            cfg["env"] = dict(self.env)
         if process_env is None:
-            process_env = {"STRATA_ADMIT_SHORT_FIRST": "2048"}
+            process_env = {}
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "env.json"
             path.write_text(json.dumps({"env": self.env}), encoding="utf-8")
@@ -46,7 +45,7 @@ class Sm75Profile(unittest.TestCase):
         result = self.check(config())
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["observed"]["kv"], "int8")
-        self.assertEqual(result["observed"]["env_sources"]["STRATA_ADMIT_SHORT_FIRST"], "process")
+        self.assertTrue(result["observed"]["env_sources"])
 
     def test_runtime_shape_mismatches_are_named(self):
         bad = copy.deepcopy(config())
@@ -70,15 +69,6 @@ class Sm75Profile(unittest.TestCase):
         codes = [item["code"] for item in result["errors"]]
         self.assertIn("env_missing", codes)
         self.assertIn("env_mismatch", codes)
-
-    def test_admit_short_first_must_reach_the_server_process(self):
-        cfg = config()
-        cfg["env"]["STRATA_ADMIT_SHORT_FIRST"] = "2048"
-        result = self.check(cfg, process_env={}, fill_env=False)
-        self.assertFalse(result["ok"])
-        self.assertIn("env_missing", [item["code"] for item in result["errors"]])
-        self.assertIn("env_server_switch_in_config",
-                      [item["code"] for item in result["warnings"]])
 
     def test_explicit_dflash2_is_part_of_the_server_profile(self):
         cfg = config()

@@ -1228,9 +1228,10 @@ class OutputParser:
                     aliases.setdefault(prefix + name, set()).add(name)
         self.aliases = {alias: next(iter(names)) for alias, names in aliases.items()
                         if len(names) == 1 and alias not in self.schemas}
-        # opt-in (the config's "ptc_tool_rewrite"): a call for a tool the request did not declare, written in the
-        # wrapper's own name, is delivered as a call of the declared wrapper instead (ptc_wrapped_call).  The
-        # arguments are the model's own, so this invents nothing; it only moves the call into the tool that runs it.
+        # the rewrite map (the server builds it for DSH's programmatic request, the only shape that declares the
+        # run_code wrapper): a call for a tool the request did not declare is delivered as a call of the declared
+        # wrapper instead (ptc_wrapped_call).  The arguments are the model's own, so this invents nothing; it only
+        # moves the call into the tool that runs it.
         self.rewrite = {k: v for k, v in (rewrite or {}).items() if isinstance(k, str) and isinstance(v, str)}
         # the program: DSH runs its wrapper in Node or in CPython, and each rejects the other's source, so the
         # rewrite writes the one the request declared (ptyhon_program_is_python reads its SDK block)

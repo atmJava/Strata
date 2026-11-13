@@ -167,17 +167,7 @@ def check_config(cfg: dict, *, process_env: dict[str, str] | None = None,
     for key, wanted in expected.items():
         config_value = cfg_env.get(key)
         process_value = seen_env.get(key)
-        if key == "STRATA_ADMIT_SHORT_FIRST":
-            # The Python HTTP server reads this switch, so a run-config env entry reaches only the engine child
-            # and cannot replace the service environment.
-            actual = str(process_value) if process_value is not None else None
-            if actual is not None:
-                env_sources[key] = "process"
-            if config_value is not None:
-                warn("env_server_switch_in_config",
-                     "STRATA_ADMIT_SHORT_FIRST in the run config reaches only the engine child; "
-                     "the systemd service must also provide it")
-        elif config_value is not None:
+        if config_value is not None:
             env_sources[key] = "run_config"
             actual = str(config_value)
         elif process_value is not None:
@@ -186,8 +176,7 @@ def check_config(cfg: dict, *, process_env: dict[str, str] | None = None,
         else:
             actual = None
         if actual is None:
-            owner = "the systemd service environment" if key == "STRATA_ADMIT_SHORT_FIRST" else "the run config"
-            error("env_missing", f"{key} must be supplied by {owner}; it is absent")
+            error("env_missing", f"{key} must be supplied by the run config; it is absent")
         elif actual != wanted:
             error("env_mismatch", f"{key} must be {wanted!r}; found {actual!r}")
 
