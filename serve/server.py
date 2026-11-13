@@ -1914,6 +1914,11 @@ class StrataEngine:
         with self.slot_cv:
             return self._known_prompt_work_locked(prompt, read_complete)
 
+    def _free_slot_available(self, prompt: list[int]) -> bool:
+        """Whether a slot is free for this prompt; the caller does not hold slot_cv."""
+        with self.slot_cv:
+            return self._choose_free_slot_locked(prompt)[0] is not None
+
     def _set_slot_busy_locked(self, slot: int, busy: bool, slots: list[bool] | None = None) -> None:
         """Change slot ownership and invalidate admission estimates; the caller holds slot_cv."""
         slots = self.slot_busy if slots is None else slots
@@ -2187,7 +2192,8 @@ class StrataEngine:
                         # read at a time: while it exists, other admissions wait for it (it is first in line).
                         if (staged_enabled and staged_ready is None and self.mp_staged is None
                                 and staged_attempts < 1
-                                and prompt_work >= STAGED_READ_MIN_TOKENS):
+                                and prompt_work >= STAGED_READ_MIN_TOKENS
+                                and not self._free_slot_available(prompt)):
                             staged_attempts += 1
                             if not holding:
                                 prompt_work = self._known_prompt_work(prompt)[1]
@@ -2195,6 +2201,10 @@ class StrataEngine:
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
+                            if self._free_slot_available(prompt):
+                                # A slot freed while this request waited for the control lines.  The inner loop
+                                # below takes it directly; staging would add a wait for BADOPT after reading.
+                                continue
                             with self.slot_cv:
                                 self.mp_staged = True
                             try:

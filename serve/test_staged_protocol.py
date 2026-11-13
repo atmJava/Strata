@@ -485,6 +485,25 @@ class StagedProtocol(FakeEngineCase):
     def bread_lines(self):
         return [line[len("BREAD_RAW "):] for line in self.log_text().splitlines() if line.startswith("BREAD_RAW ")]
 
+    def test_a_free_slot_is_taken_without_staging_the_read(self):
+        """BREAD is for a full batch.  With one slot still free, the request must go straight into that slot."""
+        e = self.engine("normal")
+        svc = self.service(e)
+        fills = self.fill_slots(svc)
+        fills[0][1].set()
+        self.wait_until(lambda: sum(1 for busy in e.slot_busy if busy) == 1,
+                        "one fill must finish and leave a slot free", 10.0)
+
+        before = self.log_count("BREAD_RAW")
+        with mock.patch.object(_server, "STAGED_READ_MIN_TOKENS", 1):
+            box = self.run_with_timeout(svc, list(b"a read with a free slot"), max_new=8)
+        self.assert_request_ok(box, "the request with a free slot")
+        self.assertEqual(self.log_count("BREAD_RAW"), before,
+                         "a free slot must take BGEN directly, not stage the read first")
+        self.assertIn("BGEN_OK", self.log_text())
+        self.assert_no_protocol_error()
+        self.assert_clean(e)
+
     def assert_no_protocol_error(self):
         self.assertNotIn("PROTO_ERR", self.log_text(),
                          "the strict fake refused a line the server sent: " +
@@ -551,6 +570,7 @@ class StagedProtocol(FakeEngineCase):
         """cont=0 (max_new 1) means there is nothing to adopt: the server sends BCANCEL and consumes BCANCELLED."""
         e = self.engine("normal")
         svc = self.service(e)
+        self.fill_slots(svc)
         ids = list(b"one token only")
         started = time.monotonic()
         run = self.start_staged(svc, ids, max_new=1)
@@ -690,6 +710,7 @@ class StagedProtocol(FakeEngineCase):
         """BCANCEL that is never acknowledged (the engine processed it, the answer was lost) must not wedge."""
         e = self.engine("bcancel-silent")
         svc = self.service(e)
+        self.fill_slots(svc)
         # the drain's 300 s default would make this case five minutes: shorten only that wait, not the logic
         drain = e._drain_control
 
