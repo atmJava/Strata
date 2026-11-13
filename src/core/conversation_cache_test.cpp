@@ -566,21 +566,91 @@ int main() {
         check(disabled.best(a,{},true).tokens == 0, "disabled cache has no matches");
     }
     {
-        // --conversation-cache-min-tokens: a conversation shorter than the minimum is not worth one of the slots.
-        // Parking is a switch-time decision, so without this a client's short side requests park themselves and,
-        // once the cache is full, evict the long conversation they were interleaved with (oldest first).
+        // --conversation-cache-min-tokens: a conversation shorter than the minimum is not protected from short-park
+        // eviction.  The floor keeps a client's side requests from evicting the long conversation they interleave with.
         ConversationCache any(1024, 4, 0), floor(1024, 4, 12288);
         check(any.enabled() && floor.enabled(), "the minimum does not disable the cache");
-        check(any.wants(0) && any.wants(1) && any.wants(1 << 20), "0 parks every length, as before the flag");
-        check(!floor.wants(0) && !floor.wants(1) && !floor.wants(12287), "below the minimum is not parked");
-        check(floor.wants(12288) && floor.wants(12289), "the minimum itself and above are parked");
+        check(any.wants(0) && any.wants(1) && any.wants(1 << 20), "0 protects every length, as before the flag");
+        check(!floor.wants(0) && !floor.wants(1) && !floor.wants(12287), "below the minimum is not protected");
+        check(floor.wants(12288) && floor.wants(12289), "the minimum itself and above are protected");
         // the CLI rejects a negative, but the predicate must not invert for one that reaches it another way
         ConversationCache negative(1024, 4, -1);
-        check(negative.wants(0) && negative.wants(1), "a negative minimum parks everything, like 0");
-        // wants() answers for the length alone; the gate is enabled() && wants(), so a disabled cache parks
+        check(negative.wants(0) && negative.wants(1), "a negative minimum protects everything, like 0");
+        // wants() answers for the length alone; admission separately checks enabled(), so a disabled cache stores
         // nothing whatever the length - keep the two independent rather than folding one into the other
         ConversationCache disabled_min(0, 4, 12288);
         check(!disabled_min.enabled() && disabled_min.wants(1 << 20), "a disabled cache still answers for length");
+    }
+    {
+        // Below-minimum conversations fill spare capacity and replace only other below-minimum conversations.  A full
+        // cache of protected conversations refuses them unchanged, so allowing short parking cannot add a long eviction.
+        ConversationCache full(1 << 20, 2, 4);
+        check(full.put(image({1, 2, 3, 4})), "park a protected conversation first");
+        check(full.put(image({5, 6, 7, 8})), "park a second protected conversation");
+        check(!full.put_small(image({9, 10, 11})), "a short conversation cannot evict a protected one");
+        check(full.size() == 2 && full.evictions() == 0, "the refused short park leaves protected conversations untouched");
+        check(full.best(std::vector<int32_t>{1, 2, 3, 4, 20}, {}, true).tokens == 4 &&
+              full.best(std::vector<int32_t>{5, 6, 7, 8, 20}, {}, true).tokens == 4,
+              "both protected conversations still match");
+        check(!full.evict_oldest_small(), "the RAM gate cannot release a protected conversation for a short park");
+        check(!full.put_small(image({1, 2, 3, 4})), "a protected-length image is not accepted through put_small()");
+        check(full.size() == 2 && full.evictions() == 0, "the wrong-length put_small() is a no-op");
+    }
+    {
+        ConversationCache mixed(1 << 20, 3, 4);
+        check(mixed.put(image({1, 2, 3, 4})), "park protected A");
+        check(mixed.put(image({5, 6, 7, 8})), "park protected B");
+        check(mixed.put_small(image({9, 10, 11})), "a short conversation uses a free slot");
+        check(mixed.put_small(image({12, 13, 14})), "a second short conversation replaces the oldest short one");
+        check(mixed.evictions() == 1 && mixed.size() == 3, "only the short conversation was evicted");
+        check(mixed.best(std::vector<int32_t>{1, 2, 3, 4, 20}, {}, true).tokens == 4 &&
+              mixed.best(std::vector<int32_t>{5, 6, 7, 8, 20}, {}, true).tokens == 4,
+              "the short replacement left both protected conversations in place");
+        check(mixed.best(std::vector<int32_t>{12, 13, 14, 20}, {}, true).tokens == 3 &&
+              mixed.best(std::vector<int32_t>{9, 10, 11, 20}, {}, true).tokens == 0,
+              "the newer short conversation stayed and the older one left");
+
+        const size_t one = image({1, 2, 3, 4}).bytes();
+        ConversationCache bytes(one * 3, 4, 4);
+        check(bytes.put(image({1, 2, 3, 4})) && bytes.put(image({5, 6, 7, 8})),
+              "fill the byte budget with protected conversations");
+        check(bytes.put_small(image({9, 10, 11})), "a free slot can receive a short image when its bytes fit");
+        check(bytes.put_small(image({12, 13, 14})), "byte pressure replaces the short image instead of a protected one");
+        check(bytes.evictions() == 1 && bytes.size() == 3 &&
+              bytes.best(std::vector<int32_t>{1, 2, 3, 4, 20}, {}, true).tokens == 4 &&
+              bytes.best(std::vector<int32_t>{5, 6, 7, 8, 20}, {}, true).tokens == 4,
+              "byte-pressure admission kept both protected conversations");
+    }
+    {
+        ConversationCache retained(1 << 20, 1, 4);
+        check(retained.put(image({1, 2, 3, 4})), "park one protected conversation");
+        std::vector<ConversationKv> kv(1);
+        kv[0].k.resize(64, 1);
+        std::vector<ConversationKv> stage(1);
+        stage[0].v.resize(32, 2);
+        std::vector<std::vector<ConversationKv>> stages;
+        stages.push_back(std::move(stage));
+        retained.retain(std::move(kv), 8, std::move(stages));
+        const size_t held = retained.retained_bytes();
+        check(held > 0, "retain active K/V");
+        check(!retained.put_small(image({9, 10, 11})), "a short park cannot evict the only protected conversation");
+        check(retained.retained_bytes() == held, "the refused short park keeps the active K/V");
+        auto reuse = retained.take_reuse();
+        check(reuse.stages.size() == 1, "taking retained K/V includes later-stage buffers");
+        check(retained.restore_reuse(std::move(reuse)) && retained.retained_bytes() == held &&
+              retained.take_reuse().stages.size() == 1,
+              "a capacity rejection restores every stage of retained K/V unchanged");
+    }
+    {
+        ConversationCache pinned(1 << 20, 1, 4);
+        auto short_pinned = image({1, 2, 3});
+        short_pinned.checkpoints.push_back(ConversationCheckpoint{});
+        short_pinned.checkpoints.back().ids = {1, 2};
+        short_pinned.checkpoints.back().pinned = true;
+        check(pinned.put_small(std::move(short_pinned)), "park a below-minimum conversation with a pinned prefix");
+        check(!pinned.evict_oldest_small(), "a pinned short conversation is protected from RAM-pressure eviction");
+        check(pinned.size() == 1 && pinned.best(std::vector<int32_t>{1, 2, 9}, {}, true).tokens == 2,
+              "the pinned short prefix remains available");
     }
     {
         // A layer-split image owns a directory of stage images.  The cache budget charges vector directories as well

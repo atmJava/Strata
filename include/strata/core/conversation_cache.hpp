@@ -229,10 +229,10 @@ public:
     ConversationCache(size_t budget, size_t slots, int64_t min_tokens = 0)
         : budget_(budget), slots_(slots), min_tokens_(min_tokens) {}
     bool enabled() const { return budget_ != 0 && slots_ != 0; }
-    /// `--conversation-cache-min-tokens`: whether a conversation of this length is worth one of `slots`.  Every
-    /// parked conversation costs a whole slot whatever its length, so a client that interleaves short side requests
-    /// with one long conversation spends the cache on the side requests and evicts the long one (oldest first) -
-    /// exactly the reuse it wanted.  0 parks every conversation, whatever its size.
+    /// `--conversation-cache-min-tokens`: whether a conversation of this length is protected from eviction by a
+    /// shorter one.  A short conversation may still use spare capacity or replace another short conversation.
+    /// A client interleaving side requests with a long conversation therefore cannot evict the long one it needs.
+    /// 0 turns the floor off and makes every conversation eligible for ordinary oldest-first eviction.
     bool wants(int64_t tokens) const { return min_tokens_ <= 0 || tokens >= min_tokens_; }
     size_t bytes() const { return bytes_ + reuse_.bytes(); }
     size_t size() const { return entries_.size(); }
@@ -257,6 +257,13 @@ public:
         for (auto& k : stage_kv) candidate.stages.push_back(ConversationKvReuse{std::move(k), tokens, tokens, {}});
         if (enabled() && candidate.bytes() <= budget_ - bytes_) reuse_ = std::move(candidate);
     }
+    // A short-park capacity check happens after take_reuse().  When that check refuses the park, put the untouched
+    // buffers back: an admission that stores nothing must not consume the active conversation's retained K/V.
+    bool restore_reuse(ConversationKvReuse&& candidate) {
+        if (!enabled() || candidate.bytes() > budget_ - bytes_) return false;
+        reuse_ = std::move(candidate);
+        return true;
+    }
     void limit_reuse(int64_t first_dirty) {
         reuse_.unchanged_tokens = std::min(reuse_.unchanged_tokens, first_dirty);
         for (auto& s : reuse_.stages) s.unchanged_tokens = std::min(s.unchanged_tokens, first_dirty);
@@ -275,22 +282,17 @@ public:
     bool can_make_room_after_superseded(size_t incoming, size_t held, const std::vector<int32_t>& ids,
                                         const std::vector<ConversationImageKey>& images,
                                         const std::vector<ConversationCheckpoint>& checkpoints, bool cvec) {
-        if (!enabled() || held > budget_ || incoming > budget_ - held) return false;
-        size_t kept = 0, kept_bytes = 0;
-        for (size_t i = 0; i < entries_.size(); ++i) {
-            const bool guarded = guarded_ != 0 && serials_[i] == guarded_;
-            if (!guarded && superseded_checkpoint(ids, images, checkpoints, cvec, entries_[i]) != nullptr)
-                continue;
-            if (entries_[i].pinned() || guarded) {
-                ++kept;
-                kept_bytes += entries_[i].bytes();
-            }
-        }
-        if (kept >= slots_ || kept_bytes > budget_ - held - incoming) {
-            if (guarded_ != 0 && index_of(guarded_) != SIZE_MAX) guard_blocked_ = true;
-            return false;
-        }
-        return true;
+        return can_make_room_after_superseded_impl(incoming, held, ids, images, checkpoints, cvec, false);
+    }
+
+    // Same preflight for a conversation below --conversation-cache-min-tokens.  It may replace superseded copies
+    // and other below-minimum conversations, but must leave every conversation at the minimum or longer in place.
+    // It also leaves optional retained K/V alone; a short park never trades the active conversation's reuse for room.
+    bool can_make_room_after_superseded_for_small(
+            size_t incoming, size_t held, const std::vector<int32_t>& ids,
+            const std::vector<ConversationImageKey>& images,
+            const std::vector<ConversationCheckpoint>& checkpoints, bool cvec) {
+        return can_make_room_after_superseded_impl(incoming, held, ids, images, checkpoints, cvec, true);
     }
 
     template<class Token>
@@ -391,6 +393,30 @@ public:
         return true;
     }
 
+    // Make room for a below-minimum conversation without evicting a conversation at the minimum or longer and
+    // without discarding reuse_.  Plan every victim before erasing any, so a refusal changes no cache state.
+    bool make_room_for_small(size_t incoming, size_t held = 0) {
+        if (!enabled() || held > budget_ || incoming > budget_ - held) return false;
+        const size_t room = budget_ - held - incoming;
+        size_t count = entries_.size(), left = bytes(), victims = 0;
+        for (size_t i = 0; i < entries_.size() && (count >= slots_ || left > room); ++i) {
+            if (!evictable_small(i)) continue;
+            --count;
+            left -= entries_[i].bytes();
+            ++victims;
+        }
+        if (count >= slots_ || left > room) return false;
+        size_t removed = 0;
+        for (size_t i = 0; i < entries_.size() && removed < victims;) {
+            if (!evictable_small(i)) { ++i; continue; }
+            bytes_ -= entries_[i].bytes();
+            erase(i);
+            ++evictions_;
+            ++removed;
+        }
+        return true;
+    }
+
     // The parked conversation that has gone unused the longest.  This is make_room()'s loop body, so
     // the parking path can also free RAM one entry at a time on demand (see the physical-RAM admission
     // gate in generate.cpp).  A ConversationBuffer is a list of 16 MiB segments and each segment is its
@@ -401,6 +427,19 @@ public:
         // the oldest entry that holds no pinned shared prefix and is not the guarded (borrowed) donor
         for (size_t i = 0; i < entries_.size(); ++i) {
             if (entries_[i].pinned() || (guarded_ != 0 && serials_[i] == guarded_)) continue;
+            bytes_ -= entries_[i].bytes();
+            erase(i);
+            ++evictions_;
+            return true;
+        }
+        return false;
+    }
+
+    // The physical-RAM admission gate uses this for a below-minimum park: it may release only other below-minimum
+    // conversations, never a conversation protected by --conversation-cache-min-tokens.
+    bool evict_oldest_small() {
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            if (!evictable_small(i)) continue;
             bytes_ -= entries_[i].bytes();
             erase(i);
             ++evictions_;
@@ -475,7 +514,50 @@ public:
         return true;
     }
 
+    // Store a conversation below --conversation-cache-min-tokens only where doing so cannot evict a longer
+    // conversation or the active K/V.  A cache full of protected conversations refuses the park unchanged.
+    bool put_small(SavedConversation&& image, size_t held = 0) {
+        const size_t n = image.bytes();
+        if (!enabled() || wants((int64_t) image.live.ids.size()) || held > budget_ || n > budget_ - held)
+            return false;
+        if (!can_make_room_after_superseded_for_small(n, held, image.live.ids, image.live.imgs,
+                                                      image.checkpoints, image.cvec))
+            return false;
+        drop_superseded(image.live.ids, image.live.imgs, image.checkpoints, image.cvec);
+        if (!make_room_for_small(n, held)) return false;
+        entries_.push_back(std::move(image));
+        serials_.push_back(next_serial_++);
+        bytes_ += n;
+        return true;
+    }
+
 private:
+    bool evictable_small(size_t i) const {
+        return !entries_[i].pinned() && !(guarded_ != 0 && serials_[i] == guarded_) &&
+               !wants((int64_t) entries_[i].live.ids.size());
+    }
+    bool can_make_room_after_superseded_impl(
+            size_t incoming, size_t held, const std::vector<int32_t>& ids,
+            const std::vector<ConversationImageKey>& images,
+            const std::vector<ConversationCheckpoint>& checkpoints, bool cvec, bool preserve_large) {
+        if (!enabled() || held > budget_ || incoming > budget_ - held) return false;
+        size_t kept = 0, kept_bytes = preserve_large ? reuse_.bytes() : 0;
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            const bool guarded = guarded_ != 0 && serials_[i] == guarded_;
+            if (!guarded && superseded_checkpoint(ids, images, checkpoints, cvec, entries_[i]) != nullptr)
+                continue;
+            if (entries_[i].pinned() || guarded ||
+                (preserve_large && wants((int64_t) entries_[i].live.ids.size()))) {
+                ++kept;
+                kept_bytes += entries_[i].bytes();
+            }
+        }
+        if (kept >= slots_ || kept_bytes > budget_ - held - incoming) {
+            if (guarded_ != 0 && index_of(guarded_) != SIZE_MAX) guard_blocked_ = true;
+            return false;
+        }
+        return true;
+    }
     static const ConversationCheckpoint* deepest_checkpoint(const SavedConversation& entry) {
         const ConversationCheckpoint* deepest = nullptr;
         for (const auto& c : entry.checkpoints)
@@ -500,7 +582,7 @@ private:
         serials_.erase(serials_.begin() + (std::ptrdiff_t) index);
     }
     size_t budget_ = 0, slots_ = 0, bytes_ = 0, evictions_ = 0, superseded_ = 0, borrowed_ = 0;
-    int64_t min_tokens_ = 0;   // --conversation-cache-min-tokens: 0 parks every conversation, whatever its size
+    int64_t min_tokens_ = 0;   // --conversation-cache-min-tokens: 0 disables protection for conversations of every size
     std::deque<SavedConversation> entries_; // least recently active first
     std::deque<uint64_t> serials_;          // entries_[i]'s identity, never reused
     uint64_t next_serial_ = 1, guarded_ = 0;

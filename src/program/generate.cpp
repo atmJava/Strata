@@ -843,9 +843,9 @@ void usage() {
                  "  --memory-limit-mib N  --serve: the total RAM (MiB) this engine's container or cgroup may use, when\n"
                  "                       the container cannot see its real limit (also STRATA_MEMORY_LIMIT_MIB; the flag\n"
                  "                       wins; 0 = none). Parking and session save/restore keep their floor under it\n"
-                 "  --conversation-cache-min-tokens N  --serve: park only conversations of at least N tokens, so\n"
-                 "                       short side requests do not take the slots a long one needs (default 4096;\n"
-                 "                       0 = park any)\n"
+                 "  --conversation-cache-min-tokens N  --serve: protect conversations of at least N tokens from\n"
+                 "                       short-request eviction; shorter ones park only in spare capacity (default\n"
+                 "                       4096; 0 = no protected floor)\n"
                  "  --conversation-cache-park-gain N  --serve: park only after the conversation advanced N tokens past\n"
                  "                       the copy it would supersede, so a turn that grew by a few hundred tokens does not\n"
                  "                       write a whole snapshot that the next turn drops (default 2048; 0 = park every turn)\n"
@@ -9189,16 +9189,10 @@ int main(int argc, char** argv) {
                 ParkStage() { strata::core::progress_at("request: parking the previous conversation"); }
                 ~ParkStage() { strata::core::progress_at("request"); strata::core::progress_beat(); }
             } park_stage;
-            // --conversation-cache-min-tokens: a short conversation is not worth one of the slots.  Parking is a
-            // switch-time decision, so a client's small side requests would otherwise park themselves and, once the
-            // cache is full, evict the long conversation they were interleaved with (oldest first) - the reuse it
-            // wanted.  Returning true is the same non-error skip the byte-budget and RAM-floor paths below take.
-            if (!conversations.wants((int64_t) src.ids.size())) {
-                std::fprintf(stderr, "strata serve: conversation cache: skip parking (%zu tokens, below the %lld "
-                                     "minimum; parked=%zu)\n",
-                             src.ids.size(), (long long) o.conversation_cache_min_tokens, conversations.size());
-                return true;
-            }
+            // --conversation-cache-min-tokens: a below-minimum conversation may use spare capacity or replace
+            // another below-minimum conversation, but it must never evict one of the long conversations the floor
+            // protects.  The admission below decides from the snapshot's actual byte estimate.
+            const bool small_park = !conversations.wants((int64_t) src.ids.size());
             // A layer split parks one image per stage: the first stage's (with the draft layer's K/V) and one per
             // later stage (without it - the draft ring is saved once).  The checkpoints are MOVED apart into their
             // stage parts for the capture and put back together whichever way this ends (no running state copied).
@@ -9226,9 +9220,11 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata serve: conversation cache: retained K/V reused for %lld of its %lld tokens "
                                      "(the rest is not this conversation's)\n", (long long) reuse.unchanged_tokens,
                              (long long) retained_n);
-            std::vector<strata::core::ConversationKvReuse> stage_reuse = std::move(reuse.stages);
-            stage_reuse.resize(n_st);
-            reuse.stages.clear();
+            auto restore_active_reuse = [&] {
+                if (src.with_reuse && !conversations.restore_reuse(std::move(reuse)))
+                    std::fprintf(stderr, "strata serve: conversation cache: could not restore retained K/V after "
+                                         "skipping a park\n");
+            };
             std::vector<strata::core::SavedConversation> stage_images;
             stage_images.reserve(n_st);
             // the later stages' estimates, each with its own retained K/V when it still fits
@@ -9242,16 +9238,17 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: conversation cache: skip parking (stage CUDA%d: %s)\n",
                                  st->dev, err.c_str());
                     err.clear();
+                    restore_active_reuse();
                     return true;
                 }
-                if (!stage_reuse[k].kv.empty()) {
+                if (k < reuse.stages.size() && !reuse.stages[k].kv.empty()) {
                     size_t r = 0;
-                    if (strata::core::conversation_snapshot_capture_bytes(stage_reuse[k], view_k, *src.stage_sessions[k], g,
+                    if (strata::core::conversation_snapshot_capture_bytes(reuse.stages[k], view_k, *src.stage_sessions[k], g,
                                                                           draft_of(k), r, err)) {
                         b = r;
-                        stage_retained += stage_reuse[k].bytes();
+                        stage_retained += reuse.stages[k].bytes();
                     } else {
-                        stage_reuse[k] = {};
+                        reuse.stages[k] = {};
                         err.clear();
                     }
                 }
@@ -9261,6 +9258,7 @@ int main(int argc, char** argv) {
             if (!strata::core::conversation_snapshot_bytes(view, src.session, g, draft0, estimate, err)) {
                 std::fprintf(stderr, "strata serve: conversation cache: skip parking (%s)\n", err.c_str());
                 err.clear(); // A recoverable miss must not poison the batched draft prefill's error channel.
+                restore_active_reuse();
                 return true;
             }
             const size_t fresh_estimate = estimate;
@@ -9278,11 +9276,21 @@ int main(int argc, char** argv) {
             // #342: the copies of this conversation a turn back can make room, but they hold the only reusable
             // state if the remaining pinned or borrowed entries still cannot fit the replacement.  Decide before
             // dropping them, then let make_room evict oldest-first only after the replacement is known to fit.
-            if (!conversations.can_make_room_after_superseded(estimate, held, view.ids, view.images, view.checkpoints,
-                                                               view.cvec)) {
-                std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds "
-                                     "available budget beside pinned or borrowed conversations)\n",
-                             estimate >> 20);
+            const bool room = small_park
+                ? conversations.can_make_room_after_superseded_for_small(
+                      estimate, held, view.ids, view.images, view.checkpoints, view.cvec)
+                : conversations.can_make_room_after_superseded(
+                      estimate, held, view.ids, view.images, view.checkpoints, view.cvec);
+            if (!room) {
+                restore_active_reuse();
+                if (small_park)
+                    std::fprintf(stderr, "strata serve: conversation cache: skip parking (%zu tokens, below the %lld "
+                                         "minimum; no room without evicting a protected conversation; parked=%zu)\n",
+                                 src.ids.size(), (long long) o.conversation_cache_min_tokens, conversations.size());
+                else
+                    std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds "
+                                         "available budget beside pinned or borrowed conversations)\n",
+                                 estimate >> 20);
                 return true;
             }
             if (const size_t dropped = conversations.drop_superseded(view.ids, view.images, view.checkpoints, view.cvec))
@@ -9294,11 +9302,22 @@ int main(int argc, char** argv) {
             // estimate must stay uncapped: it counts the retained buffers'
             // capacity and directories, and put() charges that same true size -
             // a capped figure would under-evict and overfill the budget.
-            if (!conversations.make_room(estimate, held)) {
-                std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds available budget)\n",
-                             estimate >> 20);
+            const bool made_room = small_park ? conversations.make_room_for_small(estimate, held)
+                                              : conversations.make_room(estimate, held);
+            if (!made_room) {
+                restore_active_reuse();
+                if (small_park)
+                    std::fprintf(stderr, "strata serve: conversation cache: skip parking (%zu tokens, snapshot %zu MiB "
+                                         "exceeds the capacity left by protected conversations)\n",
+                                 src.ids.size(), estimate >> 20);
+                else
+                    std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds "
+                                         "available budget)\n", estimate >> 20);
                 return true;
             }
+            std::vector<strata::core::ConversationKvReuse> stage_reuse = std::move(reuse.stages);
+            stage_reuse.resize(n_st);
+            reuse.stages.clear();
             const auto t0 = Clock::now();
             try {
                 const uint64_t floor = (uint64_t) o.conversation_cache_min_free_mib * 1024 * 1024;
@@ -9322,12 +9341,14 @@ int main(int argc, char** argv) {
                         mem ? std::optional<uint64_t>(mem->available) : std::nullopt, additional, floor);
                 };
                 while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
-                       conversations.evict_oldest())
+                       (small_park ? conversations.evict_oldest_small() : conversations.evict_oldest()))
                     ++evicted;
                 if (!admit()) {
                     std::fprintf(stderr, "strata serve: conversation cache: skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)\n",
                                  additional >> 20, (long long) o.conversation_cache_min_free_mib, ram_note(mem).c_str(),
                                  evicted, conversations.size());
+                    reuse.stages = std::move(stage_reuse);
+                    restore_active_reuse();
                     return true;
                 }
                 if (evicted)
@@ -9359,7 +9380,8 @@ int main(int argc, char** argv) {
                     return true;
                 }
                 const size_t snapshot_bytes = image.bytes();
-                const bool stored = conversations.put(std::move(image), held);
+                const bool stored = small_park ? conversations.put_small(std::move(image), held)
+                                               : conversations.put(std::move(image), held);
                 std::fprintf(stderr, "strata serve: conversation cache: %s %zu tokens%s in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu reused_kv_bytes=%zu\n",
                              stored ? "parked" : "skipped", src.ids.size(), src.what.c_str(),
                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
