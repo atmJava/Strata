@@ -64,16 +64,35 @@ std::optional<HostMemoryReading> sample_host_memory();
 
 std::optional<uint64_t> available_host_bytes();
 
-/// #3493: the conversation cache budget (MiB) --serve uses when --conversation-cache-mib was not given, from the RAM that is available
-/// once the model is loaded: 40% of what is left above the parking floor, at most 8192 (four 100K-token agent conversations were
-/// parked in 8 GiB in the report), in steps of 256, and 0 (off) when less than 1024 would be left to give.  Unknown telemetry: 0.
-inline int64_t auto_conversation_cache_mib(std::optional<uint64_t> available, int64_t min_free_mib) {
+/// The working set this server exists for: five conversations open at once (an agent harness alternates a long main
+/// conversation with shorter subagents), each holding about 160K tokens because DSH compacts at 80% of a 200K window.
+/// Capacity is these two numbers times the engine's own per-token cost, never a round number of gigabytes.
+inline constexpr int kWorkingSetConversations = 5;
+inline constexpr int64_t kWorkingSetConversationTokens = 163840;
+
+/// #3493: the conversation cache budget (MiB) --serve uses when --conversation-cache-mib was not given.
+///
+/// With the engine's per-token cost (`kv_bytes_per_token`: INFO kv_bytes_per_token), the budget is the size of the
+/// working set above, capped by the RAM left above the parking floor: the cache exists to hold what the deployment
+/// actually opens, and one conversation at 160K in INT8 costs about 2.3 GiB.  Without that number (0: an engine that
+/// cannot say, or a caller that did not ask) it keeps the earlier rule - 40% of the RAM left, at most 8192, which is
+/// what four 100K-token conversations were parked in when the report asked for it.  Either way the answer is in steps
+/// of 256 MiB, and 0 (off) when less than 1024 MiB would be left to give; unknown telemetry is 0, never a guess.
+inline int64_t auto_conversation_cache_mib(std::optional<uint64_t> available, int64_t min_free_mib,
+                                           int64_t kv_bytes_per_token = 0) {
     if (!available) return 0;
     const int64_t usable = (int64_t) (*available >> 20) - min_free_mib;
     if (usable <= 0) return 0;
-    int64_t mib = usable * 2 / 5;
-    if (mib > 8192) mib = 8192;
-    mib -= mib % 256;
+    int64_t mib;
+    if (kv_bytes_per_token > 0) {
+        const int64_t want = (int64_t) kWorkingSetConversations * kWorkingSetConversationTokens * kv_bytes_per_token;
+        mib = (want + (256LL << 20) - 1) / (256LL << 20) * 256;   // up: the step must not drop a conversation
+        if (mib > usable) mib = usable - usable % 256;            // the set does not fit: as much as the RAM allows
+    } else {
+        mib = usable * 2 / 5;
+        if (mib > 8192) mib = 8192;
+        mib -= mib % 256;
+    }
     return mib >= 1024 ? mib : 0;
 }
 

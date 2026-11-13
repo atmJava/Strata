@@ -31,22 +31,22 @@ class Sm75Profile(unittest.TestCase):
     def setUp(self):
         self.env = sm75_profile.expected_env()
 
-    def check(self, cfg, process_env=None, fill_env=True):
+    def check(self, cfg, process_env=None, fill_env=True, env=None):
+        expected = dict(self.env if env is None else env)
         if fill_env:
-            cfg["env"] = {key: value for key, value in self.env.items()
-                          if key != "STRATA_ADMIT_SHORT_FIRST"}
+            cfg["env"] = dict(expected)
         if process_env is None:
-            process_env = {"STRATA_ADMIT_SHORT_FIRST": "2048"}
+            process_env = {}
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "env.json"
-            path.write_text(json.dumps({"env": self.env}), encoding="utf-8")
+            path.write_text(json.dumps({"env": expected}), encoding="utf-8")
             return sm75_profile.check_config(cfg, process_env=process_env, env_path=path)
 
     def test_production_shape_passes(self):
         result = self.check(config())
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["observed"]["kv"], "int8")
-        self.assertEqual(result["observed"]["env_sources"]["STRATA_ADMIT_SHORT_FIRST"], "process")
+        self.assertEqual(result["observed"]["env_sources"], {})     # no engine switch: the code decides
 
     def test_runtime_shape_mismatches_are_named(self):
         bad = copy.deepcopy(config())
@@ -61,24 +61,20 @@ class Sm75Profile(unittest.TestCase):
             "kv_resident_mismatch", "gpu_shape",
         })
 
-    def test_env_missing_and_wrong_are_distinct(self):
-        cfg = config()
-        cfg["env"] = {key: value for key, value in self.env.items()
-                      if key != "STRATA_SM75_PERF"}
-        cfg["env"]["STRATA_HC_Q8"] = "0"
-        result = self.check(cfg, fill_env=False)
-        codes = [item["code"] for item in result["errors"]]
-        self.assertIn("env_missing", codes)
-        self.assertIn("env_mismatch", codes)
+    def test_the_production_list_is_empty(self):
+        """A run config holds deployment identity only (AGENTS.md): nothing has to come from its env map."""
+        self.assertEqual(self.env, {})
 
-    def test_admit_short_first_must_reach_the_server_process(self):
+    def test_env_missing_and_wrong_are_distinct(self):
+        """With a list to check, a missing key and a wrong value are reported apart (the check still works)."""
+        expected = {"STRATA_TEST_SWITCH": "1", "STRATA_TEST_OTHER": "2"}
         cfg = config()
-        cfg["env"]["STRATA_ADMIT_SHORT_FIRST"] = "2048"
-        result = self.check(cfg, process_env={}, fill_env=False)
-        self.assertFalse(result["ok"])
-        self.assertIn("env_missing", [item["code"] for item in result["errors"]])
-        self.assertIn("env_server_switch_in_config",
-                      [item["code"] for item in result["warnings"]])
+        cfg["env"] = {"STRATA_TEST_SWITCH": "0"}
+        result = self.check(cfg, fill_env=False, env=expected)
+        codes = [item["code"] for item in result["errors"]]
+        self.assertIn("env_missing", codes)                          # STRATA_TEST_OTHER
+        self.assertIn("env_mismatch", codes)                         # STRATA_TEST_SWITCH
+        self.assertEqual(result["observed"]["env_sources"], {"STRATA_TEST_SWITCH": "run_config"})
 
     def test_explicit_dflash2_is_part_of_the_server_profile(self):
         cfg = config()

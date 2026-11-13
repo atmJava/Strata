@@ -265,6 +265,32 @@ class PickSlot(unittest.TestCase):
         e.slot_busy = [False] * 3
         self.assertEqual(e.pick_slot([1, 2, 3]), 1)                 # a held prompt is never the WHOLE prompt
 
+    def test_the_choice_says_why_it_was_made(self):
+        """The counters are the measurement: a prefix hit means the history was there and was used, no_prefix means it
+        was not (so a low reuse is not the slot choice's fault), all_busy means the request had to wait for a slot."""
+        e = self.engine(3)
+        e.slot_held = [[1, 2, 3], [], [1, 2, 3, 4, 5]]
+        e.pick_slot([1, 2, 3, 4, 5, 6])                            # the longest held start: a hit of 5 tokens
+        self.assertEqual(e.pick_stats, {"prefix_hits": 1, "prefix_tokens": 5, "no_prefix": 0,
+                                        "all_busy": 0, "group_fill": 0})
+        e.pick_slot([7, 8])                                         # nothing held: an empty slot, no prefix
+        self.assertEqual(e.pick_stats["no_prefix"], 1)
+        self.assertEqual(e.pick_stats["prefix_tokens"], 5)
+        e.slot_busy = [True] * 3
+        self.assertIsNone(e.pick_slot([7, 8]))
+        self.assertEqual(e.pick_stats["all_busy"], 1)
+        e = self.engine(4)                                           # a group spans two slots: b + 1 must exist
+        e.slot_gs = 2                                               # the pipelined-groups order keeps no idle slot
+        e.pick_slot([1, 2, 3, 4, 5, 6])
+        self.assertEqual(e.pick_stats["group_fill"], 1)
+
+    def test_each_engine_counts_its_own_admissions(self):
+        one, two = self.engine(2), self.engine(2)
+        one.slot_held = [[1, 2, 3], []]
+        one.pick_slot([1, 2, 3, 4])
+        self.assertEqual(one.pick_stats["prefix_hits"], 1)
+        self.assertEqual(two.pick_stats["prefix_hits"], 0)
+
     def test_a_rewritten_next_turn_goes_to_the_slot_of_its_chat(self):
         # #2518: two chats in two slots; each next turn renders the history again but not the reply it decoded or the
         # assistant header, so the held stream (prompt + reply) is no start of it.  The engine's turn checkpoint sits at

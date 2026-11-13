@@ -126,10 +126,11 @@ kv=int8
 kv_resident=32768
 ```
 
-It also checks the critical variables in
-[`tools/server/production-env-2080ti.json`](tools/server/production-env-2080ti.json).
-`STRATA_ADMIT_SHORT_FIRST=2048` must be present in the systemd service environment. Other switches may be in the run
-config's `env` map or the server process environment.
+No switch has to come from the run config or the service environment, so the list it checks against
+[`tools/server/production-env-2080ti.json`](tools/server/production-env-2080ti.json) is empty. Every choice this box
+made - the admission order, the four DSH behaviours, the CPU prefill share, the staged prompt read, the Turing kernels,
+the route tail skip it keeps off - is in the code (see
+[AGENTS.md](AGENTS.md#this-fork-serves-one-machine)).
 
 This check is static. A passing result does not prove that the engine binary was built for `sm_75`, that both cards
 are healthy, or that a 256K mixed soak passed.

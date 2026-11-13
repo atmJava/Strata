@@ -52,6 +52,18 @@ int main() {
     check(auto_conversation_cache_mib(GiB(40), 2560) == 8192, "capped at 8 GiB");
     check(auto_conversation_cache_mib(GiB(1000), 0) == 8192, "a big server: still the cap");
     check(auto_conversation_cache_mib(GiB(40), 1000000) == 0, "a floor above the RAM: off, no underflow");
+    // The working-set path: five conversations at the 160K compaction point, times the engine's per-token cost.  The
+    // INT8 number on this deployment is 14,220 B/token, so the set is 5 * 163,840 * 14,220 = 11,109.4 MiB and the
+    // budget must hold all of it: 11,264 in steps of 256, not 11,008.
+    check(kWorkingSetConversations == 5 && kWorkingSetConversationTokens == 163840, "the working set is DSH's shape");
+    check(auto_conversation_cache_mib(GiB(40), 2560, 14220) == 11264, "INT8: the whole working set, rounded up");
+    check(auto_conversation_cache_mib(GiB(40), 2560, 8460) == 6656, "a four-bit K/V: the same set costs less");
+    check(auto_conversation_cache_mib(GiB(40), 2560, 14220) == auto_conversation_cache_mib(GiB(1000), 2560, 14220),
+          "more RAM than the set needs does not buy more cache");
+    check(auto_conversation_cache_mib(GiB(12), 2560, 14220) == 9728, "less RAM than the set: as much as the RAM allows");
+    check(auto_conversation_cache_mib(GiB(4), 2560, 14220) == 1536, "a small box: whatever is left, still in steps");
+    check(auto_conversation_cache_mib(GiB(3), 2560, 14220) == 0, "too little left for 1 GiB: off");
+    check(auto_conversation_cache_mib({}, 2560, 14220) == 0, "unknown telemetry is still no cache");
     // Test the real provider without assuming any particular amount of free RAM.
     const auto available = available_host_bytes();
     check(!available || conversation_memory_admit(available, 0, 0), "provider returns bytes or unknown");

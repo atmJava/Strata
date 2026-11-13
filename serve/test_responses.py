@@ -620,7 +620,9 @@ class AutoPrefixPin(Server):
         self.request(instructions=None)
         self.assertNotIn("strata_prefix", self.samplings[-1])
 
-    def test_dsh_tool_prefix_pin_is_exact_and_default_off(self):
+    def test_dsh_tool_prefix_pin_is_exact(self):
+        self.assertIs(self.svc.pin_dsh_tool_prefix, True)     # the deployment default
+        self.svc.pin_dsh_tool_prefix = False                  # off, to see the pin's effect below
         body = dsh_request()
         self.assertTrue(is_dsh_main_request(body))
         code, response = self.post(body)
@@ -652,6 +654,7 @@ class AutoPrefixPin(Server):
         self.assertNotIn("strata_prefix", self.samplings[-1])
 
     def test_dsh_tool_prefix_pin_does_not_change_ids_or_override_explicit(self):
+        self.svc.pin_dsh_tool_prefix = False
         self.svc.codex_system_before_tools = True
         body = dsh_request("same task")
         code, response = self.post(body)

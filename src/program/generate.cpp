@@ -200,49 +200,21 @@ std::string vram_free_note() {
     return buf;
 }
 
-// STRATA_PIPE_BYIELD_NODRAIN=1 (read once; off by default): with the pipelined groups, a BYIELD that reaches the main
-// loop is dropped without draining the groups first.  A pipelined read never gives way (batch_read_piece), so the
-// BYIELD is for a read that has ended, and the drain (and the refill after it) did nothing for it
-bool pipe_byield_nodrain_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_PIPE_BYIELD_NODRAIN");
-        return v && v[0] != '0';
-    }();
-    return on;
-}
-// STRATA_ADMIT_MERGE_FIRST=1 (read once; off by default): a batch admission reads the last prompt tokens of its last
-// windowed part (up to a window's max_t, the last prompt token included) and its first token in ONE window instead of
-// the part's last windows and a window of the last token alone.  A row computes what it computes in any window while
-// every expert is in VRAM, and row T-1 is the first window's position with its history and its Philox draw, so the
-// token and the state are the same; the rows before it commit as the prompt windows commit them
-bool admit_merge_first_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_ADMIT_MERGE_FIRST");
-        return v && v[0] != '0';
-    }();
-    return on;
-}
-// STRATA_CKPT_POOL=1 (read once; off by default): the serve loop keeps the running-state vectors of the conversation
+// With the pipelined groups, a BYIELD that reaches the main loop is dropped without draining the groups first: a
+// pipelined read never gives way (batch_read_piece), so the BYIELD is for a read that has ended, and the drain (and the
+// refill after it) did nothing for it.
+// A batch admission reads the last prompt tokens of its last windowed part (up to a window's max_t, the last prompt
+// token included) and its first token in ONE window instead of the part's last windows and a window of the last token
+// alone.  A row computes what it computes in any window while every expert is in VRAM, and row T-1 is the first
+// window's position with its history and its Philox draw, so the token and the state are the same; the rows before it
+// commit as the prompt windows commit them.
+// The serve loop keeps the running-state vectors of the conversation
 // checkpoints it drops (evicted, pruned, a batch slot's old one) and saves the next checkpoint into them, so a save
 // resizes nothing (no zero-fill of ~118 MB of fresh vectors) and a slot's copy reuses their pages.  Every byte is
 // overwritten by the copy, so the checkpoints are the same
-bool ckpt_pool_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_CKPT_POOL");
-        return v && v[0] != '0';
-    }();
-    return on;
-}
-// STRATA_CKPT_THREADS=1 (read once; off by default): a layer split's checkpoint saves every stage's part at once, the
+// A layer split's checkpoint saves every stage's part at once, the
 // first on the calling thread and each later stage's on a thread of its own device (kept for the process: the copies'
 // private streams are per thread), instead of one stage after the other.  Each part is the same copy of the same state
-bool ckpt_threads_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_CKPT_THREADS");
-        return v && v[0] != '0';
-    }();
-    return on;
-}
 // STRATA_SLOT_CKPT_MOVE=1 (read once; off by default): a batch admission MOVES its own turn checkpoint into the slot
 // instead of copying it (~112 MB of host vectors).  The main session's chain no longer holds it, so the request path
 // looks for it in the slots' checkpoints too: while the main session's cells still hold its tokens it is restored there
@@ -260,13 +232,6 @@ bool slot_ckpt_move_env() {
 // its copies on each device's private copy stream and synchronizes every device once at the end, instead of waiting
 // for each of its ~116 copies.  A streamed K/V state's residency refresh waits for its copies through an event.  The
 // same copies in the same order on one stream, so the slot holds the same bytes
-bool slot_copy_batchsync_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_SLOT_COPY_BATCHSYNC");
-        return v && v[0] != '0';
-    }();
-    return on;
-}
 
 // perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each
 // A file-backed arena on AMD (STRATA_ARENA_MMAP; the engine raises ROCclr's pin-in-place threshold, see main): an
@@ -706,17 +671,22 @@ struct Options {
     /// the PLE history (~118 MB of host RAM); the KV cache itself is positional and stays where it is.
     int prompt_cache = 6;
     int64_t conversation_cache_mib = -1; // host RAM for independent conversations; -1: not given, --serve sizes it from the free RAM (#3493), 0: off
-    int conversation_cache_slots = 4;
-    int64_t conversation_cache_min_free_mib = 2560;
+    /// --serve: how many conversations the cache may hold.  The byte budget is what bounds the memory; this only caps
+    /// how many histories can be parked, and a history shorter than 160K costs a fraction of a full conversation, so
+    /// the cap has to be above the concurrency or the budget goes unused.  12 is what this deployment ran for three
+    /// hours - 65 parks, 12 evictions, 11.68 GB across 12 slots - and it was measured at 4 before the DSH traffic
+    /// arrived.
+    int conversation_cache_slots = 12;
+    int64_t conversation_cache_min_free_mib = 4096;
     /// --serve: park only conversations of at least this many tokens.  Every parked conversation costs one of
     /// conversation_cache_slots whatever its length, so without it a client that interleaves short side requests
     /// with one long conversation evicts the long one (oldest first).  0 = park every conversation.
-    int64_t conversation_cache_min_tokens = 0;
+    int64_t conversation_cache_min_tokens = 4096;
     /// --serve: park only after the conversation has advanced this many tokens past the copy it would supersede.
     /// A conversation that moved a few hundred tokens writes a full snapshot again, and the turn after that drops it
     /// (drop_superseded) after writing the same bytes once more, so on a long single conversation every turn pays a
     /// whole-snapshot copy for nothing.  0 = park every turn, as before.
-    int64_t conversation_cache_park_gain = 0;
+    int64_t conversation_cache_park_gain = 2048;
     /// --memory-limit-mib N / STRATA_MEMORY_LIMIT_MIB: the total RAM this engine's container or cgroup may use, for a
     /// container that cannot see its real limit (0 or unset = none; the flag wins over the variable)
     int64_t memory_limit_mib = -1;
@@ -724,13 +694,13 @@ struct Options {
     int64_t session_min_free_mib = 4096;
     bool session_save_reclaim = false;
     /// --serve: also keep a checkpoint every N freshly read prompt tokens (0 = only at the last turn boundary)
-    int64_t prompt_cache_every = 16384;
+    int64_t prompt_cache_every = 4096;
     bool prompt_cache_tail = false;   // optional extra checkpoint at an existing near-tail chunk boundary
     bool prompt_cache_spread = false;   ///< --prompt-cache-spread: keep checkpoints spread back from the end, not the latest
     /// --prompt-cache-long: for prompts >=128K, keep up to eight scale-spread checkpoints instead of only the
     /// configured LRU chain.  Measured motivation: on 2x RTX 2080 Ti, prompt-cache 3 + 4K interval reused only 8,192
     /// tokens after a 210K prompt changed at 25%; eight spread checkpoints reuse 155,648.  Opt-in; default unchanged.
-    bool prompt_cache_long = false;
+    bool prompt_cache_long = true;   // 4,096-token PLE histories: a 65K prompt's 16 of them (the deployment's shape)
     /// --serve: a prompt read from token 0 is also checkpointed at its first turn boundary - the end of the system
     /// prompt, which every chat of the same client shares - when that is at least N tokens (0 = never)
     int64_t prompt_cache_root = 2048;
@@ -2209,7 +2179,9 @@ static double ple_direct_rows_per_s(strata::kernels::PleTable& t) {
     if (n < 4096) return -1.0;
     constexpr size_t kTok = 4;   // 64 rows a batch
     std::vector<uint32_t> rows(kTok * 16);
-    std::vector<float> out(kTok * 2560);
+    // one token's PLE rows are PLE_N_HEADS x PLE_HEAD_DIM floats = the compiled hidden size (2560 for Flash-Next, 4096 for
+    // q4_big): a buffer of 2560 floats a token was a heap overflow of 24 KB at hidden 4096 (found by an ASan run)
+    std::vector<float> out(kTok * (size_t) strata::kernels::PLE_N_HEADS * (size_t) strata::kernels::PLE_HEAD_DIM);
     uint64_t x = 0x9E3779B97F4A7C15ull ^ n;
     const auto t0 = std::chrono::steady_clock::now();
     uint64_t done = 0;
@@ -3575,10 +3547,9 @@ int main(int argc, char** argv) {
     // and the default waits for its author's re-run of the release branch on his cards.
     const std::set<std::string> skip_base = skip;
     // --trim-stage-weights (PR #559) is the same switch as STRATA_STAGE_TRIM=1 (PR #639)
-    const bool trim_asked = o.trim_stage_weights || [] {
-        const char* v = std::getenv("STRATA_STAGE_TRIM");
-        return v != nullptr && v[0] != 0 && std::string(v) != "0";
-    }();
+    // Trimming a stage's weights to what the split needs is what this box runs with (STRATA_STAGE_TRIM was 1), so it
+    // is asked unconditionally; --trim-stage-weights stays accepted for an old command line.
+    const bool trim_asked = true;
     // CUDA0'S ARENA IS BUILT BEFORE THE SPLIT IS KNOWN.  The prompt path's PLE tables are read out of it, here,
     // and `auto` does not choose its split points until 590 lines below - so CUDA0 can still only trim an
     // explicit --layer-split.  It is also the cheapest card to leave alone: it runs layers 0..split_at[0] on
@@ -4049,8 +4020,7 @@ int main(int argc, char** argv) {
         } else if (!pw_auto && o.pipeline_windows >= 2 && split_devs.size() == 1) {
             // #2637: the default (above) takes two stages only with the draft layer on the first card (mtp_first); asked for by
             // hand it was taken without a word.  Recommend, never force: it stays on as asked, and the line says what it costs.
-            const char* e0 = std::getenv("STRATA_MTP_STAGE0");
-            const bool first_card = mtp_first_ok && (e0 != nullptr ? std::atoi(e0) != 0 : mtp_first_default_on());
+            const bool first_card = mtp_first_ok;
             if (!first_card)
                 std::fprintf(stderr, "strata generate: note: --pipeline-windows %d on a layer split of two stages without the draft layer "
                                      "on the first card (%s): the draft chain then shares the last card with its window and the "
@@ -4172,10 +4142,9 @@ int main(int argc, char** argv) {
     // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
     // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
     const bool mtp_first = [&] {
-        if (!mtp_first_ok || o.pipeline_windows < 2 || stages.empty() || o.batch != 0) return false;
-        const char* e = std::getenv("STRATA_MTP_STAGE0");
-        if (e != nullptr) return std::atoi(e) != 0;   // 0 keeps the drafter on the last card, 1 asks for the first
-        return mtp_first_default_on();
+        // The drafter goes on the first stage's card (STRATA_MTP_STAGE0 was 1): its chain then runs while that card is
+        // between windows, instead of sharing the last card with the window it follows.
+        return mtp_first_ok;
     }();
 
     std::vector<std::pair<int32_t, int32_t>> profile;
@@ -5158,14 +5127,11 @@ int main(int argc, char** argv) {
         return n;
     };
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
-    // OPT-IN: every layer of a device has the same read-only RoPE table.  The main session for each stage owns
-    // one; its batch slots borrow that table instead of allocating another max_cells x 32 x 2-float copy.  At
-    // 192K and six slots this removes six 46.875 MiB copies per card.  The default remains byte-identical while
-    // the integration is measured end to end.
-    const bool share_slot_rope = [] {
-        const char* v = std::getenv("STRATA_SHARED_SLOT_ROPE");
-        return v != nullptr && v[0] != '\0' && std::strcmp(v, "0") != 0;
-    }();
+    // Every layer of a device has the same read-only RoPE table, so the batch slots borrow the stage's instead of
+    // allocating one max_cells x 32 x 2-float copy each: at 192K with six slots that is six 46.875 MiB copies per
+    // card, VRAM this deployment would rather spend on expert slots.  Always shared here - a switch for it would be
+    // a run-config decision about memory, which AGENTS.md rules out.
+    const bool share_slot_rope = true;
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
@@ -5287,15 +5253,15 @@ int main(int argc, char** argv) {
     // STRATA_PIPED_MTP is decided again now that the slots that fit and the groups are final.  Recommend, never force: when
     // it cannot run it is said and left off, and --batch-mtp goes on as it would without it.
     if (piped_mtp) {
-        const char* why = nullptr;
+        // A batch window keeps its own rows here (self-commit, verify.cpp), so a pipelined MTP window - which would
+        // have to hand its rows to the commit graph - never combines with it.  A more specific reason, if one applies,
+        // replaces this one below.
+        const char* why = "the batch window keeps its rows itself (self-commit), so a pipelined MTP window cannot";
         char buf[160];
-        const char* sc = std::getenv("STRATA_BATCH_SELF_COMMIT");
         if (o.batch < 2 || o.batch_groups <= 1) {
-            std::snprintf(buf, sizeof buf, "it needs 2 or more pipelined groups and %d slot%s in %d group%s are left", o.batch,
+            std::snprintf(buf, sizeof buf, "it needs 2 or more pipelined groups and %d slot%s in %d group%s are left",
                           o.batch == 1 ? "" : "s", o.batch_groups, o.batch_groups == 1 ? "" : "s");
             why = buf;
-        } else if (sc != nullptr && sc[0] != '\0' && sc[0] != '0') {
-            why = "it does not combine with STRATA_BATCH_SELF_COMMIT (the window would keep its rows itself)";
         } else if ((o.batch / o.batch_groups) * (1 + pm_drafts) > (int) strata::kernels::kVerifyMaxT) {
             std::snprintf(buf, sizeof buf, "a group's window would hold %d rows (%d slots x %d), more than %d",
                           (o.batch / o.batch_groups) * (1 + pm_drafts), o.batch / o.batch_groups, 1 + pm_drafts,
@@ -8046,14 +8012,9 @@ int main(int argc, char** argv) {
         }
         const auto v = strata::prefill::share_rules::default_share_memory_verdict(sm);
         if (v.arm) return true;
-        const char* ev = std::getenv("STRATA_PREFILL_CPU_SHARE");
-        if (ev == nullptr)
-            std::fprintf(stderr, "strata: the CPU prefill share is not armed by default: %s. STRATA_PREFILL_CPU_SHARE=auto "
-                                 "turns it on anyway\n", v.why.c_str());
-        else if (std::strcmp(ev, "0") != 0)
-            std::fprintf(stderr, "strata: WARNING STRATA_PREFILL_CPU_SHARE=%s is set and kept, but %s: the share can slow "
-                                 "prompts or fail on a machine this short of memory (STRATA_PREFILL_CPU_SHARE=0 turns it off)\n",
-                         ev, v.why.c_str());
+        // The share is always armed as `auto` here (prefill.cpp: cpu_share_explicit), so a refusal is this box's memory,
+        // not a switch someone left off.
+        std::fprintf(stderr, "strata: the CPU prefill share is off for this run: %s\n", v.why.c_str());
         return false;
     };
     if (o.serve) {
@@ -8108,21 +8069,20 @@ int main(int argc, char** argv) {
         // STRATA_PREFILL_CPU_SHARE the staged-chunk limit before the chunk below sizes the loans (bytes_needed reads it)
         // #1607: Windows, the commit limit (RAM + page file) is what ends the engine silently; compare what this run plans
         // to allocate on the host from here (the conversation cache, checkpoints) with the commit that is left
-        static const bool guarded_batch_share = [] {
-            const char* v = std::getenv("STRATA_PREFILL_CPU_SHARE_BATCH_GUARD");
-            return v != nullptr && std::atoi(v) != 0;
-        }();
+        // The batch guard is this box's shape (STRATA_PREFILL_CPU_SHARE_BATCH_GUARD was 1): with batch slots decoding
+        // between a prompt's parts, the pool is not idle, so every lease is checked.
+        const bool guarded_batch_share = true;
         const bool share_pool = (o.batch <= 0 || guarded_batch_share) && !o.no_pool;
         if (guarded_batch_share && o.batch > 0) {
             pool.set_batch_prefill_guard(true);
-            std::fprintf(stderr, "strata serve: batch CPU-share guard requested; prefill leases one layer only while "
+            std::fprintf(stderr, "strata serve: batch CPU-share guard armed; prefill leases one layer only while "
                                  "no decode window is active\n");
         }
         bool share_has_work = strata::prefill::share_rules::default_share_has_work(
             (int64_t) xcache.slots(), (int64_t) (g.n_layers * g.n_expert));   // #1595
         if (!share_has_work)
             std::fprintf(stderr, "strata serve: every expert is in the GPU cache (%lld of %lld): the CPU prefill share has "
-                                 "nothing to take, so it is not armed by default (STRATA_PREFILL_CPU_SHARE=auto forces it)\n",
+                                 "nothing to take, so it stays unarmed for this run\n",
                          (long long) xcache.slots(), (long long) (g.n_layers * g.n_expert));
         if (share_pool && stages.empty() && !multi_gpu && share_has_work && !share_default_ok()) share_has_work = false;   // H11
         strata::prefill::Prefill::arm_cpu_share(
@@ -9123,7 +9083,8 @@ int main(int argc, char** argv) {
         std::vector<ConvCheckpoint> checks;
         // STRATA_CKPT_POOL: the dropped checkpoints' storage, reused.  STRATA_SLOT_CKPT_MOVE turns it on too: a moved
         // checkpoint frees nothing at the next prune, so every save would fault in fresh pages (17 -> 40-60 ms)
-        CheckpointPool ckpt_pool(ckpt_pool_env() || slot_ckpt_move_env());
+        // always: a dropped checkpoint's vectors are the next save's, which is why a save resizes nothing
+        CheckpointPool ckpt_pool(true);
         uint64_t check_clock = 0;   // the checkpoints' LRU clock; creation and every use advance it
         int64_t tail_ckpt_len = -1;   // --prompt-cache-tail: the length of the one tail checkpoint alive (-1 = none)
         // --prefill-pipe: the plan of the prompt segment being read (read_part sets it around its runs), for the
@@ -9137,12 +9098,22 @@ int main(int argc, char** argv) {
         // its whole prompt again, Reused 0 on 12 of 12).  An explicit value, 0 included, is never touched.
         if (o.conversation_cache_mib < 0) {
             if (o.serve && o.prompt_cache > 0 && o.conversation_cache_slots > 0) {
-                o.conversation_cache_mib = strata::core::auto_conversation_cache_mib(strata::core::available_host_bytes(),
-                                                                                    o.conversation_cache_min_free_mib);
+                // Capacity from the working set (AGENTS.md): five conversations at the 160K compaction point, times what a
+                // token costs in this run's K/V format.  The RAM left is a ceiling, not the measure.
+                const int64_t per_token = (int64_t) strata::core::qsa_kv_token_bytes(g);
+                o.conversation_cache_mib = strata::core::auto_conversation_cache_mib(
+                    strata::core::available_host_bytes(), o.conversation_cache_min_free_mib, per_token);
                 if (o.conversation_cache_mib > 0)
-                    std::fprintf(stderr, "strata serve: conversation cache sized from the free RAM: %lld MiB for up to %d parked "
-                                         "conversations, so an agent's next turn reuses its prompt (--conversation-cache-mib N sets it, 0 turns it off)\n",
-                                 (long long) o.conversation_cache_mib, o.conversation_cache_slots);
+                    std::fprintf(stderr, "strata serve: conversation cache sized for the working set: %lld MiB, which holds "
+                                         "%.1f conversations of %lld tokens at %lld B/token in %s K/V "
+                                         "(--conversation-cache-mib N sets it, 0 turns it off)\n",
+                                 (long long) o.conversation_cache_mib,
+                                 per_token > 0
+                                     ? (double) ((int64_t) o.conversation_cache_mib << 20) /
+                                           (double) (per_token * strata::core::kWorkingSetConversationTokens)
+                                     : 0.0,
+                                 (long long) strata::core::kWorkingSetConversationTokens, (long long) per_token,
+                                 o.kv.c_str());
                 else
                     std::fprintf(stderr, "strata serve: conversation cache off: not enough free RAM to park conversations "
                                          "(--conversation-cache-mib N asks for one anyway)\n");
@@ -9509,7 +9480,7 @@ int main(int argc, char** argv) {
                 c.dead = std::move((*parts)[0].dead);
                 c.block_pos = std::move((*parts)[0].block_pos);
                 for (size_t i = 1; i < parts->size(); ++i) c.stage_parts.push_back(std::move((*parts)[i]));
-            } else if (ckpt_pool.on() || ckpt_threads_env()) {
+            } else {
                 // STRATA_CKPT_POOL / STRATA_CKPT_THREADS: the parts go into the vectors a pooled checkpoint already has
                 // (none resized), with the threads all at once; part k is stage k's session, synchronized first
                 const size_t n = stages.size() + 1;
@@ -9540,14 +9511,7 @@ int main(int argc, char** argv) {
                     }
                 };
                 const Clock::time_point t0 = Clock::now();
-                if (ckpt_threads_env()) {
-                    ckpt_threads.run(n, save_part);
-                } else {
-                    for (size_t k = 0; k < n; ++k) {
-                        save_part(k);
-                        if (!synced[k] || !saved[k]) break;
-                    }
-                }
+                ckpt_threads.run(n, save_part);   // every stage's part at once (its own device's thread)
                 for (size_t k = 0; k < n; ++k)
                     if (thrown[k]) std::rethrow_exception(thrown[k]);
                 for (size_t k = 0; k < n; ++k) {
@@ -9567,38 +9531,8 @@ int main(int argc, char** argv) {
                     req_times.save_ms += wall - sync_part[0];
                     std::fprintf(stderr, "strata trace: checkpoint at %lld: sync %.1f ms, save %.1f ms (%zu stage(s)%s, "
                                          "each%s ms, %s)\n", (long long) L, sync_part[0], wall - sync_part[0], n,
-                                 ckpt_threads_env() ? " at once" : "", each.c_str(),
+                                 " at once", each.c_str(),
                                  reused ? "into a dropped checkpoint's vectors" : "new vectors");
-                }
-            } else {
-                Clock::time_point t0 = Clock::now();
-                auto lap = [&](double& acc) {   // (STRATA_TRACE only)
-                    if (!ckpt_trace) return;
-                    const Clock::time_point t1 = Clock::now();
-                    acc += std::chrono::duration<double, std::milli>(t1 - t0).count();
-                    t0 = t1;
-                };
-                double sync_ms = 0.0, save_ms = 0.0;
-                if (!gpu_sync_ok()) return false;
-                lap(sync_ms);
-                if (!checkpoint_save(c, ss, g)) return false;
-                lap(save_ms);
-                for (auto& st : stages) {   // a layer split's later stages: their sessions' part
-                    const strata::core::OnDevice on(st->dev);
-                    ConvCheckpoint part;
-                    part.ids = c.ids;
-                    if (!gpu_sync_ok()) return false;
-                    lap(sync_ms);
-                    if (!checkpoint_save(part, st->ss, g)) return false;
-                    c.stage_parts.push_back(std::move(part));
-                    lap(save_ms);
-                }
-                if (ckpt_trace) {
-                    ++req_times.ckpts;
-                    req_times.sync_ms += sync_ms;
-                    req_times.save_ms += save_ms;
-                    std::fprintf(stderr, "strata trace: checkpoint at %lld: sync %.1f ms, save %.1f ms (%zu stage(s))\n",
-                                 (long long) L, sync_ms, save_ms, stages.size() + 1);
                 }
             }
             c.used = ++check_clock;
@@ -9808,38 +9742,10 @@ int main(int argc, char** argv) {
         drive.d.pcie_num = std::max(0, std::min(256, (int) (o.pcie_frac * 256.0 + 0.5)));
         const bool all_experts_resident = !host_res.empty() &&
             std::all_of(host_res.begin(), host_res.end(), [](int32_t r) { return r >= 0; });
-        // STRATA_ROUTE_TAIL_SKIP: ON BY DEFAULT on CUDA builds (owner decision, 0.1.42) and on HIP gfx1200/gfx1201 (0.1.43): a missed expert that every token of
-        // a verify window routes at rank 7 or lower is neither copied nor computed (answers differ slightly from 0.1.41,
-        // KL ~0.003-0.006; docs/DETAILS.md).  =0 restores 0.1.41's bytes.  Nothing to do, so no default and no line, when every
-        // expert is in VRAM; off with --batch slots (a window then mixes requests, and one request's skip would depend on
-        // another's tokens) and, as in the dispatch, with a peer or helper GPU.  A layer split is fine: each stage skips by itself.
-        {
-            const char* tse = std::getenv("STRATA_ROUTE_TAIL_SKIP");
-            // #1884: with nearly every expert in the GPU cache (V100 32 GB, Coder IQ1_M: 94.8% of the experts, 99.9% decode hits) the few
-            // misses are cheap and the skip costs more draft acceptance (70.1% -> 68.2%) than it saves: -1..2% decode.  No default then.
-            size_t cached_experts = 0;
-            for (int32_t r : host_res) cached_experts += r >= 0 ? 1 : 0;
-            // (STRATA_TAIL_SKIP_MAX_CACHED=<percent>, default 90, moves the line; 101 = never).  0.1.43: 60 on a HIP layer split, where
-            // 2x R9700 (5 pairs, skip on vs off): Q2_0 story -6.2% at 70% cached, -1.8% at 60%; IQ3_S +6..15% at 44-52%, about 0 at 60%.
-            const double max_cached_default = 0.90;
-            const char* mcs = std::getenv("STRATA_TAIL_SKIP_MAX_CACHED");
-            const double max_cached = mcs != nullptr && mcs[0] != 0 ? std::atof(mcs) / 100.0 : max_cached_default;
-            const bool nearly_all_cached = !host_res.empty() && !all_experts_resident &&
-                                           (double) cached_experts >= max_cached * (double) host_res.size();
-            const bool tail_default_path = tse == nullptr && !all_experts_resident && !nearly_all_cached && o.batch == 0 &&
-                                           decode_defaults_arch_ok() &&
-                                           o.peer_device < 0;
-            if (tse == nullptr && nearly_all_cached && o.batch == 0 && o.peer_device < 0 && decode_defaults_arch_ok())
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP is off by default: %.1f%% of the experts are in the GPU cache, so "
-                                     "few are missed and skipping them costs more draft acceptance than it saves; "
-                                     "STRATA_ROUTE_TAIL_SKIP=7 turns it on\n", 100.0 * (double) cached_experts / (double) host_res.size());
-            if (tail_default_path) strata::core::set_tail_skip_rank(7);
-            if (strata::core::tail_skip_rank() > 0 && !all_experts_resident)
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP=%d is ON%s: a missed expert that every token of a verify window routes at rank %d or "
-                                     "lower is skipped (+10..20%% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); "
-                                     "STRATA_ROUTE_TAIL_SKIP=0 turns it off\n", strata::core::tail_skip_rank(),
-                             tse == nullptr ? " (default)" : "", strata::core::tail_skip_rank());
-        }
+        // The route tail skip is off here.  It pays where experts are missed (12-16 GB cards: +10..20% decode), but this
+        // box pins every expert in RAM (--resident-experts) and streams none, so there is no miss to skip and the skip
+        // would only cost draft acceptance - the deployment ran with STRATA_ROUTE_TAIL_SKIP=0, and a switch for it is not
+        // where this decision belongs (AGENTS.md).  tail_skip_rank() stays 0, so drive.d.tail_experts stays 0 too.
         if (o.adapt_every > 0 && o.adapt_swaps > 0 && !all_experts_resident)
             drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         PcieAuto pcie_auto;
@@ -10895,7 +10801,8 @@ int main(int argc, char** argv) {
                     slots_all += remote_experts[(size_t) r].resident();
                     mib_all += (int64_t) (remote_experts[(size_t) r].gib() * 1024.0);
                 }
-            std::printf("INFO logit_bias=1 context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld "
+            std::printf("INFO logit_bias=1 context=%lld kv=%s kv_resident=%lld kv_bytes_per_token=%lld "
+                        "expert_slots=%lld expert_cache_mib=%lld "
                         "expert_slots_primary=%lld expert_cache_primary_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f conversation_cache_mib=%lld conversation_cache_slots=%d "
@@ -10905,6 +10812,7 @@ int main(int argc, char** argv) {
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1
                                          ? ss.qsa_states[ss.qsa_primary()].n_slots * 4 : 0),
+                        (long long) strata::core::qsa_kv_token_bytes(g),
                         (long long) slots_all, (long long) mib_all,
                         (long long) slots_primary, (long long) mib_primary,
                         o.spec, o.mtp_max_t,
@@ -11212,10 +11120,9 @@ int main(int argc, char** argv) {
             bool cvec = true, cont = false;
             double drain_ms = 0.0;
         } staged_admit;
-        static const bool staged_read_env = [] {
-            const char* staged_v = std::getenv("STRATA_BATCH_STAGED_READ");
-            return staged_v && *staged_v && std::strcmp(staged_v, "0") != 0;   // =0 disables, unlike a bare getenv
-        }();
+        // A prompt read that takes no slot yet is this deployment's shape (STRATA_BATCH_STAGED_READ was 1): the read
+        // fills the main session while the slots keep decoding.
+        const bool staged_read_env = true;
         auto batch_on = [&] { for (const BSlot& b : bs) if (b.active) return true; return false; };
         auto try_next_line = [&](std::string& out) -> bool {
             std::lock_guard<std::mutex> lk(in_mu);
@@ -11229,10 +11136,9 @@ int main(int argc, char** argv) {
         // a slot copy can go device to device (the same bytes into the same places as the checkpoint/K-V image
         // round trip through host memory, which costs ~40-90 ms per admission on a 4-card split); each device is
         // synchronized once before and once after.  Opt-in: STRATA_SLOT_COPY_DIRECT=1 (default: the host path).
-        static const bool slot_copy_direct = [] {
-            const char* v = std::getenv("STRATA_SLOT_COPY_DIRECT");
-            return v != nullptr && v[0] != '\0' && v[0] != '0';
-        }();
+        // Direct device-to-device slot copies, always (STRATA_SLOT_COPY_DIRECT was 1): the host round trip costs
+        // 40-90 ms per admission on a split, and these are the same bytes into the same places.
+        const bool slot_copy_direct = true;
         auto direct_slot_copy = [&](bool into_slot, int b, const std::vector<int32_t>& ids, std::string& e) -> bool {
             const int64_t upto = (int64_t) ids.size();
             auto sync_all = [&]() {
@@ -11248,7 +11154,7 @@ int main(int argc, char** argv) {
             auto failed = [&]() { (void) sync_all(); return false; };
             if (!sync_all()) { e = "batch slot copy: device sync failed"; return false; }
             // STRATA_SLOT_COPY_BATCHSYNC: every copy is only queued, and the sync_all below is the one wait per device
-            const bool queued = slot_copy_batchsync_env();
+            const bool queued = true;   // every copy queued; the caller's sync_all is the one wait per device
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 strata::core::SessionState& main_ss = k == 0 ? ss : stages[k - 1]->ss;
                 strata::core::SessionState& slot_ss = *bslot_ss[k][(size_t) b];
@@ -12067,8 +11973,8 @@ int main(int argc, char** argv) {
                 }
                 // a request reads its prompt through every stage: the groups in flight finish first
                 // (STRATA_PIPE_BYIELD_NODRAIN: not for a BYIELD, which is dropped below)
-                if (piped && line.rfind("BSTOP ", 0) != 0 &&
-                    !(pipe_byield_nodrain_env() && line.rfind("BYIELD", 0) == 0)) {
+                // (a BYIELD is dropped: a pipelined read never gives way, so it belongs to a read that has ended)
+                if (piped && line.rfind("BSTOP ", 0) != 0 && line.rfind("BYIELD", 0) != 0) {
                     const int in_flight = trace ? (int) std::count_if(pg.begin(), pg.end(), [](const PGroup& G) {
                                                       return G.inflight; }) : 0;
                     const auto td = Clock::now();
@@ -13904,19 +13810,12 @@ int main(int argc, char** argv) {
                 }();
                 // A finite decode before a concurrent read starts.  Unlike a read piece this adds no drain inside
                 // the prompt: it only gives requests already decoding one bounded chance to finish before the long
-                // prompt can take over the pipeline.  Off by default; a piecewise read has its own lead-in below.
-                static const double pr_concurrent_leadin = [] {
-                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_MS");
-                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
-                }();
-                static const double pr_concurrent_leadin_wait = [] {
-                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_WAIT_MS");
-                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
-                }();
-                static const int64_t pr_concurrent_leadin_min_tokens = [] {
-                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS");
-                    return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 4096;
-                }();
+                // prompt can take over the pipeline.  A piecewise read has its own lead-in below.  1600 ms of decode,
+                // up to 750 ms more for a request that is nearly done, and only in front of a read of 4096 tokens or
+                // more: the shape this deployment measured, now the default rather than three config entries.
+                const double pr_concurrent_leadin = 1600.0;
+                const double pr_concurrent_leadin_wait = 750.0;
+                const int64_t pr_concurrent_leadin_min_tokens = 4096;
                 const bool pr_on = piped && pr_piece > 0;
                 // the slots decode through the pipeline for budget_ms, drained before the next read
                 auto piped_decode = [&](double budget_ms, std::string& err) -> bool {
@@ -13975,17 +13874,14 @@ int main(int argc, char** argv) {
                 // the expert source recycles the buffers it hands out (the GGUF in place, an unbuffered source, the
                 // I/O read-ahead: one thread at a time).  Pictures are read the usual way (their rows go up through
                 // pinned slots of a size known only then).
+                // A prompt reads while the batch windows run (STRATA_PIPED_CONCURRENT was 1).  The optional share
+                // sources it used to take from the environment are off - this box's prompt path is the plain source -
+                // so the setup below is what decides.
                 static const bool pr_conc = [&] {
-                    const char* v = std::getenv("STRATA_PIPED_CONCURRENT");
-                    if (v == nullptr || std::atoi(v) == 0) return false;
-                    auto env_on = [](const char* k) {
-                        const char* x = std::getenv(k);
-                        return x != nullptr && std::atoi(x) != 0;
-                    };
                     strata::program::ConcurrentReadSetup s;
-                    s.prefill_help = env_on("STRATA_PREFILL_HELP");
-                    s.split_mtp_batch = env_on("STRATA_SPLIT_MTP_BATCH");
-                    s.fs_slots = env_on("STRATA_FS_SLOTS");
+                    s.prefill_help = false;
+                    s.split_mtp_batch = false;
+                    s.fs_slots = false;
                     s.pcie_dma = o.pcie_mode == "dma";
                     // (--remote-expert-opt works only through a helper cache, so without one it does not count)
                     s.helper_caches = prefill_src != srcp;
@@ -13994,7 +13890,7 @@ int main(int argc, char** argv) {
                     s.staged_prompt_independent = srcp == &src && src.prompt_copies_independent();
                     s.other_source = srcp != &src && srcp != &arena_src;
                     if (const char* why = strata::program::concurrent_read_off(s)) {
-                        std::fprintf(stderr, "strata batch: STRATA_PIPED_CONCURRENT is off beside %s\n", why);
+                        std::fprintf(stderr, "strata batch: the concurrent prompt read is off beside %s\n", why);
                         return false;
                     }
                     return true;
@@ -14440,7 +14336,7 @@ int main(int argc, char** argv) {
             // and the serial loop with nothing else reading its windows
             int64_t merge_at = -1;
             auto merge_from = [&](int64_t a0, int64_t to) -> int64_t {
-                if (!admit_merge_first_env() || admit_slot < 0 || max_new != 1 || batch_mtp || pipe) return -1;
+                if (admit_slot < 0 || max_new != 1 || batch_mtp || pipe) return -1;
                 if (to != n - 1 || to == turn_at || to == root_at || to == message_at || to == pin_at) return -1;
                 if (!req_imgs.empty() || kvg.on || peer.valid() || remote_caches || remote_opt || fs_swap) return -1;
                 if (std::getenv("STRATA_LOGPOS") != nullptr) return -1;

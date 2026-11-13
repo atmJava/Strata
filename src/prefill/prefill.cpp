@@ -190,32 +190,18 @@ inline int64_t stream_all_min() {
 // STRATA_PREFILL_CPU_SHARE=0 turns it off: the output is then the 0.1.40.3 bytes.  g_share_default is set by
 // Prefill::arm_cpu_share(.., true) from the paths that qualify; the layer split, batch slots and HIP stay off.
 bool g_share_default = false;
-inline double cpu_share_explicit() {   // -2: the variable is not set; -1: measured
-    static const double v = [] {
-        const char* e = std::getenv("STRATA_PREFILL_CPU_SHARE");
-        if (e == nullptr) return -2.0;
-        if (std::strcmp(e, "auto") == 0) return -1.0;
-        return std::clamp(std::atof(e), 0.0, 1.0);
-    }();
-    return v;
-}
+// -1: measured (the share follows its measured rules wherever they arm it).  This deployment ran with
+// STRATA_PREFILL_CPU_SHARE=auto, and AGENTS.md keeps the decision in code: the layer split, the batch slots and a
+// memory-short machine still leave it unarmed through g_share_default / arm_cpu_share.
+inline double cpu_share_explicit() { return -1.0; }
 inline double cpu_share_env() {   // -1: measured
     const double v = cpu_share_explicit();
     return v == -2.0 ? (g_share_default ? -1.0 : 0.0) : v;
 }
 inline bool cpu_share_on() { return cpu_share_env() != 0.0; }
-// STRATA_PREFILL_CPU_SHARE_MAX (default 3072, at least 1024): with the share on, chunks below it are staged after their
-// routing - so they can hand the CPU its share - instead of streaming every expert the cards do not hold.  The share pays
-// on chunks up to ~3K tokens, where few tokens route to many of the streamed experts; 1024 keeps the old limit.
-inline int64_t cpu_share_max() {
-    static const int64_t v = [] {
-        const char* e = std::getenv("STRATA_PREFILL_CPU_SHARE_MAX");
-        return e ? std::max<int64_t>(kStreamAllMinDefault, (int64_t) std::atoll(e)) : (int64_t) 3072;
-    }();
-    static const bool explicit_max = std::getenv("STRATA_PREFILL_CPU_SHARE_MAX") != nullptr;
-    if (g_share_default && cpu_share_explicit() == -2.0 && !explicit_max) return kStreamAllMinDefault;   // its measured range
-    return v;
-}
+// 1024 tokens: the deployed limit (STRATA_PREFILL_CPU_SHARE_MAX=1024).  Chunks above it stream every expert instead of
+// staging after their routing, which pays only up to ~3K tokens (the measurements above).
+inline int64_t cpu_share_max() { return std::max<int64_t>(kStreamAllMinDefault, (int64_t) 1024); }
 // On a layer split every stage may have the pool (set_cpu_pool), and the stages read different chunks at the same time:
 // one stage at a time takes it for a chunk, the other reads its chunk with the GPU alone.
 std::atomic<bool> g_cpu_pool_busy{false};
@@ -2291,7 +2277,7 @@ void Prefill::arm_cpu_share(bool applies, bool by_default) {
         g_share_default = true;
         std::fprintf(stderr, "prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU "
                              "takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, "
-                             "mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.\n");
+                             "mean KL ~0.004).\n");
     }
     if (applies && cpu_share_on()) g_stream_min_share = cpu_share_max();
 }

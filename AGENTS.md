@@ -42,6 +42,11 @@ one whose slot held another conversation reused 9,036. Decoding ran at 64 tok/s 
 18.9-24.8 tok/s with five requests in flight. The conversation cache held 11.68 GB across 12 slots, with 65
 parks, 24 restores and 12 evictions in three hours.
 
+The engine reports what a token of a conversation costs in the running K/V format: 14,220 B in INT8 over the 12
+QSA layers, which is 1,056 of K/V plus a page-table byte and the 128-byte pooled indexer key. At the 160K compaction
+point a conversation is about 2.3 GB, so the 11.68 GB cache already held about 5.4 of them - capacity was never the
+lever, and the 51 s median wait is admission and reuse.
+
 Version 0.2.7, engine 0.1.51. The public model families are DeepSeekV4.1-Flash-1017,
 Qwen3.8-Flash-Next and Qwen3.6-35B-A3B. DeepSeek V4.1-Flash runs in the app and in the Terminal
 (`strata launch --family deepseek41 --model ist-das-2.00bpw`; sets in
@@ -67,6 +72,34 @@ Strata has three parts:
   server with an OpenAI- and Anthropic-compatible API and a web page). Build it with CMake
   as [README.md](README.md#build) says. This checkout has no `setup.py`, `START-HERE.bat` or `setup.sh`; a model is
   set up and served with `strata launch`.
+
+## How work is ordered here
+
+Latency is the only measure, so the order of work follows the wait rather than a wish list. The twelve real DSH
+requests measured above spent 615 s waiting for the engine to start and 114 s decoding. The seconds are in the wait:
+
+1. **Admission** - who gets the engine next: short prompts before long ones within a shape, a long request that has
+   waited, and conversational affinity, so a request that continues a parked history follows it instead of queueing
+   behind a stranger.
+2. **Reuse** - how much of a prompt the engine already holds: the conversation cache, the prompt-cache checkpoints,
+   and a K/V format that gives way (int8, then k8v4, then q4_0) instead of the prompt being read again.
+3. **Decode** - last of the three, because a 20% decode gain moves a 3 s turn and a 51 s wait does not.
+
+Capacity is not on that list. The cache already holds about 5.4 conversations at the compaction point (14,220 B per
+token in INT8), so a cache size in a config file was never the lever.
+
+## How a round is closed
+
+Every round ends with the same four steps, in this order, and the commit message says what each one gave:
+
+1. Run the suites: `python tools/run_tests.py` (the engine's standalone conversation tests, the server's, the tools',
+   the terminal's). A group that cannot run is named in the commit's "Not run" line, not left out.
+2. A test written beside the change. When the change is a default, the test asserts it in one place - 
+   `serve/test_deployment_policy.py` - so turning it back into a switch fails one obvious test.
+3. `git grep -n 'getenv("STRATA_' src include serve`: a new read is a bug unless it is a test seam
+   (`STRATA_TEST_*`). A branch behind a constant is noise: delete the branch, not only the condition.
+4. The build, at `nice -n 15 make -j2`, then `strata --version`. Compiling is not restarting: the service stays up
+   while a separate build tree is verified.
 
 ## Installing Strata for a user
 
@@ -116,7 +149,8 @@ server ([docs/MCP_SERVER.md](docs/MCP_SERVER.md)) offers the same steps as tools
 - AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md);
   Mac (Metal): [docs/MAC.md](docs/MAC.md). Those three pages describe the upstream tree: this checkout builds the
   CUDA `sm_75` engine only, and the build refuses HIP, SYCL and Metal ([README.md](README.md#build)).
-- Tests: the Terminal and Control tests are in `tests/terminal` (`python -m pytest tests/terminal`). The app's UI
+- Tests: `python tools/run_tests.py` runs all of them from one command (`--group engine|serve|tools|terminal`,
+  `--filter NAME`). The Terminal and Control tests are in `tests/terminal` (`python -m pytest tests/terminal`). The app's UI
   tests are not here either. The server probes' tests are in `tools/server/tests` (`python -m pytest
   tools/server/tests`). The tools' own tests run without a GPU or downloads: `python tools/test_<name>.py` (for
   example `tools/test_shards.py`, `tools/test_gguf_paths.py`); the pack tests need llama.cpp's gguf-py and skip

@@ -1,4 +1,4 @@
-"""serve/test_admit_order.py - STRATA_ADMIT_SHORT_FIRST: new requests take the control lines short prompts first
+"""serve/test_admit_order.py - ADMIT_SHORT_FIRST: new requests take the control lines short prompts first
 (StrataEngine._take_control / _admit_next; no process, no GPU).
 
     python -m unittest serve.test_admit_order -v
@@ -96,9 +96,11 @@ class AdmitOrderTest(unittest.TestCase):
             self.until(lambda: len(self.order) == 2, s=15.0)
         self.assertEqual(self.order, ["agent", "chat"])
 
-    def test_off_by_default(self):
-        self.assertEqual(server.ADMIT_SHORT_FIRST if "STRATA_ADMIT_SHORT_FIRST" not in __import__("os").environ
-                         else 0, 0)
+    def test_the_deployment_default(self):
+        """2048 tokens, as a constant: the order is what this box is for, not an opt-in (AGENTS.md)."""
+        self.assertEqual(server.ADMIT_SHORT_FIRST, 2048)
+
+    def test_without_the_order_both_get_their_turn(self):
         with mock.patch.object(server, "ADMIT_SHORT_FIRST", 0):
             order = self.queue(("agent1", 120000), ("chat", 500))
         self.assertEqual(sorted(order), ["agent1", "chat"])            # both get their turn, in any order

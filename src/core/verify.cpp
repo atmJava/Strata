@@ -185,12 +185,15 @@ bool env_on(const char* name) {
 const bool g_trace = env_on("STRATA_VERIFY_TRACE");
 const bool g_no_multi_gr = env_on("STRATA_NO_MULTI_GR");   // #783 PR-g: per-token GR reads/writes and generic-T kernels again
 const bool g_no_batch_kv = env_on("STRATA_NO_BATCH_KV_STEP");   // #783 PR-d: per-token K/V and indexer appends again
-// STRATA_BATCH_SELF_COMMIT=1 (opt-in): a batch window whose rows are each another slot's one token keeps them itself,
+// A batch window whose rows are each another slot's one token keeps them itself,
 // as a one-token window does (record_window): the GDN conv histories and states advance inside the window graph, and
 // no commit graph runs after it.  Such a window's commit is unconditional (each slot keeps its one row), and the rest
 // of the commit graph only repeats what the window wrote: the indexer tails are put back and appended again from the
 // same rows, the PLE histories are put back to the window's own snapshot.
-const bool g_batch_self_commit = env_on("STRATA_BATCH_SELF_COMMIT");
+// On, and not a setting: this deployment ran with it (STRATA_BATCH_SELF_COMMIT=1) and the box is 2 x 2080 Ti on
+// --batch 2.  Turning it off crashed the engine on the first batched request here - "mtp draft: an illegal memory
+// access was encountered", the draft's window committing through a graph the self-committing window does not build.
+const bool g_batch_self_commit = true;
 // STRATA_QSA_SLOTS=1 (opt-in): in a batch window, a QSA layer's block scores, top-k and attention run as one launch
 // each over the window's rows (up to 8 per launch, each row reading its own slot's indexer keys and K/V) instead of
 // one call per row; every row is computed by the same kernel with the same arithmetic as its own call.  Not with a
@@ -946,11 +949,9 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // STRATA_PIPED_CONCURRENT=1 (opt-in): a prompt can run on the same GPU while the batch windows run, so the windows'
     // streams get the device's highest priority (HIP: the default priority, as the drafter's)
     auto make_stream = [](cudaStream_t* s) -> cudaError_t {
-        static const bool hi = [] {   // (STRATA_PIPED_CONCURRENT_PRIO=0: the default priority)
-            const char* v = std::getenv("STRATA_PIPED_CONCURRENT");
-            const char* p = std::getenv("STRATA_PIPED_CONCURRENT_PRIO");
-            return v != nullptr && std::atoi(v) != 0 && (p == nullptr || std::atoi(p) != 0);
-        }();
+        // a prompt can run on the GPU while the batch windows run (STRATA_PIPED_CONCURRENT was 1), so the windows'
+        // streams take the device's highest priority
+        const bool hi = true;
         int lo = 0, top = 0;
         if (hi) {
             if (cudaDeviceGetStreamPriorityRange(&lo, &top) == cudaSuccess &&

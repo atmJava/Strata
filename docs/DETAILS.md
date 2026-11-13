@@ -667,15 +667,15 @@ system prompt with a billing header that changes on every request; the server pi
 | Option | Effect |
 | --- | --- |
 | `--prompt-cache N` | Number of checkpoints (`0` = off, which also disables parking). |
-| `--prompt-cache-every N`, `--prompt-cache-root N`, `--turn-token ID` | Checkpoint interval, the system-prompt checkpoint (`0` = none) and the turn token. |
+| `--prompt-cache-every N`, `--prompt-cache-root N`, `--turn-token ID` | Checkpoint interval (default 4,096 tokens), the system-prompt checkpoint (`0` = none) and the turn token. |
 | `--prompt-cache-spread` (opt-in) | The checkpoint that leaves is the one whose removal leaves the smallest gap, so the kept points thin out geometrically back from the end. An agent that rewrites its history a few thousand tokens back then resumes near the edit instead of at the system prompt. Same RAM. |
-| `--prompt-cache-long` (opt-in) | For prompts of 128K tokens or more, keep up to eight checkpoints at useful edit scales: about 1/8, 1/4, 1/2, 3/4, 7/8 and 15/16 of the prompt, plus the shared root and newest point. This helps histories that are compressed or edited in the middle rather than only near the end. It uses more host RAM (about 118 MB per checkpoint on the measured Qwen geometry); short prompts keep the configured policy. Requires `--prompt-cache` and `--prompt-cache-every`. |
+| `--prompt-cache-long` (on by default) | For prompts of 128K tokens or more, keep up to eight checkpoints at useful edit scales: about 1/8, 1/4, 1/2, 3/4, 7/8 and 15/16 of the prompt, plus the shared root and newest point. This helps histories that are compressed or edited in the middle rather than only near the end. It uses more host RAM (about 118 MB per checkpoint on the measured Qwen geometry); short prompts keep the configured policy. Requires `--prompt-cache` and `--prompt-cache-every`. |
 | `"strata_checkpoint": false` (per request) | A one-shot request that no later request continues saves no checkpoints and keeps no session. |
 | `"strata_prefix": {"messages": 1}` (per request, opt-in) | One long document, many questions. Marks where the document ends: `{"messages": 1}`, `{"message": 0, "chars": 210000}` or `{"tokens": 12345}`. The checkpoint at the boundary is pinned, so 20 questions cost one read of the document. One pinned prefix at a time per engine; needs `--prompt-cache 3` or more; a malformed field is a 400. See [RESEARCH_RUNS.md](RESEARCH_RUNS.md). |
-| `--conversation-cache-mib N`, `--conversation-cache-slots N` | Park conversations in a bounded host-RAM cache so alternating requests (controller and worker histories, sub-agents) reuse their prompts. Without `--conversation-cache-mib` the budget is 40% of the RAM left above `--conversation-cache-min-free-mib` once the model is loaded, at most 8192 MiB in steps of 256, off when under 1024; the engine log says which. `0` turns it off. It preserves histories; it does not run requests at once. |
-| `--conversation-cache-min-tokens N` | Park only conversations of at least N tokens, so short side requests do not evict a long conversation. Default `0` (park all). |
-| `--conversation-cache-park-gain N` (opt-in) | Park a conversation again only after it advanced N tokens past the copy it would replace. |
-| `--conversation-cache-min-free-mib N` | RAM floor, default 2560. Parking and session files are skipped when less than the snapshot plus the floor is available. |
+| `--conversation-cache-mib N`, `--conversation-cache-slots N` | Park conversations in a bounded host-RAM cache so alternating requests (controller and worker histories, sub-agents) reuse their prompts. Without `--conversation-cache-mib` the budget is the size of the working set - five conversations at 163,840 tokens (80% of a 200K window) times what a token costs in the running K/V format, which is 14,220 B in INT8 and 11,264 MiB on this deployment - capped by the RAM left above `--conversation-cache-min-free-mib`, in steps of 256 MiB, off when under 1024; the engine log says which. `--conversation-cache-slots` defaults to 12: the byte budget bounds the memory, and the count only caps how many histories are parked, so it has to sit above the five conversations in flight or the budget goes unused (this box ran 12 for three hours: 65 parks, 12 evictions, 11.68 GB). `0` turns the cache off. It preserves histories; it does not run requests at once. |
+| `--conversation-cache-min-tokens N` | Park only conversations of at least N tokens, so short side requests do not evict a long conversation. Default `4096`: a shorter conversation is not worth the slot. |
+| `--conversation-cache-park-gain N` | Park a conversation again only after it advanced N tokens past the copy it would replace. Default `2048`, so a turn that barely moves a history does not rewrite its parking. |
+| `--conversation-cache-min-free-mib N` | RAM floor, default 4096. Parking and session files are skipped when less than the snapshot plus the floor is available. |
 | `--memory-limit-mib N` (or `STRATA_MEMORY_LIMIT_MIB`) | Total RAM this engine's container may use, for when a container cannot see its own limit. Config `args`: `"--memory-limit-mib", "102400"`. `0` = none. |
 
 The RAM figure the floor is checked against is the smallest of `MemAvailable`, the room under each cgroup limit visible to
@@ -918,8 +918,8 @@ bits of the answer: a switch that changes rounding can change a greedy answer at
 
 | Setting | Applies to | Off switch | What it does |
 | --- | --- | --- | --- |
-| `STRATA_PREFILL_CPU_SHARE` (`auto`, cap `STRATA_PREFILL_CPU_SHARE_MAX=1024`) | CUDA, one GPU, no `--batch`, prompt chunks under 1,024 tokens | `STRATA_PREFILL_CPU_SHARE=0` | The CPU pool computes the experts few of the chunk's tokens route to, while the GPU works on the rest. `auto` measures per layer how long each side takes and checks that sharing pays. Skipped with one log line when RAM or commit is short. Output changes in the last bits. Layer split, batch slots and HIP keep it off unless you set it. |
-| `STRATA_ROUTE_TAIL_SKIP` (7) | CUDA, and HIP gfx1200/gfx1201; one GPU or a layer split | `STRATA_ROUTE_TAIL_SKIP=0` | A missed expert that every token of a verify window routes at rank 7 or lower is neither copied nor computed. Not applied when every expert is in VRAM, with `--batch` slots, with a peer tier or helper GPU, on other HIP and SYCL, or when 90% or more of the experts are cached (`STRATA_TAIL_SKIP_MAX_CACHED=<percent>` moves that line; it is 60% on an AMD layer split). Answers differ slightly from a run without it. |
+| The CPU prefill share (`auto`, chunks under 1,024 tokens) | CUDA, one GPU, no `--batch`, prompt chunks under 1,024 tokens | none: the decision is in code (`prefill.cpp`), and a memory-short machine still leaves it unarmed | The CPU pool computes the experts few of the chunk's tokens route to, while the GPU works on the rest. `auto` measures per layer how long each side takes and checks that sharing pays. Skipped with one log line when RAM or commit is short. Output changes in the last bits. Layer split, batch slots and HIP keep it off unless you set it. |
+| Route tail skip: off in this fork | CUDA, and HIP gfx1200/gfx1201; one GPU or a layer split | not needed: every expert is resident here, so it is off in code | A missed expert that every token of a verify window routes at rank 7 or lower is neither copied nor computed. Not applied when every expert is in VRAM, with `--batch` slots, with a peer tier or helper GPU, on other HIP and SYCL, or when 90% or more of the experts are cached (`STRATA_TAIL_SKIP_MAX_CACHED=<percent>` moves that line; it is 60% on an AMD layer split). Answers differ slightly from a run without it. |
 | PCIe share from the CPU's speed | CUDA, one GPU, no `--pcie-frac` | `--pcie-frac N` always wins; `STRATA_PCIE_FRAC_DEFAULT=old` keeps the probe-only rule | The share starts at the probe's value and is refined in the first decode windows from the CPU pool's time per missed expert: `L / (L + 1.85 R)`, rounded to 0.05 and kept between 0.10 and 0.60, changed at most three times. Each change prints a `PCIe share:` line. On HIP it is the default for gfx1200/gfx1201; `STRATA_PCIE_FRAC_DEFAULT=auto` turns it on for other HIP parts. `STRATA_PCIE_AUTO_SPLIT=1` (HIP, opt-in) refines a two-stage layer split. |
 | Chunk follows the host's memory | Linux file tier | `STRATA_PREFILL_HOST_PLAN=0` | See [Linux file tier](#linux-file-tier). |
 | Fused int8 prompt experts | gfx12 (R9700): IQ3_S and IQ3_XXS packs. 12.0 NVIDIA cards with 80 or more SMs: IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS gate/up | `STRATA_PF_FUSED=0` | Replaces the MMQ prompt kernels. `STRATA_PF_FUSED=1` opts in every covered format on other cards (on HIP gfx11 and gfx1200/gfx1201 too; see [AMD_HIP.md](AMD_HIP.md)). |
@@ -984,16 +984,17 @@ measured. "Exact" means the 10-prompt and 4K/20K identity gate with the switch o
 `STRATA_DEQUANT_WIDE` (wide dequantization of Q4_K, Q5_K, Q6_K and IQ4_XS for the prompt's dense weights) is on by default on
 sm_86 and sm_61, bit-exact. `STRATA_DEQUANT_WIDE=0` turns it off.
 
-### RTX 20 (Turing, sm_75) kernels (opt-in)
+### RTX 20 (Turing, sm_75) kernels (on in this fork)
 
 Kernels by rafatxf (#2069-#2072, #2093, #2220-#2222), imanu86 (#2081) and xrip (#1821) for compute capability 7.5 are bitwise
-equal to the ones they replace. Nobody on the team has an sm_75 card to confirm them, so they are off until asked for.
-`STRATA_SM75_PERF=1` turns on every bitwise Turing kernel on a 7.5 card (no other card is affected). Each has its own variable
-that wins in both directions: `STRATA_SM75_IL`, `STRATA_SM75_EXP`, `STRATA_GR_UP75` / `STRATA_GR_DOWN_TG`, `STRATA_SCORES_HALVE`,
+equal to the ones they replace. Upstream has nobody with an sm_75 card, so they are off there; this fork is two RTX 2080 Ti,
+so `sm75_series()` returns true and every one of them is on (a card that is not 7.5 never reaches them). Each still has its
+own variable that wins in both directions: `STRATA_SM75_IL`, `STRATA_SM75_EXP`, `STRATA_GR_UP75` / `STRATA_GR_DOWN_TG`, `STRATA_SCORES_HALVE`,
 `STRATA_TOPK_SPLIT`, `STRATA_TOPK_SAMPLE`, `STRATA_ATTN_V3`, `STRATA_Q2_WARP`, `STRATA_FUSE_WAIT=2`, `STRATA_QIL`,
 `STRATA_TC_SM75`, `STRATA_PA_V1_PREFETCH`, `STRATA_SCORES_THREAD` (a thread-per-head block scorer; `=1` works on any CUDA card).
-Options that change answers stay separate: `STRATA_SELECT_SIMT=1|2`, `STRATA_PA_V2T=0` (select v1; v2 is the default),
-`STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1` (Q2_0 pack, 7.5 card only) and `STRATA_BF16_TC=1` with `STRATA_XN_F16`.
+The tiled FP32 block scorer and the FP16 route for a bf16 GEMM are code defaults here rather than switches.
+Options that change answers stay separate: `STRATA_PA_V2T=0` (select v1; v2 is the default),
+`STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1` (Q2_0 pack, 7.5 card only) and `STRATA_XN_F16`.
 
 ---
 

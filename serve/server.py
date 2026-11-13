@@ -332,14 +332,19 @@ ENGINE_STALL_S = _timeout_env("STRATA_ENGINE_STALL_S", 90.0)
 # in the same round it reads the line, and the request is already ending
 BCANCEL_DRAIN_S = 10.0
 # --batch: new requests take the control lines (one prompt read at a time) short prompts first: a prompt of at most
-# STRATA_ADMIT_SHORT_FIRST tokens goes before longer ones (opt-in; unset or 0: whoever gets the lock first), and a
-# longer one that waited STRATA_ADMIT_MAX_WAIT_S (default 30) counts as short.  A chat question then waits for the one
-# read in progress, not for every agent read that came before it.
-try:
-    ADMIT_SHORT_FIRST = max(0, int(os.environ.get("STRATA_ADMIT_SHORT_FIRST") or 0))
-except ValueError:
-    ADMIT_SHORT_FIRST = 0
+# ADMIT_SHORT_FIRST tokens goes before longer ones, and a longer one that waited ADMIT_MAX_WAIT_S (default 30) counts
+# as short.  A chat question then waits for the one read in progress, not for every agent read that came before it.
+#
+# 2048 tokens, and not a setting: this deployment answers a chat turn (a few hundred tokens of question behind a long
+# history) beside agent reads of tens of thousands, so the order is what keeps the question from queueing behind every
+# agent turn.  It is this box's default because that is what the box is for (AGENTS.md: the default path is the
+# adapted path; no environment variable or tuning flag for performance).
+ADMIT_SHORT_FIRST = 2048
 ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
+# DSH compacts at about 80% of a 200K window, so one conversation peaks near this many tokens, and the working set this
+# server is sized for is five of them (AGENTS.md).  Capacity is answered in these units - how many conversations fit -
+# not in gigabytes.
+COMPACTION_TOKENS = 163_840
 STALL_CPU_EPS_S = 0.5       # CPU seconds the engine may use in the whole stall window and still count as frozen
 STALL_IO_EPS_B = 1 << 20    # bytes read or written in that window
 
@@ -914,12 +919,21 @@ def conversation_slots(engine) -> int | None:
 
 
 def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) -> dict:
-    """#596: the Monitor's Conversation cache card: the parked conversations (the engine's opt-in
-    --conversation-cache-mib: budget, slots, what its log says) and how much of the prompts the cache gave back."""
+    """#596: the Monitor's Conversation cache card: the parked conversations (the budget, the slots, what its log
+    says), what that budget buys in conversations at the compaction point, and how much of the prompts the cache gave
+    back."""
     mib = info.get("conversation_cache_mib")
+    # The engine reports what one token of a conversation costs in the running KV format (INFO kv_bytes_per_token), so
+    # the budget becomes the only number that matters here: how many conversations it holds at the compaction point.
+    per_token = info.get("kv_bytes_per_token")
+    capacity = (int(mib * 1024 * 1024 // per_token)
+                if isinstance(mib, int) and mib > 0 and isinstance(per_token, int) and per_token > 0 else None)
     last = hist[-1] if hist else None
     return {"enabled": isinstance(mib, int) and mib > 0, "budget_mib": mib if isinstance(mib, int) else None,
-            "slots": info.get("conversation_cache_slots"), **parked,
+            "slots": info.get("conversation_cache_slots"),
+            "kv_bytes_per_token": per_token, "capacity_tokens": capacity,
+            "capacity_conversations": round(capacity / COMPACTION_TOKENS, 1) if capacity else None,
+            **parked,
             "requests": len(hist), "requests_reused": sum(1 for r in hist if (r.get("reused") or 0) > 0),
             "reused_tokens": totals.get("reused", 0), "prompt_tokens": totals.get("prompt_tokens", 0),
             "last_reused": last.get("reused") if last else None,
@@ -1870,8 +1884,8 @@ class StrataEngine:
     def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
-        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these)."""
-        entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: STRATA_ADMIT_SHORT_FIRST)
+        `new`: the request's first admission (ADMIT_SHORT_FIRST orders only these)."""
+        entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: ADMIT_SHORT_FIRST)
         with self.slot_cv:
             self.waiting += 1
             self.wait_lens.append(entry)
@@ -1926,10 +1940,10 @@ class StrataEngine:
         return True
 
     def _admit_next(self):
-        """STRATA_ADMIT_SHORT_FIRST=<tokens> (the caller holds slot_cv): the new request that takes the control lines
-        next - one whose prompt is at most that long (it reads little) before a longer one, in arrival order within
-        each; a longer one that has waited STRATA_ADMIT_MAX_WAIT_S counts as short (it is never held back for good).
-        Off (unset or 0): whoever gets the lock first, as before.  Only the order changes, never what is read."""
+        """ADMIT_SHORT_FIRST tokens (the caller holds slot_cv): the new request that takes the control lines next -
+        one whose prompt is at most that long (it reads little) before a longer one, in arrival order within each; a
+        longer one that has waited ADMIT_MAX_WAIT_S counts as short (it is never held back for good).  At 0: whoever
+        gets the lock first.  Only the order changes, never what is read."""
         now = time.monotonic()
         ordered = [e for e in self.wait_lens if len(e) > 2 and e[2]]
         if not ordered:
@@ -2440,17 +2454,29 @@ class StrataEngine:
 
     slot_groups = 1         # --batch-groups (set when the engine starts)
     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
+    # Why a slot was chosen, so a run says whether reuse was lost by the choice or because the history was gone: a
+    # prefix hit is a slot whose held tokens are the start of this prompt, no_prefix is a slot picked empty or by
+    # least-recent-use instead, no_free_slot_polls counts the polls that found every slot in flight (one per poll, not
+    # no idle slot as a cache on purpose).  Read at /metrics; not a tuning knob.
+    pick_stats = {"prefix_hits": 0, "prefix_tokens": 0, "no_prefix": 0, "no_free_slot_polls": 0, "group_fill": 0}
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
     def pick_slot(self, prompt: list[int]) -> int | None:
         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
         prompt (the engine then reads only the rest), else an empty one, else the one used longest ago - so the
         conversations other slots hold stay for their next turns.  None: every slot is busy."""
+        # an engine built lazily may not have run __init__: the class attribute is the template, copied on first use so
+        # two engines in one process do not add their counts together
+        stats = self.__dict__.get("pick_stats")
+        if stats is None:
+            stats = self.pick_stats = dict(type(self).pick_stats)
         free = [b for b in self.slot_order if not self.slot_busy[b]]
         if not free:
+            stats["no_free_slot_polls"] += 1
             return None
         gs = getattr(self, "slot_gs", 0)
         if gs > 1:
+            stats["group_fill"] += 1
             # pipelined groups of several slots: the engine keeps no idle slot below a busy one as a conversation cache
             # (its pad row writes the slot), so nothing is worth keeping free for a next turn.  A group's window spans
             # its slots up to its last busy one, so first fill a hole below a busy slot of the same group (it costs no
@@ -2476,8 +2502,12 @@ class StrataEngine:
             return k if 0 < k < len(prompt) and prompt[:k] == h[:k] else 0
         best = max(free, key=held_prefix)
         # without --batch-groups a held prefix of any length is taken, as before
-        if held_prefix(best) >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
+        keep = held_prefix(best)
+        if keep >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
+            stats["prefix_hits"] += 1
+            stats["prefix_tokens"] += keep
             return best
+        stats["no_prefix"] += 1
         # with --batch-groups: the group with the fewest busy slots first, so the requests spread over the
         # pipeline's stages (two requests in one group leave the other stage idle); then empty, then least recent
         busy_in = {}
@@ -4029,17 +4059,20 @@ class Service:
         self.queue_timeouts = 0
         self.client_disconnect_cancels = 0
         self.draining = False
-        # DSH emits its title request beside the first main request. The wire
-        # shape is exact, but has no purpose field. This opt-in lets the main
-        # call finish before the title competes for the GPU and prompt cache.
-        self.defer_title_requests = os.environ.get("STRATA_DEFER_TITLE_REQUESTS") == "1"
-        self.pin_dsh_tool_prefix = os.environ.get("STRATA_PIN_DSH_TOOL_PREFIX") == "1"
+        # These four are what this deployment always wants, so they are defaults rather than settings (AGENTS.md).
+        # Each one is gated by a shape check of its own - a DSH title request, a DSH main request, a declared
+        # run_code, DSH's tools-less compaction - so a request of another shape is not affected.
+        #
+        # DSH emits its title request beside the first main request: the wire shape is exact but has no purpose
+        # field, and deferring it lets the main call finish before the title competes for the GPU and prompt cache.
+        self.defer_title_requests = True
+        self.pin_dsh_tool_prefix = True
         # DSH's programmatic mode advertises only run_code; a model that writes a direct <tool_call> for one of the
-        # tools run_code can reach gets a run_code call carrying that same call (frontend.ptc_wrapped_call). Opt-in.
-        self.ptc_tool_rewrite = os.environ.get("STRATA_DSH_PTC_TOOL_REWRITE") == "1"
+        # tools run_code can reach gets a run_code call carrying that same call (frontend.ptc_wrapped_call).
+        self.ptc_tool_rewrite = True
         # DSH's compaction re-sends the conversation with no tools; render it with the conversation's tools so the
-        # prompt it reads again starts as the cached one did (responses.dsh_prompt_tools).  Opt-in.
-        self.keep_dsh_compaction_tools = os.environ.get("STRATA_KEEP_DSH_COMPACTION_TOOLS") == "1"
+        # prompt it reads again starts as the cached one did (responses.dsh_prompt_tools).
+        self.keep_dsh_compaction_tools = True
         self.dsh_tool_prefix_key = None
         self.dsh_tool_prefix_lock = threading.Lock()
         grace_ms = _timeout_env("STRATA_DEFER_TITLE_GRACE_MS", 250.0) or 0.0
@@ -4848,6 +4881,9 @@ class Service:
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
+                # why each admission took the slot it took: a prefix hit reuses the slot's history, no_prefix means
+                # the history was not there (or was not long enough), all_busy means the request had to wait for one
+                "admission": dict(getattr(self.engine, "pick_stats", {})),
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}

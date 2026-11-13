@@ -115,7 +115,12 @@ class DeferredTitleAdmission(unittest.TestCase):
         self.assertEqual(self.svc.title_requests_deferred, 0)
         self.svc.release_inference(title=True)
 
-    def test_default_off_does_not_wait(self):
+    def test_the_deployment_default_is_on(self):
+        """The title waits for the main call by default: this deployment always wants that (AGENTS.md)."""
+        self.assertIs(self.svc.defer_title_requests, True)
+
+    def test_turned_off_does_not_wait(self):
+        self.svc.defer_title_requests = False
         self.assertIs(self.svc.reserve_inference(), True)
         started = time.monotonic()
         self.assertFalse(self.svc.wait_for_title_turn(self.title()))
