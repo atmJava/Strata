@@ -213,8 +213,7 @@ int current_cc() {
 // 0: cuBLAS's BF16 GEMM, 1: through FP16 (tensor cores), 2: through FP32 (Pascal)
 int bf16_path() {
     static const int forced = [] {
-        const char* v = std::getenv("STRATA_BF16_TC");
-        return v != nullptr && v[0] != '\0' ? std::atoi(v) : -1;
+        return 1;   // STRATA_BF16_TC=1 on this deployment: a bf16 GEMM below compute 8.0 goes through FP16
     }();
     const int cc = current_cc();
     if (forced == 2 && cc > 0) return 1;   // a test mode: the FP16 path on any card (gemm_bf16_parity on sm_80+)

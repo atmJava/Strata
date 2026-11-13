@@ -1282,14 +1282,9 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
     }
 }
 
-/// STRATA_HC_SPLIT: unset or 2 = the newest the check accepts (staged), 1 = at most split, 0 = the plain read
-int env_variant() {
-    const char* e = std::getenv("STRATA_HC_SPLIT");
-    if (e == nullptr || e[0] == '\0') return kHcStaged;
-    if (e[0] == '0') return kHcPlain;
-    if (e[0] == '1') return kHcSplit;
-    return kHcStaged;
-}
+/// The variant a card starts from before fused_gr_check has run on it: at most a split (STRATA_HC_SPLIT was 1 on this
+/// deployment).  The check below still decides what the card accepts.
+int env_variant() { return kHcSplit; }
 
 // per device: the variant `fused_gr_check` chose (0 = not checked yet)
 std::atomic<int> g_variant[64];
@@ -2348,9 +2343,8 @@ int fused_gr_variant() {
     cudaGetDevice(&dev);
     const int v = dev >= 0 && dev < 64 ? g_variant[dev].load() : 0;
     if (v > 0) return v;
-    // not checked on this card: the plain read, unless STRATA_HC_SPLIT names a variant (a test such as gr_parity)
-    const char* e = std::getenv("STRATA_HC_SPLIT");
-    return e != nullptr && (e[0] == '1' || e[0] == '2') ? env_variant() : kHcPlain;
+    // not checked on this card: the variant the deployment names, which the check may accept or replace
+    return env_variant();
 }
 
 void fused_gr_check() {

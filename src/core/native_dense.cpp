@@ -41,18 +41,11 @@ bool in_range(const std::string& name) {
     const int l = std::atoi(name.c_str() + 4);
     return l >= g_layer_lb && l < g_layer_le;
 }
-// S23 experiment (STRATA_HC_Q8=1): the hyper-connection projections' Q8_0 bytes for the verify read
+// The hyper-connection projections' Q8_0 bytes for the verify read: the GGUF's own Q8_0 projections, or - a bf16 pack -
+// a Q8_0 copy quantized at load.  On: this deployment ran with STRATA_HC_Q8=1, and its other default (gfx12, gfx1151)
+// is not this box.
 bool hc_q8_env() {
-    // STRATA_HC_Q8: 1 = on (the GGUF's own Q8_0 projections, or - a bf16 pack - a Q8_0 copy quantized at load); 0 = off;
-    // unset / auto = on for gfx12 (RDNA4: the R9700 decode +2.5 to +4%, KL 0.0003-0.0010 over its noise floor) unless
-    // STRATA_GFX12_DEFAULTS=0; also on for gfx1151 (Strix Halo, STRATA_HC_Q8=0 turns it off), off elsewhere
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_HC_Q8");
-        if (v != nullptr && v[0] == '1') return true;
-        if (v != nullptr && v[0] != '\0' && std::strcmp(v, "auto") != 0) return false;
-        return false;
-    }();
-    return on;
+    return true;
 }
 bool hc_q8_name(const std::string& name) {
     if (name == "output_hc_down.weight" || name == "output_hc_up.weight") return true;   // S25: the final mixer too

@@ -52,7 +52,7 @@ def _reader_name(value: Any) -> str:
 def expected_env(path: str | Path = ENV_FILE) -> dict[str, str]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     env = data.get("env") if isinstance(data, dict) else None
-    if not isinstance(env, dict) or not env:
+    if not isinstance(env, dict):
         raise ValueError(f"{path} has no env object")
     return {str(key): str(value) for key, value in env.items()}
 

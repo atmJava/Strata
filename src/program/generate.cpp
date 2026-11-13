@@ -13924,17 +13924,14 @@ int main(int argc, char** argv) {
                 // the expert source recycles the buffers it hands out (the GGUF in place, an unbuffered source, the
                 // I/O read-ahead: one thread at a time).  Pictures are read the usual way (their rows go up through
                 // pinned slots of a size known only then).
+                // A prompt reads while the batch windows run (STRATA_PIPED_CONCURRENT was 1).  The optional share
+                // sources it used to take from the environment are off - this box's prompt path is the plain source -
+                // so the setup below is what decides.
                 static const bool pr_conc = [&] {
-                    const char* v = std::getenv("STRATA_PIPED_CONCURRENT");
-                    if (v == nullptr || std::atoi(v) == 0) return false;
-                    auto env_on = [](const char* k) {
-                        const char* x = std::getenv(k);
-                        return x != nullptr && std::atoi(x) != 0;
-                    };
                     strata::program::ConcurrentReadSetup s;
-                    s.prefill_help = env_on("STRATA_PREFILL_HELP");
-                    s.split_mtp_batch = env_on("STRATA_SPLIT_MTP_BATCH");
-                    s.fs_slots = env_on("STRATA_FS_SLOTS");
+                    s.prefill_help = false;
+                    s.split_mtp_batch = false;
+                    s.fs_slots = false;
                     s.pcie_dma = o.pcie_mode == "dma";
                     // (--remote-expert-opt works only through a helper cache, so without one it does not count)
                     s.helper_caches = prefill_src != srcp;
@@ -13943,7 +13940,7 @@ int main(int argc, char** argv) {
                     s.staged_prompt_independent = srcp == &src && src.prompt_copies_independent();
                     s.other_source = srcp != &src && srcp != &arena_src;
                     if (const char* why = strata::program::concurrent_read_off(s)) {
-                        std::fprintf(stderr, "strata batch: STRATA_PIPED_CONCURRENT is off beside %s\n", why);
+                        std::fprintf(stderr, "strata batch: the concurrent prompt read is off beside %s\n", why);
                         return false;
                     }
                     return true;

@@ -126,10 +126,11 @@ kv=int8
 kv_resident=32768
 ```
 
-It also checks the engine variables in
-[`tools/server/production-env-2080ti.json`](tools/server/production-env-2080ti.json). The server's own decisions -
-the admission order, the four DSH behaviours - are code defaults, not switches, so no service environment variable has
-to supply them (see [AGENTS.md](AGENTS.md#this-fork-serves-one-machine)).
+No switch has to come from the run config or the service environment, so the list it checks against
+[`tools/server/production-env-2080ti.json`](tools/server/production-env-2080ti.json) is empty. Every choice this box
+made - the admission order, the four DSH behaviours, the CPU prefill share, the staged prompt read, the Turing kernels,
+the route tail skip it keeps off - is in the code (see
+[AGENTS.md](AGENTS.md#this-fork-serves-one-machine)).
 
 This check is static. A passing result does not prove that the engine binary was built for `sm_75`, that both cards
 are healthy, or that a 256K mixed soak passed.

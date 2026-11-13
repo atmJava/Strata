@@ -946,11 +946,9 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // STRATA_PIPED_CONCURRENT=1 (opt-in): a prompt can run on the same GPU while the batch windows run, so the windows'
     // streams get the device's highest priority (HIP: the default priority, as the drafter's)
     auto make_stream = [](cudaStream_t* s) -> cudaError_t {
-        static const bool hi = [] {   // (STRATA_PIPED_CONCURRENT_PRIO=0: the default priority)
-            const char* v = std::getenv("STRATA_PIPED_CONCURRENT");
-            const char* p = std::getenv("STRATA_PIPED_CONCURRENT_PRIO");
-            return v != nullptr && std::atoi(v) != 0 && (p == nullptr || std::atoi(p) != 0);
-        }();
+        // a prompt can run on the GPU while the batch windows run (STRATA_PIPED_CONCURRENT was 1), so the windows'
+        // streams take the device's highest priority
+        const bool hi = true;
         int lo = 0, top = 0;
         if (hi) {
             if (cudaDeviceGetStreamPriorityRange(&lo, &top) == cudaSuccess &&

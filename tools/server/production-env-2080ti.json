@@ -1,10 +1,4 @@
 {
-  "_note": "Engine runtime switches for the 2x RTX 2080 Ti, 6x256K production profile. No secrets. The Python server's own decisions (the admission order, the DSH behaviours) are code defaults, and the four-step decode lead-in and slot RoPE sharing are too (AGENTS.md). A key here reaches only the engine child (serve/server.py child_env): a switch the server reads must be in the systemd service environment, and STRATA_MP_STAGED_READ / STRATA_BATCH_SERIAL_TWO are named here only to say they never took effect that way.",
-  "env": {
-    "STRATA_BATCH_STAGED_READ": "1",
-    "STRATA_EXP_MODE": "8",
-    "STRATA_HC_Q8": "1",
-    "STRATA_PIPED_CONCURRENT": "1",
-    "STRATA_SM75_PERF": "1"
-  }
+  "_note": "No engine switches. Everything this deployment ran from its run config's env map (the CPU prefill share, the staged prompt read, the slot and checkpoint fast paths, the Turing kernels, the tail skip that stayed off) is a code default now (AGENTS.md), and the server's own decisions were already code. This file is kept so the checker still has something to compare: an empty list means a run config that holds deployment identity only - paths, the model, the API key, the address.",
+  "env": {}
 }

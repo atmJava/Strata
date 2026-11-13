@@ -26,19 +26,10 @@
 
 namespace strata {
 
-/// STRATA_SM75_PERF: -1 unset, 0 off, 1 on (read once)
-inline int sm75_series_setting() {
-    static const int setting = [] {
-        const char* e = std::getenv("STRATA_SM75_PERF");
-        if (e == nullptr || e[0] == '\0') return -1;
-        return std::atoi(e) != 0 ? 1 : 0;
-    }();
-    return setting;
-}
-
-/// STRATA_SM75_PERF=1 exactly: the series is off unless asked for (upstream's default; a card that is not a 7.5 never
-/// reaches a Turing kernel - see sm75_default)
-inline bool sm75_series() { return sm75_series_setting() == 1; }
+/// The Turing kernels are on.  This box is two RTX 2080 Ti (compute 7.5) and the engine was adapted for them; the
+/// deployment set STRATA_SM75_PERF=1, and a card that is not a 7.5 never reaches one of these kernels anyway
+/// (sm75_default).
+inline bool sm75_series() { return true; }
 
 /// the device (raw cudaDevAttrComputeCapabilityMajor / Minor) is a Turing card, or emulates one (STRATA_EMULATE_CC=75)
 inline bool is_sm75(int major, int minor) { return cc_major_of(major) == 7 && cc_minor_of(minor) == 5; }
