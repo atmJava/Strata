@@ -200,34 +200,21 @@ std::string vram_free_note() {
     return buf;
 }
 
-// With the pipelined groups, a BYIELD that reaches the main loop is dropped without draining the groups first.  A
+// With the pipelined groups, a BYIELD that reaches the main loop is dropped without draining the groups first: a
 // pipelined read never gives way (batch_read_piece), so the BYIELD is for a read that has ended, and the drain (and the
-// refill after it) did nothing for it.  On here (it was STRATA_PIPE_BYIELD_NODRAIN=1), as are the four decisions below:
-// AGENTS.md keeps a performance decision out of the environment, so this box's choice is the code's.
-bool pipe_byield_nodrain_env() {
-    return true;
-}
-// A batch admission reads the last prompt tokens of its last
-// windowed part (up to a window's max_t, the last prompt token included) and its first token in ONE window instead of
-// the part's last windows and a window of the last token alone.  A row computes what it computes in any window while
-// every expert is in VRAM, and row T-1 is the first window's position with its history and its Philox draw, so the
-// token and the state are the same; the rows before it commit as the prompt windows commit them
-bool admit_merge_first_env() {
-    return true;
-}
+// refill after it) did nothing for it.
+// A batch admission reads the last prompt tokens of its last windowed part (up to a window's max_t, the last prompt
+// token included) and its first token in ONE window instead of the part's last windows and a window of the last token
+// alone.  A row computes what it computes in any window while every expert is in VRAM, and row T-1 is the first
+// window's position with its history and its Philox draw, so the token and the state are the same; the rows before it
+// commit as the prompt windows commit them.
 // The serve loop keeps the running-state vectors of the conversation
 // checkpoints it drops (evicted, pruned, a batch slot's old one) and saves the next checkpoint into them, so a save
 // resizes nothing (no zero-fill of ~118 MB of fresh vectors) and a slot's copy reuses their pages.  Every byte is
 // overwritten by the copy, so the checkpoints are the same
-bool ckpt_pool_env() {
-    return true;
-}
 // A layer split's checkpoint saves every stage's part at once, the
 // first on the calling thread and each later stage's on a thread of its own device (kept for the process: the copies'
 // private streams are per thread), instead of one stage after the other.  Each part is the same copy of the same state
-bool ckpt_threads_env() {
-    return true;
-}
 // STRATA_SLOT_CKPT_MOVE=1 (read once; off by default): a batch admission MOVES its own turn checkpoint into the slot
 // instead of copying it (~112 MB of host vectors).  The main session's chain no longer holds it, so the request path
 // looks for it in the slots' checkpoints too: while the main session's cells still hold its tokens it is restored there
@@ -245,9 +232,6 @@ bool slot_ckpt_move_env() {
 // its copies on each device's private copy stream and synchronizes every device once at the end, instead of waiting
 // for each of its ~116 copies.  A streamed K/V state's residency refresh waits for its copies through an event.  The
 // same copies in the same order on one stream, so the slot holds the same bytes
-bool slot_copy_batchsync_env() {
-    return true;
-}
 
 // perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each
 // A file-backed arena on AMD (STRATA_ARENA_MMAP; the engine raises ROCclr's pin-in-place threshold, see main): an
@@ -9099,7 +9083,8 @@ int main(int argc, char** argv) {
         std::vector<ConvCheckpoint> checks;
         // STRATA_CKPT_POOL: the dropped checkpoints' storage, reused.  STRATA_SLOT_CKPT_MOVE turns it on too: a moved
         // checkpoint frees nothing at the next prune, so every save would fault in fresh pages (17 -> 40-60 ms)
-        CheckpointPool ckpt_pool(ckpt_pool_env() || slot_ckpt_move_env());
+        // always: a dropped checkpoint's vectors are the next save's, which is why a save resizes nothing
+        CheckpointPool ckpt_pool(true);
         uint64_t check_clock = 0;   // the checkpoints' LRU clock; creation and every use advance it
         int64_t tail_ckpt_len = -1;   // --prompt-cache-tail: the length of the one tail checkpoint alive (-1 = none)
         // --prefill-pipe: the plan of the prompt segment being read (read_part sets it around its runs), for the
@@ -9495,7 +9480,7 @@ int main(int argc, char** argv) {
                 c.dead = std::move((*parts)[0].dead);
                 c.block_pos = std::move((*parts)[0].block_pos);
                 for (size_t i = 1; i < parts->size(); ++i) c.stage_parts.push_back(std::move((*parts)[i]));
-            } else if (ckpt_pool.on() || ckpt_threads_env()) {
+            } else {
                 // STRATA_CKPT_POOL / STRATA_CKPT_THREADS: the parts go into the vectors a pooled checkpoint already has
                 // (none resized), with the threads all at once; part k is stage k's session, synchronized first
                 const size_t n = stages.size() + 1;
@@ -9526,14 +9511,7 @@ int main(int argc, char** argv) {
                     }
                 };
                 const Clock::time_point t0 = Clock::now();
-                if (ckpt_threads_env()) {
-                    ckpt_threads.run(n, save_part);
-                } else {
-                    for (size_t k = 0; k < n; ++k) {
-                        save_part(k);
-                        if (!synced[k] || !saved[k]) break;
-                    }
-                }
+                ckpt_threads.run(n, save_part);   // every stage's part at once (its own device's thread)
                 for (size_t k = 0; k < n; ++k)
                     if (thrown[k]) std::rethrow_exception(thrown[k]);
                 for (size_t k = 0; k < n; ++k) {
@@ -9553,38 +9531,8 @@ int main(int argc, char** argv) {
                     req_times.save_ms += wall - sync_part[0];
                     std::fprintf(stderr, "strata trace: checkpoint at %lld: sync %.1f ms, save %.1f ms (%zu stage(s)%s, "
                                          "each%s ms, %s)\n", (long long) L, sync_part[0], wall - sync_part[0], n,
-                                 ckpt_threads_env() ? " at once" : "", each.c_str(),
+                                 " at once", each.c_str(),
                                  reused ? "into a dropped checkpoint's vectors" : "new vectors");
-                }
-            } else {
-                Clock::time_point t0 = Clock::now();
-                auto lap = [&](double& acc) {   // (STRATA_TRACE only)
-                    if (!ckpt_trace) return;
-                    const Clock::time_point t1 = Clock::now();
-                    acc += std::chrono::duration<double, std::milli>(t1 - t0).count();
-                    t0 = t1;
-                };
-                double sync_ms = 0.0, save_ms = 0.0;
-                if (!gpu_sync_ok()) return false;
-                lap(sync_ms);
-                if (!checkpoint_save(c, ss, g)) return false;
-                lap(save_ms);
-                for (auto& st : stages) {   // a layer split's later stages: their sessions' part
-                    const strata::core::OnDevice on(st->dev);
-                    ConvCheckpoint part;
-                    part.ids = c.ids;
-                    if (!gpu_sync_ok()) return false;
-                    lap(sync_ms);
-                    if (!checkpoint_save(part, st->ss, g)) return false;
-                    c.stage_parts.push_back(std::move(part));
-                    lap(save_ms);
-                }
-                if (ckpt_trace) {
-                    ++req_times.ckpts;
-                    req_times.sync_ms += sync_ms;
-                    req_times.save_ms += save_ms;
-                    std::fprintf(stderr, "strata trace: checkpoint at %lld: sync %.1f ms, save %.1f ms (%zu stage(s))\n",
-                                 (long long) L, sync_ms, save_ms, stages.size() + 1);
                 }
             }
             c.used = ++check_clock;
@@ -11206,7 +11154,7 @@ int main(int argc, char** argv) {
             auto failed = [&]() { (void) sync_all(); return false; };
             if (!sync_all()) { e = "batch slot copy: device sync failed"; return false; }
             // STRATA_SLOT_COPY_BATCHSYNC: every copy is only queued, and the sync_all below is the one wait per device
-            const bool queued = slot_copy_batchsync_env();
+            const bool queued = true;   // every copy queued; the caller's sync_all is the one wait per device
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 strata::core::SessionState& main_ss = k == 0 ? ss : stages[k - 1]->ss;
                 strata::core::SessionState& slot_ss = *bslot_ss[k][(size_t) b];
@@ -12025,8 +11973,8 @@ int main(int argc, char** argv) {
                 }
                 // a request reads its prompt through every stage: the groups in flight finish first
                 // (STRATA_PIPE_BYIELD_NODRAIN: not for a BYIELD, which is dropped below)
-                if (piped && line.rfind("BSTOP ", 0) != 0 &&
-                    !(pipe_byield_nodrain_env() && line.rfind("BYIELD", 0) == 0)) {
+                // (a BYIELD is dropped: a pipelined read never gives way, so it belongs to a read that has ended)
+                if (piped && line.rfind("BSTOP ", 0) != 0 && line.rfind("BYIELD", 0) != 0) {
                     const int in_flight = trace ? (int) std::count_if(pg.begin(), pg.end(), [](const PGroup& G) {
                                                       return G.inflight; }) : 0;
                     const auto td = Clock::now();
@@ -14388,7 +14336,7 @@ int main(int argc, char** argv) {
             // and the serial loop with nothing else reading its windows
             int64_t merge_at = -1;
             auto merge_from = [&](int64_t a0, int64_t to) -> int64_t {
-                if (!admit_merge_first_env() || admit_slot < 0 || max_new != 1 || batch_mtp || pipe) return -1;
+                if (admit_slot < 0 || max_new != 1 || batch_mtp || pipe) return -1;
                 if (to != n - 1 || to == turn_at || to == root_at || to == message_at || to == pin_at) return -1;
                 if (!req_imgs.empty() || kvg.on || peer.valid() || remote_caches || remote_opt || fs_swap) return -1;
                 if (std::getenv("STRATA_LOGPOS") != nullptr) return -1;
