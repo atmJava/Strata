@@ -9247,6 +9247,8 @@ int main(int argc, char** argv) {
             std::vector<strata::core::ConversationKvReuse> stage_reuse = std::move(reuse.stages);
             stage_reuse.resize(n_st);
             reuse.stages.clear();
+            std::vector<strata::core::SavedConversation> stage_images;
+            stage_images.reserve(n_st);
             // the later stages' estimates, each with its own retained K/V when it still fits
             size_t stage_estimate = 0, stage_retained = 0;
             for (size_t k = 0; k < n_st; ++k) {
@@ -9287,6 +9289,10 @@ int main(int argc, char** argv) {
                 err.clear();
             }
             estimate += stage_estimate;
+            // The image owns this directory too.  Reserve it now so the estimate and the final SavedConversation
+            // charge the same capacity; otherwise put() can discover the extra bytes only after superseded copies
+            // have already been dropped.
+            estimate += stage_images.capacity() * sizeof(strata::core::SavedConversation);
             // #342: the copies of this conversation a turn back can make room, but they hold the only reusable
             // state if the remaining pinned or borrowed entries still cannot fit the replacement.  Decide before
             // dropping them, then let make_room evict oldest-first only after the replacement is known to fit.
@@ -9346,10 +9352,12 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: conversation cache: evicted %zu parked conversation%s to admit this snapshot (%zu MiB plus %lld MiB floor)\n",
                                  evicted, evicted == 1 ? "" : "s", additional >> 20,
                                  (long long) o.conversation_cache_min_free_mib);
-                strata::core::SavedConversation image;
+                strata::core::SavedConversation first_stage;
                 size_t reused_bytes = 0;
-                if (!strata::core::conversation_snapshot_save(image, view, src.session, g, draft0, err,
+                if (!strata::core::conversation_snapshot_save(first_stage, view, src.session, g, draft0, err,
                         std::move(reuse), &reused_bytes)) return false;
+                strata::core::SavedConversation image = std::move(first_stage);
+                image.stage_images = std::move(stage_images);
                 for (size_t k = 0; k < n_st; ++k) {   // the later stages (the last one with the draft layer's K/V)
                     auto& st = stages[k];
                     const strata::core::OnDevice on(st->dev);
