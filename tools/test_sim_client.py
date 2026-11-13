@@ -88,24 +88,24 @@ class RowMatching(unittest.TestCase):
         self.client._open = lambda path, body=None: {"requests": self.rows}
 
     def test_the_newest_matching_row(self):
-        self.assertEqual(self.client.row(10.5, 100).get("id"), "b")
+        self.assertEqual(self.client.row(9.5, 100).get("id"), "b")      # b at 11.0 beats a at 10.0
 
     def test_a_row_is_handed_out_once(self):
-        self.client.row(10.5, 100)
-        self.assertEqual(self.client.row(10.5, 100).get("id"), "a")
+        self.client.row(9.5, 100)
+        self.assertEqual(self.client.row(9.5, 100).get("id"), "a")
 
     def test_a_row_from_before_the_request_is_not_used(self):
-        self.client.row(10.5, 100)
-        self.client.row(10.5, 100)
-        self.assertEqual(self.client.row(10.5, 100), {})       # c started before 10.5
+        self.client.row(9.5, 100)
+        self.client.row(9.5, 100)
+        self.assertEqual(self.client.row(9.5, 100), {})        # c started at 9.0, before the request
 
     def test_another_prompt_length_matches_nothing(self):
-        self.assertEqual(self.client.row(10.5, 999), {})
+        self.assertEqual(self.client.row(9.5, 999), {})
 
 
 class Verdict(unittest.TestCase):
     def test_a_healthy_run_has_no_failures(self):
-        good = [row(1, 100000, 90000, 10000, 20.0, 0), row(2, 100000, 96000, 4000, 20.0, 0),
+        good = [row(1, 100000, 90000, 6000, 20.0, 0), row(2, 100000, 96000, 4000, 20.0, 0),
                 row(2, 60000, 58000, 2000, 18.0, 1)]
         passed, failed = sim_client.summary(good, [], Args)
         self.assertEqual(failed, [])
@@ -128,11 +128,11 @@ class Verdict(unittest.TestCase):
         self.assertTrue(any("concurrent decode" in f for f in failed))
 
     def test_one_turn_cannot_show_reuse(self):
-        _, failed = sim_client.summary([row(1, 100000, 90000, 10000, 20.0, 0)], [], Args)
+        _, failed = sim_client.summary([row(1, 100000, 90000, 6000, 20.0, 0)], [], Args)
         self.assertTrue(any("no turn 2" in f for f in failed))
 
     def test_a_client_error_is_a_failure(self):
-        good = [row(1, 100000, 90000, 10000, 20.0, 0), row(2, 100000, 96000, 4000, 20.0, 0),
+        good = [row(1, 100000, 90000, 6000, 20.0, 0), row(2, 100000, 96000, 4000, 20.0, 0),
                 row(2, 60000, 58000, 2000, 18.0, 1)]
         _, failed = sim_client.summary(good, ["session 1 turn 1: boom"], Args)
         self.assertTrue(any("boom" in f for f in failed))
