@@ -41,6 +41,7 @@ import re
 import select
 import signal
 import socket
+import socketserver
 import struct
 import shutil
 import subprocess
@@ -60,13 +61,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages, require_messages,
+                            forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages, ptc_program_is_python, require_messages,
                             tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from strata_control import atomic as _atomic_mod  # noqa: E402
 from strata_control import engine_component  # noqa: E402
 from strata_control import tls  # noqa: E402
+from strata_control.childenv import quiet_crash_env  # noqa: E402
 
 tls.install()       # #3722: image URLs and tool servers over HTTPS are checked against the operating system's certificates
 from strata_control import vision_reader  # noqa: E402
@@ -290,6 +292,10 @@ RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean s
 # server (the engine's main thread waits, untimed, for its next command): the engine is ended and the request fails;
 # the next request starts it again.  The config's "engine_silence_s" sets it (0: wait forever, as before).
 ENGINE_SILENCE_S = 300.0
+# #4271: a streaming client that stops reading (a hung process, a network that dropped) leaves the thread that writes to
+# it blocked once the socket buffers are full - and that thread holds the engine's turn.  A write that makes no progress
+# for this long ends the request as a disconnect (the engine is stopped, the turn given back).  0: no limit, as before.
+STREAM_WRITE_TIMEOUT_S = float(os.environ.get("STRATA_STREAM_WRITE_TIMEOUT_S", "60") or 0)
 # Disk sessions: the longest allowance an engine may announce (`SWAIT <phase> <s>`) for one step that blocks in a
 # single call (a file flush, the host->device transfer); the engine's own bound is the same (session_phase_limit_s).
 SESSION_WAIT_MAX_S = 3600
@@ -615,6 +621,40 @@ def is_dsh_title_request(req: dict) -> bool:
 
 DSH_MAX_OUTPUT_TOKENS = (32000, 32768)      # DSH's default; the desktop profile sends the model's maxTokens
 
+DSH_MAIN_TOOLS = (
+    "bash", "create_goal", "edit", "exit_plan_mode", "get_goal", "glob", "grep",
+    "interrupt_agent", "job_kill", "job_list", "job_output", "list_agents", "read",
+    "read_image", "send_message", "skill", "subagent", "subagent_fork", "todo_write",
+    "update_goal", "web_fetch", "web_search", "workflow", "working_directory", "write",
+)
+
+
+def ptc_prompt_texts(req):
+    """The texts of a request that carry DSH's programmatic SDK block: its instructions and its first system turn."""
+    out = []
+    ins = req.get("instructions")
+    if isinstance(ins, str):
+        out.append(ins)
+    elif isinstance(ins, list):
+        out.extend(p.get("text", "") for p in ins if isinstance(p, dict))
+    for item in (req.get("input") or [])[:2]:
+        if isinstance(item, dict) and item.get("role") in ("system", "developer"):
+            c = item.get("content")
+            if isinstance(c, str):
+                out.append(c)
+            elif isinstance(c, list):
+                out.extend(p.get("text", "") for p in c if isinstance(p, dict))
+    # the chat shape carries the same block in `messages`; DSH uses one shape or the other, so read both
+    for item in (req.get("messages") or [])[:2]:
+        if isinstance(item, dict) and item.get("role") in ("system", "developer"):
+            c = item.get("content")
+            if isinstance(c, str):
+                out.append(c)
+            elif isinstance(c, list):
+                out.extend(p.get("text", "") for p in c if isinstance(p, dict))
+    return out
+
+
 def ptc_rewrite_map(declared, ptc_names=None):
     """The tools a programmatic request may name directly -> the wrapper that runs them.  The request declares only
     the wrapper, so the names come from DSH_MAIN_TOOLS and from the request's own developer text (a profile or
@@ -623,14 +663,6 @@ def ptc_rewrite_map(declared, ptc_names=None):
     # may offer tools this build's list does not know (MCP servers, schedules), and a name the wrapper cannot reach
     # fails inside the program, where the model reads the error and recovers, instead of ending the turn as XML text.
     return {"*": "run_code"} if "run_code" in (declared or ()) else {}
-
-
-DSH_MAIN_TOOLS = (
-    "bash", "create_goal", "edit", "exit_plan_mode", "get_goal", "glob", "grep",
-    "interrupt_agent", "job_kill", "job_list", "job_output", "list_agents", "read",
-    "read_image", "send_message", "skill", "subagent", "subagent_fork", "todo_write",
-    "update_goal", "web_fetch", "web_search", "workflow", "working_directory", "write",
-)
 
 
 def is_dsh_main_request(req: dict) -> bool:
@@ -2586,11 +2618,15 @@ class StrataEngine:
                     raise ValueError(line[4:].strip())
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
-                if self.can_stop:
+                # the engine can be ended or restarted on another thread meanwhile: Engine.close() closes stdin (a
+                # write then raises ValueError) before it clears `proc` (None then) - the STOP has nobody to reach, and
+                # the request's own outcome must not be replaced by that error
+                proc = self.proc
+                if self.can_stop and proc is not None:
                     try:
-                        self.proc.stdin.write("STOP\n")
-                        self.proc.stdin.flush()
-                    except OSError:
+                        proc.stdin.write("STOP\n")
+                        proc.stdin.flush()
+                    except (OSError, ValueError):
                         pass
                 # #481: never an untimed wait here - it holds the request FIFO, and an engine that lost step never
                 # answers.  An engine that honours STOP gets the current allowance in all (a STOP during a prompt
@@ -3684,7 +3720,7 @@ def ordered_gpus(cfg: dict, scores=None, vrams=None) -> list[int]:
 def child_env(cfg: dict, *, offline: bool = False) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
-    env = dict(os.environ)
+    env = quiet_crash_env(dict(os.environ))          # no debugger on a user's machine: ggml's abort path forks gdb (strata_control/childenv.py)
     if gpu_all_off(cfg):
         env["CUDA_VISIBLE_DEVICES"] = ""
     elif gpu_list(cfg):                              # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
@@ -4851,6 +4887,8 @@ class Service:
              t.get("tool_calls_unread", 0)),
             ("strata:ptc_rewritten_total", "counter", "Undeclared calls delivered as the programmatic wrapper (run_code)",
              t.get("ptc_rewritten", 0)),
+            ("strata:tool_args_repaired_total", "counter", "Tool call arguments (a JSON array or object) that were damaged and read as written",
+             t.get("tool_args_repaired", 0)),
             ("strata:model_loaded", "gauge", "1 while the model is loaded", int(self.loaded())),
         ]
         return "".join(f"# HELP {name} {help_}\n# TYPE {name} {kind}\n{name} {value}\n"
@@ -5257,9 +5295,6 @@ class Service:
              declared_only=False) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
-        # DSH's programmatic request carries the tools its developer text names in one private key, not as sampling
-        # (only the wrapper is declared); read it here and keep it out of the sampling merge below.
-        ptc_names = sampling.pop("_strata_ptc_names", None) if isinstance(sampling, dict) else None
         # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
         # apps; the request's own fields win over all of them
         defaults = {**model_card_sampling(self.model_arch, thinking), **self.sampling_defaults, **self.shared}
@@ -5285,13 +5320,19 @@ class Service:
                 print(f"[strata] thinking capped at {max_new - reserve} of max_tokens {max_new} to leave room for "
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
+        # DSH's programmatic request carries the tools its developer text names in one private key, not as sampling
+        # (only the wrapper is declared); read it here and keep it out of the sampling
+        ptc_names = sampling.pop("_strata_ptc_names", None) if isinstance(sampling, dict) else None
         rewrite = None
         if self.ptc_tool_rewrite:
             declared = {t.get("name") for t in tools or [] if isinstance(t, dict)}
             if "run_code" in declared:          # the wrapper DSH's programmatic mode declares
                 rewrite = ptc_rewrite_map(declared, ptc_names) or None
         parser = self.parser_cls(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
-                                 declared_only=declared_only, rewrite=rewrite)
+                                 declared_only=declared_only, rewrite=rewrite,
+                                 ptc_python=(rewrite is not None
+                                             and ptc_program_is_python(
+                                                 ptc_prompt_texts(sampling if isinstance(sampling, dict) else {}))))
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -5786,6 +5827,14 @@ class Service:
                 self.totals["ptc_rewritten"] = self.totals.get("ptc_rewritten", 0) + parser.rewritten
             print(f"[strata] ptc: {parser.rewritten} undeclared call(s) delivered as run_code: "
                   f"{', '.join(sorted(parser.rewritten_names))}", flush=True)
+        if getattr(parser, "stray_think", 0):
+            # #4077: the model wrote a closing think tag while thinking; the reasoning after it was sent as the answer
+            self.totals["stray_think_closers"] = self.totals.get("stray_think_closers", 0) + parser.stray_think
+            print(f"[strata] {parser.stray_think} extra closing think tag(s) in the answer were dropped (the model wrote one "
+                  "while thinking, so the rest of its reasoning went out as the answer; a call after it still counts)", flush=True)
+        if getattr(parser, "notes", None):
+            self.totals["tool_args_repaired"] = self.totals.get("tool_args_repaired", 0) + len(parser.notes)
+            print(f"[strata] {len(parser.notes)} tool call argument(s) repaired: {'; '.join(sorted(set(parser.notes)))}", flush=True)
         rejected = []
         if parser.unread:
             named = getattr(parser, "unread_names", None)
@@ -7583,6 +7632,11 @@ def make_handler(svc: Service):
             self.send_header("X-Accel-Buffering", "no")   # nginx and similar proxies pass each event at once
             self._cors()
             self.end_headers()
+            if STREAM_WRITE_TIMEOUT_S > 0:
+                try:
+                    self.connection.settimeout(STREAM_WRITE_TIMEOUT_S)     # (#4271) a stuck write ends as OSError: disconnected
+                except OSError:
+                    pass
 
         def _capture(self, items, api):
             """Retain bounded input/output for the monitor without changing the API response (the items as they
@@ -7986,6 +8040,12 @@ class Server(ThreadingHTTPServer):
     # first ones (measured on 4 x R9700, also with one request at a time); the requests wait in the server, not the kernel
     # (STRATA_HTTP_BACKLOG overrides it)
     request_queue_size = max(5, int(os.environ.get("STRATA_HTTP_BACKLOG") or 256))
+
+    def server_bind(self):
+        # http.server's own server_bind also asks socket.getfqdn(host) for a server_name nothing here reads; on a host whose reverse
+        # lookup stalls (35 s on the first lookup of every new process) each start waited that long before it listened
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that hangs up needs no stack trace
@@ -9118,21 +9178,19 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                   "api_url": f"http://{ready_host}:{bound_port}", "bound_host": a.host, "bound_port": bound_port,
                   "model_id": svc.model, "model_state": "unloaded" if lazy else "ready",
                   "api_state": "ready", "created_at": time.time()}
-    if ready_path is not None:
-        try:
-            ready_file.publish(ready_path, record)
-        except OSError as e:
-            print(f"[strata] could not write ready file ({type(e).__name__})", file=sys.stderr)
-            for close in (httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
-                          getattr(svc.images, "shutdown", None), hub.close if hub is not None else None):
-                if close:
-                    close()
-            return 6
-    if event_sink is not None:
-        notify_lifecycle("ready", record)
     interrupted = False
     drained = True
     try:
+        # inside the try: a SIGTERM that arrives the moment the ready file is visible (a supervisor that reads it and
+        # stops the server at once) takes the clean stop below, not an uncaught KeyboardInterrupt with the file left behind
+        if ready_path is not None:
+            try:
+                ready_file.publish(ready_path, record)
+            except OSError as e:
+                print(f"[strata] could not write ready file ({type(e).__name__})", file=sys.stderr)
+                return 6                                # the finally below closes everything once
+        if event_sink is not None:
+            notify_lifecycle("ready", record)
         while True:
             time.sleep(1)
     except KeyboardInterrupt:

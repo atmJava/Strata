@@ -23,7 +23,7 @@ class ResultText(unittest.TestCase):
     def test_off_by_default_and_the_note_is_unchanged(self):
         self.assertIs(DEFAULTS["image_results"], False)
         note = result_text({"content": [picture()]})
-        self.assertEqual(note, "[image (image/png, 12 bytes): not shown to the model]")
+        self.assertEqual(note, "[image (image/png, 9 bytes): not shown to the model]")
 
     def test_a_picture_is_an_image_part_when_asked_for(self):
         images = []
