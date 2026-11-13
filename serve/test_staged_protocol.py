@@ -504,6 +504,55 @@ class StagedProtocol(FakeEngineCase):
         self.assert_no_protocol_error()
         self.assert_clean(e)
 
+    def test_work_changed_while_waiting_is_refreshed_before_staging(self):
+        """A free cached slot can vanish while a request waits for the control lines.  Its admission must use the
+        new work estimate, not the short one it saw before waiting."""
+        e = self.engine("normal")
+        svc = self.service(e)
+        fills = self.fill_slots(svc)
+        fills[0][1].set()
+        self.wait_until(lambda: sum(1 for busy in e.slot_busy if busy) == 1,
+                        "one fill must leave a slot free", 10.0)
+        free = next(i for i, busy in enumerate(e.slot_busy) if not busy)
+        prompt = [17] * 5_000
+        with e.slot_cv:
+            e.slot_held[free] = prompt[:-100]
+            e._slot_turn.pop(free, None)
+        self.assertEqual(e._known_prompt_work(prompt), (4_900, 100))
+
+        self.assertTrue(e.ctl.acquire(timeout=1.0))
+        box, cancel = {"result": None, "error": None}, threading.Event()
+
+        def go():
+            try:
+                box["result"] = list(e.generate(prompt, 8, {}, cancel))
+            except BaseException as exc:        # noqa: BLE001 - reported below
+                box["error"] = exc
+        with mock.patch.object(_server, "STAGED_READ_MIN_TOKENS", 2_048):
+            before = self.log_count("BREAD_RAW")
+            t = threading.Thread(target=go, daemon=True)
+            t.start()
+            self.addCleanup(self._stop_thread, t, cancel)
+            self.wait_until(lambda: e.waiting == 1, "the request must wait for the control lines")
+            with e.slot_cv:
+                e._set_slot_busy_locked(free, True)
+                e._replace_slot_held(free, [])
+                e.slot_claims.add(free)
+            self.assertEqual(e._known_prompt_work(prompt), (0, 5_000))
+            e.ctl.release()
+            self.wait_until(lambda: self.log_count("BREAD_RAW") > before,
+                            "the request must stage after its cached free slot disappears", 5.0)
+            with e.slot_cv:
+                e._set_slot_busy_locked(free, False)
+                e.slot_claims.discard(free)
+                e.slot_cv.notify_all()
+            t.join(15.0)
+            self.assertFalse(t.is_alive(), "the staged request must finish after a slot frees")
+        self.assertIsNone(box["error"], f"the request failed: {box['error']!r}")
+        self.assertTrue(box["result"], "the request must produce tokens")
+        self.assert_no_protocol_error()
+        self.assert_clean(e)
+
     def assert_no_protocol_error(self):
         self.assertNotIn("PROTO_ERR", self.log_text(),
                          "the strict fake refused a line the server sent: " +

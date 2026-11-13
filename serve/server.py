@@ -2089,7 +2089,6 @@ class StrataEngine:
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
-        prompt_work = self._known_prompt_work(prompt)[1]
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         serial_two = SERIAL_TWO
@@ -2097,6 +2096,7 @@ class StrataEngine:
         if not ok:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
+        prompt_work = self._known_prompt_work(prompt)[1]  # slot ownership may have changed while this request waited
         btrace("ctl acquired")
         slot, gen0, reserved = None, None, None
         slot_touched = False      # a slot claimed but cancelled before its command keeps its LRU position
@@ -2110,11 +2110,11 @@ class StrataEngine:
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
-                    prompt_work = self._known_prompt_work(prompt)[1]
                     ok = yield from self._take_control(cancel, prompt=prompt)
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
+                    prompt_work = self._known_prompt_work(prompt)[1]
                 with self.slot_cv:
                     alone = not any(self.slot_busy) and self.waiting <= (1 if serial_two else 0)
                 if alone and left > 1:
@@ -2196,11 +2196,11 @@ class StrataEngine:
                                 and not self._free_slot_available(prompt)):
                             staged_attempts += 1
                             if not holding:
-                                prompt_work = self._known_prompt_work(prompt)[1]
                                 ok = yield from self._take_control(cancel, prompt=prompt)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
+                                prompt_work = self._known_prompt_work(prompt)[1]
                             if self._free_slot_available(prompt):
                                 # A slot freed while this request waited for the control lines.  The inner loop
                                 # below takes it directly; staging would add a wait for BADOPT after reading.
@@ -2295,13 +2295,13 @@ class StrataEngine:
                                 # loop in _run, not run(): a ("ping", None) here reaches the detokenizer as a token)
                                 yield None
                             if not holding:
-                                prompt_work = self._known_prompt_work(
-                                    prompt, read_complete=staged_ready is not None)[1]
                                 ok = yield from self._take_control(cancel, prompt=prompt,
                                                                    read_complete=staged_ready is not None)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
+                                prompt_work = self._known_prompt_work(
+                                    prompt, read_complete=staged_ready is not None)[1]
                     if cancel.is_set():
                         return
                     if self._yielded is not None:           # it gave way: the others waiting then go first
@@ -2317,6 +2317,7 @@ class StrataEngine:
                         if not ok:
                             return
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
+                        prompt_work = self._known_prompt_work(prompt)[1]
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
                     was_staged = staged_ready is not None
@@ -2398,6 +2399,7 @@ class StrataEngine:
                             self._park_slot(slot)
                             slot = None
                             slot_touched = False
+                            prompt_work = self._known_prompt_work(prompt)[1]
                             continue
                         # #1994: the engine says this slot is not free (its view and ours differ for a moment, or a
                         # slot it still holds).  That is not the request's fault and nothing was read: park the slot
@@ -2417,6 +2419,7 @@ class StrataEngine:
                         self._park_slot(slot)
                         slot = None
                         slot_touched = False
+                        prompt_work = self._known_prompt_work(prompt)[1]
                         continue
                     cont = bool(self._ctl_result and self._ctl_result[1])
                     phase = "slot" if cont else "none"
