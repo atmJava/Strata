@@ -61,7 +61,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages, require_messages,
+                            forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages, ptc_program_is_python, require_messages,
                             tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -629,25 +629,57 @@ DSH_MAIN_TOOLS = (
 )
 
 
-def is_dsh_main_request(req: dict) -> bool:
-    """The exact DSH Responses shape used for ordinary agent turns.
+def ptc_prompt_texts(req):
+    """The texts of a request that carry DSH's programmatic SDK block: its instructions and its first system turn."""
+    out = []
+    ins = req.get("instructions")
+    if isinstance(ins, str):
+        out.append(ins)
+    elif isinstance(ins, list):
+        out.extend(p.get("text", "") for p in ins if isinstance(p, dict))
+    for item in (req.get("input") or [])[:2]:
+        if isinstance(item, dict) and item.get("role") in ("system", "developer"):
+            c = item.get("content")
+            if isinstance(c, str):
+                out.append(c)
+            elif isinstance(c, list):
+                out.extend(p.get("text", "") for p in c if isinstance(p, dict))
+    # the chat shape carries the same block in `messages`; DSH uses one shape or the other, so read both
+    for item in (req.get("messages") or [])[:2]:
+        if isinstance(item, dict) and item.get("role") in ("system", "developer"):
+            c = item.get("content")
+            if isinstance(c, str):
+                out.append(c)
+            elif isinstance(c, list):
+                out.extend(p.get("text", "") for p in c if isinstance(p, dict))
+    return out
 
-    DSH sends no request-purpose metadata. Match its stable wire surface instead of
-    reading prompt text. A DSH release with another tool set fails open.
+
+def ptc_rewrite_map(declared, ptc_names=None):
+    """The tools a programmatic request may name directly -> the wrapper that runs them.  The request declares only
+    the wrapper, so the names come from DSH_MAIN_TOOLS and from the request's own developer text (a profile or
+    plugin may offer tools this build's list does not know)."""
+    # "*" (frontend's sentinel): any name the request did not declare is that wrapper's call.  A profile or plugin
+    # may offer tools this build's list does not know (MCP servers, schedules), and a name the wrapper cannot reach
+    # fails inside the program, where the model reads the error and recovers, instead of ending the turn as XML text.
+    return {"*": "run_code"} if "run_code" in (declared or ()) else {}
+
+
+def is_dsh_main_request(req: dict) -> bool:
+    """The Responses shape DSH sends for an ordinary agent turn, in either preset.
+
+    DSH sends no request-purpose metadata, and its tool set and max_output_tokens move with the profile and the
+    preset: 25 names with max_output_tokens 32768 in the normal preset, only run_code in the programmatic one, 40000
+    once the profile grows.  So neither is matched; a developer message first and tools present is what both shapes
+    have, and the one other shape that matters here (a compaction) carries no tools.
     """
     tools = req.get("tools")
     items = req.get("input")
-    names = sorted(
-        tool.get("name")
-        for tool in tools or []
-        if isinstance(tool, dict) and isinstance(tool.get("name"), str)
-    )
     return (
         req.get("stream") is True
-        and req.get("max_output_tokens") in DSH_MAX_OUTPUT_TOKENS
         and not req.get("instructions")
         and not req.get("client_metadata")
-        and names == sorted(DSH_MAIN_TOOLS)
+        and isinstance(tools, list) and bool(tools)
         and isinstance(items, list)
         and len(items) >= 2
         and isinstance(items[0], dict)
@@ -4853,6 +4885,8 @@ class Service:
             ("strata:drafts_accepted_total", "counter", "Speculative draft tokens accepted", t["drafts_accepted"]),
             ("strata:tool_calls_unread_total", "counter", "<tool_call> blocks returned as text (an undeclared name or a form the template does not use)",
              t.get("tool_calls_unread", 0)),
+            ("strata:ptc_rewritten_total", "counter", "Undeclared calls delivered as the programmatic wrapper (run_code)",
+             t.get("ptc_rewritten", 0)),
             ("strata:tool_args_repaired_total", "counter", "Tool call arguments (a JSON array or object) that were damaged and read as written",
              t.get("tool_args_repaired", 0)),
             ("strata:model_loaded", "gauge", "1 while the model is loaded", int(self.loaded())),
@@ -5286,13 +5320,19 @@ class Service:
                 print(f"[strata] thinking capped at {max_new - reserve} of max_tokens {max_new} to leave room for "
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
+        # DSH's programmatic request carries the tools its developer text names in one private key, not as sampling
+        # (only the wrapper is declared); read it here and keep it out of the sampling
+        ptc_names = sampling.pop("_strata_ptc_names", None) if isinstance(sampling, dict) else None
         rewrite = None
         if self.ptc_tool_rewrite:
             declared = {t.get("name") for t in tools or [] if isinstance(t, dict)}
             if "run_code" in declared:          # the wrapper DSH's programmatic mode declares
-                rewrite = {name: "run_code" for name in DSH_MAIN_TOOLS if name not in declared}
+                rewrite = ptc_rewrite_map(declared, ptc_names) or None
         parser = self.parser_cls(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
-                                 declared_only=declared_only, rewrite=rewrite)
+                                 declared_only=declared_only, rewrite=rewrite,
+                                 ptc_python=(rewrite is not None
+                                             and ptc_program_is_python(
+                                                 ptc_prompt_texts(sampling if isinstance(sampling, dict) else {}))))
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -5782,6 +5822,11 @@ class Service:
             self.totals["tool_calls_from_reasoning"] = self.totals.get("tool_calls_from_reasoning", 0) + parser.rescued
             print(f"[strata] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
                   f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
+        if parser.rewritten:
+            with self.status_lock:
+                self.totals["ptc_rewritten"] = self.totals.get("ptc_rewritten", 0) + parser.rewritten
+            print(f"[strata] ptc: {parser.rewritten} undeclared call(s) delivered as run_code: "
+                  f"{', '.join(sorted(parser.rewritten_names))}", flush=True)
         if getattr(parser, "stray_think", 0):
             # #4077: the model wrote a closing think tag while thinking; the reasoning after it was sent as the answer
             self.totals["stray_think_closers"] = self.totals.get("stray_think_closers", 0) + parser.stray_think
@@ -7766,7 +7811,12 @@ def make_handler(svc: Service):
             def events():
                 yield from asm.start()
                 done = None
-                for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel):
+                ptc = responses_api.ptc_tool_names(req)
+                if any(isinstance(t, dict) and t.get("name") == "run_code" for t in tools or []):
+                    print(f"[strata] ptc: names in the developer text: {len(ptc)}"
+                          f"{' (' + ', '.join(sorted(ptc)[:8]) + ')' if ptc else ''}", flush=True)
+                run_req = {**req, "_strata_ptc_names": ptc} if ptc else req
+                for kind, x in svc.run(ids, thinking, tools, max_new, run_req, cancel):
                     if kind == "ping":
                         yield None
                     elif kind == "event":

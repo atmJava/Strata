@@ -759,6 +759,7 @@ _PREFIX_LOOKBACK = 256     # how far before a new delta a prefixed name or a mis
 # #5409: `<function=tools actio>` / `<function=tools>`; the prefixes are the ones of #4751
 _PREFIX_SPACED = re.compile(r"(<function=\s*(?:tools|functions|default_api)[ \t]+)([^<>\s]+)\s*>")
 _PREFIX_PART = re.compile(r"<function=\s*(?:tools|functions|default_api)[ \t]+[^<>\s]{0,80}\s*$")
+_PREFIX_BRACKET = re.compile(r"<function=\s*(?:tools|functions|default_api)\s*\[\s*([^\]\n]{0,80})\]\s*>")
 _PREFIX_BARE = re.compile(r"(<tool_call>\s*)<function=\s*(tools|functions|default_api)\s*>(.*?)</function>", re.S)
 _PREFIX_BARE_OPEN = re.compile(r"<tool_call>\s*<function=\s*(tools|functions|default_api)\s*>(?!.*</function>)", re.S)
 # #5276: `<toolcall>` / `<tool-call>` as the opener (then whitespace, `<function=NAME>`), and such an opener still arriving
@@ -1143,16 +1144,38 @@ def parse_tool_call(body: str, schema: dict | None = None, notes: list | None = 
     return ToolCall(name=name, arguments=args)
 
 
-def ptc_wrapped_call(name: str, args: dict, target: str) -> ToolCall:
+_PREFIX_NAME = re.compile(r"^(?:tools|functions|default_api)(?:\s*\.|\s*\[|\s+)\s*['\"`]?\s*([A-Za-z_][A-Za-z0-9_]*)")
+PTC_PYTHON_MARKS = ("TypedDict", "async def ")   # only DSH's Python projection spells its SDK block this way
+
+def ptc_program_is_python(texts) -> bool:
+    """The language DSH's programmatic prompt declared its tools in.  The TypeScript projection writes
+    `interface ToolArgsMap`; the Python one names `TypedDict` classes and `async def` signatures, and a program
+    written in the other language is a syntax error, so the wrapper has to know which one it is writing."""
+    for t in texts:
+        if isinstance(t, str) and any(m in t for m in PTC_PYTHON_MARKS) and "interface ToolArgsMap" not in t:
+            return True
+    return False
+
+
+def ptc_wrapped_call(name: str, args: dict, target: str, python: bool = False) -> ToolCall:
     """A call the model wrote for a tool the request did not declare, in the one wrapper it did declare.
 
     DSH's programmatic mode advertises only `run_code`; inside that program the same tools are `tools.<name>(...)`,
-    so the model's direct call is the same act.  The arguments go in as JSON (valid JavaScript) and the result is
-    printed, which is what the wrapper returns to the model."""
-    code = (f"const r = await tools[{json.dumps(name, ensure_ascii=False)}]"
-            f"({json.dumps(args, ensure_ascii=False)});\n"
-            "console.log(typeof r === 'string' ? r : JSON.stringify(r));")
-    return ToolCall(name=target, arguments={"code": code, "description": f"{name} call, run through {target}"})
+    so the model's direct call is the same act.  The arguments go in as JSON - valid JavaScript, and valid Python
+    once `json.loads` reads them - and the result is printed, which is what the wrapper returns to the model.
+    `python` picks the language of the program: DSH runs Node or CPython, and each runtime rejects the other's code."""
+    payload = json.dumps(args, ensure_ascii=False)
+    if python:
+        code = ("import json\n"
+                f"r = await tools[{json.dumps(name, ensure_ascii=False)}]"
+                f"(json.loads({json.dumps(payload, ensure_ascii=False)}))\n"
+                "print(r if isinstance(r, str) else json.dumps(r, ensure_ascii=False))")
+    else:
+        code = (f"const r = await tools[{json.dumps(name, ensure_ascii=False)}]"
+                f"({json.dumps(args, ensure_ascii=False)});\n"
+                "console.log(typeof r === 'string' ? r : JSON.stringify(r));")
+    return ToolCall(name=target, arguments={"code": code,
+                                            "description": f"Run the model's {name} call through {target}"})
 
 
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
@@ -1163,7 +1186,8 @@ class OutputParser:
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False, declared_only: bool = False, rewrite: dict[str, str] | None = None):
+                 recover: bool = False, declared_only: bool = False, rewrite: dict[str, str] | None = None,
+                 ptc_python: bool = False):
         self.state = "reasoning" if thinking else "content"
         self.buf = ""
         self.lead = False
@@ -1208,6 +1232,11 @@ class OutputParser:
         # wrapper's own name, is delivered as a call of the declared wrapper instead (ptc_wrapped_call).  The
         # arguments are the model's own, so this invents nothing; it only moves the call into the tool that runs it.
         self.rewrite = {k: v for k, v in (rewrite or {}).items() if isinstance(k, str) and isinstance(v, str)}
+        # the program: DSH runs its wrapper in Node or in CPython, and each rejects the other's source, so the
+        # rewrite writes the one the request declared (ptyhon_program_is_python reads its SDK block)
+        self.ptc_python = bool(ptc_python)
+        self.rewritten = 0              # calls delivered as the declared wrapper (ptc_rewritten_total)
+        self.rewritten_names = set()
         self.unread = 0              # #3441: `<tool_call>` blocks that opened like a call and were returned as text
         self.unread_names: list[str] = []   # the names (first few) of those that named a tool the request did not declare
         # stream_tools: a tool call is also reported while it is being written - "tool_start" (its name and id) as
@@ -1261,12 +1290,29 @@ class OutputParser:
         self._restore(snap)
         return ok
 
+    def _name_of(self, raw: str) -> str:
+        """The name a written name means.  A declared name or its alias, as before; and the programmatic spellings
+        a DSH prompt puts in the model's hands - `tools.edit`, `tools edit`, `tools["edit"]` - for a tool the
+        rewrite map can reach, which is the only way an undeclared tool is ever a call."""
+        name = self.aliases.get(raw, raw)
+        if name != raw or name in self.schemas:
+            return name
+        m = _PREFIX_NAME.match(raw)
+        member = m.group(1) if m else None
+        if member and (member in self.schemas or member in self.aliases or member in self.rewrite):
+            return self.aliases.get(member, member)
+        return name
+
     def _callable(self, name: str) -> bool:
         """#3075: may a call for `name` be a call?  A tool the request declared (or its Responses spelling); with
-        none declared, only where `declared_only` is off."""
+        none declared, only where `declared_only` is off.  An undeclared name the rewrite map reaches (a named
+        one, or any at all under its "*" sentinel) is a call too: it is delivered as the declared wrapper."""
         if not self.schemas:
             return not self.declared_only
-        return name in self.schemas or name in self.aliases or name in self.rewrite
+        name = self._name_of(name)
+        if name in self.schemas or name in self.aliases or name in self.rewrite:
+            return True
+        return "*" in self.rewrite
 
     def _loose_open(self, after: str):
         """#3441: `after` (text after a `<tool_call>`, whitespace dropped) opens a call in a drifted form that names a
@@ -1319,7 +1365,7 @@ class OutputParser:
                 gt = self.buf.find(">", p)
                 raw_name = self.buf[p + len(FUNC_START):gt if gt >= 0 else len(self.buf)]
                 name = raw_name.strip()
-                name = self.aliases.get(name, name)
+                name = self._name_of(name)
                 if gt < 0 and re.fullmatch(r"\s*[^<>\s]*\s*", raw_name):
                     return p, False
                 if gt >= 0 and name in self.schemas:
@@ -1498,7 +1544,7 @@ class OutputParser:
                     return out
                 raw_name = rest[a + 10:b]
                 name = raw_name.strip()
-                name = self.aliases.get(name, name)
+                name = self._name_of(name)
                 if raw_name != raw_name.strip() and name not in self.schemas:
                     return out
                 if name not in self.schemas and name in self.rewrite:
@@ -1622,8 +1668,21 @@ class OutputParser:
         if "<function=" in buf:
             def spaced(m):
                 name = m.group(2).strip()
-                return f"<function={name}>" if name in self.schemas else m.group(0)
+                # a declared tool, or one the rewrite map can reach: the programmatic spellings name tools the
+                # request did not declare, and the wrapper is the only declared one
+                reachable = (name in self.schemas or name in self.aliases or name in self.rewrite
+                             or "*" in self.rewrite)
+                return f"<function={name}>" if reachable else m.group(0)
             buf = _PREFIX_SPACED.sub(spaced, buf)
+
+            def bracketed(m):
+                # `tools["read"]`, `tools [ "read" ]`: the brackets are the model quoting the property name
+                inner = m.group(1).strip().strip(chr(34) + chr(39) + chr(96)).strip()
+                name = self.aliases.get(inner, inner)
+                reachable = (name in self.schemas or name in self.aliases or name in self.rewrite
+                             or "*" in self.rewrite)
+                return f"<function={name}>" if reachable else m.group(0)
+            buf = _PREFIX_BRACKET.sub(bracketed, buf)
             m = _PREFIX_PART.search(buf)
             if m and not held:
                 held, buf = buf[m.start():], buf[:m.start()]
@@ -1653,7 +1712,7 @@ class OutputParser:
         pos, out = start, []
         for m in _MISSPELT_OPEN.finditer(buf, start):
             name = m.group(2).strip()
-            name = self.aliases.get(name, name)
+            name = self._name_of(name)
             if name in self.schemas and self._opens_at(m.start()):
                 out.append(buf[pos:m.start()] + CALL_START + m.group(1) + FUNC_START + m.group(2) + ">")
                 pos = m.end()
@@ -1705,7 +1764,7 @@ class OutputParser:
                     call = None
                     try:
                         name = body[:end].strip()[len("<function="):].split(">", 1)[0].strip()
-                        name = self.aliases.get(name, name)
+                        name = self._name_of(name)
                         if name in self.schemas:
                             call = parse_tool_call(body[:end], self.schemas.get(name), self.notes)
                             call.name = name
@@ -1881,7 +1940,7 @@ class OutputParser:
                 if is_call:
                     raw_name = is_call.group(1)
                     name = raw_name.strip()
-                    name = self.aliases.get(name, name)
+                    name = self._name_of(name)
                     if raw_name != raw_name.strip() and name not in self.schemas:
                         is_call = None     # only declared names gain whitespace normalization
                 is_partial = FUNC_START.startswith(after) or re.fullmatch(r"<function=\s*[^<>\s]*\s*", after)
@@ -1994,7 +2053,7 @@ class OutputParser:
             body = self.buf[len(CALL_START):]
             f = function_end(body)
             name = body.lstrip()[len(FUNC_START):].split(">", 1)[0].strip() if f >= 0 else ""
-            name = self.aliases.get(name, name)
+            name = self._name_of(name)
             if f >= 0 and not body[f:].strip() and name in self.schemas:
                 try:
                     call = parse_tool_call(body[:f], self.schemas.get(name), self.notes)
@@ -2045,16 +2104,29 @@ class OutputParser:
         parse is the text it is instead of an error that ends the request."""
         raw_name = body.strip()[len(FUNC_START):].split(">", 1)[0]
         name = raw_name.strip()
-        name = self.aliases.get(name, name)
+        name = self._name_of(name)
         bare, self.bare = self.bare, False
         try:
             if raw_name != raw_name.strip() and name not in self.schemas:
                 raise ValueError("whitespace tool name is not declared")
             call = parse_tool_call(body, self.schemas.get(name), self.notes)
             call.name = name
+            # The wrapper schema requires a description; a model that wrote only "code" is still a call, and a
+            # generic one is better than a validation failure at the client.
+            if (name in self.schemas and isinstance(call.arguments, dict)
+                    and "description" not in call.arguments
+                    and "description" in (((self.schemas.get(name) or {}).get("parameters") or {})
+                                          .get("properties") or {})):
+                call.arguments["description"] = f"{name} call"
             target = self.rewrite.get(name) if name not in self.schemas else None
+            if target is None and name not in self.schemas:
+                target = self.rewrite.get("*")     # the wrapper the programmatic preset declares, for any name
             if target and target in self.schemas:
-                call = ptc_wrapped_call(name, call.arguments, target)
+                call = ptc_wrapped_call(name, call.arguments, target, self.ptc_python)
+                # ptc_rewritten_total alone records this: the call was NOT returned as text, so it is not
+                # an unread call (that counter means a block the client had to read as plain text)
+                self.rewritten += 1
+                self.rewritten_names.add(name)
         except ValueError:
             if not self.recover:
                 raise
