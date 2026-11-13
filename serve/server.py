@@ -3514,7 +3514,28 @@ def engine_args(cfg: dict) -> list[str]:
             args += ["--vram-segment-mib", str(seg)]
     args += parallel_args(cfg, args)
     args += pool_cores_args(cfg, args)
+    args += prompt_cache_args(cfg, args)
     return learned_profile_args(cfg, args)
+
+
+def prompt_cache_args(cfg: dict, args: list[str]) -> list[str]:
+    """Opt-in, off by default: "prompt_cache_spread": true keeps the conversation checkpoints spread back
+    from the end of the conversation (dense at its head otherwise, the engine default), and "prompt_cache_tail":
+    true keeps one more near the end of the prompt, at an existing chunk boundary.  Both are the engine own
+    options; a value this cannot read is said here and ignored (recommend, never force).  An option already in
+    the args wins."""
+    out = []
+    for key, flag in (('prompt_cache_spread', '--prompt-cache-spread'),
+                      ('prompt_cache_tail', '--prompt-cache-tail')):
+        value = cfg.get(key)
+        if value is None or value is False:
+            continue
+        if not isinstance(value, bool):
+            print(f'[strata] {key!r} must be true or false, not {value!r}: ignored', flush=True)
+            continue
+        if value and not any(a == flag for a in args + out):
+            out.append(flag)
+    return out
 
 
 PARALLEL_MAX = 8      # the engine's batch window holds at most 8 rows (kVerifyMaxT); --batch-mtp waves more through it
@@ -6040,7 +6061,7 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
             r = box["r"]
             print(f"[strata] tool {c.name}: {'ok' if r['ok'] else 'error'}, {r['chars']:,} characters in "
                   f"{r['ms'] / 1000:.1f} s{' (truncated for the model)' if r['truncated'] else ''}", flush=True)
-            results.append(r["text"])
+            results.append((r["text"], r.get("images") or []))
             yield "mcp", {"event": "result", "id": c.id, **{k: r[k] for k in ("ok", "text", "chars", "truncated", "ms")}}
         if cancel.is_set() or len(results) < len(calls):
             done = {**done, "finish": "cancel"}
@@ -6048,7 +6069,9 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
         messages.append({"role": "assistant", "content": "".join(text).strip(),
                          **({"reasoning_content": "".join(reasoning).strip()} if reasoning else {}),
                          "tool_calls": [{"function": {"name": c.name, "arguments": c.arguments}} for c in calls]})
-        messages += [{"role": "tool", "content": r} for r in results]
+        messages += [{"role": "tool", "content": text} if not pics else
+                     {"role": "tool", "content": [{"type": "text", "text": text}] + pics}
+                     for text, pics in results]
         try:
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_req, cancel=cancel)
         except ClientGone:                                      # #1999: the client left while a picture was prepared

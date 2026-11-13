@@ -35,7 +35,12 @@ import urllib.request
 from serve import lifeline
 
 PROTOCOL = "2025-06-18"               # the MCP revision Strata asks for; the server's answer is used as given
-DEFAULTS = {"timeout_s": 60.0, "max_result_chars": 20000, "max_rounds": 8, "start_timeout_s": 120.0}
+IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp")   # what the vision reader takes
+IMAGE_MAX_BYTES = 8 << 20                                  # one picture, base64 decoded
+DEFAULTS = {"timeout_s": 60.0, "max_result_chars": 20000, "max_rounds": 8, "start_timeout_s": 120.0,
+            # opt-in, off by default: a picture a tool returns goes to the vision reader as a picture instead
+            # of a "not shown to the model" note (see result_text)
+            "image_results": False}
 
 
 class McpError(RuntimeError):
@@ -524,8 +529,12 @@ class McpServer:
 
 
 # ------------------------------------------------------------------------------------------------ the hub
-def result_text(result: dict) -> str:
-    """An MCP tool result as the text the model reads: the text blocks as they are, other blocks named."""
+def result_text(result: dict, images: list | None = None) -> str:
+    """An MCP tool result as the text the model reads: the text blocks as they are, other blocks named.
+
+    `images`: when the caller passes a list, a picture block the vision reader can take (PNG, JPEG, WebP, under
+    the size cap) is appended to it as an image part and the text says so, instead of the note that it is not
+    shown.  None (the default) keeps the note: nothing changes unless a caller asks for pictures."""
     parts = []
     for block in result.get("content") or []:
         if not isinstance(block, dict):
@@ -541,7 +550,15 @@ def result_text(result: dict) -> str:
             parts.append(f"[resource link: {block.get('name') or ''} {block.get('uri', '')}]".replace("  ", " "))
         elif kind in ("image", "audio"):
             size = len(block.get("data") or "") * 3 // 4
-            parts.append(f"[{kind} ({block.get('mimeType', '?')}, {size:,} bytes): not shown to the model]")
+            mime = str(block.get("mimeType") or "").lower()
+            data = block.get("data")
+            if (images is not None and kind == "image" and mime in IMAGE_MIMES
+                    and isinstance(data, str) and 0 < size <= IMAGE_MAX_BYTES):
+                images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
+                parts.append(f"[image ({mime}, {size:,} bytes): shown to the model below]")
+            else:
+                why = "" if images is None else "; the vision reader takes PNG, JPEG and WebP under 8 MiB"
+                parts.append(f"[{kind} ({mime or '?'}, {size:,} bytes): not shown to the model{why}]")
         else:
             parts.append(json.dumps(block, ensure_ascii=False))
     if not parts and result.get("structuredContent") is not None:
@@ -621,14 +638,15 @@ class McpHub:
         "ms", "server", "tool"}.  Errors become text starting with "error:"; only McpCancelled is raised."""
         t0 = time.monotonic()
         server, tool = self._routes.get(name) or self.routes().get(name, (None, name))
-        out = {"server": server.name if server else None, "tool": tool}
+        out = {"server": server.name if server else None, "tool": tool,
+               "images": [] if self.settings.get("image_results") else None}
         if server is None:
             text, ok = f"error: there is no tool named {name!r}", False
         else:
             try:
                 res = server.call(tool, arguments if isinstance(arguments, dict) else {},
                                   float(self.settings["timeout_s"]), cancel)
-                text, ok = result_text(res), not res.get("isError")
+                text, ok = result_text(res, out["images"]), not res.get("isError")
                 if not ok:
                     text = "error: " + (text or "the tool reported an error")
             except McpCancelled:
