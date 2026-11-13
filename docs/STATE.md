@@ -27,7 +27,9 @@
   `402 passed / 51 skipped / 0 errors`、`52.62 s`；`pytest serve tests/terminal
   tools/server/tests` 为 `1,457 passed / 64 skipped / 10,910 subtests`、`514.49 s`，两轮
   均 exit 0。详见 [清理门禁结果](work/FREEZE_027_CLEANUP_GATE_RESULT-20261107.md)。
-  CUDA 构建、`ctest` 与真实服务器 smoke 未在本机验证。
+  CUDA 构建、`ctest` 与真实服务器 smoke 未在本机验证。本轮已从 `97925527` 的独立归档在远端通过 CUDA
+  13.0.88、`sm_75`、Release 组装构建：退出码 0，产物报告 `strata 0.1.51`，SHA-256
+  `6cdf18f1...`。该验证只覆盖组装和入口，不包含 `ctest`、CUDA runtime smoke 或部署。
 - 未完成采纳项：21
 - 当前项：AGENT-CURRENT-PROD-COST-REMAP（暂停，无主动执行）。模型/槽数比较及所有新
   候选均停止；未完成采纳项只表示历史队列，不授权继续执行。
