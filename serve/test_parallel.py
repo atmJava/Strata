@@ -267,18 +267,19 @@ class PickSlot(unittest.TestCase):
 
     def test_the_choice_says_why_it_was_made(self):
         """The counters are the measurement: a prefix hit means the history was there and was used, no_prefix means it
-        was not (so a low reuse is not the slot choice's fault), all_busy means the request had to wait for a slot."""
+        was not (so a low reuse is not the slot choice's fault), no_free_slot_polls counts the polls that found every
+        slot in flight."""
         e = self.engine(3)
         e.slot_held = [[1, 2, 3], [], [1, 2, 3, 4, 5]]
         e.pick_slot([1, 2, 3, 4, 5, 6])                            # the longest held start: a hit of 5 tokens
         self.assertEqual(e.pick_stats, {"prefix_hits": 1, "prefix_tokens": 5, "no_prefix": 0,
-                                        "all_busy": 0, "group_fill": 0})
+                                        "no_free_slot_polls": 0, "group_fill": 0})
         e.pick_slot([7, 8])                                         # nothing held: an empty slot, no prefix
         self.assertEqual(e.pick_stats["no_prefix"], 1)
         self.assertEqual(e.pick_stats["prefix_tokens"], 5)
         e.slot_busy = [True] * 3
         self.assertIsNone(e.pick_slot([7, 8]))
-        self.assertEqual(e.pick_stats["all_busy"], 1)
+        self.assertEqual(e.pick_stats["no_free_slot_polls"], 1)
         e = self.engine(4)                                           # a group spans two slots: b + 1 must exist
         e.slot_gs = 2                                               # the pipelined-groups order keeps no idle slot
         e.pick_slot([1, 2, 3, 4, 5, 6])

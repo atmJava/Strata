@@ -4882,7 +4882,8 @@ class Service:
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
                 # why each admission took the slot it took: a prefix hit reuses the slot's history, no_prefix means
-                # the history was not there (or was not long enough), all_busy means the request had to wait for one
+                # the history was not there (or was not long enough), no_free_slot_polls counts polls that had
+                # nowhere to admit the request
                 "admission": dict(getattr(self.engine, "pick_stats", {})),
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
