@@ -68,6 +68,34 @@ Strata has three parts:
   as [README.md](README.md#build) says. This checkout has no `setup.py`, `START-HERE.bat` or `setup.sh`; a model is
   set up and served with `strata launch`.
 
+## How work is ordered here
+
+Latency is the only measure, so the order of work follows the wait rather than a wish list. The twelve real DSH
+requests measured above spent 615 s waiting for the engine to start and 114 s decoding. The seconds are in the wait:
+
+1. **Admission** - who gets the engine next: short prompts before long ones within a shape, a long request that has
+   waited, and conversational affinity, so a request that continues a parked history follows it instead of queueing
+   behind a stranger.
+2. **Reuse** - how much of a prompt the engine already holds: the conversation cache, the prompt-cache checkpoints,
+   and a K/V format that gives way (int8, then k8v4, then q4_0) instead of the prompt being read again.
+3. **Decode** - last of the three, because a 20% decode gain moves a 3 s turn and a 51 s wait does not.
+
+Capacity is not on that list. The cache already holds about 5.4 conversations at the compaction point (14,220 B per
+token in INT8), so a cache size in a config file was never the lever.
+
+## How a round is closed
+
+Every round ends with the same four steps, in this order, and the commit message says what each one gave:
+
+1. Run the suites: `python tools/run_tests.py` (the engine's standalone conversation tests, the server's, the tools',
+   the terminal's). A group that cannot run is named in the commit's "Not run" line, not left out.
+2. A test written beside the change. When the change is a default, the test asserts it in one place - 
+   `serve/test_deployment_policy.py` - so turning it back into a switch fails one obvious test.
+3. `git grep -n 'getenv("STRATA_' src include serve`: a new read is a bug unless it is a test seam
+   (`STRATA_TEST_*`). A branch behind a constant is noise: delete the branch, not only the condition.
+4. The build, at `nice -n 15 make -j2`, then `strata --version`. Compiling is not restarting: the service stays up
+   while a separate build tree is verified.
+
 ## Installing Strata for a user
 
 Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**. For a user who wants the desktop app, send them to the installer
@@ -116,7 +144,8 @@ server ([docs/MCP_SERVER.md](docs/MCP_SERVER.md)) offers the same steps as tools
 - AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md);
   Mac (Metal): [docs/MAC.md](docs/MAC.md). Those three pages describe the upstream tree: this checkout builds the
   CUDA `sm_75` engine only, and the build refuses HIP, SYCL and Metal ([README.md](README.md#build)).
-- Tests: the Terminal and Control tests are in `tests/terminal` (`python -m pytest tests/terminal`). The app's UI
+- Tests: `python tools/run_tests.py` runs all of them from one command (`--group engine|serve|tools|terminal`,
+  `--filter NAME`). The Terminal and Control tests are in `tests/terminal` (`python -m pytest tests/terminal`). The app's UI
   tests are not here either. The server probes' tests are in `tools/server/tests` (`python -m pytest
   tools/server/tests`). The tools' own tests run without a GPU or downloads: `python tools/test_<name>.py` (for
   example `tools/test_shards.py`, `tools/test_gguf_paths.py`); the pack tests need llama.cpp's gguf-py and skip
