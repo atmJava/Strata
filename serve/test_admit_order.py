@@ -29,6 +29,8 @@ def engine_without_process(n=2):
     e.slot_claims, e.slot_releasing, e._orphan_seen = set(), set(), {}
     e.slot_cv = threading.Condition()
     e.waiting, e.admitting, e.wait_lens, e.ctl_epoch = 0, 0, [], 0
+    e.slot_order, e.slot_group = list(range(n)), [0] * n
+    e.slot_groups, e.slot_gs, e.slot_used = 1, 0, [0.0] * n
     e.ctl = threading.Lock()
     e.gen = 1
     e.up = True
@@ -140,8 +142,28 @@ class AdmitOrderTest(unittest.TestCase):
         self.e.slot_busy[0] = False
         self.assertEqual(self.e._known_prompt_work(prompt), (9_000, 1_000))
 
+    def test_ranking_uses_the_prefix_pick_slot_can_actually_take(self):
+        """Group mode skips a short prefix when choosing a slot; admission must not count that prefix as saved work."""
+        prompt = list(range(2_300))
+        self.e.slot_groups = 2
+        self.e.slot_held[0] = prompt[:self.e.SLOT_PREFIX_MIN - 1]
+        self.assertEqual(self.e.pick_slot(prompt), 1)
+        self.assertEqual(self.e._known_prompt_work(prompt), (0, len(prompt)))
+
+        self.e.slot_held[0] = prompt[:self.e.SLOT_PREFIX_MIN]
+        self.assertEqual(self.e.pick_slot(prompt), 0)
+        self.assertEqual(self.e._known_prompt_work(prompt),
+                         (self.e.SLOT_PREFIX_MIN, len(prompt) - self.e.SLOT_PREFIX_MIN))
+
+    def test_all_busy_uses_the_best_parked_prefix(self):
+        """When no slot is free, the eventual release can still preserve the best parked conversation prefix."""
+        prompt = list(range(10_000))
+        self.e.slot_held[0] = prompt[:9_000]
+        self.e.slot_busy[:] = [True] * self.e.batch
+        self.assertEqual(self.e._known_prompt_work(prompt), (9_000, 1_000))
+
     def test_admission_refreshes_work_after_a_free_slot_is_taken(self):
-        """A waiter that looked short through a free cached slot must not keep that rank after another request takes it."""
+        """A waiter that looked short through a free cached slot must not keep that rank after it is taken."""
         cached, fresh = [7] * 10_000, [8] * 1_500
         self.e.slot_held[0] = cached[:9_000]
         with mock.patch.object(server, "ADMIT_SHORT_FIRST", 2048), mock.patch.object(server, "ADMIT_MAX_WAIT_S", 60.0):

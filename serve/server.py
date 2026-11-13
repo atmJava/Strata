@@ -2526,16 +2526,53 @@ class StrataEngine:
         turn = next((i for i in range(len(held) - 1, -1, -1) if held[i] == self.TURN_ID), 0)
         return turn if 0 < turn < len(prompt) and prompt[:turn] == held[:turn] else 0
 
+    def _choose_free_slot_locked(self, prompt: list[int]) -> tuple[int | None, int, str]:
+        """The slot `pick_slot` would choose and its prefix; the caller holds slot_cv.
+
+        The last value names the selection reason for pick metrics.
+        """
+        free = [b for b in self.slot_order if not self.slot_busy[b]]
+        if not free:
+            return None, 0, "busy"
+        gs = getattr(self, "slot_gs", 0)
+        if gs > 1:
+            # pipelined groups of several slots: the engine keeps no idle slot below a busy one as a conversation cache
+            # (its pad row writes the slot), so nothing is worth keeping free for a next turn.  A group's window spans
+            # its slots up to its last busy one, so first fill a hole below a busy slot of the same group (it costs no
+            # extra row), then follow the spreading order
+            # (reported on #793: least-recently-used picks left leading holes, [_ B], that cost a whole row each)
+            def fills_hole(b):
+                g0 = b - b % gs
+                return any(self.slot_busy[x] for x in range(b + 1, g0 + gs))
+            slot = min(free, key=lambda b: (not fills_hole(b), self.slot_order.index(b)))
+            return slot, self._held_prefix(slot, prompt), "group_fill"
+        prefixes = {b: self._held_prefix(b, prompt) for b in free}
+        best = max(free, key=prefixes.get)
+        # without --batch-groups a held prefix of any length is taken, as before
+        keep = prefixes[best]
+        if keep >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
+            return best, keep, "prefix"
+        # with --batch-groups: the group with the fewest busy slots first, so the requests spread over the
+        # pipeline's stages (two requests in one group leave the other stage idle); then empty, then least recent
+        busy_in = {}
+        for b in range(self.batch):
+            if self.slot_busy[b]:
+                busy_in[self.slot_group[b]] = busy_in.get(self.slot_group[b], 0) + 1
+        slot = min(free, key=lambda b: (busy_in.get(self.slot_group[b], 0) if self.slot_groups > 1 else 0,
+                                        bool(self.slot_held[b]), self.slot_used[b]))
+        return slot, prefixes[slot], "no_prefix"
+
     def _known_prompt_reuse_locked(self, prompt: list[int]) -> int:
         """The prefix `prompt` can use now; the caller holds slot_cv.
 
-        Counting a busy slot while an empty slot is available makes a long read look short and lets it take the control
-        lines ahead of a genuinely short request.  While every slot is busy there is no such immediate mismatch: the
-        request must wait, and the best held prefix is the best estimate of the work its eventual slot will save.
+        While a slot is free, count only the prefix `pick_slot` would actually use: a short prefix that group mode
+        skips cannot turn a long read into a short one.  While every slot is busy, use the best parked prefix as the
+        estimate of the work the eventual slot will save.
         """
-        free = [b for b in range(self.batch) if not self.slot_busy[b]]
-        usable = free if free else range(self.batch)
-        return max((self._held_prefix(b, prompt) for b in usable), default=0)
+        slot, reuse, _ = self._choose_free_slot_locked(prompt)
+        if slot is not None:
+            return reuse
+        return max((self._held_prefix(b, prompt) for b in range(self.batch)), default=0)
 
     def _known_prompt_reuse(self, prompt: list[int]) -> int:
         """The prompt prefix the slots can provide under the current ownership."""
@@ -2551,38 +2588,18 @@ class StrataEngine:
         stats = self.__dict__.get("pick_stats")
         if stats is None:
             stats = self.pick_stats = dict(type(self).pick_stats)
-        free = [b for b in self.slot_order if not self.slot_busy[b]]
-        if not free:
+        slot, reuse, reason = self._choose_free_slot_locked(prompt)
+        if slot is None:
             stats["no_free_slot_polls"] += 1
             return None
-        gs = getattr(self, "slot_gs", 0)
-        if gs > 1:
+        if reason == "group_fill":
             stats["group_fill"] += 1
-            # pipelined groups of several slots: the engine keeps no idle slot below a busy one as a conversation cache
-            # (its pad row writes the slot), so nothing is worth keeping free for a next turn.  A group's window spans
-            # its slots up to its last busy one, so first fill a hole below a busy slot of the same group (it costs no
-            # extra row), then follow the spreading order
-            # (reported on #793: least-recently-used picks left leading holes, [_ B], that cost a whole row each)
-            def fills_hole(b):
-                g0 = b - b % gs
-                return any(self.slot_busy[x] for x in range(b + 1, g0 + gs))
-            return min(free, key=lambda b: (not fills_hole(b), self.slot_order.index(b)))
-        best = max(free, key=lambda b: self._held_prefix(b, prompt))
-        # without --batch-groups a held prefix of any length is taken, as before
-        keep = self._held_prefix(best, prompt)
-        if keep >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
+        elif reason == "prefix":
             stats["prefix_hits"] += 1
-            stats["prefix_tokens"] += keep
-            return best
-        stats["no_prefix"] += 1
-        # with --batch-groups: the group with the fewest busy slots first, so the requests spread over the
-        # pipeline's stages (two requests in one group leave the other stage idle); then empty, then least recent
-        busy_in = {}
-        for b in range(self.batch):
-            if self.slot_busy[b]:
-                busy_in[self.slot_group[b]] = busy_in.get(self.slot_group[b], 0) + 1
-        return min(free, key=lambda b: (busy_in.get(self.slot_group[b], 0) if self.slot_groups > 1 else 0,
-                                        bool(self.slot_held[b]), self.slot_used[b]))
+            stats["prefix_tokens"] += reuse
+        else:
+            stats["no_prefix"] += 1
+        return slot
 
     def slots_view(self) -> list[dict]:
         """/metrics: each batch slot - idle (with the tokens it holds for a next turn), reading or decoding."""
