@@ -222,7 +222,7 @@ the Qwen layer split described above. On four Radeon AI PRO R9700 cards it reach
   An explicit `--expert-cache` on the first card is capped to leave room for them.
 - More cards pay off when the model's routed experts do not fit the faster ones. An extra slow card costs its own round per
   window and can make a good pair slower.
-- For several conversations at once, `--batch N --batch-groups G --trim-stage-weights` pipelines them through the cards
+- For several conversations at once, `--batch N --batch-groups G` pipelines them through the cards
   ([BATCHING.md](BATCHING.md)).
 
 ## History / older measurements

@@ -3,7 +3,7 @@
 windows (BGEN), greedy.  Every slot's tokens must equal its solo tokens; prints the aggregate decode rate.
 
   python3 tools/batch_test.py --exe engine/strata --config strata-<model>.json --batch 4 --n 4 \
-      --extra "--layer-split 12,24,36 --trim-stage-weights --pcie-frac 0 --adapt-every 1000000"
+      --extra "--layer-split 12,24,36 --pcie-frac 0 --adapt-every 1000000"
 """
 import argparse, json, os, subprocess, sys, tempfile, time
 from pathlib import Path

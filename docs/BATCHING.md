@@ -81,7 +81,7 @@ of the same arm.
 With a layer split, the engine options go into the config's `args`:
 
 ```
-"args": [ ..., "--batch", "8", "--batch-groups", "4", "--trim-stage-weights" ],
+"args": [ ..., "--batch", "8", "--batch-groups", "4" ],
 "layer_split": "12,24,36"
 ```
 
@@ -90,11 +90,13 @@ With a layer split, the engine options go into the config's `args`:
 | `"parallel": N` / `--batch N` / `--slots N` (2..8 normally; with a layer split up to 8 per group, see below) | up to N conversations have batch slots; more requests wait for a free slot. Each slot gets its own state (a session carved like the stage's own: GDN recurrence, QSA K/V and indexer, PLE history) on every GPU of the split. With grouped MTP, more than 8 slots can rotate through eight-row windows if memory permits. |
 | `--batch-groups G` | with a layer split (default: auto, below): the N slots in G groups that flow through the GPUs as a pipeline (GPU k runs one group while GPU k+1 runs another). G must divide N. 1 = all slots in one window, GPU after GPU. |
 | `--batch-groups auto` | the default on a layer split since 0.1.41 (give no `--batch-groups`): the engine pipelines one group per GPU stage (the most that divide the slots; 8 slots on 4 GPUs = 4 groups of 2) and says so (`INFO batch_groups=G`). `--batch-groups 1` turns it off (all slots in one window, GPU after GPU). Measured, 8 clients, total tok/s against one group: 4 x R9700 166 against 86, 2 GPUs 109 against 78, 3 GPUs 110 against 78. With `--adapt-async 1` and no `--batch-groups` the default is one group (the adaptive tier between batch windows does not run in pipelined groups) and the log says so; with `--batch-mtp` and no `--batch-groups` the pipeline wins and `--batch-mtp` is left off (`--batch-groups 1` or `STRATA_BATCH_MTP_SERIAL=1` keeps it); `--batch-groups G` or `--batch-groups auto` given with `--batch-mtp` pipelines the groups and turns `--batch-mtp` off, and given with `--adapt-async 1` pipelines the groups and turns `--adapt-async` off (the pipelined path does not adapt). | PROPOSED for 0.2.1 (owner decides; branch f-021-split): on NVIDIA builds with exactly two stages the default is one group instead (2x RTX A4000, IQ3_XXS, aggregate tok/s against the pipelined default: +16% at 2 slots, +12% at 4, +15% at 8, 5 of 5 pairs each; `--batch-groups auto` or a number asks for the pipeline, `STRATA_BATCH_GROUPS_NV_SERIAL=0` restores the old default).
-| `--trim-stage-weights` | with an **explicit** `--layer-split` (e.g. `12,24,36`, not `auto`): every GPU loads only the dense weights of its own layers instead of the whole model's (the same as `STRATA_STAGE_TRIM=1`, PR #639). The VRAM this frees goes to the expert cache. Useful without `--batch` too. |
-
 The engine never refuses a count it cannot run: it says so in its log and runs what it can - at most 8 slots without a
 layer split (a window holds 8 rows; with a layer split and pipelined groups, 8 per group), as many as fit in VRAM, or none (one request at a time) when not two fit. The server reads
 the count the engine reports (`INFO batch_slots=N`), and `GET /v1/status` says it (`concurrency.serving`).
+
+With an explicit `--layer-split` (e.g. `12,24,36`, not `auto`), every GPU now loads only the dense weights of its own
+layers. The VRAM this frees goes to the expert cache. This is not a switch and works without `--batch`; dated
+measurement commands below may name the old `--trim-stage-weights` opt-in.
 
 ## More than 8 slots on a layer split, and the opt-in admission and decode switches
 
@@ -531,7 +533,7 @@ the HTTP server, 400 tokens per answer, temperature 0.7 (PR #559):
 With the patches below on engine 0.1.38 and parking on, through the service: 8 requests at temperature 0 -> 369
 tok/s, at 0.7 -> 358 tok/s.
 
-`--trim-stage-weights` alone raised the share of experts held in VRAM on that machine from 76-85 % to 84-100 %
+Stage-weight trimming alone (then an opt-in) raised the share of experts held in VRAM on that machine from 76-85 % to 84-100 %
 per card.
 
 ### One launch for all slots (opt-in)
@@ -589,7 +591,7 @@ For exact comparisons pass `--pcie-frac 0 --adapt-every 1000000` (and the script
 
 ```
 python3 tools/batch_test.py --exe engine/strata --config strata-<model>.json --batch 8 --n 8 \
-    --extra "--layer-split 12,24,36 --trim-stage-weights --batch-groups 4 --pcie-frac 0 --adapt-every 1000000"
+    --extra "--layer-split 12,24,36 --batch-groups 4 --pcie-frac 0 --adapt-every 1000000"
 python3 tools/batch_interleave_test.py --exe engine/strata --config strata-<model>.json \
     --extra "--pcie-frac 0 --adapt-every 1000000 --no-prefill-borrow"
 python3 tools/parking_test.py --exe engine/strata --config strata-<model>.json \

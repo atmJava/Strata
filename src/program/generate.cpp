@@ -603,9 +603,6 @@ struct Options {
     /// sent as `BGEN <slot> <max_new> ...` reads its prompt and its first token through the usual path, then
     /// continues in slot <slot> of the batch windows (`BT <slot> <id>` lines, then `BDONE <slot> ...`).
     int batch = 0;
-    /// With an explicit --layer-split, every GPU loads only its own layers' dense weights instead of the whole
-    /// model's: the VRAM they took goes back to the expert cache (opt-in)
-    bool trim_stage_weights = false;
     /// The --batch slots in this many groups pipelined through the stages of a layer split (stage k
     /// runs one group while stage k+1 runs another).  1 = every slot in one window, stage after stage.
     int batch_groups = 1;
@@ -875,7 +872,6 @@ void usage() {
                  "                       STRATA_PIPELINE_AUTO=0 or N=0 turns it off): one conversation's verify windows\n"
                  "                       with the GPUs overlapped - 1 = the prompt's short reads, 2 = decode as well\n"
                  "                       (stage 0 runs the next window while stage 1 verifies this one); docs/MULTI_GPU.md\n"
-                 "  --trim-stage-weights an explicit --layer-split: each GPU loads only its own layers' dense weights\n"
                  "  --prompt-cache-every N  --serve: also checkpoint every N fresh prompt tokens (default 16384, 0 = off)\n"
                  "  --prompt-cache-tail  --serve, single GPU: one extra checkpoint near the prompt's end, at an existing\n"
                  "                       chunk boundary (default off; requires --prompt-cache and --prompt-cache-every > 0)\n"
@@ -2518,7 +2514,6 @@ int main(int argc, char** argv) {
         else if (a == "--spec") o.spec = std::atoi(next("--spec"));
         else if (a == "--batch") o.batch = std::atoi(next("--batch"));
         else if (a == "--slots") o.batch = std::atoi(next("--slots"));   // the same as --batch
-        else if (a == "--trim-stage-weights") o.trim_stage_weights = true;
         else if (a == "--batch-groups") {
             const char* bgv = next("--batch-groups");
             o.batch_groups_set = true;
@@ -3545,26 +3540,18 @@ int main(int argc, char** argv) {
     }
     // Layer split: every GPU holds only the dense weights of ITS layers (the PLE tensors stay everywhere).
     // Without this each card keeps a full copy (~3.4 GB for the Coder) that its stage never reads - VRAM the
-    // expert cache wants.  Opt-in, STRATA_STAGE_TRIM=1, on HIP and CUDA alike: measured on 2x MI50 (PR #639),
-    // and the default waits for its author's re-run of the release branch on his cards.
+    // expert cache wants.
     const std::set<std::string> skip_base = skip;
-    // --trim-stage-weights (PR #559) is the same switch as STRATA_STAGE_TRIM=1 (PR #639)
-    // Trimming a stage's weights to what the split needs is what this box runs with (STRATA_STAGE_TRIM was 1), so it
-    // is asked unconditionally; --trim-stage-weights stays accepted for an old command line.
-    const bool trim_asked = true;
     // CUDA0'S ARENA IS BUILT BEFORE THE SPLIT IS KNOWN.  The prompt path's PLE tables are read out of it, here,
     // and `auto` does not choose its split points until 590 lines below - so CUDA0 can still only trim an
     // explicit --layer-split.  It is also the cheapest card to leave alone: it runs layers 0..split_at[0] on
     // the device with the most room, and on the 4-way IQ3_S rig the trim buys it 4598 -> 4608 slots.  The VRAM
     // is on the later cards (CUDA2 1241 -> 2485, CUDA3 533 -> 1772), and THEIR weights load after the search,
     // so they trim under `auto` too - see the block past it.
-    const bool stage_trim = trim_asked && multi_gpu && !split_auto && !split_at.empty();
-    if (o.trim_stage_weights && !multi_gpu)
-        std::fprintf(stderr, "strata generate: --trim-stage-weights needs a layer split across GPUs (ignored)\n");
-    // Only `--layer-split auto` WITH the trim asked loads the later stages' weights after the split search (they can
-    // only be trimmed once the split is known).  Every other run keeps the 0.1.39 order: weights first, then the
-    // search - so without the trim nothing about a split moves.
-    const bool late_weights = trim_asked && multi_gpu && split_auto;
+    const bool stage_trim = multi_gpu && !split_auto && !split_at.empty();
+    // `--layer-split auto` loads the later stages' weights after the split search because they can only be trimmed
+    // once the split is known.  Every other run keeps the 0.1.39 order: weights first, then the search.
+    const bool late_weights = multi_gpu && split_auto;
     // keep_routers: CUDA0 with --mmap-experts keeps every layer's router (ffn_gate_inp, ~2.5 MiB a layer) - the file
     // tier's routing-aware prefetch (RouterLookahead, below) copies all of them from CUDA0's arena, and would
     // otherwise turn itself off
@@ -4475,7 +4462,7 @@ int main(int argc, char** argv) {
         // as IQ3_S does on two or more 32 GB cards) the predicted decode window is the same for all of them - the
         // layers' times just add - and which one "won" was floating-point noise in the sum: 3 layers on the first
         // card, 30 on the second.  A prompt flows through the stages as a pipeline, so its speed is the slowest stage's:
-        // measured on 4x R9700 with --trim-stage-weights, 6,36,41 read a 32K prompt at 1,750 tok/s and 12,24,36 at 2,780,
+        // measured on 4x R9700 with stage weights trimmed, 6,36,41 read a 32K prompt at 1,750 tok/s and 12,24,36 at 2,780,
         // same decode speed, same tokens.  Among placements whose window time agrees to 1e-6 ms the one with the
         // smallest slowest stage (layers x ms per layer) is kept; an earlier one stays on a second tie.
         double best_max = 1e30;
