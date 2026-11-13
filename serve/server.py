@@ -41,6 +41,7 @@ import re
 import select
 import signal
 import socket
+import socketserver
 import struct
 import shutil
 import subprocess
@@ -67,6 +68,7 @@ from serve import runconfig  # noqa: E402
 from strata_control import atomic as _atomic_mod  # noqa: E402
 from strata_control import engine_component  # noqa: E402
 from strata_control import tls  # noqa: E402
+from strata_control.childenv import quiet_crash_env  # noqa: E402
 
 tls.install()       # #3722: image URLs and tool servers over HTTPS are checked against the operating system's certificates
 from strata_control import vision_reader  # noqa: E402
@@ -290,6 +292,10 @@ RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean s
 # server (the engine's main thread waits, untimed, for its next command): the engine is ended and the request fails;
 # the next request starts it again.  The config's "engine_silence_s" sets it (0: wait forever, as before).
 ENGINE_SILENCE_S = 300.0
+# #4271: a streaming client that stops reading (a hung process, a network that dropped) leaves the thread that writes to
+# it blocked once the socket buffers are full - and that thread holds the engine's turn.  A write that makes no progress
+# for this long ends the request as a disconnect (the engine is stopped, the turn given back).  0: no limit, as before.
+STREAM_WRITE_TIMEOUT_S = float(os.environ.get("STRATA_STREAM_WRITE_TIMEOUT_S", "60") or 0)
 # Disk sessions: the longest allowance an engine may announce (`SWAIT <phase> <s>`) for one step that blocks in a
 # single call (a file flush, the host->device transfer); the engine's own bound is the same (session_phase_limit_s).
 SESSION_WAIT_MAX_S = 3600
@@ -2580,11 +2586,15 @@ class StrataEngine:
                     raise ValueError(line[4:].strip())
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
-                if self.can_stop:
+                # the engine can be ended or restarted on another thread meanwhile: Engine.close() closes stdin (a
+                # write then raises ValueError) before it clears `proc` (None then) - the STOP has nobody to reach, and
+                # the request's own outcome must not be replaced by that error
+                proc = self.proc
+                if self.can_stop and proc is not None:
                     try:
-                        self.proc.stdin.write("STOP\n")
-                        self.proc.stdin.flush()
-                    except OSError:
+                        proc.stdin.write("STOP\n")
+                        proc.stdin.flush()
+                    except (OSError, ValueError):
                         pass
                 # #481: never an untimed wait here - it holds the request FIFO, and an engine that lost step never
                 # answers.  An engine that honours STOP gets the current allowance in all (a STOP during a prompt
@@ -3658,7 +3668,7 @@ def ordered_gpus(cfg: dict, scores=None, vrams=None) -> list[int]:
 def child_env(cfg: dict, *, offline: bool = False) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
-    env = dict(os.environ)
+    env = quiet_crash_env(dict(os.environ))          # no debugger on a user's machine: ggml's abort path forks gdb (strata_control/childenv.py)
     if gpu_all_off(cfg):
         env["CUDA_VISIBLE_DEVICES"] = ""
     elif gpu_list(cfg):                              # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
@@ -4823,6 +4833,8 @@ class Service:
             ("strata:drafts_accepted_total", "counter", "Speculative draft tokens accepted", t["drafts_accepted"]),
             ("strata:tool_calls_unread_total", "counter", "<tool_call> blocks returned as text (an undeclared name or a form the template does not use)",
              t.get("tool_calls_unread", 0)),
+            ("strata:tool_args_repaired_total", "counter", "Tool call arguments (a JSON array or object) that were damaged and read as written",
+             t.get("tool_args_repaired", 0)),
             ("strata:model_loaded", "gauge", "1 while the model is loaded", int(self.loaded())),
         ]
         return "".join(f"# HELP {name} {help_}\n# TYPE {name} {kind}\n{name} {value}\n"
@@ -5750,6 +5762,14 @@ class Service:
             self.totals["tool_calls_from_reasoning"] = self.totals.get("tool_calls_from_reasoning", 0) + parser.rescued
             print(f"[strata] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
                   f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
+        if getattr(parser, "stray_think", 0):
+            # #4077: the model wrote a closing think tag while thinking; the reasoning after it was sent as the answer
+            self.totals["stray_think_closers"] = self.totals.get("stray_think_closers", 0) + parser.stray_think
+            print(f"[strata] {parser.stray_think} extra closing think tag(s) in the answer were dropped (the model wrote one "
+                  "while thinking, so the rest of its reasoning went out as the answer; a call after it still counts)", flush=True)
+        if getattr(parser, "notes", None):
+            self.totals["tool_args_repaired"] = self.totals.get("tool_args_repaired", 0) + len(parser.notes)
+            print(f"[strata] {len(parser.notes)} tool call argument(s) repaired: {'; '.join(sorted(set(parser.notes)))}", flush=True)
         rejected = []
         if parser.unread:
             named = getattr(parser, "unread_names", None)
@@ -7545,6 +7565,11 @@ def make_handler(svc: Service):
             self.send_header("X-Accel-Buffering", "no")   # nginx and similar proxies pass each event at once
             self._cors()
             self.end_headers()
+            if STREAM_WRITE_TIMEOUT_S > 0:
+                try:
+                    self.connection.settimeout(STREAM_WRITE_TIMEOUT_S)     # (#4271) a stuck write ends as OSError: disconnected
+                except OSError:
+                    pass
 
         def _capture(self, items, api):
             """Retain bounded input/output for the monitor without changing the API response (the items as they
@@ -7943,6 +7968,12 @@ class Server(ThreadingHTTPServer):
     # first ones (measured on 4 x R9700, also with one request at a time); the requests wait in the server, not the kernel
     # (STRATA_HTTP_BACKLOG overrides it)
     request_queue_size = max(5, int(os.environ.get("STRATA_HTTP_BACKLOG") or 256))
+
+    def server_bind(self):
+        # http.server's own server_bind also asks socket.getfqdn(host) for a server_name nothing here reads; on a host whose reverse
+        # lookup stalls (35 s on the first lookup of every new process) each start waited that long before it listened
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that hangs up needs no stack trace
@@ -9075,21 +9106,19 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                   "api_url": f"http://{ready_host}:{bound_port}", "bound_host": a.host, "bound_port": bound_port,
                   "model_id": svc.model, "model_state": "unloaded" if lazy else "ready",
                   "api_state": "ready", "created_at": time.time()}
-    if ready_path is not None:
-        try:
-            ready_file.publish(ready_path, record)
-        except OSError as e:
-            print(f"[strata] could not write ready file ({type(e).__name__})", file=sys.stderr)
-            for close in (httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
-                          getattr(svc.images, "shutdown", None), hub.close if hub is not None else None):
-                if close:
-                    close()
-            return 6
-    if event_sink is not None:
-        notify_lifecycle("ready", record)
     interrupted = False
     drained = True
     try:
+        # inside the try: a SIGTERM that arrives the moment the ready file is visible (a supervisor that reads it and
+        # stops the server at once) takes the clean stop below, not an uncaught KeyboardInterrupt with the file left behind
+        if ready_path is not None:
+            try:
+                ready_file.publish(ready_path, record)
+            except OSError as e:
+                print(f"[strata] could not write ready file ({type(e).__name__})", file=sys.stderr)
+                return 6                                # the finally below closes everything once
+        if event_sink is not None:
+            notify_lifecycle("ready", record)
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
