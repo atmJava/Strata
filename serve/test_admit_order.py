@@ -136,6 +136,47 @@ class AdmitOrderTest(unittest.TestCase):
         self.e.slot_held[0] = prompt[:9_500]
         self.assertEqual(self.e._known_prompt_work(prompt), (9_500, 500))
 
+    def test_stable_slot_ownership_reuses_waiting_estimates(self):
+        """A waiter keeps its work estimate until a slot is taken, released or a test rewrites the busy list."""
+        now = time.monotonic()
+        self.e.wait_lens = [
+            [10_000, now, True, 10_000, list(range(10_000)), False],
+            [20_000, now + 0.01, True, 20_000, list(range(20_000)), False],
+        ]
+        with mock.patch.object(self.e, "_known_prompt_work_locked",
+                               wraps=self.e._known_prompt_work_locked) as work:
+            with self.e.slot_cv:
+                self.e._refresh_waiting_work_locked()
+                self.e._refresh_waiting_work_locked()
+            self.assertEqual(work.call_count, 2)
+
+            with self.e.slot_cv:
+                self.e._set_slot_busy_locked(0, True)
+                self.e._refresh_waiting_work_locked()
+            self.assertEqual(work.call_count, 4)
+
+            self.e.slot_busy[1] = True
+            with self.e.slot_cv:
+                self.e._refresh_waiting_work_locked()
+            self.assertEqual(work.call_count, 6)
+
+            self.e._replace_slot_held(0, [1, 2, 3])
+            with self.e.slot_cv:
+                self.e._refresh_waiting_work_locked()
+            self.assertEqual(work.call_count, 8)
+
+    def test_a_pre_restart_release_cannot_touch_the_new_slot_list(self):
+        """A delayed BDONE or park callback owns the list it started with, not the restarted engine's slots."""
+        old = self.e.slot_busy
+        old[0] = True
+        self.e.slot_busy = [False] * self.e.batch
+        epoch = self.e._slot_epoch
+        with self.e.slot_cv:
+            self.e._set_slot_busy_locked(0, False, old)
+        self.assertEqual(old, [False] * self.e.batch)
+        self.assertEqual(self.e.slot_busy, [False] * self.e.batch)
+        self.assertEqual(self.e._slot_epoch, epoch)
+
     def test_prefix_sampling_keeps_exact_reuse_semantics(self):
         """Sampled rejection is only an early exit; every sampled match still verifies the whole prefix."""
         prompt = list(range(10_000))

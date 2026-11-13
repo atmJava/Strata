@@ -1102,6 +1102,8 @@ class StrataEngine:
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
         self.last = {}
         self._slot_turn: dict[int, tuple[list[int], int, int]] = {}
+        self._slot_epoch = getattr(self, "_slot_epoch", 0) + 1
+        self._slot_busy_seen = None
         self.info = {}                   # INFO key=value facts (engine 0.1.8+): kv, expert slots, ... (Monitor tab)
         self.terminal_stages: list[dict] = []  # final layer ranges from this engine start's bounded stderr log
         self.terminal_batch_sample: dict | None = None
@@ -1335,7 +1337,7 @@ class StrataEngine:
             self.waiting = 0                            # requests waiting for the control lines (ctl)
             self.admitting = 0                          # #1603: ... and those that gave the lines back to wait for a slot
             self.wait_lens: list[list] = []             # ... prompt length, arrival, ordered flag, expected work,
-                                                         # prompt and staged-read-complete flag
+                                                         # prompt, staged-read-complete flag and slot-state epoch
             self.ctl_epoch = 0                          # how often the control lines were taken
             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
         self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
@@ -1825,9 +1827,9 @@ class StrataEngine:
                     if line.split()[3:4] == ["nonfinite"]:   # #879: the engine dropped the slot's state
                         tail = []
                     break
-            held[slot] = tail[:-1] if stream and tail else []
+            self._replace_slot_held(slot, tail[:-1] if stream and tail else [], held)
             with self.slot_cv:
-                busy[slot] = False
+                self._set_slot_busy_locked(slot, False, busy)
                 releasing.discard(slot)
                 self.slot_cv.notify_all()
         try:
@@ -1846,14 +1848,14 @@ class StrataEngine:
         """#1994: the engine refused a BGEN for `slot`.  Keep it busy here for SLOT_PARK_S (no request owns it), then
         give it back: the engine's view has caught up, or the next refusal parks it again."""
         with self.slot_cv:
+            busy = self.slot_busy
             self.slot_claims.discard(slot)
-            self.slot_busy[slot] = True
-        busy = self.slot_busy
+            self._set_slot_busy_locked(slot, True, busy)
 
         def free():
             with self.slot_cv:
                 if slot not in self.slot_claims and slot not in self.slot_releasing:
-                    busy[slot] = False
+                    self._set_slot_busy_locked(slot, False, busy)
                 self.slot_cv.notify_all()
         t = threading.Timer(self.SLOT_PARK_S, free)
         t.daemon = True
@@ -1878,7 +1880,7 @@ class StrataEngine:
             if busy and b not in self.slot_claims and b not in self.slot_releasing:
                 first = self._orphan_seen.setdefault(b, now)
                 if now - first >= self.ORPHAN_SLOT_S:
-                    self.slot_busy[b] = False
+                    self._set_slot_busy_locked(b, False)
                     self._orphan_seen.pop(b, None)
                     freed.append(b)
             else:
@@ -1912,10 +1914,47 @@ class StrataEngine:
         with self.slot_cv:
             return self._known_prompt_work_locked(prompt, read_complete)
 
+    def _set_slot_busy_locked(self, slot: int, busy: bool, slots: list[bool] | None = None) -> None:
+        """Change slot ownership and invalidate admission estimates; the caller holds slot_cv."""
+        slots = self.slot_busy if slots is None else slots
+        if slots[slot] == busy:
+            return
+        slots[slot] = busy
+        if slots is self.slot_busy:             # a completion callback from before a restart owns an old list
+            self._slot_epoch = getattr(self, "_slot_epoch", 0) + 1
+            self._slot_busy_seen = None
+
+    def _replace_slot_held(self, slot: int, tokens: list[int], helds: list[list[int]] | None = None) -> None:
+        """Publish a slot's new held tokens and invalidate admission estimates."""
+        with self.slot_cv:
+            helds = self.slot_held if helds is None else helds
+            helds[slot] = tokens
+            if helds is self.slot_held:
+                self._slot_epoch = getattr(self, "_slot_epoch", 0) + 1
+                self._slot_turn.pop(slot, None)
+
+    def _sync_slot_epoch_locked(self) -> int:
+        """Return the slot-state epoch, also noticing a direct busy-list write from a test or restart."""
+        busy = tuple(self.slot_busy)
+        if busy != getattr(self, "_slot_busy_seen", None):
+            self._slot_epoch = getattr(self, "_slot_epoch", 0) + 1
+            self._slot_busy_seen = busy
+        return self._slot_epoch
+
     def _refresh_waiting_work_locked(self) -> None:
-        """Refresh admission estimates after slot ownership or held prompts change; the caller holds slot_cv."""
+        """Refresh admission estimates when slot ownership advances; the caller holds slot_cv.
+
+        Either publishing held tokens or changing a slot's busy owner advances the epoch.  The epoch avoids repeating
+        long prefix checks while the queue is stable."""
+        epoch = self._sync_slot_epoch_locked()
         for entry in self.wait_lens:
+            if len(entry) > 6 and entry[6] == epoch:
+                continue
             entry[3] = self._known_prompt_work_locked(entry[4], entry[5])[1]
+            if len(entry) > 6:
+                entry[6] = epoch
+            else:
+                entry.append(epoch)
 
     def _take_control(self, cancel, prompt: list[int], after_epoch: int | None = None, new: bool = False,
                       read_complete: bool = False):
@@ -1925,10 +1964,11 @@ class StrataEngine:
         `read_complete`: a staged read already owns the prompt in the engine."""
         plen = len(prompt)
         with self.slot_cv:
+            epoch = self._sync_slot_epoch_locked()
             work = self._known_prompt_work_locked(prompt, read_complete)[1]
-            # (length, arrival, ordered, expected work, prompt, staged read complete).  Admission refreshes work
-            # from the prompt because a slot can be taken or released while this request waits.
-            entry = [plen, time.monotonic(), new, work, prompt, read_complete]
+            # (length, arrival, ordered, expected work, prompt, staged read complete, slot-state epoch).  Admission
+            # refreshes work when a slot is taken or released, not on every ordering pass while ownership is stable.
+            entry = [plen, time.monotonic(), new, work, prompt, read_complete, epoch]
             self.waiting += 1
             self.wait_lens.append(entry)
         beat = time.monotonic()
@@ -2100,7 +2140,7 @@ class StrataEngine:
                             with self.slot_cv:          # the slot the part read will wait in
                                 reserved = self.pick_slot(prompt)
                                 if reserved is not None:
-                                    self.slot_busy[reserved] = True
+                                    self._set_slot_busy_locked(reserved, True)
                                     self.slot_claims.add(reserved)
                             if reserved is not None:
                                 self._send(f"BYIELD {reserved}")
@@ -2125,7 +2165,7 @@ class StrataEngine:
                         slot_touched = True
                     elif reserved is not None:              # it did not give way: the slot is free again
                         with self.slot_cv:
-                            self.slot_busy[reserved] = False
+                            self._set_slot_busy_locked(reserved, False)
                             self.slot_claims.discard(reserved)
                             self.slot_cv.notify_all()
                         reserved = None
@@ -2205,7 +2245,7 @@ class StrataEngine:
                                 slot = (self.pick_slot(prompt)
                                         if (staged_ready is not None or self.mp_staged is None) else None)
                                 if slot is not None:
-                                    self.slot_busy[slot] = True
+                                    self._set_slot_busy_locked(slot, True)
                                     self.slot_claims.add(slot)
                                     if admit_wait:
                                         admit_wait = False
@@ -2256,7 +2296,7 @@ class StrataEngine:
                         return
                     if self._yielded is not None:           # it gave way: the others waiting then go first
                         slot_touched = True
-                        self.slot_held[slot] = list(prompt[:self._yielded[1]])
+                        self._replace_slot_held(slot, list(prompt[:self._yielded[1]]))
                         self._yielded = None
                         yields += 1
                         self.ctl.release()
@@ -2297,7 +2337,7 @@ class StrataEngine:
                     started = getattr(cancel, "_strata_queue_started", None)
                     if started is not None:
                         started()
-                    self.slot_held[slot] = []               # the admission overwrites what the slot held
+                    self._replace_slot_held(slot, [])       # the admission overwrites what the slot held
                     phase = "admit"
                     self._ctl_mode, self._ctl_result, self._yielded = "batch", None, None
                     self._ctl_erred = False
@@ -2342,7 +2382,7 @@ class StrataEngine:
                                 raise GpuBusy("the engine's batch slots are not free right now; try again in a moment",
                                               retry_after=5) from e
                             self.slot_live[slot] = None
-                            self.slot_held[slot] = []
+                            self._replace_slot_held(slot, [])
                             phase = "none"
                             self._ctl_erred = False
                             self._park_slot(slot)
@@ -2361,7 +2401,7 @@ class StrataEngine:
                             raise GpuBusy("the engine's batch slots are not free right now; try again in a moment",
                                       retry_after=5) from e
                         self.slot_live[slot] = None
-                        self.slot_held[slot] = []
+                        self._replace_slot_held(slot, [])
                         phase = "none"
                         self._ctl_erred = False
                         self._park_slot(slot)
@@ -2417,9 +2457,10 @@ class StrataEngine:
                         f = line.split()
                         self._apply_bdone(f)
                         # what the slot's sessions hold now: the prompt and every token fed (all but the last one)
-                        self.slot_held[slot] = list(prompt) + out[gen0:-1] if len(out) > gen0 else []
+                        self._replace_slot_held(
+                            slot, list(prompt) + out[gen0:-1] if len(out) > gen0 else [])
                         if f[3:4] == ["nonfinite"]:              # #879: the engine dropped the slot's state
-                            self.slot_held[slot] = []
+                            self._replace_slot_held(slot, [])
                             raise EngineNonFinite("the engine's logits became non-finite (#879)")
                         if (going_solo and f[3:4] == ["cancel"] and not cancel.is_set() and len(out) < int(max_new)
                                 and not (out and out[-1] in EOS_IDS)):
@@ -2429,7 +2470,7 @@ class StrataEngine:
                             self.slot_live[slot] = None
                             self.slot_used[slot] = time.time()
                             with self.slot_cv:
-                                self.slot_busy[slot] = False
+                                self._set_slot_busy_locked(slot, False)
                                 self.slot_claims.discard(slot)
                                 self.slot_cv.notify_all()
                             slot, gen0 = None, None
@@ -2491,7 +2532,7 @@ class StrataEngine:
                     self.admitting = max(0, self.admitting - 1)
             if reserved is not None:
                 with self.slot_cv:
-                    self.slot_busy[reserved] = False
+                    self._set_slot_busy_locked(reserved, False)
                     self.slot_claims.discard(reserved)
                     self.slot_cv.notify_all()
             if slot is not None:
@@ -2500,19 +2541,19 @@ class StrataEngine:
                     self.slot_used[slot] = time.time()
                 if phase == "slot" and bdone_in:
                     stream = list(prompt) + out[gen0:] if gen0 is not None and len(out) > gen0 else None
-                    self.slot_held[slot] = stream[:-1] if stream else []     # as the BDONE wait leaves it
+                    self._replace_slot_held(slot, stream[:-1] if stream else [])  # as the BDONE wait leaves it
                     with self.slot_cv:
-                        self.slot_busy[slot] = False
+                        self._set_slot_busy_locked(slot, False)
                         self.slot_claims.discard(slot)
                         self.slot_cv.notify_all()
                 elif phase == "slot":
-                    self.slot_held[slot] = []
+                    self._replace_slot_held(slot, [])
                     stream = list(prompt) + out[gen0:] if gen0 is not None and len(out) > gen0 else None
                     self._release_slot_when_done(slot, stream)    # freed at its BDONE
                     self.slot_claims.discard(slot)                # (the BDONE wait owns it now)
                 else:
                     with self.slot_cv:
-                        self.slot_busy[slot] = False
+                        self._set_slot_busy_locked(slot, False)
                         self.slot_claims.discard(slot)
                         self.slot_cv.notify_all()
 
