@@ -136,6 +136,37 @@ class AdmitOrderTest(unittest.TestCase):
         self.e.slot_held[0] = prompt[:9_500]
         self.assertEqual(self.e._known_prompt_work(prompt), (9_500, 500))
 
+    def test_prefix_sampling_keeps_exact_reuse_semantics(self):
+        """Sampled rejection is only an early exit; every sampled match still verifies the whole prefix."""
+        prompt = list(range(10_000))
+        held = prompt[:9_000]
+        self.e.slot_held[0] = held
+        self.assertEqual(self.e._known_prompt_work(prompt), (9_000, 1_000))
+
+        changed = held.copy()
+        changed[-1] += 1
+        self.e.slot_held[0] = changed
+        self.assertEqual(self.e._known_prompt_work(prompt), (0, 10_000))
+
+        changed = held.copy()
+        changed[-2] += 1
+        self.e.slot_held[0] = changed
+        self.assertEqual(self.e._known_prompt_work(prompt), (0, 10_000))
+
+    def test_turn_checkpoint_cache_tracks_replaced_slots(self):
+        """Reusing a slot must not reuse the checkpoint position of the conversation it replaced."""
+        prompt = list(range(10_000))
+        first = prompt[:9_000]
+        first[-1] = self.e.TURN_ID
+        second = prompt[:2_000]
+        second[1_000] = self.e.TURN_ID
+        self.e.slot_held[0] = first
+
+        self.assertEqual(self.e._held_prefix(0, prompt + [20_000]), len(first) - 1)
+        self.e.slot_held[0] = second
+        self.assertEqual(self.e._held_prefix(0, prompt + [20_000]), 1_000)
+        self.assertEqual(self.e._held_turn(0, second), 1_000)
+
     def test_a_completed_staged_read_has_no_work_left(self):
         """BRDY holds the read in the engine, not in a slot; waiting to adopt it must rank as zero work."""
         prompt = list(range(10_000))

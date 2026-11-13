@@ -1101,6 +1101,7 @@ class StrataEngine:
         self.max_context = int(args[args.index("--max-context") + 1]) if "--max-context" in args else 4096
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
         self.last = {}
+        self._slot_turn: dict[int, tuple[list[int], int, int]] = {}
         self.info = {}                   # INFO key=value facts (engine 0.1.8+): kv, expert slots, ... (Monitor tab)
         self.terminal_stages: list[dict] = []  # final layer ranges from this engine start's bounded stderr log
         self.terminal_batch_sample: dict | None = None
@@ -2524,6 +2525,28 @@ class StrataEngine:
     pick_stats = {"prefix_hits": 0, "prefix_tokens": 0, "no_prefix": 0, "no_free_slot_polls": 0, "group_fill": 0}
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
+    @staticmethod
+    def _starts_with(prompt: list[int], held: list[int], n: int) -> bool:
+        """Whether the first `n` tokens agree, rejecting unrelated caches before copying a long prefix."""
+        if n <= 0:
+            return True
+        # A conversation's continuation agrees at every position; unrelated prompts almost always differ at one of
+        # these samples.  A mismatch proves the full prefixes differ, so only a sampled match needs the C-level copy.
+        for i in (n - 1, n // 2, n // 4):
+            if prompt[i] != held[i]:
+                return False
+        return prompt[:n] == (held if n == len(held) else held[:n])
+
+    def _held_turn(self, slot: int, held: list[int]) -> int:
+        """The last turn checkpoint in `held`; replacement lists invalidate the cached scan."""
+        cache = self.__dict__.setdefault("_slot_turn", {})   # a synthesized test engine may skip __init__
+        cached = cache.get(slot)
+        if cached is not None and cached[0] is held and cached[1] == len(held):
+            return cached[2]
+        turn = next((i for i in range(len(held) - 1, -1, -1) if held[i] == self.TURN_ID), 0)
+        cache[slot] = (held, len(held), turn)
+        return turn
+
     def _held_prefix(self, slot: int, prompt: list[int]) -> int:
         """How many tokens of `prompt` this slot's cache can serve.  The caller holds slot_cv when reading the slot."""
         # The slot's whole held stream (the prompt and what it decoded) when this prompt continues it, else its turn
@@ -2535,10 +2558,14 @@ class StrataEngine:
         held = self.slot_held[slot]
         if not held:
             return 0
-        if len(held) < len(prompt) and prompt[:len(held)] == held:
+        cache = self.__dict__.setdefault("_slot_turn", {})   # a synthesized test engine may skip __init__
+        cached = cache.get(slot)
+        if cached is not None and cached[0] is not held:
+            del cache[slot]                      # do not keep a replaced, potentially long cache alive
+        if len(held) < len(prompt) and self._starts_with(prompt, held, len(held)):
             return len(held)
-        turn = next((i for i in range(len(held) - 1, -1, -1) if held[i] == self.TURN_ID), 0)
-        return turn if 0 < turn < len(prompt) and prompt[:turn] == held[:turn] else 0
+        turn = self._held_turn(slot, held)
+        return turn if 0 < turn < len(prompt) and self._starts_with(prompt, held, turn) else 0
 
     def _choose_free_slot_locked(self, prompt: list[int]) -> tuple[int | None, int, str]:
         """The slot `pick_slot` would choose and its prefix; the caller holds slot_cv.
