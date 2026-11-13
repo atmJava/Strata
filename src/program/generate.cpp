@@ -706,7 +706,10 @@ struct Options {
     /// the PLE history (~118 MB of host RAM); the KV cache itself is positional and stays where it is.
     int prompt_cache = 6;
     int64_t conversation_cache_mib = -1; // host RAM for independent conversations; -1: not given, --serve sizes it from the free RAM (#3493), 0: off
-    int conversation_cache_slots = 4;
+    /// --serve: how many conversations the cache may hold.  The working set is what it has to hold - five
+    /// conversations open at once (strata/core/conversation_memory.hpp: kWorkingSetConversations) - so a slot count
+    /// below it would drop one the deployment is using.
+    int conversation_cache_slots = strata::core::kWorkingSetConversations;
     int64_t conversation_cache_min_free_mib = 2560;
     /// --serve: park only conversations of at least this many tokens.  Every parked conversation costs one of
     /// conversation_cache_slots whatever its length, so without it a client that interleaves short side requests
@@ -9139,12 +9142,22 @@ int main(int argc, char** argv) {
         // its whole prompt again, Reused 0 on 12 of 12).  An explicit value, 0 included, is never touched.
         if (o.conversation_cache_mib < 0) {
             if (o.serve && o.prompt_cache > 0 && o.conversation_cache_slots > 0) {
-                o.conversation_cache_mib = strata::core::auto_conversation_cache_mib(strata::core::available_host_bytes(),
-                                                                                    o.conversation_cache_min_free_mib);
+                // Capacity from the working set (AGENTS.md): five conversations at the 160K compaction point, times what a
+                // token costs in this run's K/V format.  The RAM left is a ceiling, not the measure.
+                const int64_t per_token = (int64_t) strata::core::qsa_kv_token_bytes(g);
+                o.conversation_cache_mib = strata::core::auto_conversation_cache_mib(
+                    strata::core::available_host_bytes(), o.conversation_cache_min_free_mib, per_token);
                 if (o.conversation_cache_mib > 0)
-                    std::fprintf(stderr, "strata serve: conversation cache sized from the free RAM: %lld MiB for up to %d parked "
-                                         "conversations, so an agent's next turn reuses its prompt (--conversation-cache-mib N sets it, 0 turns it off)\n",
-                                 (long long) o.conversation_cache_mib, o.conversation_cache_slots);
+                    std::fprintf(stderr, "strata serve: conversation cache sized for the working set: %lld MiB, which holds "
+                                         "%.1f conversations of %lld tokens at %lld B/token in %s K/V "
+                                         "(--conversation-cache-mib N sets it, 0 turns it off)\n",
+                                 (long long) o.conversation_cache_mib,
+                                 per_token > 0
+                                     ? (double) ((int64_t) o.conversation_cache_mib << 20) /
+                                           (double) (per_token * strata::core::kWorkingSetConversationTokens)
+                                     : 0.0,
+                                 (long long) strata::core::kWorkingSetConversationTokens, (long long) per_token,
+                                 o.kv.c_str());
                 else
                     std::fprintf(stderr, "strata serve: conversation cache off: not enough free RAM to park conversations "
                                          "(--conversation-cache-mib N asks for one anyway)\n");
