@@ -191,16 +191,16 @@ public:
     /// The first stage only, checked before every chunk but the first: true ends the run there as if the prompt
     /// ended there.  `run` returns true once every stage has read the tokens before that chunk, and `stopped_at()`
     /// says how many of the run's tokens that is (-1 when the run read them all).  A read beside the batch slots
-    /// (STRATA_PIPED_CONCURRENT) gives way to a waiting shorter request there.
+    /// gives way to a waiting shorter request there.
     std::function<bool()> stop_at_chunk;
     /// 149-prefetch (STRATA_RAM_ADAPT2): a layer's routed expert ids (T x k, -1 = none) after the prompt path downloaded them
     /// for its grouping on the host; a policy may count them. Not called on the paths that keep the ids on the GPU.
     std::function<void(int64_t layer, const int32_t* ids, int64_t n)> on_routes;
     int64_t stopped_at() const { return stopped_at_; }
     /// Grows this stage's (and the later stages') pinned upload slots to what a text chunk of `T` tokens uploads, so
-    /// a run of such chunks allocates no pinned memory (STRATA_PIPED_CONCURRENT: an allocation or free on the read's
-    /// thread takes the driver's lock).  Before the run, with nothing of this path in flight.  False: a slot could
-    /// not be had (it then grows at first use, as before).
+    /// a run of such chunks allocates no pinned memory (an allocation or free on the read's thread takes the driver's
+    /// lock).  Before the run, with nothing of this path in flight.  False: a slot could not be had (it then grows at
+    /// first use, as before).
     bool reserve_uploads(int64_t T);
 
     /// The vision path: HOST rows (n_embd floats) indexed by absolute position, read in place of the token

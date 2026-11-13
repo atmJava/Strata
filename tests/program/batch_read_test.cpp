@@ -34,7 +34,7 @@ int main() {
     // a piece is always a multiple of the chunk
     for (int64_t c : {256, 1000, 2048, 4096})
         for (int64_t k : {1, 3, 8, 16}) CHECK(batch_read_piece(true, false, true, false, c, k) % c == 0);
-    // concurrent_read_off (STRATA_PIPED_CONCURRENT): runs with nothing set; each setting alone keeps it off, named
+    // concurrent_read_off: each setting alone keeps the concurrent read off and names its cause.
     CHECK(concurrent_read_off({}) == nullptr);
     bool ConcurrentReadSetup::*const each[] = {
         &ConcurrentReadSetup::prefill_help, &ConcurrentReadSetup::split_mtp_batch, &ConcurrentReadSetup::fs_slots,

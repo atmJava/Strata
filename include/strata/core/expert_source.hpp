@@ -956,7 +956,7 @@ public:
     void set_io_prefetch(bool on, int threads);
     bool io_prefetch() const { return io_pf_; }
     /// blob() hands out stage buffers it recycles (the GGUF in place, an unbuffered source, the I/O read-ahead): one
-    /// thread at a time (STRATA_PIPED_CONCURRENT is off with such a source)
+    /// thread at a time (the concurrent prompt read is off with such a source)
     bool stages_blobs() const { return staged(); }
     /// Counts the cached / uncached bytes of every blob read from the files (mincore, page-granular).  Free with
     /// io_prefetch; otherwise opt in with STRATA_IO_STATS=1 (the check costs a few microseconds per blob).

@@ -189,7 +189,7 @@ public:
     /// layer split: the pipelined slot groups write their rows at hbase = group * rows-per-group, one row per slot.
     void set_handoff_rows(int rows) { handoff_rows_ = rows; }
     /// Is the zero-doorbell graph the one a batch window would run now (every expert of the stage in VRAM by the host
-    /// table)?  Looks at the table, as each window does.  (STRATA_ADMIT_MERGE_FIRST's gate.)
+    /// table)?  Looks at the table, as each window does.  This is also the admission merge's gate.
     bool ar_live() { refresh_ar(); return ar_on(); }
     /// STRATA_SPLIT_OVERLAP=1 (opt-in; stages on DIFFERENT devices only): the hand-off carries a ready flag (one
     /// mapped word per hand-off buffer: host and device addresses).  The writing stage raises it from the GPU when
@@ -266,9 +266,9 @@ public:
                            const int64_t* pos, std::string& err);
     /// Serves the layers of this stage's window that have rung (the CPU pool and the flags), with no CUDA call: 1 once
     /// every layer is served (or the window raises no host doorbells), 0 while one is still to ring.  batch_poll
-    /// calls it, unless set_external_serve(true) moved it to a thread of its own (STRATA_PIPED_CONCURRENT: a CUDA
-    /// call can wait for the driver's lock while another thread holds it waiting for the GPU, whose window waits
-    /// for its doorbell, #31); batch_poll then makes no CUDA call before every layer is served.
+    /// calls it, unless set_external_serve(true) moved it to a thread of its own (a CUDA call can wait for the
+    /// driver's lock while another thread holds it waiting for the GPU, whose window waits for its doorbell, #31);
+    /// batch_poll then makes no CUDA call before every layer is served.
     int batch_serve(PoolMultiFn pool, void* user);
     void set_external_serve(bool on) { ext_serve_.store(on, std::memory_order_release); }
     /// A slot's sampling (temperature / top_p / top_k / min_p / seed; penalties are not applied in batch windows):

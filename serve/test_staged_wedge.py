@@ -145,7 +145,6 @@ class StagedWedge(unittest.TestCase):
         # staging on, but only for prompts over 4096 tokens by default: the requests that fill the slots must not
         # take the staged path (only the tests' long request does, via stage_long_prompts())
         self.env = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ": "1",
-                                                "STRATA_BATCH_STAGED_READ": "1",
                                                 "STRATA_MP_STAGED_READ_MIN_TOKENS": "4096"})
         self.env.start()
         self.addCleanup(self.env.stop)

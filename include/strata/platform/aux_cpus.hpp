@@ -314,7 +314,7 @@ inline bool off_host_target_locked(const State& s, cpu_set_t& out) {
 
 /// Puts the calling thread off the host's core and off the pool workers' CPUs (see off_host_target_locked).  A thread
 /// the host creates inherits the host's single CPU; one that must not share that core (the concurrent prompt read's
-/// thread and its doorbell thread, STRATA_PIPED_CONCURRENT) calls this first.  False when nothing changed.
+/// thread and its doorbell thread) calls this first.  False when nothing changed.
 inline bool place_off_host() {
     detail::State& s = detail::state();
     std::lock_guard<std::mutex> lk(s.mu);

@@ -220,10 +220,9 @@ const bool g_no_batch_kv = env_on("STRATA_NO_BATCH_KV_STEP");   // #783 PR-d: pe
 // no commit graph runs after it.  Such a window's commit is unconditional (each slot keeps its one row), and the rest
 // of the commit graph only repeats what the window wrote: the indexer tails are put back and appended again from the
 // same rows, the PLE histories are put back to the window's own snapshot.
-// On, and not a setting: this deployment ran with it (STRATA_BATCH_SELF_COMMIT=1) and the box is 2 x 2080 Ti on
-// --batch 2.  Turning it off crashed the engine on the first batched request here - "mtp draft: an illegal memory
-// access was encountered", the draft's window committing through a graph the self-committing window does not build.
-const bool g_batch_self_commit = true;
+// A one-row-per-slot window advances the GDN state itself and runs no commit graph.  This box is 2 x 2080 Ti on
+// --batch 2.  The graph path crashed the engine on the first batched request here - "mtp draft: an illegal memory
+// access was encountered".
 // STRATA_QSA_SLOTS=1 (opt-in): in a batch window, a QSA layer's block scores, top-k and attention run as one launch
 // each over the window's rows (up to 8 per launch, each row reading its own slot's indexer keys and K/V) instead of
 // one call per row; every row is computed by the same kernel with the same arithmetic as its own call.  Not with a
@@ -237,7 +236,7 @@ bool one_row_per_slot(const int* rows, int S) {
             if (rows[i] == rows[j]) return false;
     return S >= 1;
 }
-bool batch_self_commits(const int* rows, int S) { return g_batch_self_commit && one_row_per_slot(rows, S); }
+bool batch_self_commits(const int* rows, int S) { return one_row_per_slot(rows, S); }
 
 // The shared expert runs on its own stream, forked off and joined back per layer (`sh_fork` in record_window).  The
 // overlap pays off on CUDA, where it was added (cfd3b72).  On HIP a cross-stream event dependency costs more than the
@@ -976,19 +975,15 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     sink_.staging = (unsigned long long) staging_;
     sink_.staging_cap = kStagingBlobs;
     (void) TS;
-    // STRATA_PIPED_CONCURRENT=1 (opt-in): a prompt can run on the same GPU while the batch windows run, so the windows'
-    // streams get the device's highest priority (HIP: the default priority, as the drafter's)
+    // A prompt can run on the same GPU while the batch windows run, so the windows' streams get the device's highest
+    // priority (HIP: the default priority, as the drafter's).
     auto make_stream = [](cudaStream_t* s) -> cudaError_t {
-        // a prompt can run on the GPU while the batch windows run (STRATA_PIPED_CONCURRENT was 1), so the windows'
-        // streams take the device's highest priority
-        const bool hi = true;
+        // The prompt can run while the batch windows do, so their streams take the device's highest priority.
         int lo = 0, top = 0;
-        if (hi) {
-            if (cudaDeviceGetStreamPriorityRange(&lo, &top) == cudaSuccess &&
-                cudaStreamCreateWithPriority(s, cudaStreamNonBlocking, top) == cudaSuccess)
-                return cudaSuccess;
-            cudaGetLastError();   // (only the failed priority call's error: the default path clears nothing)
-        }
+        if (cudaDeviceGetStreamPriorityRange(&lo, &top) == cudaSuccess &&
+            cudaStreamCreateWithPriority(s, cudaStreamNonBlocking, top) == cudaSuccess)
+            return cudaSuccess;
+        cudaGetLastError();   // (only the failed priority call's error: the default path clears nothing)
         return cudaStreamCreateWithFlags(s, cudaStreamNonBlocking);
     };
     bool copy_made = false;
@@ -1161,7 +1156,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     // a batch window: row t is slot t, whose state lives in its own session
     auto slot_ss = [&](int t) -> SessionState& { return batch_rec_ ? *slots_[(size_t) brow_[t]] : ss; };
     const int hrow0 = batch_rec_ ? row_base_ : 0;   // a slot group's own hand-off rows
-    // STRATA_BATCH_SELF_COMMIT: the window keeps its rows (no commit graph, nothing to snapshot for one)
+    // A one-row-per-slot window keeps its rows: no commit graph and nothing to snapshot for one.
     const bool keep_rows = batch_rec_ && batch_self_commits(brow_, T);
 
     // ---- the window's inputs, from mapped staging.  With branches the steps and positions (first read by the first
@@ -3500,8 +3495,8 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
     tail_snap_b_ = (float*) ((uint8_t*) d + a);
     slots_ = slots;
     slot_sp_.assign(slots.size(), sampling_);   // greedy until set_slot_sampling
-    std::fprintf(stderr, "strata verify: batch windows of up to %lld sequences (layers [%lld, %lld))%s\n", (long long) S,
-                 (long long) lb_, (long long) le_, g_batch_self_commit ? ", one-row windows keep their rows" : "");
+    std::fprintf(stderr, "strata verify: batch windows of up to %lld sequences (layers [%lld, %lld)), "
+                         "one-row windows keep their rows\n", (long long) S, (long long) lb_, (long long) le_);
     return true;
 }
 

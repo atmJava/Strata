@@ -446,7 +446,7 @@ class HeartbeatTypes(FakeEngineCase):
 
     def setUp(self):
         super().setUp()
-        self.env = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ": "0", "STRATA_BATCH_STAGED_READ": "0"})
+        self.env = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ": "0"})
         self.env.start()
         self.addCleanup(self.env.stop)
 
@@ -488,7 +488,6 @@ class StagedProtocol(FakeEngineCase):
     def setUp(self):
         super().setUp()
         self.env = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ": "1",
-                                                "STRATA_BATCH_STAGED_READ": "1",
                                                 "STRATA_MP_STAGED_READ_MIN_TOKENS": "4096"})
         self.env.start()
         self.addCleanup(self.env.stop)

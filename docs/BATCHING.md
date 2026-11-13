@@ -98,7 +98,7 @@ With an explicit `--layer-split` (e.g. `12,24,36`, not `auto`), every GPU now lo
 layers. The VRAM this frees goes to the expert cache. This is not a switch and works without `--batch`; dated
 measurement commands below may name the old `--trim-stage-weights` opt-in.
 
-## More than 8 slots on a layer split, and the opt-in admission and decode switches
+## More than 8 slots on a layer split, and the remaining tuning switches
 
 (From havok2-htwo's patch series, PR #2364.)
 
@@ -109,22 +109,20 @@ as fit in VRAM and at most 8 per group (`INFO batch_slots=N`). `--batch-mtp` kee
 doubled by the proposals). Nothing changes for 8 slots or fewer. Every slot of a 16-slot pipelined batch decodes
 exactly the tokens it decodes alone (`tools/batch_test.py --n 16`, which now takes up to 32 prompts).
 
-**Opt-in switches** (environment of the engine, i.e. `"env"` in the config; none is on by default). Each one changes
-how the work is scheduled or copied, not what is computed; `tools/batch_test.py` checks that every slot decodes the tokens it
-decodes alone.
+**Default admission and decode paths.** The direct device-to-device slot copy, its queued batch copy, checkpoint storage
+reuse, same-window admission merge and one-row self-commit are part of the default path. They are not switches and no
+environment variable can turn them off. A new prompt of at most 2,048 tokens takes the control lines first; a longer
+prompt counts as short once it has waited `STRATA_ADMIT_MAX_WAIT_S` (default 30 seconds).
+
+**Remaining opt-in switches** (environment of the engine, i.e. `"env"` in the config; each one below changes how work is
+scheduled or copied, not what is computed). `tools/batch_test.py` checks that every slot decodes the tokens it decodes
+alone.
 
 | Switch | What it does |
 |---|---|
-| `STRATA_SLOT_COPY_DIRECT=1` | an admission (and a slot's resume) copies the running state and the QSA K/V device to device, instead of through host images |
-| `STRATA_SLOT_COPY_BATCHSYNC=1` | with the above: queue the ~116 copies and synchronize each device once |
-| `STRATA_SLOT_CKPT_MOVE=1` | the admission's turn checkpoint moves into the slot (no 112 MB copy); it also keeps the dropped checkpoints' storage, as `STRATA_CKPT_POOL` does; a session SAVE or parked conversation taken right after an admission lacks the moved checkpoint (the slot holds it) |
-| `STRATA_CKPT_POOL=1`, `STRATA_CKPT_THREADS=1` | a checkpoint is saved into the vectors of a dropped one; a split's stage parts are saved at once |
-| `STRATA_ADMIT_MERGE_FIRST=1` | an admission reads its last prompt tokens and its first token in one window (all experts resident only) |
-| `STRATA_PIPE_BYIELD_NODRAIN=1` | a BYIELD that reaches a pipelined batch is dropped without draining the groups |
-| `STRATA_BATCH_SELF_COMMIT=1` | a one-row-per-slot window advances the GDN state itself, no commit graph |
+| `STRATA_SLOT_CKPT_MOVE=1` | the admission's turn checkpoint moves into the slot (no 112 MB copy); a session SAVE or parked conversation taken right after an admission lacks the moved checkpoint (the slot holds it) |
 | `STRATA_QSA_SLOTS=1` | a window's QSA block scores, top-k and attention run as one launch over its rows |
 | `STRATA_HANDOFF_PIPE=P` | a layer split hands a prompt chunk to the next card in P pieces (2..16), gated by events, on a persistent thread |
-| `STRATA_ADMIT_SHORT_FIRST=N` (server) | a new prompt of at most N tokens takes the control lines before longer ones (a longer one that waited `STRATA_ADMIT_MAX_WAIT_S`, default 30, counts as short) |
 | `STRATA_TRACE=1` | one line per admission with its phases (drain, prompt, first window, slot copy, checkpoint copy) |
 | `STRATA_MMQ_DIRECT=1`, `STRATA_MMQ_GROUP_SORT=1` | CUDA, needs the build option `-DSTRATA_MMQ_TAB=ON`: the prompt MMQ reads resident experts in their cache slots; full MMQ groups sorted by row count (docs/DETAILS.md) |
 
@@ -190,16 +188,16 @@ about 10-25% speed per request on this card". `--parallel N` is honoured as aske
 - Slots are assigned so that consecutive requests land in different pipeline groups (`--batch-groups`).
 - A client that disconnects stops its slot (`BSTOP`); the others go on.
 
-## Reading a prompt beside pipelined groups (experimental, opt-in)
+## Reading a prompt beside pipelined groups
 
 With a layer split and `--batch-groups` above 1 a prompt is read in one run: every decoding slot stops until it is
 read, however long it is (#1906). One GPU does not have this problem: there the slots decode between the prompt's
 chunks for `STRATA_BATCH_DECODE_SHARE` x the chunk's time.
 
-`STRATA_PIPED_CONCURRENT=1` reads a prompt on a thread of its own while the slot groups keep decoding through the
-pipeline, instead of stopping them: the prompt's chunks and the slots' windows run on the same GPUs at once, on their
-own streams (the windows' at the device's highest priority on CUDA; `STRATA_PIPED_CONCURRENT_PRIO=0` keeps the default),
-so the slots never wait for the read and the read is one run with no drain inside it.
+When the configuration permits it, Strata reads the prompt on a thread of its own while the slot groups keep decoding
+through the pipeline, instead of stopping them: the prompt's chunks and the slots' windows run on the same GPUs at
+once, on their own streams (the windows' at the device's highest priority on CUDA), so the slots never wait for the
+read and the read is one run with no drain inside it.
 
 - The prompt's K/V goes to the main sessions and the slots' to their own, so they do not touch each other's state. The
   n-gram (PLE) table both of them read is locked. The adaptive VRAM tier stands still during the read: its round lands
@@ -231,7 +229,7 @@ Measured on 2x RTX 5090 (Swift 1.5 IQ3_S, split 25, `--batch 6 --batch-groups 2`
 the order main, this mode, this mode, main (`tools/piped_read_join_bench.py`; the fixed-prompt rows send the same four
 stream prompts every run, so the streams' answers and work are the same):
 
-| | main | `STRATA_PIPED_CONCURRENT=1` |
+| | main | concurrent read (then `STRATA_PIPED_CONCURRENT=1`) |
 | --- | ---: | ---: |
 | 64K + 32K cold prompts beside four streams: longest stop of a stream | 11.9 s | 0.77-0.84 s |
 | ... the streams' tokens meanwhile | 289-291 | 1,411-1,679 |
@@ -410,7 +408,7 @@ taking a slot back) first drains the pipeline, which also waits for the queued c
 
 It needs a layer split with two or more groups, any number of slots per group (as long as a group's window,
 slots x (1 + N), is at most 8 rows). When it cannot run, the engine says why and goes on without it: fewer than two
-groups left, `STRATA_BATCH_SELF_COMMIT` on, or a window of more than 8 rows.
+groups left, or a window of more than 8 rows.
 
 Measured on a box with 2x RTX A6000 48 GB (`--layer-split auto`), Qwen3.8-Flash-Next IQ3_S, every expert resident in
 VRAM, `--batch 4 --batch-groups auto` (2 groups of 2 slots), `tools/serve_load.py`, 256 tokens per request, reasoning

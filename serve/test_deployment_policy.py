@@ -8,6 +8,7 @@ not three files away. This is that one file.
 """
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -28,6 +29,18 @@ def source_reads(name):
             continue
         if name in path.read_text(encoding="utf-8"):
             hits.append(path.name)
+    return hits
+
+
+def engine_reads(name):
+    """C++ files that read this environment variable, comments and documents excluded."""
+    pattern = re.compile(r"\bgetenv\s*\(\s*\"" + re.escape(name) + r"\"")
+    hits = []
+    suffixes = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".inc", ".inl"}
+    for folder in (ROOT / "src", ROOT / "include"):
+        for path in sorted(folder.rglob("*")):
+            if path.suffix in suffixes and pattern.search(path.read_text(encoding="utf-8")):
+                hits.append(str(path.relative_to(ROOT)))
     return hits
 
 
@@ -59,6 +72,26 @@ class TheFourDshBehaviours(unittest.TestCase):
                      "STRATA_DSH_PTC_TOOL_REWRITE", "STRATA_KEEP_DSH_COMPACTION_TOOLS"):
             with self.subTest(name=name):
                 self.assertEqual(source_reads(name), [])
+
+
+class EngineDefaults(unittest.TestCase):
+    """Behaviour this deployment uses unconditionally must not return as an environment switch."""
+
+    def test_folded_switches_have_no_environment_reader(self):
+        for name in (
+            "STRATA_SLOT_COPY_DIRECT",
+            "STRATA_SLOT_COPY_BATCHSYNC",
+            "STRATA_CKPT_POOL",
+            "STRATA_CKPT_THREADS",
+            "STRATA_ADMIT_MERGE_FIRST",
+            "STRATA_PIPE_BYIELD_NODRAIN",
+            "STRATA_BATCH_SELF_COMMIT",
+            "STRATA_STAGE_TRIM",
+            "STRATA_PIPED_CONCURRENT",
+            "STRATA_PIPED_CONCURRENT_PRIO",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(engine_reads(name), [])
 
 
 class Capacity(unittest.TestCase):

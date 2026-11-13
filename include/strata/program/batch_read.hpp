@@ -27,7 +27,7 @@ inline int64_t batch_read_piece(bool batch, bool piped, bool layer_split, bool b
     return chunks_per_piece > 0 ? chunk * chunks_per_piece : 0;
 }
 
-/// What a configuration has that keeps the concurrent read (STRATA_PIPED_CONCURRENT=1) off.
+/// What a configuration has that keeps the concurrent read off.
 struct ConcurrentReadSetup {
     bool prefill_help = false;      ///< STRATA_PREFILL_HELP: the idle stage's help allocates on the read's thread
     bool split_mtp_batch = false;   ///< STRATA_SPLIT_MTP_BATCH: the batched draft K/V frees there (a free waits)
