@@ -175,7 +175,8 @@ struct SavedConversation {
 
     size_t bytes() const {
         size_t n = live.bytes() + checkpoints.capacity() * sizeof(ConversationCheckpoint) +
-                   kv.capacity() * sizeof(ConversationKv);
+                   kv.capacity() * sizeof(ConversationKv) +
+                   stage_images.capacity() * sizeof(SavedConversation);
         for (const auto& s : stage_images) n += s.bytes();
         for (const auto& c : checkpoints) n += c.bytes();
         for (const auto& k : kv) n += k.bytes();

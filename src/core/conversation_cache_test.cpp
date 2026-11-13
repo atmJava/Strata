@@ -583,6 +583,16 @@ int main() {
         check(!disabled_min.enabled() && disabled_min.wants(1 << 20), "a disabled cache still answers for length");
     }
     {
+        // A layer-split image owns a directory of stage images.  The cache budget charges vector directories as well
+        // as their payloads, so SavedConversation::bytes() must count stage_images itself, not only each stage.
+        SavedConversation layered = image({1, 2, 3});
+        const size_t base = layered.bytes();
+        layered.stage_images.push_back(image({1, 2, 3, 4}));
+        const size_t stage_directory = layered.stage_images.capacity() * sizeof(SavedConversation);
+        check(layered.bytes() == base + stage_directory + layered.stage_images[0].bytes(),
+              "layer-split image accounting includes the stage-image directory");
+    }
+    {
         // layer-split parking: checkpoints moved apart into stage parts and put back, no running state copied
         auto running = [](std::initializer_list<int32_t> ids, uint8_t salt, size_t parts) {
             ConversationCheckpoint c;
