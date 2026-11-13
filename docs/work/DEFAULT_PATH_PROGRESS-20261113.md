@@ -44,9 +44,15 @@ question that source and fake-engine tests cannot answer.
 10. A layer-split snapshot's cache accounting now includes the `stage_images` vector directory.
 11. Parking reserves that exact directory before admission, so the estimate and final snapshot charge the same
     capacity and a later `put()` cannot discover extra bytes only after superseded copies are gone.
+12. MTP drafter placement now has one final `Layout` resolved from the requested shape: no split stays on the primary
+    device, a pipelined non-batch decode uses the first stage, and every requested batch slot stays on the last stage.
+13. That layout is resolved before stage allocation and is not recomputed after slot-fit checks. A slot that later
+    does not fit may disable batching; it cannot move a drafter whose cache and head reservation were already priced.
+14. The dead gfx12 pipeline-auto and `STRATA_MTP_STAGE0` paths are removed. Deployment-policy tests reject those
+    readers returning, and the placement tests cover pipeline off, prefill-only, decode, and requested slot counts.
 
-The implementation starts at `6ab3c517`; the source changes in this round end at `61e187fb`. The branch is local and
-not pushed or deployed.
+The implementation starts at `6ab3c517`; the MTP placement changes end at `bc20a931`. The branch is local and not
+pushed or deployed.
 
 ## Validation
 
@@ -65,7 +71,20 @@ not pushed or deployed.
   `705b53c5e47977048a7e242d3cec6dfccac3756320b44b78e914b8c013814962`. `strata --version` and
   `strata --help` both exited 0. This proves assembly and the executable entry point only; model inference,
   `ctest`, CUDA runtime smoke and deployment were not run.
-- No server was started, restarted or deployed in this round. `stash@{0}` remains untouched.
+- `mtp_placement_test` and `batch_groups_test` pass with `-Wall -Wextra -Werror`.
+- `serve.test_deployment_policy`, `serve.test_parallel` and `serve.test_parallel_yield`: 58 tests and 19 subtests
+  passed. Python compilation and `git diff --check` passed.
+- The final sources at `bc20a931` match the remote copies byte for byte and incrementally built `strata` on the
+  remote host with exit 0. The 61,700,456-byte binary reports `strata 0.1.51` and has SHA-256
+  `c574512273a1998a20335c110c61ffff2393b037f84ff68f332b00a570dab09d`; `--version` and `--help` exited 0.
+- One controlled runtime smoke used the remote binary with the production Swift IQ3_S, two-card split at layer 24
+  and `"parallel": 2`. Startup reported `draft_head_ready=1 pipeline_windows=0 requested_slots=2 mtp_first=0
+  mtp_dev=1`, so the batch drafter stayed on the last card. Two concurrent requests both returned HTTP 200 and
+  generated 16 tokens; both hit the length limit while still thinking, so this validated the GPU and batch path,
+  not answer wording. The log reached `pipelined, 2 groups of 1: 29 group-steps, 29 rows`, with every CUDA0/CUDA1
+  batch launch reporting `error(0)`.
+- The controlled instance was stopped. Port `18080` has no listener and both GPUs returned to 1 MiB and 0%. The
+  production service was already inactive and was not started or restarted. `stash@{0}` remains untouched.
 
 ## Open decisions
 
@@ -79,6 +98,7 @@ not pushed or deployed.
 
 ## Next
 
-1. Audit conversation-cache parking and history restoration for correctness that can be proven without a GPU.
-2. Prepare the five-session comparison for the 2,048 floor, but do not run or deploy it merely to demonstrate activity.
+1. Continue the admission and reuse audit now that MTP placement and slot-fit drift are closed.
+2. Prepare the five-session comparison for the 2,048 parking floor, but do not run or deploy it merely to
+   demonstrate activity.
 3. Use the validated binary only when a concrete runtime question cannot be answered by source or fake-engine tests.
