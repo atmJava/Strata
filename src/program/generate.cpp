@@ -5163,14 +5163,11 @@ int main(int argc, char** argv) {
         return n;
     };
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
-    // OPT-IN: every layer of a device has the same read-only RoPE table.  The main session for each stage owns
-    // one; its batch slots borrow that table instead of allocating another max_cells x 32 x 2-float copy.  At
-    // 192K and six slots this removes six 46.875 MiB copies per card.  The default remains byte-identical while
-    // the integration is measured end to end.
-    const bool share_slot_rope = [] {
-        const char* v = std::getenv("STRATA_SHARED_SLOT_ROPE");
-        return v != nullptr && v[0] != '\0' && std::strcmp(v, "0") != 0;
-    }();
+    // Every layer of a device has the same read-only RoPE table, so the batch slots borrow the stage's instead of
+    // allocating one max_cells x 32 x 2-float copy each: at 192K with six slots that is six 46.875 MiB copies per
+    // card, VRAM this deployment would rather spend on expert slots.  Always shared here - a switch for it would be
+    // a run-config decision about memory, which AGENTS.md rules out.
+    const bool share_slot_rope = true;
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
@@ -13921,19 +13918,12 @@ int main(int argc, char** argv) {
                 }();
                 // A finite decode before a concurrent read starts.  Unlike a read piece this adds no drain inside
                 // the prompt: it only gives requests already decoding one bounded chance to finish before the long
-                // prompt can take over the pipeline.  Off by default; a piecewise read has its own lead-in below.
-                static const double pr_concurrent_leadin = [] {
-                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_MS");
-                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
-                }();
-                static const double pr_concurrent_leadin_wait = [] {
-                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_WAIT_MS");
-                    return v != nullptr ? std::max(0.0, std::atof(v)) : 0.0;
-                }();
-                static const int64_t pr_concurrent_leadin_min_tokens = [] {
-                    const char* v = std::getenv("STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS");
-                    return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 4096;
-                }();
+                // prompt can take over the pipeline.  A piecewise read has its own lead-in below.  1600 ms of decode,
+                // up to 750 ms more for a request that is nearly done, and only in front of a read of 4096 tokens or
+                // more: the shape this deployment measured, now the default rather than three config entries.
+                const double pr_concurrent_leadin = 1600.0;
+                const double pr_concurrent_leadin_wait = 750.0;
+                const int64_t pr_concurrent_leadin_min_tokens = 4096;
                 const bool pr_on = piped && pr_piece > 0;
                 // the slots decode through the pipeline for budget_ms, drained before the next read
                 auto piped_decode = [&](double budget_ms, std::string& err) -> bool {

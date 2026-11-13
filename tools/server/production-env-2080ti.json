@@ -1,16 +1,10 @@
 {
-  "_note": "Engine runtime switches for the 2x RTX 2080 Ti, 6x256K production profile. No secrets. The Python server's own decisions (the admission order, the DSH behaviours) are code defaults now, not switches (AGENTS.md); this file lists what the engine child still takes.",
+  "_note": "Engine runtime switches for the 2x RTX 2080 Ti, 6x256K production profile. No secrets. The Python server's own decisions (the admission order, the DSH behaviours) are code defaults, and the four-step decode lead-in and slot RoPE sharing are too (AGENTS.md). A key here reaches only the engine child (serve/server.py child_env): a switch the server reads must be in the systemd service environment, and STRATA_MP_STAGED_READ / STRATA_BATCH_SERIAL_TWO are named here only to say they never took effect that way.",
   "env": {
     "STRATA_BATCH_STAGED_READ": "1",
     "STRATA_EXP_MODE": "8",
     "STRATA_HC_Q8": "1",
-    "STRATA_MP_STAGED_READ": "1",
-    "STRATA_MP_STAGED_READ_MIN_TOKENS": "2048",
     "STRATA_PIPED_CONCURRENT": "1",
-    "STRATA_PIPED_DECODE_LEADIN_MIN_TOKENS": "4096",
-    "STRATA_PIPED_DECODE_LEADIN_MS": "1600",
-    "STRATA_PIPED_DECODE_LEADIN_WAIT_MS": "750",
-    "STRATA_SHARED_SLOT_ROPE": "1",
     "STRATA_SM75_PERF": "1"
   }
 }
