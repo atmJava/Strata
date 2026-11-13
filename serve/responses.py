@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import collections
 import copy
+import hashlib
 import json
 import re
 import threading
@@ -420,6 +421,27 @@ def prompt_made(req: dict, tools):
                 _kept_prompt_tools.popitem(last=False)
 
 
+# DSH's compaction re-sends the conversation with no tools, while the prompt it must re-read was rendered with
+# them (the template writes the tools at the top: without them the prompt shares no prefix with the one the engine
+# holds, and the longest prompt is read again).  DSH sends no purpose metadata; its stable shape is the first
+# message, the developer prompt every request of a conversation starts with.  Keep that conversation's tools and
+# render its later no-tools request with them; only the prompt, as for Codex.  Opt-in:
+# STRATA_KEEP_DSH_COMPACTION_TOOLS=1.  A different first message is a different conversation; a restart loses it.
+_DSH_TOOLS_LIMIT = 12                                # matches the configured conversation-cache slot count
+_kept_dsh_tools: "collections.OrderedDict[str, str]" = collections.OrderedDict()
+_kept_dsh_tools_lock = threading.Lock()
+
+
+def _dsh_message_text(content):
+    """The text parts of a message's content, so a picture (whose bytes a compaction may or may not re-send) does not
+    change the conversation key."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return [p.get("text") for p in content if isinstance(p, dict) and isinstance(p.get("text"), str)]
+    return None
+
+
 _PTC_CALL = re.compile(r'tools(?:\.|\[\s*["\'`]?)([A-Za-z_][A-Za-z0-9_]*)')
 
 
@@ -443,6 +465,56 @@ def ptc_tool_names(req) -> set:
     for text in texts:
         names.update(_PTC_CALL.findall(text))
     return names
+
+
+def dsh_tools_key(messages):
+    """-> the conversation key of a DSH request: its developer prompt and first user message, or None.
+
+    DSH's compaction re-sends the same first two messages and the history after them, so both sides find the same
+    key; two sessions that start alike share the tools they were rendered with, which are the same set anyway.
+    """
+    if not isinstance(messages, list) or not messages or not isinstance(messages[0], dict):
+        return None
+    first = messages[0]
+    if first.get("role") not in ("developer", "system"):
+        return None
+    second = messages[1] if len(messages) > 1 and isinstance(messages[1], dict) else {}
+    try:
+        blob = json.dumps([first.get("content"), second.get("role"), _dsh_message_text(second.get("content"))],
+                          ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def dsh_prompt_tools(messages, tools):
+    """-> the tools to render a DSH prompt with: the request's own, or for a request without tools (its compaction)
+    the ones its conversation's last prompt was rendered with."""
+    if tools:
+        return tools
+    key = dsh_tools_key(messages)
+    if key is None:
+        return tools
+    with _kept_dsh_tools_lock:
+        kept = _kept_dsh_tools.get(key)
+        if kept is not None:
+            _kept_dsh_tools.move_to_end(key)
+    return json.loads(kept) if kept else tools
+
+
+def dsh_prompt_made(messages, tools):
+    """The prompt of a DSH main request was rendered with `tools`: leave them for its conversation's compaction."""
+    if not tools:
+        return
+    key = dsh_tools_key(messages)
+    if key is None:
+        return
+    kept = json.dumps(tools)
+    with _kept_dsh_tools_lock:
+        _kept_dsh_tools[key] = kept
+        _kept_dsh_tools.move_to_end(key)
+        while len(_kept_dsh_tools) > _DSH_TOOLS_LIMIT:
+            _kept_dsh_tools.popitem(last=False)
 
 
 def text_format(req: dict):

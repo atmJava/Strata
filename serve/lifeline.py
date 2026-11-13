@@ -22,14 +22,16 @@ from strata_control import procs
 _REAL_POPEN = subprocess.Popen
 PR_SET_PDEATHSIG = 1
 
-_libc = ctypes.CDLL(None, use_errno=True)
-_libc.prctl.argtypes = (
-    ctypes.c_int,
-    ctypes.c_ulong,
-    ctypes.c_ulong,
-    ctypes.c_ulong,
-    ctypes.c_ulong,
-)
+POSIX = os.name == "posix"     # prctl, setpgid and SIGHUP are Linux's; the server is also run on Windows
+_libc = ctypes.CDLL(None, use_errno=True) if POSIX else None
+if _libc is not None:
+    _libc.prctl.argtypes = (
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    )
 
 
 class _Anchor:
@@ -73,7 +75,13 @@ def _the_anchor() -> _Anchor:
 
 
 def _die_with_parent(parent: int, then=None):
-    """Return the child-side setup that asks Linux to SIGKILL it with its parent."""
+    """Return the child-side setup that asks Linux to SIGKILL it with its parent.
+
+    Windows has no PR_SET_PDEATHSIG and no fork, so there is nothing to install there: the
+    child starts as it is and the server's own stop path (end_children) ends it."""
+
+    if _libc is None:
+        return then
 
     def run() -> None:
         if _libc.prctl(PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0) != 0:
@@ -87,7 +95,7 @@ def _die_with_parent(parent: int, then=None):
 
 
 def mechanism() -> str:
-    return "pdeathsig"
+    return "pdeathsig" if _libc is not None else "none"
 
 
 _children: set[subprocess.Popen] = set()
@@ -163,11 +171,12 @@ def _own_group(then=None):
 def popen(args, role: str = "engine", **kw) -> subprocess.Popen:
     """Start a child that cannot outlive this server."""
     _forget_finished()
-    isolate = role in ISOLATED_ROLES
-    if isolate and "start_new_session" not in kw:
-        kw["preexec_fn"] = _own_group(kw.pop("preexec_fn", None))
-    parent, then = os.getpid(), kw.pop("preexec_fn", None)
-    kw["preexec_fn"] = _die_with_parent(parent, then)
+    if _libc is not None:                       # preexec_fn itself is unsupported on Windows
+        isolate = role in ISOLATED_ROLES
+        if isolate and "start_new_session" not in kw:
+            kw["preexec_fn"] = _own_group(kw.pop("preexec_fn", None))
+        parent, then = os.getpid(), kw.pop("preexec_fn", None)
+        kw["preexec_fn"] = _die_with_parent(parent, then)
     child = _the_anchor().call(lambda: subprocess.Popen(args, **kw))
     token = None
     try:
