@@ -69,6 +69,32 @@ constexpr int GGML_Q4_0 = 2;
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
+inline bool diag_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_DIAG");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return on;
+}
+
+void diag_edge(const char* what, const char* edge, int T, int64_t p, int a, int n_out, int n_force, int n_early,
+               int j, int device, cudaGraphExec_t graph, cudaStream_t stream, cudaError_t result, bool have_result) {
+    if (!diag_on()) return;
+    const cudaError_t peek = cudaPeekAtLastError();
+    if (have_result) {
+        std::fprintf(stderr,
+                     "strata diag mtp: %s %s dev=%d T=%d p=%lld a=%d n_out=%d n_force=%d n_early=%d j=%d graph=%p stream=%p result=%s(%d) peek=%s(%d)\n",
+                     what, edge, device, T, (long long) p, a, n_out, n_force, n_early, j, (void*) graph, (void*) stream,
+                     cudaGetErrorString(result), (int) result, cudaGetErrorString(peek), (int) peek);
+    } else {
+        std::fprintf(stderr,
+                     "strata diag mtp: %s %s dev=%d T=%d p=%lld a=%d n_out=%d n_force=%d n_early=%d j=%d graph=%p stream=%p peek=%s(%d)\n",
+                     what, edge, device, T, (long long) p, a, n_out, n_force, n_early, j, (void*) graph, (void*) stream,
+                     cudaGetErrorString(peek), (int) peek);
+    }
+    std::fflush(stderr);
+}
+
 struct Bump {
     uint8_t* base = nullptr;
     uint64_t used = 0;
@@ -1472,6 +1498,37 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     const int max_steps = (int) std::min<int64_t>(std::min(max_t_ - 1, max_drafts_), st_.max_cells - (p + a));
     for (int j = 1; j < max_steps; ++j)
         if (!capture_step(j, cp, err)) return false;
+    const bool trace = diag_on();
+    auto draft_edge = [&](const char* what, const char* edge, int j, cudaGraphExec_t graph, cudaError_t result,
+                          bool have_result) {
+        diag_edge(what, edge, T, p, a, max_steps, 0, 0, j, device_, graph, cs_, result, have_result);
+    };
+    auto draft_launch = [&](const char* what, int j, cudaGraphExec_t graph) {
+        draft_edge(what, "before", j, graph, cudaSuccess, false);
+        const cudaError_t rc = cudaGraphLaunch(graph, cs_);
+        draft_edge(what, "after", j, graph, rc, true);
+        return rc;
+    };
+    auto draft_event = [&](const char* edge, int j, cudaEvent_t event, cudaError_t result, bool have_result) {
+        if (!trace) return;
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag mtp: event_%s %s dev=%d T=%d p=%lld a=%d n_out=%d j=%d event=%p stream=%p result=%s(%d) peek=%s(%d)\n",
+                     edge, j == 0 ? "round" : "step", device_, T, (long long) p, a, max_steps, j, (void*) event,
+                     (void*) cs_, have_result ? cudaGetErrorString(result) : "n/a", have_result ? (int) result : -1,
+                     cudaGetErrorString(peek), (int) peek);
+        std::fflush(stderr);
+    };
+    auto draft_sync = [&](const char* edge, cudaError_t result, bool have_result) {
+        if (!trace) return;
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag mtp: stream_sync %s dev=%d T=%d p=%lld a=%d n_out=%d stream=%p result=%s(%d) peek=%s(%d)\n",
+                     edge, device_, T, (long long) p, a, max_steps, (void*) cs_,
+                     have_result ? cudaGetErrorString(result) : "n/a", have_result ? (int) result : -1,
+                     cudaGetErrorString(peek), (int) peek);
+        std::fflush(stderr);
+    };
     const Clock::time_point t0 = Clock::now();
     const int64_t NH = g_->n_head;
     auto put = [&](int row, int64_t cell) {
@@ -1513,12 +1570,12 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
 
     int n = 0;
     if (min_p <= 0.0f && !chain_rule_ && max_steps > 0) {
-        if (cudaGraphLaunch(cp ? round_exec_c_[T] : round_exec_[T], cs_) != cudaSuccess) {
+        if (draft_launch("round_graph", -1, cp ? round_exec_c_[T] : round_exec_[T]) != cudaSuccess) {
             err = std::string("mtp draft: ") + cudaGetErrorString(cudaGetLastError());
             return false;
         }
         for (int j = 1; j < max_steps; ++j) {
-            if (cudaGraphLaunch(cp ? step_exec_c_[j] : step_exec_[j], cs_) != cudaSuccess) {
+            if (draft_launch("step_graph", j, cp ? step_exec_c_[j] : step_exec_[j]) != cudaSuccess) {
                 err = std::string("mtp draft step: ") + cudaGetErrorString(cudaGetLastError());
                 return false;
             }
@@ -1536,7 +1593,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
             if (probs) probs[j] = ((volatile float*) h_prob_)[j];
             prefetch_ple(drafts[j]);
         }
-        if (cudaStreamSynchronize(cs_) != cudaSuccess) {
+        draft_sync("before", cudaSuccess, false);
+        const cudaError_t sync = cudaStreamSynchronize(cs_);
+        draft_sync("after", sync, true);
+        if (sync != cudaSuccess) {
             err = std::string("mtp draft: ") + cudaGetErrorString(cudaGetLastError());
             return false;
         }
@@ -1549,14 +1609,22 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         g_dt.init();
         const bool dt = g_dt.on;
         if (dt) g_dt.pre_ms += hms(t0);
-        if (dt) cudaEventRecord(g_dt.eb[0], cs_);
+        if (dt) {
+            draft_event("before", 0, g_dt.eb[0], cudaSuccess, false);
+            const cudaError_t er = cudaEventRecord(g_dt.eb[0], cs_);
+            draft_event("after", 0, g_dt.eb[0], er, true);
+        }
         Clock::time_point tl = Clock::now();
-        if (cudaGraphLaunch(cp ? round_exec_c_[T] : round_exec_[T], cs_) != cudaSuccess) {
+        if (draft_launch("round_graph", -1, cp ? round_exec_c_[T] : round_exec_[T]) != cudaSuccess) {
             err = std::string("mtp draft: ") + cudaGetErrorString(cudaGetLastError());
             return false;
         }
         if (dt) g_dt.launch_ms += hms(tl);
-        if (dt) cudaEventRecord(g_dt.ea[0], cs_);
+        if (dt) {
+            draft_event("before", 0, g_dt.ea[0], cudaSuccess, false);
+            const cudaError_t er = cudaEventRecord(g_dt.ea[0], cs_);
+            draft_event("after", 0, g_dt.ea[0], er, true);
+        }
         (void) cudaStreamQuery(cs_);
         prefetch_ple(tokens[a]);
         progress_at("mtp draft: waiting for the GPU");   // #2065: a stall here read as "decode", the verify window before it
@@ -1575,14 +1643,22 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         if (probs) probs[0] = pj;
         n = 1;
         for (int j = 1; j < max_steps && (chain_rule_ ? chain_rule_(j - 1, pj) : pj >= min_p); ++j) {
-            if (dt) cudaEventRecord(g_dt.eb[j], cs_);
+            if (dt) {
+                draft_event("before", j, g_dt.eb[j], cudaSuccess, false);
+                const cudaError_t er = cudaEventRecord(g_dt.eb[j], cs_);
+                draft_event("after", j, g_dt.eb[j], er, true);
+            }
             tl = Clock::now();
-            if (cudaGraphLaunch(cp ? step_exec_c_[j] : step_exec_[j], cs_) != cudaSuccess) {
+            if (draft_launch("step_graph", j, cp ? step_exec_c_[j] : step_exec_[j]) != cudaSuccess) {
                 err = std::string("mtp draft step: ") + cudaGetErrorString(cudaGetLastError());
                 return false;
             }
             if (dt) g_dt.launch_ms += hms(tl);
-            if (dt) cudaEventRecord(g_dt.ea[j], cs_);
+            if (dt) {
+                draft_event("before", j, g_dt.ea[j], cudaSuccess, false);
+                const cudaError_t er = cudaEventRecord(g_dt.ea[j], cs_);
+                draft_event("after", j, g_dt.ea[j], er, true);
+            }
             (void) cudaStreamQuery(cs_);
             prefetch_ple(drafts[j - 1]);
             tl = Clock::now();
@@ -1596,7 +1672,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         if (chain_rule_ && n >= max_steps) (void) chain_rule_(n - 1, pj);   // the last step of a full chain
         prefetch_ple(drafts[n - 1]);
         const Clock::time_point t_pre_sync = Clock::now();
-        if (cudaStreamSynchronize(cs_) != cudaSuccess) {
+        draft_sync("before", cudaSuccess, false);
+        const cudaError_t sync = cudaStreamSynchronize(cs_);
+        draft_sync("after", sync, true);
+        if (sync != cudaSuccess) {
             err = std::string("mtp draft: ") + cudaGetErrorString(cudaGetLastError());
             return false;
         }
@@ -1622,6 +1701,13 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
     if (n_drafts) *n_drafts = n;
     if (result) *result = {n, max_steps};
+    if (trace) {
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag mtp: draft complete dev=%d T=%d p=%lld a=%d n_out=%d n=%d stream=%p peek=%s(%d)\n",
+                     device_, T, (long long) p, a, max_steps, n, (void*) cs_, cudaGetErrorString(peek), (int) peek);
+        std::fflush(stderr);
+    }
     ms_draft += ms_since(t0);
     ++rounds;
     return true;
@@ -1672,6 +1758,22 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     for (int j = 1; j < n_out; ++j)
         if (step_exec_[j] == nullptr) { err = "mtp: chain graphs not prepared"; return false; }
     const Clock::time_point t0 = Clock::now();
+    const bool trace = diag_on();
+    auto launch_graph = [&](const char* what, int j, cudaGraphExec_t graph) {
+        diag_edge(what, "before", T, p, a, n_out, n_force, n_early, j, device_, graph, cs_, cudaSuccess, false);
+        const cudaError_t rc = cudaGraphLaunch(graph, cs_);
+        diag_edge(what, "after", T, p, a, n_out, n_force, n_early, j, device_, graph, cs_, rc, true);
+        return rc;
+    };
+    auto chain_event = [&](const char* what, int j, cudaEvent_t event, cudaError_t result, bool have_result) {
+        diag_edge(what, have_result ? "after" : "before", T, p, a, n_out, n_force, n_early, j, device_, nullptr, cs_,
+                  result, have_result);
+        if (!trace) return;
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr, "strata diag mtp: chain_event %s event=%p peek=%s(%d)\n",
+                     have_result ? "after" : "before", (void*) event, cudaGetErrorString(peek), (int) peek);
+        std::fflush(stderr);
+    };
     const int64_t NH = g_->n_head;
     auto put = [&](int row, int64_t cell) {
         h_step_[row * 4 + 0] = (int32_t) cell;
@@ -1690,19 +1792,51 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     h_row_[0] = a;
     h_row_[1] = 0;
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (!stage_source_R(T, err)) return false;
-    chain_early_ = std::max(0, std::min(n_early, n_out));
-    bool ok = cudaGraphLaunch(round_exec_[T], cs_) == cudaSuccess;
-    if (ok && chain_early_ >= 1) ok = cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
-    for (int j = 1; ok && j < n_out; ++j) {
-        ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
-        if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
+    if (trace) diag_edge("source_stage", "before", T, p, a, n_out, n_force, n_early, -1, device_, nullptr, cs_,
+                         cudaSuccess, false);
+    if (!stage_source_R(T, err)) {
+        if (trace) diag_edge("source_stage", "failed", T, p, a, n_out, n_force, n_early, -1, device_, nullptr, cs_,
+                             cudaSuccess, false);
+        return false;
     }
-    if (!ok || cudaEventRecord(ev_chain_, cs_) != cudaSuccess) {
+    if (trace) diag_edge("source_stage", "after", T, p, a, n_out, n_force, n_early, -1, device_, nullptr, cs_,
+                         cudaSuccess, true);
+    chain_early_ = std::max(0, std::min(n_early, n_out));
+    bool ok = launch_graph("round_graph", -1, round_exec_[T]) == cudaSuccess;
+    if (ok && chain_early_ >= 1) {
+        chain_event("step_event", 0, ev_step_[0], cudaSuccess, false);
+        const cudaError_t er = cudaEventRecord(ev_step_[0], cs_);
+        chain_event("step_event", 0, ev_step_[0], er, true);
+        ok = er == cudaSuccess;
+    }
+    for (int j = 1; ok && j < n_out; ++j) {
+        ok = launch_graph("step_graph", j, step_exec_[j]) == cudaSuccess;
+        if (ok && j < chain_early_) {
+            chain_event("step_event", j, ev_step_[j], cudaSuccess, false);
+            const cudaError_t er = cudaEventRecord(ev_step_[j], cs_);
+            chain_event("step_event", j, ev_step_[j], er, true);
+            ok = er == cudaSuccess;
+        }
+    }
+    cudaError_t chain_event_result = cudaSuccess;
+    if (ok) {
+        chain_event("chain_event", -1, ev_chain_, cudaSuccess, false);
+        chain_event_result = cudaEventRecord(ev_chain_, cs_);
+        chain_event("chain_event", -1, ev_chain_, chain_event_result, true);
+    }
+    if (!ok || chain_event_result != cudaSuccess) {
         err = std::string("mtp chain: ") + cudaGetErrorString(cudaGetLastError());
         return false;
     }
-    (void) cudaStreamQuery(cs_);   // WDDM: submit now
+    const cudaError_t query = cudaStreamQuery(cs_);   // WDDM: submit now
+    if (trace) {
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag mtp: chain_submit after dev=%d T=%d p=%lld a=%d n_out=%d n_force=%d n_early=%d stream=%p query=%s(%d) peek=%s(%d)\n",
+                     device_, T, (long long) p, a, n_out, n_force, n_early, (void*) cs_, cudaGetErrorString(query),
+                     (int) query, cudaGetErrorString(peek), (int) peek);
+        std::fflush(stderr);
+    }
     steps_seen_ = 0;
     chain_live_ = true;
     chain_n_ = n_out;
@@ -1728,7 +1862,22 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
 int MtpDrafter::chain_poll(std::string& err) {
     if (!chain_live_) return 1;
     const OnDevice on_device(device_);
+    if (diag_on()) {
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag mtp: chain_poll before dev=%d n_out=%d seen=%d early=%d event=%p peek=%s(%d)\n",
+                     device_, chain_n_, steps_seen_, chain_early_, (void*) ev_chain_, cudaGetErrorString(peek),
+                     (int) peek);
+    }
     const cudaError_t q = cudaEventQuery(ev_chain_);
+    if (diag_on() && q != cudaErrorNotReady) {
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag mtp: chain_poll after dev=%d n_out=%d seen=%d early=%d event=%p query=%s(%d) peek=%s(%d)\n",
+                     device_, chain_n_, steps_seen_, chain_early_, (void*) ev_chain_, cudaGetErrorString(q), (int) q,
+                     cudaGetErrorString(peek), (int) peek);
+        std::fflush(stderr);
+    }
     if (q == cudaErrorNotReady) return 0;
     chain_live_ = false;
     if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }

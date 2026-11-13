@@ -74,6 +74,7 @@
 #include "strata/program/conv_cache.hpp"
 #include "strata/program/split_rules.hpp"
 #include "strata/program/stage_reserve.hpp"
+#include "strata/program/mtp_placement.hpp"
 #include "strata/program/gpu_report.hpp"
 #include "strata/prefill/share_rules.hpp"
 #include "strata/platform/host_limits.hpp"
@@ -283,6 +284,14 @@ void rss_probe(const char* where) {
 bool refill_blocking() {
     static const bool v = std::getenv("STRATA_REFILL_BLOCKING") != nullptr;
     return v;
+}
+
+bool diag_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_DIAG");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return on;
 }
 
 using Clock = std::chrono::steady_clock;
@@ -4141,11 +4150,18 @@ int main(int argc, char** argv) {
     // (stage 0 has finished the window the chain follows), not beside the last stage's window on the last card, where the two
     // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
     // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
-    const bool mtp_first = [&] {
-        // The drafter goes on the first stage's card (STRATA_MTP_STAGE0 was 1): its chain then runs while that card is
-        // between windows, instead of sharing the last card with the window it follows.
-        return mtp_first_ok;
-    }();
+    const strata::program::mtp_placement::Inputs mtp_layout{mtp_first_ok, o.pipeline_windows, stages.size(), o.batch};
+    const bool mtp_first = strata::program::mtp_placement::on_first_stage(mtp_layout);
+    if (diag_on()) {
+        const int mtp_dev =
+            strata::program::mtp_placement::drafter_device(mtp_layout, last_st != nullptr ? last_st->dev : 0);
+        std::fprintf(stderr,
+                     "strata diag placement: mtp_first_ok=%d pipeline_windows=%d stages=%zu batch=%d mtp_first=%d "
+                     "mtp_dev=%d last_stage_dev=%d\n",
+                     mtp_first_ok, o.pipeline_windows, stages.size(), o.batch, mtp_first, mtp_dev,
+                     last_st != nullptr ? last_st->dev : -1);
+        std::fflush(stderr);
+    }
 
     std::vector<std::pair<int32_t, int32_t>> profile;
     if (!o.expert_profile.empty()) {
@@ -5822,6 +5838,12 @@ int main(int argc, char** argv) {
 #if defined(STRATA_HAVE_DFLASH2)
         if (use_df2 && native_head.loaded()) mtp_bind += (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) + (48 << 20);   // DFlash2's own draft head and logits, bound after this
 #endif
+        if (diag_on())
+            std::fprintf(stderr,
+                         "strata diag placement: expert cache draft-head reservation=%lld MiB mtp_first=%d mtp_dev=%d\n",
+                         (long long) (mtp_bind >> 20), mtp_first,
+                         strata::program::mtp_placement::drafter_device(
+                             mtp_layout, last_st != nullptr ? last_st->dev : 0));
         const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind + pipe_first;
         const int64_t blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
         int64_t slots = ((int64_t) free_b - reserve) / blob;
@@ -11652,6 +11674,17 @@ int main(int argc, char** argv) {
             auto is_eos = [&](int32_t y) {
                 return std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
             };
+            if (diag_on()) {
+                std::string rows;
+                for (int t = 0; t < G.S; ++t) {
+                    if (t != 0) rows += ',';
+                    rows += std::to_string(G.rows[t]);
+                }
+                std::fprintf(stderr,
+                             "strata diag pmtp: verdict start hbase=%d S=%d active=%d stages=%d rows=[%s] out=%p\n",
+                             G.hbase, G.S, G.active, n_pipe, rows.c_str(), (const void*) outb);
+                std::fflush(stderr);
+            }
             // each slot of the group owns a contiguous block of the window's rows: its token, then its own proposals
             struct Blk { int b = 0, f = 0, n = 0, keep = 1; };
             std::vector<Blk> blks;
@@ -11675,11 +11708,33 @@ int main(int argc, char** argv) {
                 bt_tokens += blk.n - 1;   // (proposals checked)
                 blks.push_back(blk);
             }
-            for (int k = 0; k < n_pipe; ++k)
-                if (!stage_verifier(k).batch_commit_rows(G.rows, G.S, G.hbase, keep.data(), G.tok, G.pos, err)) {
+            if (diag_on()) {
+                for (const Blk& blk : blks)
+                    std::fprintf(stderr,
+                                 "strata diag pmtp: verdict block slot=%d first=%d rows=%d keep=%d dev=%d stream=%p\n",
+                                 blk.b, blk.f, blk.n, blk.keep, vk.device(), (void*) vk.stream());
+                std::fflush(stderr);
+            }
+            for (int k = 0; k < n_pipe; ++k) {
+                strata::core::Verifier& sv = stage_verifier(k);
+                if (diag_on()) {
+                    std::fprintf(stderr,
+                                 "strata diag pmtp: verdict commit_begin stage=%d dev=%d stream=%p hbase=%d S=%d\n",
+                                 k, sv.device(), (void*) sv.stream(), G.hbase, G.S);
+                    std::fflush(stderr);
+                }
+                if (!sv.batch_commit_rows(G.rows, G.S, G.hbase, keep.data(), G.tok, G.pos, err)) {
                     std::printf("ERR %s\n", err.c_str());
                     return false;
                 }
+                if (diag_on()) {
+                    const cudaError_t peek = cudaPeekAtLastError();
+                    std::fprintf(stderr,
+                                 "strata diag pmtp: verdict commit_end stage=%d dev=%d stream=%p peek=%s(%d)\n",
+                                 k, sv.device(), (void*) sv.stream(), cudaGetErrorString(peek), (int) peek);
+                    std::fflush(stderr);
+                }
+            }
             // #879: a row with non-finite logits: the slot that owns it ends, nothing of it is emitted
             for (int t = 0; t < G.S; ++t)
                 if (vk.nonfinite_in(t)) {
@@ -11732,15 +11787,77 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on_slot_mtp(slot_mtp[(size_t) blk.b]->device());
                 sl.draft_ready = false;
                 const float* src = vk.final_R_all() + (size_t) blk.f * stride;
-                if (cudaMemcpyAsync(slot_mtp_rows[(size_t) blk.b].get(), src, (size_t) blk.n * stride * sizeof(float),
-                                    cudaMemcpyDeviceToDevice, vk.stream()) != cudaSuccess ||
-                    cudaEventRecord(pm_copied[(size_t) blk.b], vk.stream()) != cudaSuccess ||
-                    cudaStreamWaitEvent(slot_mtp[(size_t) blk.b]->stream(), pm_copied[(size_t) blk.b], 0) != cudaSuccess ||
-                    !slot_mtp[(size_t) blk.b]->chain_launch(blk.n, outb + blk.f, G.pos[blk.f], blk.keep - 1, nullptr, 0,
+                const int mtp_device = slot_mtp[(size_t) blk.b]->device();
+                cudaStream_t mtp_stream = slot_mtp[(size_t) blk.b]->stream();
+                if (diag_on())
+                    std::fprintf(stderr,
+                                 "strata diag pmtp: chain.rows_copy before slot=%d rows=%d keep=%d src_dev=%d dst_dev=%d src=%p dst=%p bytes=%zu copy_stream=%p mtp_stream=%p\n",
+                                 blk.b, blk.n, blk.keep, vk.device(), mtp_device, (const void*) src,
+                                 (void*) slot_mtp_rows[(size_t) blk.b].get(),
+                                 (size_t) blk.n * stride * sizeof(float), (void*) vk.stream(), (void*) mtp_stream);
+                const cudaError_t copy = cudaMemcpyAsync(slot_mtp_rows[(size_t) blk.b].get(), src,
+                                                         (size_t) blk.n * stride * sizeof(float),
+                                                         cudaMemcpyDeviceToDevice, vk.stream());
+                if (diag_on()) {
+                    const cudaError_t peek = cudaPeekAtLastError();
+                    std::fprintf(stderr, "strata diag pmtp: chain.rows_copy after slot=%d result=%s(%d) peek=%s(%d)\n",
+                                 blk.b, cudaGetErrorString(copy), (int) copy, cudaGetErrorString(peek), (int) peek);
+                    std::fflush(stderr);
+                }
+                if (copy != cudaSuccess) {
+                    std::printf("ERR batch MTP slot %d: %s\n", blk.b, "the proposal's chain did not start");
+                    return false;
+                }
+                if (diag_on())
+                    std::fprintf(stderr, "strata diag pmtp: chain.copy_event before slot=%d event=%p stream=%p\n",
+                                 blk.b, (void*) pm_copied[(size_t) blk.b], (void*) vk.stream());
+                const cudaError_t recorded = cudaEventRecord(pm_copied[(size_t) blk.b], vk.stream());
+                if (diag_on()) {
+                    const cudaError_t peek = cudaPeekAtLastError();
+                    std::fprintf(stderr,
+                                 "strata diag pmtp: chain.copy_event after slot=%d event=%p result=%s(%d) peek=%s(%d)\n",
+                                 blk.b, (void*) pm_copied[(size_t) blk.b], cudaGetErrorString(recorded), (int) recorded,
+                                 cudaGetErrorString(peek), (int) peek);
+                    std::fflush(stderr);
+                }
+                if (recorded != cudaSuccess) {
+                    std::printf("ERR batch MTP slot %d: %s\n", blk.b, "the proposal's chain did not start");
+                    return false;
+                }
+                if (diag_on())
+                    std::fprintf(stderr,
+                                 "strata diag pmtp: chain.copy_wait before slot=%d event=%p wait_stream=%p mtp_stream=%p\n",
+                                 blk.b, (void*) pm_copied[(size_t) blk.b], (void*) vk.stream(), (void*) mtp_stream);
+                const cudaError_t waited =
+                    cudaStreamWaitEvent(mtp_stream, pm_copied[(size_t) blk.b], 0);
+                if (diag_on()) {
+                    const cudaError_t peek = cudaPeekAtLastError();
+                    std::fprintf(stderr,
+                                 "strata diag pmtp: chain.copy_wait after slot=%d event=%p result=%s(%d) peek=%s(%d)\n",
+                                 blk.b, (void*) pm_copied[(size_t) blk.b], cudaGetErrorString(waited), (int) waited,
+                                 cudaGetErrorString(peek), (int) peek);
+                    std::fflush(stderr);
+                }
+                if (waited != cudaSuccess) {
+                    std::printf("ERR batch MTP slot %d: %s\n", blk.b, "the proposal's chain did not start");
+                    return false;
+                }
+                if (diag_on())
+                    std::fprintf(stderr,
+                                 "strata diag pmtp: chain_launch begin slot=%d T=%d p=%lld a=%d n_out=%d dev=%d stream=%p\n",
+                                 blk.b, blk.n, (long long) G.pos[blk.f], blk.keep - 1, pm_drafts, mtp_device,
+                                 (void*) mtp_stream);
+                if (!slot_mtp[(size_t) blk.b]->chain_launch(blk.n, outb + blk.f, G.pos[blk.f], blk.keep - 1, nullptr, 0,
                                                             pm_drafts, 0, err)) {
                     std::printf("ERR batch MTP slot %d: %s\n", blk.b,
                                 err.empty() ? "the proposal's chain did not start" : err.c_str());
                     return false;
+                }
+                if (diag_on()) {
+                    const cudaError_t peek = cudaPeekAtLastError();
+                    std::fprintf(stderr, "strata diag pmtp: chain_launch end slot=%d dev=%d stream=%p peek=%s(%d)\n",
+                                 blk.b, mtp_device, (void*) mtp_stream, cudaGetErrorString(peek), (int) peek);
+                    std::fflush(stderr);
                 }
                 pm_drafting[(size_t) blk.b] = 1;
             }

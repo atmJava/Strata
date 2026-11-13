@@ -133,6 +133,11 @@ if(STRATA_BUILD_TESTS)
   target_include_directories(split_rules_test PRIVATE include)
   add_test(NAME split_rules_test COMMAND split_rules_test)
 
+  # the MTP drafter belongs on the first card only for the pipelined, non-batch decode; batch keeps it last
+  add_executable(mtp_placement_test tests/program/mtp_placement_test.cpp)
+  target_include_directories(mtp_placement_test PRIVATE include)
+  add_test(NAME mtp_placement_test COMMAND mtp_placement_test)
+
   # verifier tap cleanup: a non-writing split stage allocates no dump-only GPU buffers
   add_executable(tap_dump_plan_test tests/core/tap_dump_plan_test.cpp)
   target_include_directories(tap_dump_plan_test PRIVATE include)

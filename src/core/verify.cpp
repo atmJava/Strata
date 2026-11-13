@@ -165,6 +165,43 @@ inline bool g_batch_side_mixer() {
 inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
+inline bool diag_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_DIAG");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return on;
+}
+
+std::string diag_key(const std::vector<int>& key) {
+    std::string out;
+    for (size_t i = 0; i < key.size(); ++i) {
+        if (i != 0) out += ',';
+        out += std::to_string(key[i]);
+    }
+    return out;
+}
+
+void diag_launch(const char* edge, const char* what, int device, int S, int hbase, const std::vector<int>& key,
+                 const int32_t* tokens, const int64_t* pos, cudaGraphExec_t graph, cudaStream_t stream,
+                 cudaError_t launch, bool have_launch) {
+    if (!diag_on()) return;
+    const cudaError_t peek = cudaPeekAtLastError();
+    if (have_launch) {
+        std::fprintf(stderr,
+                     "strata diag verify: %s %s dev=%d S=%d hbase=%d key=[%s] tokens=%p pos=%p graph=%p stream=%p launch=%s(%d) peek=%s(%d)\n",
+                     what, edge, device, S, hbase, diag_key(key).c_str(), (const void*) tokens, (const void*) pos,
+                     (void*) graph, (void*) stream, cudaGetErrorString(launch), (int) launch, cudaGetErrorString(peek),
+                     (int) peek);
+    } else {
+        std::fprintf(stderr,
+                     "strata diag verify: %s %s dev=%d S=%d hbase=%d key=[%s] tokens=%p pos=%p graph=%p stream=%p peek=%s(%d)\n",
+                     what, edge, device, S, hbase, diag_key(key).c_str(), (const void*) tokens, (const void*) pos,
+                     (void*) graph, (void*) stream, cudaGetErrorString(peek), (int) peek);
+    }
+    std::fflush(stderr);
+}
+
 struct Bump {
     uint8_t* base = nullptr;
     uint64_t used = 0;
@@ -2475,7 +2512,22 @@ bool Verifier::launch_head_split_peer(int T, std::string& err) {
     }
     const int peer = head_->peer_device();
     const OnDevice on_peer(peer);
+    if (diag_on()) {
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag verify: peer_head before T=%d dev=%d graph=%p stream=%p peek=%s(%d)\n",
+                     T, peer, (void*) head_split_exec_[T], (void*) head_split_stream_, cudaGetErrorString(peek),
+                     (int) peek);
+    }
     const cudaError_t le = cudaGraphLaunch(head_split_exec_[T], head_split_stream_);
+    if (diag_on()) {
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag verify: peer_head after T=%d dev=%d graph=%p stream=%p launch=%s(%d) peek=%s(%d)\n",
+                     T, peer, (void*) head_split_exec_[T], (void*) head_split_stream_, cudaGetErrorString(le),
+                     (int) le, cudaGetErrorString(peek), (int) peek);
+        std::fflush(stderr);
+    }
     if (le != cudaSuccess) {
         *(volatile uint32_t*) head_split_done_h_ = UINT32_MAX;
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -3792,9 +3844,18 @@ bool Verifier::batch_launch_rows(const int* rows, int S, int hbase, const int32_
     if (!staged || !capture_deferred(rows, S, hbase, err)) return false;
     const auto key = bkey(rows, S, hbase);
     if (!prepare_head_split_launch()) return false;
+    diag_launch("before", "batch_launch_rows_exec", device_, S, hbase, key, tokens, pos, exec_bm_[key], cs_,
+                cudaSuccess, false);
     cudaError_t le = cudaGraphLaunch(exec_bm_[key], cs_);
+    diag_launch("after", "batch_launch_rows_exec", device_, S, hbase, key, tokens, pos, exec_bm_[key], cs_, le, true);
     if (le == cudaSuccess && !launch_head_split_peer(S, err)) return false;
-    if (le == cudaSuccess) le = cudaGraphLaunch(save_bm_[key], cs_);   // the rows the commit replays, kept for it
+    if (le == cudaSuccess) {
+        diag_launch("before", "batch_launch_rows_save", device_, S, hbase, key, tokens, pos, save_bm_[key], cs_,
+                    cudaSuccess, false);
+        le = cudaGraphLaunch(save_bm_[key], cs_);   // the rows the commit replays, kept for it
+        diag_launch("after", "batch_launch_rows_save", device_, S, hbase, key, tokens, pos, save_bm_[key], cs_, le,
+                    true);
+    }
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
     b_k_ = 0;
@@ -3807,7 +3868,8 @@ bool Verifier::batch_launch_rows(const int* rows, int S, int hbase, const int32_
 bool Verifier::batch_commit_rows(const int* rows, int S, int hbase, const int* keep, const int32_t* tokens,
                                  const int64_t* pos, std::string& err) {
     const OnDevice on_device(device_);
-    const auto it = dcommit_bm_.find(bkey(rows, S, hbase));
+    const auto key = bkey(rows, S, hbase);
+    const auto it = dcommit_bm_.find(key);
     if (it == dcommit_bm_.end() || it->second == nullptr) { err = "verify: a deferred commit without its window"; return false; }
     const int64_t CB = 2 + max_t_;
     // Each slot's accepted prefix.  The graph reads it from mapped memory when it runs; this slot's entry is written
@@ -3823,7 +3885,27 @@ bool Verifier::batch_commit_rows(const int* rows, int S, int hbase, const int* k
         for (int64_t j = 0; j < max_t_; ++j) c[2 + j] = j < n ? (int32_t) pos[first + j] : -1;
     }
     std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (diag_on()) {
+        std::string ks;
+        for (int t = 0; t < S; ++t) {
+            if (t != 0) ks += ',';
+            ks += std::to_string(keep[rows[t]]);
+        }
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag verify: batch_commit_rows before dev=%d S=%d hbase=%d key=[%s] keep=[%s] tokens=%p pos=%p graph=%p stream=%p peek=%s(%d)\n",
+                     device_, S, hbase, diag_key(key).c_str(), ks.c_str(), (const void*) tokens, (const void*) pos,
+                     (void*) it->second, (void*) cs_, cudaGetErrorString(peek), (int) peek);
+    }
     const cudaError_t le = cudaGraphLaunch(it->second, cs_);
+    if (diag_on()) {
+        const cudaError_t peek = cudaPeekAtLastError();
+        std::fprintf(stderr,
+                     "strata diag verify: batch_commit_rows after dev=%d S=%d hbase=%d key=[%s] graph=%p stream=%p launch=%s(%d) peek=%s(%d)\n",
+                     device_, S, hbase, diag_key(key).c_str(), (void*) it->second, (void*) cs_,
+                     cudaGetErrorString(le), (int) le, cudaGetErrorString(peek), (int) peek);
+        std::fflush(stderr);
+    }
     if (le != cudaSuccess) { err = std::string("verify: deferred commit launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
     if (ple_stage())   // the host's side of the commit (the hash's last two tokens), the accepted rows only
@@ -4152,9 +4234,29 @@ bool Verifier::commit_slot_prefixes(const int* keep, std::string& err) {
     }
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!batch_self_commits(last_rows_, S)) {   // (else the window has kept its rows)
-        const cudaError_t le = cudaGraphLaunch(commit_bm_[bkey(last_rows_, S, row_base_)], cs_);
+        const auto key = bkey(last_rows_, S, row_base_);
+        diag_launch("before", "commit_slot_prefixes", device_, S, row_base_, key, last_tokens_, last_pos_b_,
+                    commit_bm_[key], cs_, cudaSuccess, false);
+        const cudaError_t le = cudaGraphLaunch(commit_bm_[key], cs_);
+        diag_launch("after", "commit_slot_prefixes", device_, S, row_base_, key, last_tokens_, last_pos_b_,
+                    commit_bm_[key], cs_, le, true);
         if (le != cudaSuccess) { err = std::string("verify: batch commit launch: ") + cudaGetErrorString(le); return false; }
+        if (diag_on()) {
+            const cudaError_t peek = cudaPeekAtLastError();
+            std::fprintf(stderr,
+                         "strata diag verify: commit_slot_prefixes sync before dev=%d S=%d hbase=%d stream=%p peek=%s(%d)\n",
+                         device_, S, row_base_, (void*) cs_, cudaGetErrorString(peek), (int) peek);
+            std::fflush(stderr);
+        }
         const cudaError_t se = cudaStreamSynchronize(cs_);
+        if (diag_on()) {
+            const cudaError_t peek = cudaPeekAtLastError();
+            std::fprintf(stderr,
+                         "strata diag verify: commit_slot_prefixes sync after dev=%d S=%d hbase=%d stream=%p result=%s(%d) peek=%s(%d)\n",
+                         device_, S, row_base_, (void*) cs_, cudaGetErrorString(se), (int) se,
+                         cudaGetErrorString(peek), (int) peek);
+            std::fflush(stderr);
+        }
         if (se != cudaSuccess) { err = std::string("verify: batch commit: ") + cudaGetErrorString(se); return false; }
     }
     if (ple_stage())
@@ -4194,10 +4296,18 @@ bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_
     if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     if (!stage_batch(rows, S, base, tokens, pos, err)) return false;
     if (!prepare_head_split_launch()) return false;
-    cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, base)], cs_);
+    const auto key = bkey(rows, S, base);
+    diag_launch("before", "batch_launch_exec", device_, S, base, key, tokens, pos, exec_bm_[key], cs_, cudaSuccess,
+                false);
+    cudaError_t le = cudaGraphLaunch(exec_bm_[key], cs_);
+    diag_launch("after", "batch_launch_exec", device_, S, base, key, tokens, pos, exec_bm_[key], cs_, le, true);
     if (le == cudaSuccess && !launch_head_split_peer(S, err)) return false;
-    if (le == cudaSuccess && !batch_self_commits(rows, S))   // (else the window has kept its rows itself)
-        le = cudaGraphLaunch(commit_bm_[bkey(rows, S, base)], cs_);   // right behind it: every row is kept
+    if (le == cudaSuccess && !batch_self_commits(rows, S)) {   // (else the window has kept its rows itself)
+        diag_launch("before", "batch_launch_commit", device_, S, base, key, tokens, pos, commit_bm_[key], cs_,
+                    cudaSuccess, false);
+        le = cudaGraphLaunch(commit_bm_[key], cs_);   // right behind it: every row is kept
+        diag_launch("after", "batch_launch_commit", device_, S, base, key, tokens, pos, commit_bm_[key], cs_, le, true);
+    }
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
     if (ple_stage())   // the host's side of the commit (the hash's last two tokens)
