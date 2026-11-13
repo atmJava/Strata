@@ -50,9 +50,11 @@ question that source and fake-engine tests cannot answer.
     does not fit may disable batching; it cannot move a drafter whose cache and head reservation were already priced.
 14. The dead gfx12 pipeline-auto and `STRATA_MTP_STAGE0` paths are removed. Deployment-policy tests reject those
     readers returning, and the placement tests cover pipeline off, prefill-only, decode, and requested slot counts.
+15. Admission wait entries retain their prompt and staged-read state. Ordering and BYIELD decisions recompute work
+    under `slot_cv`, so a slot taken or released after arrival cannot leave a request ranked by stale reuse.
 
-The implementation starts at `6ab3c517`; the MTP placement changes end at `bc20a931`. The branch is local and not
-pushed or deployed.
+The implementation starts at `6ab3c517`; the MTP placement changes end at `bc20a931`, and the admission refresh is
+`e54cafe3`. The branch is local and not pushed or deployed.
 
 ## Validation
 
@@ -85,6 +87,9 @@ pushed or deployed.
   batch launch reporting `error(0)`.
 - The controlled instance was stopped. Port `18080` has no listener and both GPUs returned to 1 MiB and 0%. The
   production service was already inactive and was not started or restarted. `stash@{0}` remains untouched.
+- `serve.test_admit_order`, `serve.test_parallel`, `serve.test_parallel_yield`, `serve.test_staged_protocol`,
+  `serve.test_restart_waiters` and `serve.test_deployment_policy`: 97 tests and 19 subtests passed after the
+  admission refresh. Python compilation and `git diff --check` passed.
 
 ## Open decisions
 
