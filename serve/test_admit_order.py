@@ -1,4 +1,4 @@
-"""serve/test_admit_order.py - ADMIT_SHORT_FIRST: new requests take the control lines short prompts first
+"""serve/test_admit_order.py - ADMIT_SHORT_FIRST: new requests with less work left take the control lines first
 (StrataEngine._take_control / _admit_next; no process, no GPU).
 
     python -m unittest serve.test_admit_order -v
@@ -22,6 +22,7 @@ def engine_without_process(n=2):
     e = StrataEngine("missing-executable", [], lazy=True)
     e.batch = n
     e.slot_busy = [False] * n
+    e.slot_held = [[] for _ in range(n)]
     e.slot_claims, e.slot_releasing, e._orphan_seen = set(), set(), {}
     e.slot_cv = threading.Condition()
     e.waiting, e.admitting, e.wait_lens, e.ctl_epoch = 0, 0, [], 0
@@ -42,8 +43,13 @@ class AdmitOrderTest(unittest.TestCase):
         for c in self.cancels:
             c.set()
 
-    def take(self, name, plen, **kw):
+    def take(self, name, prompt_or_len, **kw):
         """A request waiting for the control lines; once it has them it notes its name and gives them back."""
+        if isinstance(prompt_or_len, list):
+            prompt, plen = prompt_or_len, len(prompt_or_len)
+            kw.setdefault("reused", self.e._known_prompt_reuse(prompt))
+        else:
+            plen = prompt_or_len
         c = threading.Event()
         self.cancels.append(c)
 
@@ -83,6 +89,21 @@ class AdmitOrderTest(unittest.TestCase):
             order = self.queue(("agent1", 120000), ("agent2", 190000), ("chat", 500), ("agent3", 150000))
         self.assertEqual(order[0], "chat")
         self.assertEqual(order[1:], ["agent1", "agent2", "agent3"])      # arrival order among the long ones
+
+    def test_cached_history_ranks_by_the_tokens_left_to_read(self):
+        """A long prompt that has nearly all of its history cached does little work and goes before a fresh read."""
+        held = list(range(1, 120_001))
+        self.e.slot_held[0] = held
+        chat = held + [500_001, 500_002]
+        agent = list(range(600_000, 612_000))
+        with mock.patch.object(server, "ADMIT_SHORT_FIRST", 8192), mock.patch.object(server, "ADMIT_MAX_WAIT_S", 60.0):
+            order = self.queue(("agent", agent), ("chat", chat))
+        self.assertEqual(order, ["chat", "agent"])
+
+    def test_yielding_compares_the_waiters_tokens_left_to_read(self):
+        self.e.wait_lens = [[120_000, time.monotonic(), True, 1_000]]
+        self.assertTrue(self.e._shorter_waiting(5_000))
+        self.assertFalse(self.e._shorter_waiting(1_999))
 
     def test_a_long_request_that_waited_too_long_goes_first(self):
         with mock.patch.object(server, "ADMIT_SHORT_FIRST", 8192), mock.patch.object(server, "ADMIT_MAX_WAIT_S", 0.2):

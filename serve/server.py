@@ -331,9 +331,9 @@ ENGINE_STALL_S = _timeout_env("STRATA_ENGINE_STALL_S", 90.0)
 # a BCANCELLED that never comes must not hold the control lines for the drain default (300 s): the engine answers it
 # in the same round it reads the line, and the request is already ending
 BCANCEL_DRAIN_S = 10.0
-# --batch: new requests take the control lines (one prompt read at a time) short prompts first: a prompt of at most
-# ADMIT_SHORT_FIRST tokens goes before longer ones, and a longer one that waited ADMIT_MAX_WAIT_S (default 30) counts
-# as short.  A chat question then waits for the one read in progress, not for every agent read that came before it.
+# --batch: new requests take the control lines (one prompt read at a time) by the tokens left to read: at most
+# ADMIT_SHORT_FIRST goes before more work, and more that waited ADMIT_MAX_WAIT_S (default 30) counts as short.  A chat
+# question then waits for the one read in progress, not for every agent read that came before it.
 #
 # 2048 tokens, and not a setting: this deployment answers a chat turn (a few hundred tokens of question behind a long
 # history) beside agent reads of tens of thousands, so the order is what keeps the question from queueing behind every
@@ -1325,7 +1325,7 @@ class StrataEngine:
             self.slot_cv = threading.Condition()
             self.waiting = 0                            # requests waiting for the control lines (ctl)
             self.admitting = 0                          # #1603: ... and those that gave the lines back to wait for a slot
-            self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
+            self.wait_lens: list[list] = []             # ... prompt length, arrival, ordered flag and expected work
             self.ctl_epoch = 0                          # how often the control lines were taken
             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
         self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
@@ -1881,11 +1881,13 @@ class StrataEngine:
 
     YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
 
-    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False):
+    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False, reused: int = 0):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
-        `new`: the request's first admission (ADMIT_SHORT_FIRST orders only these)."""
-        entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: ADMIT_SHORT_FIRST)
+        `new`: the request's first admission (ADMIT_SHORT_FIRST orders only these).
+        `reused`: the prompt prefix the slots already hold; ordering uses the tokens left to read."""
+        work = max(0, plen - max(0, int(reused)))
+        entry = [plen, time.monotonic(), new, work]     # (length, arrival, ordered, expected work)
         with self.slot_cv:
             self.waiting += 1
             self.wait_lens.append(entry)
@@ -1940,15 +1942,15 @@ class StrataEngine:
         return True
 
     def _admit_next(self):
-        """ADMIT_SHORT_FIRST tokens (the caller holds slot_cv): the new request that takes the control lines next -
-        one whose prompt is at most that long (it reads little) before a longer one, in arrival order within each; a
-        longer one that has waited ADMIT_MAX_WAIT_S counts as short (it is never held back for good).  At 0: whoever
-        gets the lock first.  Only the order changes, never what is read."""
+        """ADMIT_SHORT_FIRST tokens (the caller holds slot_cv): the new request with at most that many tokens left to
+        read goes before more work, in arrival order within each; one that has waited ADMIT_MAX_WAIT_S counts as short
+        (it is never held back for good).  At 0: whoever gets the lock first.  Only the order changes, never what is
+        read."""
         now = time.monotonic()
         ordered = [e for e in self.wait_lens if len(e) > 2 and e[2]]
         if not ordered:
             return None
-        return min(ordered, key=lambda e: (0 if e[0] <= ADMIT_SHORT_FIRST or now - e[1] >= ADMIT_MAX_WAIT_S else 1,
+        return min(ordered, key=lambda e: (0 if e[3] <= ADMIT_SHORT_FIRST or now - e[1] >= ADMIT_MAX_WAIT_S else 1,
                                            e[1]))
 
     SOLO_AGAIN_MAX = 2      # how often a request left alone in a slot goes back to the solo path
@@ -1964,10 +1966,10 @@ class StrataEngine:
         with self.slot_cv:
             return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
 
-    def _shorter_waiting(self, plen: int) -> bool:
-        """#656: someone waits for the control lines with a prompt under half this one's: worth giving way to."""
+    def _shorter_waiting(self, work: int) -> bool:
+        """#656: someone waits for the control lines with under half this request's work left: worth giving way to."""
         with self.slot_cv:
-            return any(e[0] * 2 <= plen for e in self.wait_lens)
+            return any(e[3] * 2 <= work for e in self.wait_lens)
 
     def generate_batched(self, ids, max_new, sampling, cancel, embeddings=None):
         """--batch.  Alone (no slot busy, nobody waiting): the solo path (GEN, with drafts: the fastest stream)
@@ -1992,6 +1994,8 @@ class StrataEngine:
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
+        prompt_reuse = self._known_prompt_reuse(prompt)
+        prompt_work = max(0, len(prompt) - prompt_reuse)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         # STRATA_BATCH_SERIAL_TWO (opt-in): exactly two low-concurrency requests
@@ -1999,7 +2003,7 @@ class StrataEngine:
         # promotes the active stream to a batch slot, and four streams keep the
         # production batch layout. The default remains unchanged.
         serial_two = os.environ.get("STRATA_BATCH_SERIAL_TWO") == "1"
-        ok = yield from self._take_control(cancel, len(prompt), new=True)
+        ok = yield from self._take_control(cancel, len(prompt), new=True, reused=prompt_reuse)
         if not ok:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -2046,7 +2050,7 @@ class StrataEngine:
                         if serial_two:
                             return
                         if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
-                                self._shorter_waiting(len(prompt))):
+                                self._shorter_waiting(prompt_work)):
                             with self.slot_cv:          # the slot the part read will wait in
                                 reserved = self.pick_slot(prompt)
                                 if reserved is not None:
@@ -2088,6 +2092,8 @@ class StrataEngine:
                         carry_leg(carry, self.last)         # #1869: the solo leg's figures; the slot's admission (a copy of
                                                             # the held prefix: prompt_read 1) and BDONE replace them
                         prompt = list(ids) + out            # promoted: it continues in a batch slot from here
+                        prompt_reuse = self._known_prompt_reuse(prompt)
+                        prompt_work = max(0, len(prompt) - prompt_reuse)
                 while True:
                     if slot is None:
                         # STRATA_MP_STAGED_READ: with every slot busy, read this prompt into the engine's main
@@ -2245,7 +2251,7 @@ class StrataEngine:
                     def ask():        # as give_way above, for the slot this admission reads into
                         nonlocal asked
                         if (not asked and not embeddings and yields < self.YIELDS_MAX and
-                                self._shorter_waiting(len(prompt))):
+                                self._shorter_waiting(prompt_work)):
                             self._send(f"BYIELD {slot}")
                             asked = True
 
@@ -2461,6 +2467,27 @@ class StrataEngine:
     pick_stats = {"prefix_hits": 0, "prefix_tokens": 0, "no_prefix": 0, "no_free_slot_polls": 0, "group_fill": 0}
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
+    def _held_prefix(self, slot: int, prompt: list[int]) -> int:
+        """How many tokens of `prompt` this slot's cache can serve.  The caller holds slot_cv when reading the slot."""
+        # The slot's whole held stream (the prompt and what it decoded) when this prompt continues it, else its turn
+        # checkpoint - the engine takes one at the last <|im_start|> of a prompt (the next request of the chat renders
+        # the history again, but not the reply it decoded or the assistant header), so a prompt that agrees with the
+        # held tokens up to there is that chat's next turn too (#2518: it was only found by the engine's own source
+        # search, after pick_slot had sent the request to another slot and overwritten the chat whose cache the next
+        # one needed).
+        held = self.slot_held[slot]
+        if not held:
+            return 0
+        if len(held) < len(prompt) and prompt[:len(held)] == held:
+            return len(held)
+        turn = next((i for i in range(len(held) - 1, -1, -1) if held[i] == self.TURN_ID), 0)
+        return turn if 0 < turn < len(prompt) and prompt[:turn] == held[:turn] else 0
+
+    def _known_prompt_reuse(self, prompt: list[int]) -> int:
+        """The longest known slot prefix for `prompt`, used to rank and yield by expected work."""
+        with self.slot_cv:
+            return max((self._held_prefix(b, prompt) for b in range(self.batch)), default=0)
+
     def pick_slot(self, prompt: list[int]) -> int | None:
         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
         prompt (the engine then reads only the rest), else an empty one, else the one used longest ago - so the
@@ -2486,23 +2513,9 @@ class StrataEngine:
                 g0 = b - b % gs
                 return any(self.slot_busy[x] for x in range(b + 1, g0 + gs))
             return min(free, key=lambda b: (not fills_hole(b), self.slot_order.index(b)))
-        def held_prefix(b):
-            # what of `prompt` the slot's cache serves: the slot's whole held stream (the prompt and what it decoded)
-            # when this prompt continues it, else its turn checkpoint - the engine takes one at the last <|im_start|> of
-            # a prompt (the next request of the chat renders the history again, but not the reply it decoded or the
-            # assistant header), so a prompt that agrees with the held tokens up to there is that chat's next turn
-            # too (#2518: it was only found by the engine's own source search, after pick_slot had sent it to another
-            # slot and the request in that slot had overwritten the chat whose cache the next one needed)
-            h = self.slot_held[b]
-            if not h:
-                return 0
-            if len(h) < len(prompt) and prompt[:len(h)] == h:
-                return len(h)
-            k = len(h) - 1 - h[::-1].index(self.TURN_ID) if self.TURN_ID in h else 0
-            return k if 0 < k < len(prompt) and prompt[:k] == h[:k] else 0
-        best = max(free, key=held_prefix)
+        best = max(free, key=lambda b: self._held_prefix(b, prompt))
         # without --batch-groups a held prefix of any length is taken, as before
-        keep = held_prefix(best)
+        keep = self._held_prefix(best, prompt)
         if keep >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
             stats["prefix_hits"] += 1
             stats["prefix_tokens"] += keep
