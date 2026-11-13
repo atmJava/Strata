@@ -525,6 +525,34 @@ def require_messages(messages: list) -> None:
         raise ValueError("messages must be a non-empty list: send at least one message")
 
 
+def _order_chat_tool_results(messages: list[dict]) -> None:
+    """The template pairs results by position, so restore call order while IDs are still available.
+
+    Only a complete, unambiguous run of results is reordered. Legacy or incomplete histories keep their
+    received order. IDs are private to this conversion and never reach the template.
+    """
+    i = 0
+    while i < len(messages):
+        if messages[i]["role"] != "tool":
+            i += 1
+            continue
+        j = i + 1
+        while j < len(messages) and messages[j]["role"] == "tool":
+            j += 1
+        prev = messages[i - 1] if i else {}
+        calls = [c.get("_call_id") for c in prev.get("tool_calls") or []] if prev.get("role") == "assistant" else []
+        results = [m.get("_call_id") for m in messages[i:j]]
+        if len(calls) == len(results) and all(isinstance(cid, str) and cid for cid in calls + results):
+            if len(set(calls)) == len(calls) and len(set(results)) == len(results) and set(calls) == set(results):
+                rank = {cid: n for n, cid in enumerate(calls)}
+                messages[i:j] = sorted(messages[i:j], key=lambda m: rank[m["_call_id"]])
+        i = j
+    for message in messages:
+        message.pop("_call_id", None)
+        for call in message.get("tool_calls") or []:
+            call.pop("_call_id", None)
+
+
 def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     """OpenAI Chat Completions -> (template messages, template tools, template kwargs)."""
     messages = []
@@ -539,13 +567,16 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
         out = {"role": role, "content": _parts_of(content) if images else _text_of(content)}
         if m.get("reasoning_content"):
             out["reasoning_content"] = m["reasoning_content"]
+        if role == "tool":
+            out["_call_id"] = m.get("tool_call_id")
         if m.get("tool_calls"):
             calls = []
             for c in _object_list(m["tool_calls"], "tool_calls"):
                 fn = c.get("function", c)
                 if not isinstance(fn, dict):
                     raise ValueError("tool_calls must be a list of objects (each with a \"function\" object)")
-                calls.append({"function": {"name": fn.get("name"), "arguments": tool_arguments(fn.get("arguments"))}})
+                calls.append({"function": {"name": fn.get("name"), "arguments": tool_arguments(fn.get("arguments"))},
+                              "_call_id": c.get("id")})
             out["tool_calls"] = calls
         messages.append(out)
     tools = [t.get("function", t) if t.get("type") == "function" else t
@@ -562,6 +593,8 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
             kwargs = {"enable_thinking": False}
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
+    # A client may send results in the order its tools finished (Claude Code does for parallel calls)
+    _order_chat_tool_results(messages)
     return _env_to_user(_late_system_to_user(messages)), tools, kwargs
 
 
@@ -623,12 +656,14 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             elif kind == "thinking":
                 reasoning.append(block.get("thinking", ""))
             elif kind == "tool_use":
-                calls.append({"function": {"name": block.get("name"), "arguments": tool_arguments(block.get("input"))}})
+                calls.append({"function": {"name": block.get("name"), "arguments": tool_arguments(block.get("input"))},
+                              "_call_id": block.get("id")})
             elif kind == "tool_result":
                 # A tool's image (Claude Code's Read of a picture) reaches the encoder like a user's, as the OpenAI
                 # path's tool messages already do; a text-only result is one string, as before.
                 messages.append({"role": "tool", "content": _parts_of(_check_parts(
-                    block.get("content"), f"messages[{i}].content[{j}].content", TEXT_PARTS + IMAGE_PARTS))})
+                    block.get("content"), f"messages[{i}].content[{j}].content", TEXT_PARTS + IMAGE_PARTS)),
+                                 "_call_id": block.get("tool_use_id")})
         if text or calls or reasoning or parts:
             # an image sent beside tool results stays in this turn instead of being dropped
             out = {"role": m["role"], "content": _parts_of(parts) if _has_image(parts) else "".join(text)}
@@ -663,6 +698,8 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
         # A config's reasoning_effort still applies: Service.with_shared sets output_config before this runs.  A
         # request that gives its own reasoning_budget_tokens (#123) asks for thinking, so it thinks as before.
         kwargs["enable_thinking"] = False
+    # A client may send results in the order its tools finished (Claude Code does for parallel calls)
+    _order_chat_tool_results(messages)
     return _env_to_user(_late_system_to_user(messages)), tools, kwargs
 
 
@@ -883,16 +920,36 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     return ToolCall(name=name, arguments=args)
 
 
-def ptc_wrapped_call(name: str, args: dict, target: str) -> ToolCall:
+PTC_PYTHON_MARKS = ("TypedDict", "async def ")   # only DSH's Python projection spells its SDK block this way
+
+def ptc_program_is_python(texts) -> bool:
+    """The language DSH's programmatic prompt declared its tools in.  The TypeScript projection writes
+    `interface ToolArgsMap`; the Python one names `TypedDict` classes and `async def` signatures, and a program
+    written in the other language is a syntax error, so the wrapper has to know which one it is writing."""
+    for t in texts:
+        if isinstance(t, str) and any(m in t for m in PTC_PYTHON_MARKS) and "interface ToolArgsMap" not in t:
+            return True
+    return False
+
+def ptc_wrapped_call(name: str, args: dict, target: str, python: bool = False) -> ToolCall:
     """A call the model wrote for a tool the request did not declare, in the one wrapper it did declare.
 
     DSH's programmatic mode advertises only `run_code`; inside that program the same tools are `tools.<name>(...)`,
-    so the model's direct call is the same act.  The arguments go in as JSON (valid JavaScript) and the result is
-    printed, which is what the wrapper returns to the model."""
-    code = (f"const r = await tools[{json.dumps(name, ensure_ascii=False)}]"
-            f"({json.dumps(args, ensure_ascii=False)});\n"
-            "console.log(typeof r === 'string' ? r : JSON.stringify(r));")
-    return ToolCall(name=target, arguments={"code": code, "description": f"{name} call, run through {target}"})
+    so the model's direct call is the same act.  The arguments go in as JSON - valid JavaScript, and valid Python
+    once `json.loads` reads them - and the result is printed, which is what the wrapper returns to the model.
+    `python` picks the language of the program: DSH runs Node or CPython, and each runtime rejects the other's code."""
+    payload = json.dumps(args, ensure_ascii=False)
+    if python:
+        code = ("import json\n"
+                f"r = await tools[{json.dumps(name, ensure_ascii=False)}]"
+                f"(json.loads({json.dumps(payload, ensure_ascii=False)}))\n"
+                "print(r if isinstance(r, str) else json.dumps(r, ensure_ascii=False))")
+    else:
+        code = (f"const r = await tools[{json.dumps(name, ensure_ascii=False)}]"
+                f"({json.dumps(args, ensure_ascii=False)});\n"
+                "console.log(typeof r === 'string' ? r : JSON.stringify(r));")
+    return ToolCall(name=target, arguments={"code": code,
+                                            "description": f"Run the model's {name} call through {target}"})
 
 
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
@@ -903,7 +960,7 @@ class OutputParser:
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False, declared_only: bool = False, rewrite: dict[str, str] | None = None):
+                 recover: bool = False, declared_only: bool = False, rewrite: dict[str, str] | None = None,                 ptc_python: bool = False):
         self.state = "reasoning" if thinking else "content"
         self.buf = ""
         self.lead = False
@@ -949,6 +1006,7 @@ class OutputParser:
         # DSH's programmatic prompt spells its tools `tools.name` (the object a run_code program calls), and the model
         # writes that spelling into the <tool_call> in three ways: `tools.name`, `tools name` (a space for the dot)
         # and the bare `tools`.  All three are the tool they name at every place a name is read.
+        self.ptc_python = bool(ptc_python)   # the wrapper's program language: DSH runs Node or CPython
         self.rewritten = 0           # calls the parser moved into the declared wrapper
         self.rewritten_names = set()
         for _name in list(self.schemas) + [k for k in self.rewrite if k != "*"]:
@@ -1699,7 +1757,9 @@ class OutputParser:
             if target is None and name not in self.schemas:
                 target = self.rewrite.get("*")     # the wrapper the programmatic preset declares, for any name
             if target and target in self.schemas:
-                call = ptc_wrapped_call(name, call.arguments, target)
+                call = ptc_wrapped_call(name, call.arguments, target, self.ptc_python)
+                # ptc_rewritten_total alone records this: the call was NOT returned as text, so it is not
+                # an unread call (that counter means a block the client had to read as plain text)
                 self.rewritten += 1
                 self.rewritten_names.add(name)
         except ValueError:
