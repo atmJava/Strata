@@ -6,7 +6,11 @@ This tree is the CLI and server distribution for one production shape:
 - CUDA compute capability 7.5 (`sm_75`)
 - 2 x NVIDIA RTX 2080 Ti 22 GB
 - Qwen3.8-Flash-Next
-- 6 serving slots, 256K context, INT8 KV cache and two batch groups
+- 262,144 context, INT8 KV, two batch slots and two batch groups
+
+The rules this fork follows are in **[AGENTS.md](AGENTS.md#this-fork-serves-one-machine)**: the default path is
+the adapted path, performance decisions are made in code rather than by flag or environment variable, capacity
+comes from the working set, and a change is checked with a repeatable simulation.
 
 The retained product is the `strata` command line plus the OpenAI/Anthropic-compatible server. The desktop app,
 installers, updater, model marketplace, non-CUDA backends and engines for other model families are not part of this
