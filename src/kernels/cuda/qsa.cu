@@ -150,17 +150,18 @@ __global__ void kv_append_kernel(uint16_t* __restrict__ k_pool, uint16_t* __rest
 /// **THE ROTATION IS INSIDE THIS KERNEL, AND THAT IS WHAT MAKES THE WHOLE FUNCTION CAPTURABLE.**  It used to be
 /// a second launch from the host wrapper, guarded by `if (pos % idx_block == idx_block - 1)` - a HOST branch on
 /// `pos`, which forced `pos` to be a host scalar, which meant a captured graph would replay the first token's
-/// position forever.  Doing it here reads the position from `pos_dev` like every other kernel, so the grid and
-/// the arguments are the same for every token and the graph replays correctly.
-__global__ void indexer_key_append_kernel(const float* __restrict__ raw, const int32_t* __restrict__ pos_dev,
-                                          int pos_base, const float* __restrict__ w_k_norm, float eps,
+/// position forever.  Doing it here reads the sequence-relative cell number from `relative_pos_dev`, so the grid
+/// and the arguments are the same for every token and the graph replays correctly.
+__global__ void indexer_key_append_kernel(const float* __restrict__ raw,
+                                          const int32_t* __restrict__ relative_pos_dev, int pos_base,
+                                          const float* __restrict__ w_k_norm, float eps,
                                           float* __restrict__ tail, float* __restrict__ dead,
                                           float* __restrict__ pooled, int32_t* __restrict__ block_pos,
                                           int idx_dim, int r, int n_rot, const float* __restrict__ cos_tab,
                                           const float* __restrict__ sin_tab, const int32_t* __restrict__ mtab) {
     extern __shared__ double s_mean[];   // idx_dim doubles
     const int d = threadIdx.x;
-    const int pos = (int) __ldg(pos_dev);
+    const int pos = (int) __ldg(relative_pos_dev);
     const int slot = pos % r;
 
     // The RAW tail: a cell that COMPLETES a block is not stored, because the pool below consumes it directly.
@@ -719,21 +720,22 @@ void kv_append(uint16_t* k_pool, uint16_t* v_pool, const int32_t* page_table, in
     kv_append_step(k_pool, v_pool, page_table, step_upload(pos, -1, s), kcur, vcur, s, stream);
 }
 
-void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_base, const float* w_k_norm,
-                        float eps, const QsaIndexerBuffers& b, const QsaShapes& s, const float* cos_tab,
-                        const float* sin_tab, void* stream) {
+void indexer_key_append(const float* raw, const int32_t* relative_pos_dev, int32_t pos_base,
+                        const float* w_k_norm, float eps, const QsaIndexerBuffers& b, const QsaShapes& s,
+                        const float* cos_tab, const float* sin_tab, void* stream) {
     validate(s, "indexer_key_append");
-    if (pos_dev == nullptr) fail("indexer_key_append: pos_dev is null");
+    if (relative_pos_dev == nullptr) fail("indexer_key_append: relative_pos_dev is null");
     if (b.tail == nullptr || b.dead == nullptr || b.pooled == nullptr || b.block_pos == nullptr)
         fail("indexer_key_append: the indexer buffers are not all set (tail/dead/pooled/block_pos)");
     const int threads = (int) s.idx_dim;
     const size_t smem = (size_t) s.idx_dim * sizeof(double);
     // **ONE LAUNCH, NO HOST BRANCH ON THE POSITION.**  The completion rotation is inside the kernel now.  The
     // arguments here are identical for every token, which is the property a CUDA graph needs: this function can
-    // be captured and replayed, and the position arrives through `pos_dev` like every other kernel's data.
+    // be captured and replayed, and the position arrives through `relative_pos_dev` like every other kernel's
+    // data.
     indexer_key_append_kernel<<<1, threads, smem, (cudaStream_t) stream>>>(
-        raw, pos_dev, (int) pos_base, w_k_norm, eps, b.tail, b.dead, b.pooled, b.block_pos, (int) s.idx_dim,
-        (int) s.idx_block, (int) s.n_rot, cos_tab, sin_tab, mrope_table());
+        raw, relative_pos_dev, (int) pos_base, w_k_norm, eps, b.tail, b.dead, b.pooled, b.block_pos,
+        (int) s.idx_dim, (int) s.idx_block, (int) s.n_rot, cos_tab, sin_tab, mrope_table());
     check_launch("indexer_key_append");
     if (stream == nullptr) check_sync("indexer_key_append");
 }

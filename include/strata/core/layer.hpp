@@ -39,6 +39,7 @@
 #include "strata/kernels/kv_stream.hpp"
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/ple.hpp"
+#include "strata/kernels/qsa.hpp"
 
 #include <cstdio>
 #include <functional>
@@ -272,6 +273,13 @@ struct QsaState {
     int32_t* host_step = nullptr;    ///< (kStepCount + 1,) pinned; final element is attention status
     int32_t* host_pos = nullptr;     ///< (n_head,) pinned
 };
+
+/// The indexer consumes a sequence-relative cell number; `pos_base` carries the absolute RoPE position.
+/// Keeping the choice here makes it hard to pass the absolute `pos_dev` staging by mistake, which rotates
+/// pooled blocks with the base counted twice once a restored prefix starts away from zero.
+inline const int32_t* qsa_indexer_relative_pos(const QsaState& st) {
+    return st.step + strata::kernels::kStepPos;
+}
 
 /// Plan v0.3 P7: the RoPE cos/sin table (max_cells x n_rot/2 x 2 floats, 64 MiB at 262K) is identical in every
 /// QSA layer. `with_rope = false` sizes a state that borrows it; `share_rope` points `st` at another state's table

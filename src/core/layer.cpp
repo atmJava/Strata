@@ -1179,8 +1179,8 @@ if (st.kv_q4) {
         native_qsa_indexer_append(b.idx_raw, st.step + kStepPos, pos_base,
             (const float*) w_ikn->data, RMS_EPS, ib, s, st.max_cells, rope_scaling(), stream);
     } catch (const std::exception& error) { err = v.name("native_indexer") + ": " + error.what(); return false; }
-} else indexer_key_append(b.idx_raw, st.pos_dev, pos_base, (const float*) w_ikn->data, RMS_EPS, ib, s,
-                          st.cos_tab, st.sin_tab, stream);    }
+} else indexer_key_append(b.idx_raw, qsa_indexer_relative_pos(st), pos_base, (const float*) w_ikn->data, RMS_EPS,
+                          ib, s, st.cos_tab, st.sin_tab, stream);    }
 // ---- 6. the query projection, and the HALF-SPLIT into q and gate.
 //
 // **`attn_q` IS *NOT* ALWAYS Q2_0.**  It is Q2_0 on TWO of the twelve QSA layers, Q3_K on six and IQ4_XS on

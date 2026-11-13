@@ -388,6 +388,7 @@ int main(int argc, char** argv) {
     const int64_t NH = S.n_head, NKV = S.n_head_kv, HD = S.head_dim, IDXN = S.idx_n_head, IDXD = S.idx_dim,
                   R = S.idx_block, TOPK = S.idx_top_k;
     const int64_t MAXC = strata::kernels::kTopkMaxCells;
+    constexpr int64_t kSparseFixtureCells = 2100;   // > 2051, so the selection width really truncates
     const float EPS = strata::kernels::qsa_rms_eps();
     const double THETA = strata::kernels::qsa_freq_base();
     std::mt19937 rng(20260916u);
@@ -556,8 +557,9 @@ int main(int argc, char** argv) {
     }
     std::vector<float> w_kn((size_t) IDXD);
     for (auto& x : w_kn) x = 1.0f + 0.1f * rnd(1.0);
-    std::vector<float> cos_tab((size_t) (2000 * S.n_rot / 2)), sin_tab(cos_tab.size());
-    strata::kernels::build_rope_table((int) S.n_rot, THETA, 2000, cos_tab.data(), sin_tab.data());
+    // Cover every position the fixture allows, rather than just the first sequence it happens to build.
+    std::vector<float> cos_tab((size_t) (MAXC * S.n_rot / 2)), sin_tab(cos_tab.size());
+    strata::kernels::build_rope_table((int) S.n_rot, THETA, (int) MAXC, cos_tab.data(), sin_tab.data());
     Dev<float> dw_kn, dcos, dsin;
     dw_kn.put(w_kn);
     dcos.put(cos_tab);
@@ -973,7 +975,7 @@ int main(int argc, char** argv) {
     // ================= 6. the whole layer at n_kv = 2100, so the selection is genuinely sparse =============
     int64_t width = 0;
     {
-        const int64_t T = 2100;                      // > 2051, so `width` really truncates
+        const int64_t T = kSparseFixtureCells;
         width = strata::kernels::qsa_selection_width(T, S);
         std::vector<float> pk((size_t) T * NKV * HD), pv((size_t) T * NKV * HD), praw((size_t) T * IDXD);
         std::vector<std::vector<double>> k16((size_t) T), v16((size_t) T);

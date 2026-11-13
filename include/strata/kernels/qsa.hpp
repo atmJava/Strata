@@ -227,7 +227,8 @@ struct QsaIndexerBuffers {
 /// position is the block's FIRST cell, which `ref/qsa.py` PROPERTY 4 pins and the test re-pins: rotating at the
 /// block's LAST cell keeps every shape and every magnitude.
 ///
-/// **`pos_dev` IS A DEVICE POINTER AND THIS FUNCTION IS CAPTURABLE.**  It used to take `int64_t pos` as a host
+/// **`relative_pos_dev` IS A DEVICE POINTER AND THIS FUNCTION IS CAPTURABLE.**  It holds the sequence-relative
+/// cell number (`step[kStepPos]`), not the absolute RoPE position.  It used to take `int64_t pos` as a host
 /// scalar, and a CUDA graph bakes kernel ARGUMENTS in at capture time - so a captured call would have replayed
 /// the FIRST token's position forever: `slot = pos % idx_block` would never advance, no block would ever
 /// complete, the indexer would keep pooling cells 0-3, and the selection would stay pinned to the first block.
@@ -243,11 +244,11 @@ struct QsaIndexerBuffers {
 /// `pos_base` IS THE SEQUENCE'S FIRST CELL'S POSITION, so cell j sits at position `pos_base + j`.  The kernel
 /// cannot derive it: `QsaCache.pos` is what the reference rotates by, and equating a cell's position with its
 /// index is only right for a sequence that starts at 0.  The test runs the fixture at `pos_base = 100`, where
-/// the two readings are 514% apart.  `pos_base` is CONSTANT for a sequence, so unlike `pos_dev` it is safe to
-/// bake into a graph.
-void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_base, const float* w_k_norm,
-                        float eps, const QsaIndexerBuffers& b, const QsaShapes& s, const float* cos_tab,
-                        const float* sin_tab, void* stream);
+/// the two readings are 514% apart.  `pos_base` is CONSTANT for a sequence, so unlike `relative_pos_dev` it is
+/// safe to bake into a graph.
+void indexer_key_append(const float* raw, const int32_t* relative_pos_dev, int32_t pos_base,
+                        const float* w_k_norm, float eps, const QsaIndexerBuffers& b, const QsaShapes& s,
+                        const float* cos_tab, const float* sin_tab, void* stream);
 
 /// Per-CELL indexer scores, `n_kv = pos + 1` of them, fp32.
 ///

@@ -842,6 +842,10 @@ if(STRATA_ENABLE_CUDA)
   target_include_directories(qsa_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(qsa_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME qsa_parity COMMAND qsa_parity --selftest)
+  # the indexer's position comes from the relative step counter, never the absolute RoPE positions
+  add_executable(qsa_indexer_position_test tests/core/qsa_indexer_position_test.cpp)
+  target_include_directories(qsa_indexer_position_test PRIVATE include)
+  add_test(NAME qsa_indexer_position_test COMMAND qsa_indexer_position_test)
 
   # the QSA top-k the engine dispatches against the original kernel: identical ids on both sides of the register
   # kernel's reach, with tied and with equal scores (synthetic, no model)
