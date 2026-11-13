@@ -713,7 +713,7 @@ struct Options {
     /// the verify windows run with the stages overlapped (stage 0 reads window K+1 while stage 1 reads window K);
     /// 2 = the decode windows too: stage 0 runs window K+1 speculatively while stage 1 verifies window K (rolled back
     /// when K is not accepted as guessed).  0 = off (the stages take turns).
-    /// -1 (not asked for) = 2 on gfx12 (HIP) layer splits of 3 or more stages, else 0; --pipeline-windows N asks for it.
+    /// -1 (not asked for) = 0 in this CUDA sm_75 checkout; --pipeline-windows N asks for it explicitly.
     int pipeline_windows = -1;
     /// The suffix drafter (prompt lookup): when the text being written repeats an earlier stretch of the context (code
     /// edits, quoted input, tool-call JSON) by at least this many tokens, the window may be filled with what followed
@@ -861,8 +861,8 @@ void usage() {
                  "                       window (STRATA_BATCH_MTP=1 does the same); works on one GPU and on a layer split (the\n"
                  "                       slot drafters sit on the last stage's GPU; not with --batch-groups); needs VRAM per slot\n"
                  "  --batch-groups G     --batch with a layer split: the slots in G groups pipelined through the GPUs\n"
-                 "  --pipeline-windows N --serve with a layer split on two GPUs (on by default for 2+ stages on AMD gfx12;\n"
-                 "                       STRATA_PIPELINE_AUTO=0 or N=0 turns it off): one conversation's verify windows\n"
+                 "  --pipeline-windows N --serve with a layer split on two GPUs (opt-in in this sm_75 checkout;\n"
+                 "                       N=0 turns it off): one conversation's verify windows\n"
                  "                       with the GPUs overlapped - 1 = the prompt's short reads, 2 = decode as well\n"
                  "                       (stage 0 runs the next window while stage 1 verifies this one); docs/MULTI_GPU.md\n"
                  "  --prompt-cache-every N  --serve: also checkpoint every N fresh prompt tokens (default 16384, 0 = off)\n"
@@ -1935,12 +1935,6 @@ static bool pcie_auto_split_ok() {
 // R9700) and apply on gfx1200 / gfx1201 only; every other AMD part (gfx11, gfx906, ...) keeps its earlier behaviour.  CUDA: always true.
 [[maybe_unused]] static bool decode_defaults_arch_ok() {
     return true;
-}
-
-/// 0.1.44: the pipelined decode puts the drafter on the first stage's card by default where it was measured (gfx12; the HIP builds
-/// only).  STRATA_MTP_STAGE0=0 / 1 decides either way.
-[[maybe_unused]] static bool mtp_first_default_on() {
-    return false;
 }
 
 // HIP outside gfx12: the same refinement, opt-in with STRATA_PCIE_FRAC_DEFAULT=auto (#2224).  Its author gate-measured it on an
@@ -3954,12 +3948,8 @@ int main(int argc, char** argv) {
     strata::core::Verifier::set_commit_async(!multi_gpu);   // see Verifier::set_commit_async
     // --pipeline-windows (opt-in): one conversation's windows with the two stages of a layer split overlapped.  Decided
     // here, before any stage sizes its expert cache (the second verifier per stage and the snapshots are allocated
-    // after the caches, so their room is kept out of them).  What it does not support turns it off, said once.
-    // 0.1.43: not asked for (-1) = on (2) for gfx12 layer splits of three or more stages, where it was measured (4x R9700);
-    // with two stages it loses (the drafter's chain shares the last card with its window).  STRATA_PIPELINE_AUTO=0 keeps
-    // it off, --pipeline-windows N asks for it as before.  Anything it does not support leaves it off, said nothing.
-    // 0.1.44: the drafter can sit on the first stage's card (see mtp_first below) when its draft head is the subset file: the main head
-    // stays on the last card and only the subset's rows are copied over once
+    // after the caches, so their room is kept out of them).  What it does not support turns it off, said once.  This
+    // checkout has no architecture-dependent automatic pipeline: an omitted flag stays off on the sm_75 deployment.
     const bool mtp_first_ok = [&] {
         if (o.mtp.empty() || o.spec < 2) return false;
         if (const char* fh = std::getenv("STRATA_MTP_FULL_HEAD"); fh != nullptr && fh[0] == '1') return false;
@@ -3968,21 +3958,7 @@ int main(int argc, char** argv) {
                                          : std::filesystem::exists(o.mtp_draft_vocab, ec);
     }();
     const bool pw_auto = o.pipeline_windows < 0;
-    if (pw_auto) {
-        static const char* ae = std::getenv("STRATA_PIPELINE_AUTO");
-        static const char* am = std::getenv("STRATA_PIPELINE_AUTO_MIN_STAGES");
-        // two stages pay off only with the drafter on the first card (0.1.44, mtp_first): its chain no longer shares the last card with the window
-        const size_t min_st = am != nullptr ? (size_t) std::max(2, std::atoi(am))
-                                            : (mtp_first_ok && mtp_first_default_on() ? 2 : 3);
-        bool on = o.serve && multi_gpu && !split_same && split_devs.size() + 1 >= min_st && !(ae != nullptr && std::atoi(ae) == 0);
-        on = false;
-        const bool helpers_a = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
-        on = on && !o.mtp.empty() && o.spec >= 2 && o.batch == 0 && o.peer_device < 0 && !helpers_a && !o.adapt_async;
-        o.pipeline_windows = on ? 2 : 0;
-        if (on)
-            std::fprintf(stderr, "strata generate: --pipeline-windows 2 is on by default for a layer split of %zu stages "
-                                 "(--pipeline-windows 0 or STRATA_PIPELINE_AUTO=0 turns it off)\n", split_devs.size() + 1);
-    }
+    if (pw_auto) o.pipeline_windows = 0;
     if (o.pipeline_windows > 0) {
         const bool helpers = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
         const char* off = !o.serve ? "it needs --serve"
@@ -3999,18 +3975,22 @@ int main(int argc, char** argv) {
         if (off != nullptr) {
             std::fprintf(stderr, "strata generate: --pipeline-windows %d is off: %s\n", o.pipeline_windows, off);
             o.pipeline_windows = 0;
-        } else if (!pw_auto && o.pipeline_windows >= 2 && split_devs.size() == 1) {
-            // #2637: the default (above) takes two stages only with the draft layer on the first card (mtp_first); asked for by
-            // hand it was taken without a word.  Recommend, never force: it stays on as asked, and the line says what it costs.
-            const bool first_card = mtp_first_ok;
-            if (!first_card)
-                std::fprintf(stderr, "strata generate: note: --pipeline-windows %d on a layer split of two stages without the draft layer "
-                                     "on the first card (%s): the draft chain then shares the last card with its window and the "
-                                     "pipeline lost to the serial loop on 2x R9700 before 0.1.44 (docs/MULTI_GPU.md); kept as asked, "
-                                     "--pipeline-windows 0 turns it off\n", o.pipeline_windows,
-                             !mtp_first_ok ? "it needs --mtp with --spec 2 or more and the draft head's subset file (draft_vocab.bin)"
-                                           : "STRATA_MTP_STAGE0=1 asks for it");
         }
+    }
+    // Resolve the drafter's device once from the requested shape.  In particular, requested_slots is immutable here:
+    // a slot that later does not fit may disable batching, but may not move a drafter whose memory was already planned
+    // on the last stage.  Command-line --batch, its --slots alias, and the server's "parallel" all arrive as this input.
+    const strata::program::mtp_placement::Inputs mtp_layout_inputs{
+        mtp_first_ok, o.pipeline_windows, split_devs.size(), o.batch};
+    const strata::program::mtp_placement::Layout mtp_layout{
+        strata::program::mtp_placement::resolve(mtp_layout_inputs)};
+    if (!pw_auto && o.pipeline_windows >= 2 && split_devs.size() == 1 &&
+        mtp_layout.drafter != strata::program::mtp_placement::DrafterStage::First) {
+        std::fprintf(stderr, "strata generate: note: --pipeline-windows %d on a layer split of two stages without the draft layer "
+                             "on the first card (it needs --mtp with --spec 2 or more and the draft head's subset file, "
+                             "draft_vocab.bin): the draft chain then shares the last card with its window and the pipeline "
+                             "lost to the serial loop on 2x R9700 before 0.1.44 (docs/MULTI_GPU.md); kept as asked, "
+                             "--pipeline-windows 0 turns it off\n", o.pipeline_windows);
     }
     // ---- layer split across GPUs: each later stage's own copy of the dense weights, its session and (the last) the
     // head, made on its device before the host arena is mapped (as the drafter below, for the same WDDM reason)
@@ -4123,15 +4103,16 @@ int main(int argc, char** argv) {
     // (stage 0 has finished the window the chain follows), not beside the last stage's window on the last card, where the two
     // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
     // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
-    const strata::program::mtp_placement::Inputs mtp_layout{mtp_first_ok, o.pipeline_windows, stages.size(), o.batch};
-    const bool mtp_first = strata::program::mtp_placement::on_first_stage(mtp_layout);
+    const bool mtp_first =
+        mtp_layout.drafter == strata::program::mtp_placement::DrafterStage::First;
     if (strata::core::diag::enabled()) {
         const int mtp_dev =
-            strata::program::mtp_placement::drafter_device(mtp_layout, last_st != nullptr ? last_st->dev : 0);
+            strata::program::mtp_placement::drafter_device(
+                mtp_layout, primary_device, last_st != nullptr ? last_st->dev : primary_device);
         std::fprintf(stderr,
-                     "strata diag placement: mtp_first_ok=%d pipeline_windows=%d stages=%zu batch=%d mtp_first=%d "
+                     "strata diag placement: mtp_first_ok=%d pipeline_windows=%d stages=%zu requested_slots=%d mtp_first=%d "
                      "mtp_dev=%d last_stage_dev=%d\n",
-                     mtp_first_ok, o.pipeline_windows, stages.size(), o.batch, mtp_first, mtp_dev,
+                     mtp_first_ok, o.pipeline_windows, stages.size(), mtp_layout_inputs.requested_slots, mtp_first, mtp_dev,
                      last_st != nullptr ? last_st->dev : -1);
         std::fflush(stderr);
     }
@@ -5812,7 +5793,7 @@ int main(int argc, char** argv) {
                          "strata diag placement: expert cache draft-head reservation=%lld MiB mtp_first=%d mtp_dev=%d\n",
                          (long long) (mtp_bind >> 20), mtp_first,
                          strata::program::mtp_placement::drafter_device(
-                             mtp_layout, last_st != nullptr ? last_st->dev : 0));
+                             mtp_layout, primary_device, last_st != nullptr ? last_st->dev : primary_device));
         const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind + pipe_first;
         const int64_t blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
         int64_t slots = ((int64_t) free_b - reserve) / blob;
@@ -13354,7 +13335,7 @@ int main(int argc, char** argv) {
             // read batched and its header still goes through the windows.  Picture rows need the batched path.
             // STRATA_CKPT_REREAD compares a restored checkpoint with a batched re-read, so it keeps every read batched.
             static const bool no_short = std::getenv("STRATA_CKPT_REREAD") != nullptr;
-            int64_t req_short_read = o.short_read;   // STRATA_PIPELINE_SWITCH may set it per request (short_read=)
+            int64_t req_short_read = o.short_read;   // the debug-only STRATA_PIPELINE_SWITCH may set it per request
             if (short_read_off_once) {   // #3465: the request after non-finite logits in a prompt window
                 short_read_off_once = false;
                 req_short_read = 0;
@@ -13370,7 +13351,8 @@ int main(int argc, char** argv) {
             };
             // --pipeline-windows, testing: STRATA_PIPELINE_SWITCH=<file> is read at every request, "pw=<0|1|2>
             // theta=<f> force_miss=<k> short_read=<n>" - an A/B of the pipelined and the serial loops (and forced
-            // rollbacks) on one server, with the same expert placement
+            // rollbacks) on one server, with the same expert placement.  Changing pw here changes this request's
+            // execution path only: the drafter stays on the device resolved at startup, where its cache was priced.
             int pl_pw = pipe ? o.pipeline_windows : 0;
             float pl_theta = [] {   // a speculative window is launched only when its estimated chance is at least this
                 const char* v = pipe_dbg_env("STRATA_PIPELINE_THETA");

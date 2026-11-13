@@ -178,11 +178,12 @@ window is a guess: that this window is accepted whole and that its bonus token i
 holds, half of the next window is already done. If not, the first card restores its state and builds the window from the real
 tokens. The tokens are the serial loop's, up to CPU rounding.
 
-- **Default:** on for AMD RDNA4 (gfx1200 / gfx1201) with `--serve`, the draft layer, and a split of two or more stages when the
-  drafter can sit on the first card, otherwise three or more. The log says "is on by default for a layer split of N stages".
-  `--pipeline-windows 0` or `STRATA_PIPELINE_AUTO=0` turns it off. NVIDIA builds keep it opt-in (`--pipeline-windows 2`).
-- **Draft layer placement:** with the pipeline on, the draft layer loads on the first card, whose window has finished when the
-  chain starts. `STRATA_MTP_STAGE0=0` keeps the old place.
+- **Default in this CUDA `sm_75` checkout:** off. `--pipeline-windows 2` opts in. There is no architecture-dependent
+  automatic switch.
+- **Draft layer placement:** a non-batch decode with the pipeline on loads the draft layer on the first card, whose
+  window has finished when the chain starts. Any requested `--batch`/`--slots` or server `"parallel"` keeps the solo
+  drafter and every slot drafter on the last stage. A slot that later does not fit may turn batching off, but it does
+  not move a drafter whose VRAM was already planned. These are code decisions; `STRATA_MTP_STAGE0` is no longer read.
 - **Off, with one log line saying why:** `--batch` slots, `--peer-device`, the helper caches (`--expert-cache-device1..3`, which
   `--remote-expert-opt` builds on), a split onto one GPU, no draft layer, and on three or more stages `--pipeline-windows 1` and
   `--adapt-async 1`. A request with repetition penalties or coupled draft sampling decodes serially.
@@ -192,6 +193,8 @@ tokens. The tokens are the serial loop's, up to CPU rounding.
 
 `--remote-expert-opt` does something only with a helper cache; on a plain layer split it is inert.
 The `STRATA_PIPELINE_*` tuning and test variables are read only with `STRATA_PIPELINE_DEBUG=1`.
+`STRATA_PIPELINE_SWITCH` can put one request on the serial decode path for an A/B test; it does not recompute the
+drafter's device or move memory after startup.
 
 ## Two models on two cards
 

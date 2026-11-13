@@ -4,9 +4,10 @@
 #include <cstdio>
 #include <initializer_list>
 
+using strata::program::mtp_placement::DrafterStage;
 using strata::program::mtp_placement::drafter_device;
 using strata::program::mtp_placement::Inputs;
-using strata::program::mtp_placement::on_first_stage;
+using strata::program::mtp_placement::resolve;
 
 namespace {
 int failures = 0;
@@ -16,27 +17,43 @@ void check(bool condition, const char* what) {
     std::fprintf(stderr, "FAIL: %s\n", what);
     ++failures;
 }
+
+void check_layout(Inputs in, DrafterStage stage, bool pipelined_decode, const char* what) {
+    const auto layout = resolve(in);
+    check(layout.drafter == stage && layout.pipelined_decode == pipelined_decode, what);
+}
 }  // namespace
 
 int main() {
-    const Inputs first{true, 2, 1, 0};
-    check(on_first_stage(first), "a pipelined non-batch split uses the first stage");
-    check(drafter_device(first, 1) == 0, "the first-stage drafter runs on CUDA0");
+    const auto first = resolve({true, 2, 1, 0});
+    check(first.drafter == DrafterStage::First && first.pipelined_decode,
+          "a pipelined non-batch split uses the first stage");
+    check(drafter_device(first, 0, 1) == 0, "the first-stage drafter runs on the primary device");
 
-    const Inputs last{true, 2, 1, 2};
-    check(!on_first_stage(last), "batch mode keeps the drafter on the last stage");
-    check(drafter_device(last, 1) == 1, "the batch drafter runs on the last stage's device");
+    const auto unsplit = resolve({true, 2, 0, 0});
+    check(unsplit.drafter == DrafterStage::Unsplit && !unsplit.pipelined_decode,
+          "an unsplit model has no layer-split placement");
+    check(drafter_device(unsplit, 2, 3) == 2, "an unsplit drafter follows the primary device, not literal CUDA0");
 
-    check(!on_first_stage({false, 2, 1, 0}), "a missing draft head prevents first-stage placement");
-    check(!on_first_stage({true, 1, 1, 0}), "one pipeline window is not the measured placement");
-    check(!on_first_stage({true, 2, 0, 0}), "a single stage has no first-stage split placement");
-    check(drafter_device({true, 2, 0, 0}, 1) == 0, "an unsplit model keeps the drafter on CUDA0");
+    check_layout({false, 2, 1, 0}, DrafterStage::Last, false,
+                 "a full draft head prevents first-stage placement");
+    check_layout({true, 0, 1, 0}, DrafterStage::Last, false,
+                 "pipeline off keeps the serial last-stage placement");
+    check_layout({true, 1, 1, 0}, DrafterStage::Last, false,
+                 "the prefill-only pipeline keeps the drafter on the last stage");
+    check_layout({true, 2, 1, 1}, DrafterStage::Last, false,
+                 "one requested slot pins the drafter to the last stage");
+    check_layout({true, 2, 1, 2}, DrafterStage::Last, false,
+                 "two requested slots pin the drafter to the last stage");
+    check_layout({true, 2, 1, 8}, DrafterStage::Last, false,
+                 "eight requested slots pin the drafter to the last stage");
+    check(drafter_device(resolve({true, 2, 1, 2}), 0, 1) == 1,
+          "a batch drafter uses the actual last-stage device");
 
-    for (const int batch : {1, 2, 8}) {
-        const Inputs in{true, 2, 1, batch};
-        check(!on_first_stage(in), "every batch size keeps the drafter on the last stage");
-        check(drafter_device(in, 1) == 1, "every batch size resolves CUDA1 as the drafter device");
-    }
+    // Command-line --batch, the alias --slots and the server's "parallel" all reach this input as requested_slots.
+    // The fit pass may reduce that count or disable batching later; it must not recompute the layout as unsplit.
+    check_layout({true, 2, 1, 4}, DrafterStage::Last, false,
+                 "--parallel/--batch requested slots keep the final layout stable");
 
     if (failures == 0) std::printf("mtp_placement_test: ok\n");
     return failures == 0 ? 0 : 1;

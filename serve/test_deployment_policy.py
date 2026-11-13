@@ -110,6 +110,9 @@ class EngineDefaults(unittest.TestCase):
             "STRATA_STAGE_TRIM",
             "STRATA_PIPED_CONCURRENT",
             "STRATA_PIPED_CONCURRENT_PRIO",
+            "STRATA_MTP_STAGE0",
+            "STRATA_PIPELINE_AUTO",
+            "STRATA_PIPELINE_AUTO_MIN_STAGES",
         ):
             with self.subTest(name=name):
                 self.assertEqual(engine_reads(name), [])
