@@ -46,15 +46,12 @@ class Elastic(unittest.TestCase):
         self.engine.loaded = True
         self.vision = ElasticVision(d)
         self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=self.vision)
-        self.addCleanup(self.drop_embeddings)
-
-    def drop_embeddings(self):
-        path = getattr(getattr(self.svc, "embeddings", None), "path", None)
-        if path is not None:
-            path.unlink(missing_ok=True)
 
     def picture(self):
         self.svc.prepare([{"role": "user", "content": [{"type": "text", "text": "what is it"}, IMAGE]}], None, {})
+        path = getattr(getattr(self.svc, "embeddings", None), "path", None)
+        if path is not None:
+            self.addCleanup(Path(path).unlink, missing_ok=True)
 
     def test_the_first_picture_makes_room_then_starts_the_encoder(self):
         self.picture()
