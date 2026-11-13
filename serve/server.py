@@ -2053,6 +2053,7 @@ class StrataEngine:
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
         btrace("ctl acquired")
         slot, gen0, reserved = None, None, None
+        slot_touched = False      # a slot claimed but cancelled before its command keeps its LRU position
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
         stop_sent = False
         yields, solo_again, refused = 0, 0, 0
@@ -2120,6 +2121,7 @@ class StrataEngine:
                         raise EngineNonFinite("the engine's logits became non-finite (#879)")
                     if self._yielded is not None and reserved is not None and self._yielded[0] == reserved:
                         slot, reserved = reserved, None     # gave way: the read goes on in that slot (below)
+                        slot_touched = True
                     elif reserved is not None:              # it did not give way: the slot is free again
                         with self.slot_cv:
                             self.slot_busy[reserved] = False
@@ -2252,6 +2254,7 @@ class StrataEngine:
                     if cancel.is_set():
                         return
                     if self._yielded is not None:           # it gave way: the others waiting then go first
+                        slot_touched = True
                         self.slot_held[slot] = list(prompt[:self._yielded[1]])
                         self._yielded = None
                         yields += 1
@@ -2279,6 +2282,7 @@ class StrataEngine:
                     self._last_done = None                  # (#879: this admission's DONE decides below)
                     if was_staged:      # the prompt is already read: adopt it into this slot, no re-read
                         self._send(f"BADOPT {slot}")
+                        slot_touched = True
                         print(f"[strata] parallel: staged read adopted into slot {slot}", flush=True)
                         staged_ready = None
                         with self.slot_cv:
@@ -2286,6 +2290,7 @@ class StrataEngine:
                             self.slot_cv.notify_all()
                     else:
                         self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                        slot_touched = True
                     if deadline is not None:
                         cancel._strata_queue_deadline = None
                     started = getattr(cancel, "_strata_queue_started", None)
@@ -2341,6 +2346,7 @@ class StrataEngine:
                             self._ctl_erred = False
                             self._park_slot(slot)
                             slot = None
+                            slot_touched = False
                             continue
                         # #1994: the engine says this slot is not free (its view and ours differ for a moment, or a
                         # slot it still holds).  That is not the request's fault and nothing was read: park the slot
@@ -2359,6 +2365,7 @@ class StrataEngine:
                         self._ctl_erred = False
                         self._park_slot(slot)
                         slot = None
+                        slot_touched = False
                         continue
                     cont = bool(self._ctl_result and self._ctl_result[1])
                     phase = "slot" if cont else "none"
@@ -2488,7 +2495,8 @@ class StrataEngine:
                     self.slot_cv.notify_all()
             if slot is not None:
                 self.slot_live[slot] = None
-                self.slot_used[slot] = time.time()
+                if slot_touched:
+                    self.slot_used[slot] = time.time()
                 if phase == "slot" and bdone_in:
                     stream = list(prompt) + out[gen0:] if gen0 is not None and len(out) > gen0 else None
                     self.slot_held[slot] = stream[:-1] if stream else []     # as the BDONE wait leaves it

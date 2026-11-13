@@ -256,12 +256,13 @@ class AdmitOrderTest(unittest.TestCase):
         e.ctl.release()
 
     def test_a_request_cancelled_while_claiming_a_slot_does_not_send_bgen(self):
-        """A client can leave after it gets the control lines and before its slot is chosen. The claim must be
-        released without reading the prompt into the engine."""
+        """A client can leave after it gets the control lines and while its slot is claimed. The claim must be
+        released without reading the prompt into the engine or changing the untouched slot's LRU position."""
         e = engine_without_process(2)
         e.slot_busy[0], e.slot_claims = True, {0}
         e.slot_q = [queue.Queue(), queue.Queue()]
         e.slot_live, e.slot_releasing = [None, None], set()
+        e.slot_used = [10.0, 20.0]
         e.mp_staged, e._yielded = None, None
         e.progress, e.progress_ms, e.reused = None, 0, 0
         cancel = threading.Event()
@@ -283,6 +284,7 @@ class AdmitOrderTest(unittest.TestCase):
         self.assertEqual(sends, [])
         self.assertEqual(e.slot_busy, [True, False])
         self.assertEqual(e.slot_claims, {0})
+        self.assertEqual(e.slot_used, [10.0, 20.0], "an untouched slot must keep its LRU position")
         self.assertTrue(e.ctl.acquire(blocking=False), "a cancelled admission must release the control lines")
         e.ctl.release()
 
