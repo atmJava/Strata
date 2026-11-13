@@ -621,6 +621,13 @@ def is_dsh_title_request(req: dict) -> bool:
 
 DSH_MAX_OUTPUT_TOKENS = (32000, 32768)      # DSH's default; the desktop profile sends the model's maxTokens
 
+DSH_MAIN_TOOLS = (
+    "bash", "create_goal", "edit", "exit_plan_mode", "get_goal", "glob", "grep",
+    "interrupt_agent", "job_kill", "job_list", "job_output", "list_agents", "read",
+    "read_image", "send_message", "skill", "subagent", "subagent_fork", "todo_write",
+    "update_goal", "web_fetch", "web_search", "workflow", "working_directory", "write",
+)
+
 
 def ptc_prompt_texts(req):
     """The texts of a request that carry DSH's programmatic SDK block: its instructions and its first system turn."""
@@ -656,14 +663,6 @@ def ptc_rewrite_map(declared, ptc_names=None):
     # may offer tools this build's list does not know (MCP servers, schedules), and a name the wrapper cannot reach
     # fails inside the program, where the model reads the error and recovers, instead of ending the turn as XML text.
     return {"*": "run_code"} if "run_code" in (declared or ()) else {}
-
-
-DSH_MAIN_TOOLS = (
-    "bash", "create_goal", "edit", "exit_plan_mode", "get_goal", "glob", "grep",
-    "interrupt_agent", "job_kill", "job_list", "job_output", "list_agents", "read",
-    "read_image", "send_message", "skill", "subagent", "subagent_fork", "todo_write",
-    "update_goal", "web_fetch", "web_search", "workflow", "working_directory", "write",
-)
 
 
 def is_dsh_main_request(req: dict) -> bool:
@@ -3537,7 +3536,6 @@ def prompt_cache_args(cfg: dict, args: list[str]) -> list[str]:
             out.append(flag)
     return out
 
-
 PARALLEL_MAX = 8      # the engine's batch window holds at most 8 rows (kVerifyMaxT); --batch-mtp waves more through it
 
 
@@ -5297,9 +5295,6 @@ class Service:
              declared_only=False) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
-        # DSH's programmatic request carries the tools its developer text names in one private key, not as sampling
-        # (only the wrapper is declared); read it here and keep it out of the sampling merge below.
-        ptc_names = sampling.pop("_strata_ptc_names", None) if isinstance(sampling, dict) else None
         # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
         # apps; the request's own fields win over all of them
         defaults = {**model_card_sampling(self.model_arch, thinking), **self.sampling_defaults, **self.shared}
@@ -5325,6 +5320,9 @@ class Service:
                 print(f"[strata] thinking capped at {max_new - reserve} of max_tokens {max_new} to leave room for "
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
+        # DSH's programmatic request carries the tools its developer text names in one private key, not as sampling
+        # (only the wrapper is declared); read it here and keep it out of the sampling
+        ptc_names = sampling.pop("_strata_ptc_names", None) if isinstance(sampling, dict) else None
         rewrite = None
         if self.ptc_tool_rewrite:
             declared = {t.get("name") for t in tools or [] if isinstance(t, dict)}
