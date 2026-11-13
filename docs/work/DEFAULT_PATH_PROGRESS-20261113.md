@@ -41,9 +41,12 @@ question that source and fake-engine tests cannot answer.
 8. A park now checks whether its replacement fits beside pinned or borrowed conversations before dropping
    superseded copies. A refused capture therefore keeps the old reusable state.
 9. A staged read that has returned BRDY is ranked as zero tokens left to read while it waits to be adopted.
+10. A layer-split snapshot's cache accounting now includes the `stage_images` vector directory.
+11. Parking reserves that exact directory before admission, so the estimate and final snapshot charge the same
+    capacity and a later `put()` cannot discover extra bytes only after superseded copies are gone.
 
-The implementation starts at `6ab3c517`; the source changes in this round end at `80fc3705`. The validated tree is
-the documentation commit `97925527`. The branch is local and not pushed or deployed.
+The implementation starts at `6ab3c517`; the source changes in this round end at `61e187fb`. The branch is local and
+not pushed or deployed.
 
 ## Validation
 
@@ -54,13 +57,15 @@ the documentation commit `97925527`. The branch is local and not pushed or deplo
 - The complete engine group passed after the cache change (`conversation_cache`, split failure, memory, file and
   save-reclaim tests).
 - `serve.test_admit_order` and `serve.test_deployment_policy`: 26 tests passed after the staged-read change.
+- `conversation_cache_test`: 4,832 checks passed after the final layer-split accounting change.
 - Python compilation and `git diff --check` passed after every commit.
-- A clean archive of `97925527` built successfully on the remote host in
+- A clean archive of `61e187fb` built successfully on the remote host in
   `/home/atm/strata-build-20261113.B1GbiW/build-cached` with CUDA 13.0.88, `sm_75`, Release and `-j2`; the build
-  exited 0. The binary reports `strata 0.1.51`, is 61,700,352 bytes and has SHA-256
-  `6cdf18f17fed93b8b340da262edf4d9baff7dbd851ff3f08c29b1193da424659`. This proves assembly and the version
-  entry point only. `ctest`, CUDA runtime smoke and deployment were not run.
-- Strata was not started, restarted or deployed in this round. `stash@{0}` remains untouched.
+  exited 0. The binary reports `strata 0.1.51`, is 61,700,504 bytes and has SHA-256
+  `705b53c5e47977048a7e242d3cec6dfccac3756320b44b78e914b8c013814962`. `strata --version` and
+  `strata --help` both exited 0. This proves assembly and the executable entry point only; model inference,
+  `ctest`, CUDA runtime smoke and deployment were not run.
+- No server was started, restarted or deployed in this round. `stash@{0}` remains untouched.
 
 ## Open decisions
 

@@ -14,7 +14,8 @@
 - 本轮断点：分支 `docs/gpu-xid13-incident-20261112` 仅在本地领先；工作区干净，
   `stash@{0}` 必须保留。最近完成 admission 重入复用、staged-read 默认化、双路串行默认化、
   solo 回退常量化及 30 秒 admission fallback 常量化；conversation cache 在确认新快照能放下
-  之前不再删除 superseded 旧副本，已完成的 staged read 按零待读 token 参与 admission。
+  之前不再删除 superseded 旧副本，已完成的 staged read 按零待读 token 参与 admission；
+  layer split 的 stage-image 目录也进入预算预检，保存前后按同一容量核算。
 - 未决默认值：`--conversation-cache-min-tokens 4096` 使实测 3,894-token 会话没有 parking。
   交接建议改为 2,048，但尚无新的五会话验证；这是 owner 决策，不把推测写进默认。
 - 历史“优化已停止、仅维护稳定”说明保留在本文件后部，只作为 2026-11-01 至 2026-11-12
@@ -27,9 +28,10 @@
   `402 passed / 51 skipped / 0 errors`、`52.62 s`；`pytest serve tests/terminal
   tools/server/tests` 为 `1,457 passed / 64 skipped / 10,910 subtests`、`514.49 s`，两轮
   均 exit 0。详见 [清理门禁结果](work/FREEZE_027_CLEANUP_GATE_RESULT-20261107.md)。
-  CUDA 构建、`ctest` 与真实服务器 smoke 未在本机验证。本轮已从 `97925527` 的独立归档在远端通过 CUDA
+  CUDA 构建、`ctest` 与真实服务器 smoke 未在本机验证。本轮已从 `61e187fb` 的独立归档在远端通过 CUDA
   13.0.88、`sm_75`、Release 组装构建：退出码 0，产物报告 `strata 0.1.51`，SHA-256
-  `6cdf18f1...`。该验证只覆盖组装和入口，不包含 `ctest`、CUDA runtime smoke 或部署。
+  `705b53c5...`；最终源码提交为 `61e187fb`。该验证覆盖组装、`--version` 与 `--help` 入口，
+  不包含模型推理、`ctest`、CUDA runtime smoke 或部署。
 - 未完成采纳项：21
 - 当前项：AGENT-CURRENT-PROD-COST-REMAP（暂停，无主动执行）。模型/槽数比较及所有新
   候选均停止；未完成采纳项只表示历史队列，不授权继续执行。
