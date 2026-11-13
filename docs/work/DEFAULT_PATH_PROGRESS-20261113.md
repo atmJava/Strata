@@ -38,17 +38,26 @@ question that source and fake-engine tests cannot answer.
 6. Solo hand-back and the 30-second long-wait fallback are code constants with no production environment override.
 7. Deployment-policy tests reject the retired server switches and the AST admission test rejects a future
    `_take_control` call that omits known reuse.
+8. A park now checks whether its replacement fits beside pinned or borrowed conversations before dropping
+   superseded copies. A refused capture therefore keeps the old reusable state.
+9. A staged read that has returned BRDY is ranked as zero tokens left to read while it waits to be adopted.
 
-The implementation starts at `6ab3c517`; the server default changes end at `ed55233b`. The branch is local and not
-pushed or deployed.
+The implementation starts at `6ab3c517`; the current round ends at `80fc3705`. The branch is local and not pushed or
+deployed.
 
 ## Validation
 
 - `serve.test_parallel` and `serve.test_parallel_yield`: 45 tests passed.
-- `serve.test_staged_protocol`, `serve.test_staged_wedge` and `serve.test_admit_order`: 27 tests passed.
+- `serve.test_staged_protocol`, `serve.test_staged_wedge` and `serve.test_admit_order`: 27 tests passed before the
+  staged-read work change.
 - `serve.test_deployment_policy`: 13 tests passed after the final server change.
+- The complete engine group passed after the cache change (`conversation_cache`, split failure, memory, file and
+  save-reclaim tests).
+- `serve.test_admit_order` and `serve.test_deployment_policy`: 26 tests passed after the staged-read change.
 - Python compilation and `git diff --check` passed after every commit.
-- The CUDA `strata` binary built successfully at `fc36ff05`; later changes are Python server code only.
+- The CUDA `strata` binary built successfully at `fc36ff05`. No CUDA compiler or configured build tree is present on
+  this local host, so the later C++/header change has CPU test coverage but no assembled CUDA build yet. A remote
+  build is required before a deployment decision.
 - Strata was not started, restarted or deployed in this round. `stash@{0}` remains untouched.
 
 ## Open decisions

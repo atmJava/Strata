@@ -13,7 +13,8 @@
   测试区分时才启动 Strata。
 - 本轮断点：分支 `docs/gpu-xid13-incident-20261112` 仅在本地领先；工作区干净，
   `stash@{0}` 必须保留。最近完成 admission 重入复用、staged-read 默认化、双路串行默认化、
-  solo 回退常量化及 30 秒 admission fallback 常量化。
+  solo 回退常量化及 30 秒 admission fallback 常量化；conversation cache 在确认新快照能放下
+  之前不再删除 superseded 旧副本，已完成的 staged read 按零待读 token 参与 admission。
 - 未决默认值：`--conversation-cache-min-tokens 4096` 使实测 3,894-token 会话没有 parking。
   交接建议改为 2,048，但尚无新的五会话验证；这是 owner 决策，不把推测写进默认。
 - 历史“优化已停止、仅维护稳定”说明保留在本文件后部，只作为 2026-11-01 至 2026-11-12
