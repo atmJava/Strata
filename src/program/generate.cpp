@@ -9217,11 +9217,6 @@ int main(int argc, char** argv) {
                              src.ids.size(), (long long) o.conversation_cache_min_tokens, conversations.size());
                 return true;
             }
-            // #342: before make_room evicts oldest-first, the copies of this conversation a turn back go (they hold
-            // nothing the outgoing chain does not, apart from the tail this conversation rewrote)
-            if (const size_t dropped = conversations.drop_superseded(src.ids, src.imgs, src.checks, src.cvec))
-                std::fprintf(stderr, "strata serve: conversation cache: dropped %zu superseded cop%s of this "
-                             "conversation; parked=%zu\n", dropped, dropped == 1 ? "y" : "ies", conversations.size());
             // A layer split parks one image per stage: the first stage's (with the draft layer's K/V) and one per
             // later stage (without it - the draft ring is saved once).  The checkpoints are MOVED apart into their
             // stage parts for the capture and put back together whichever way this ends (no running state copied).
@@ -9292,6 +9287,19 @@ int main(int argc, char** argv) {
                 err.clear();
             }
             estimate += stage_estimate;
+            // #342: the copies of this conversation a turn back can make room, but they hold the only reusable
+            // state if the remaining pinned or borrowed entries still cannot fit the replacement.  Decide before
+            // dropping them, then let make_room evict oldest-first only after the replacement is known to fit.
+            if (!conversations.can_make_room_after_superseded(estimate, held, view.ids, view.images, view.checkpoints,
+                                                               view.cvec)) {
+                std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds "
+                                     "available budget beside pinned or borrowed conversations)\n",
+                             estimate >> 20);
+                return true;
+            }
+            if (const size_t dropped = conversations.drop_superseded(view.ids, view.images, view.checkpoints, view.cvec))
+                std::fprintf(stderr, "strata serve: conversation cache: dropped %zu superseded cop%s of this "
+                             "conversation; parked=%zu\n", dropped, dropped == 1 ? "y" : "ies", conversations.size());
             // A park carrying its own retained K/V replaces memory the cache
             // already held, so capacity is make_room's call - it runs next either
             // way, and put()'s accounting still bounds the budget. The with-reuse
@@ -12936,7 +12944,7 @@ int main(int argc, char** argv) {
             // --conversation-cache-park-gain N: a park now would supersede the entry parked_prefix_tokens() reports (the copy
             // this conversation wrote last), so a conversation that advanced fewer than N tokens since then keeps it:
             // it still holds this conversation's prefix, and re-parking writes the whole snapshot only for the next
-            // turn to drop it again.  0 (the default) parks every turn, as before.
+            // turn to drop it again.  0 parks every turn.
             const size_t park_held = o.conversation_cache_park_gain > 0
                                          ? conversations.parked_prefix_tokens(live, live_imgs, checks, cvec_cached)
                                          : 0;

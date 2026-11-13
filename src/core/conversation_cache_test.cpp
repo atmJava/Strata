@@ -477,6 +477,41 @@ int main() {
         one_slot.unguard();
     }
     {
+        // A replacement that supersedes the only evictable entry must not remove that entry before it knows it
+        // fits beside a guarded donor.  The old copy is the only reusable state if the new capture is refused.
+        auto cp = [](std::vector<int32_t> ids) { ConversationCheckpoint c; c.ids = std::move(ids); return c; };
+        SavedConversation donor = image({1, 2, 10});
+        donor.checkpoints = {cp({1, 2}), cp({1, 2, 10})};
+        SavedConversation old = image({1, 2, 20, 21});
+        old.checkpoints = {cp({1, 2}), cp({1, 2, 20})};
+        const size_t donor_bytes = donor.bytes(), old_bytes = old.bytes();
+        ConversationCache cache(donor_bytes + old_bytes, 2);
+        check(cache.put(std::move(donor)), "park the guarded donor before the old copy");
+        const auto donor_match = cache.best(std::vector<int32_t>{1, 2, 99}, {}, true);
+        check(cache.put(std::move(old)), "park the evictable copy the replacement supersedes");
+        const auto old_match = cache.best(std::vector<int32_t>{1, 2, 20, 21, 30}, {}, true);
+        check(donor_match.serial != 0 && old_match.serial != 0 && donor_match.serial != old_match.serial,
+              "the donor and old copy have distinct identities");
+
+        SavedConversation replacement = image({1, 2, 20, 21, 30});
+        replacement.checkpoints = {cp({1, 2}), cp({1, 2, 20})};
+        const size_t base = replacement.bytes();
+        if (base <= old_bytes) replacement.live.gdn.resize(replacement.live.gdn.size() + old_bytes - base + 1);
+        check(replacement.bytes() > old_bytes && replacement.bytes() <= donor_bytes + old_bytes,
+              "the replacement needs the old copy's room but still fits the cache by itself");
+
+        cache.guard(donor_match.serial);
+        check(!cache.can_make_room_after_superseded(replacement.bytes(), 0, replacement.live.ids,
+                                                    replacement.live.imgs, replacement.checkpoints, replacement.cvec) &&
+              cache.guard_blocked(),
+              "preflight refuses before dropping the superseded copy beside the donor");
+        check(cache.find(old_match.serial) != nullptr, "the failed preflight leaves the old copy parked");
+        check(!cache.put(std::move(replacement)) && cache.find(old_match.serial) != nullptr &&
+              cache.size() == 2 && cache.evictions() == 0,
+              "put also refuses without dropping the old copy or evicting the donor");
+        cache.unguard();
+    }
+    {
         // pin=N beside a borrow: the guarded donor and a conversation holding a pinned shared prefix both stay; the
         // oldest other entry is the one evicted (the case midhatn tested on #1164)
         auto cp = [](std::vector<int32_t> ids, bool pinned = false) {

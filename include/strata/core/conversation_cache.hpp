@@ -268,6 +268,30 @@ public:
                entries_.size() < slots_ && bytes() <= budget_ - held - incoming;
     }
 
+    // Preflight a park whose superseded copies drop_superseded() would remove.  Dropping those copies can
+    // make room, but must not happen when the remaining pinned or guarded entries still leave no room for the
+    // replacement: a failed put would then lose the old copy without storing the new one.
+    bool can_make_room_after_superseded(size_t incoming, size_t held, const std::vector<int32_t>& ids,
+                                        const std::vector<ConversationImageKey>& images,
+                                        const std::vector<ConversationCheckpoint>& checkpoints, bool cvec) {
+        if (!enabled() || held > budget_ || incoming > budget_ - held) return false;
+        size_t kept = 0, kept_bytes = 0;
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            const bool guarded = guarded_ != 0 && serials_[i] == guarded_;
+            if (!guarded && superseded_checkpoint(ids, images, checkpoints, cvec, entries_[i]) != nullptr)
+                continue;
+            if (entries_[i].pinned() || guarded) {
+                ++kept;
+                kept_bytes += entries_[i].bytes();
+            }
+        }
+        if (kept >= slots_ || kept_bytes > budget_ - held - incoming) {
+            if (guarded_ != 0 && index_of(guarded_) != SIZE_MAX) guard_blocked_ = true;
+            return false;
+        }
+        return true;
+    }
+
     template<class Token>
     Match best(const std::vector<Token>& prompt, const std::vector<ConversationImageKey>& images, bool cvec) const {
         Match best;
@@ -407,19 +431,10 @@ public:
     // shares the system prompt's root with it), is kept.  Returns how many were dropped.
     size_t drop_superseded(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& images,
                            const std::vector<ConversationCheckpoint>& checkpoints, bool cvec) {
-        auto held = [&](const ConversationCheckpoint& c) {
-            if (c.ids == ids && c.imgs == images) return true;
-            for (const auto& k : checkpoints)
-                if (k.ids == c.ids && k.imgs == c.imgs) return true;
-            return false;
-        };
         size_t dropped = 0;
         for (size_t i = 0; i < entries_.size();) {
             const auto& e = entries_[i];
-            const ConversationCheckpoint* deepest = nullptr;
-            for (const auto& c : e.checkpoints)
-                if (!deepest || c.ids.size() > deepest->ids.size()) deepest = &c;
-            if (e.cvec == cvec && deepest && !deepest->ids.empty() && held(*deepest) &&
+            if (superseded_checkpoint(ids, images, checkpoints, cvec, e) != nullptr &&
                 !(guarded_ != 0 && serials_[i] == guarded_)) {
                 bytes_ -= e.bytes();
                 erase(i);
@@ -440,15 +455,8 @@ public:
                                 const std::vector<ConversationCheckpoint>& checkpoints, bool cvec) const {
         size_t longest = 0;
         for (const auto& e : entries_) {
-            if (e.cvec != cvec) continue;
-            const ConversationCheckpoint* deepest = nullptr;
-            for (const auto& c : e.checkpoints)
-                if (!deepest || c.ids.size() > deepest->ids.size()) deepest = &c;
-            if (!deepest || deepest->ids.empty()) continue;
-            bool holds = deepest->ids == ids && deepest->imgs == images;
-            for (const auto& k : checkpoints)
-                if (!holds && k.ids == deepest->ids && k.imgs == deepest->imgs) holds = true;
-            if (holds) longest = std::max(longest, deepest->ids.size());
+            if (const auto* deepest = superseded_checkpoint(ids, images, checkpoints, cvec, e))
+                longest = std::max(longest, deepest->ids.size());
         }
         return longest;
     }
@@ -456,6 +464,8 @@ public:
     bool put(SavedConversation&& image, size_t held = 0) {
         const size_t n = image.bytes();
         if (!enabled() || held > budget_ || n > budget_ - held) return false;   // make_room's refusal, first
+        if (!can_make_room_after_superseded(n, held, image.live.ids, image.live.imgs, image.checkpoints, image.cvec))
+            return false;
         drop_superseded(image.live.ids, image.live.imgs, image.checkpoints, image.cvec);
         if (!make_room(n, held)) return false;
         entries_.push_back(std::move(image));
@@ -465,6 +475,25 @@ public:
     }
 
 private:
+    static const ConversationCheckpoint* deepest_checkpoint(const SavedConversation& entry) {
+        const ConversationCheckpoint* deepest = nullptr;
+        for (const auto& c : entry.checkpoints)
+            if (!deepest || c.ids.size() > deepest->ids.size()) deepest = &c;
+        return deepest;
+    }
+
+    static const ConversationCheckpoint* superseded_checkpoint(
+            const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& images,
+            const std::vector<ConversationCheckpoint>& checkpoints, bool cvec, const SavedConversation& entry) {
+        if (entry.cvec != cvec) return nullptr;
+        const ConversationCheckpoint* deepest = deepest_checkpoint(entry);
+        if (deepest == nullptr || deepest->ids.empty()) return nullptr;
+        if (deepest->ids == ids && deepest->imgs == images) return deepest;
+        for (const auto& c : checkpoints)
+            if (c.ids == deepest->ids && c.imgs == deepest->imgs) return deepest;
+        return nullptr;
+    }
+
     void erase(size_t index) {
         entries_.erase(entries_.begin() + (std::ptrdiff_t) index);
         serials_.erase(serials_.begin() + (std::ptrdiff_t) index);
