@@ -112,7 +112,7 @@ exactly the tokens it decodes alone (`tools/batch_test.py --n 16`, which now tak
 **Default admission and decode paths.** The direct device-to-device slot copy, its queued batch copy, checkpoint storage
 reuse, same-window admission merge and one-row self-commit are part of the default path. They are not switches and no
 environment variable can turn them off. A new prompt of at most 2,048 tokens takes the control lines first; a longer
-prompt counts as short once it has waited `STRATA_ADMIT_MAX_WAIT_S` (default 30 seconds).
+prompt counts as short once it has waited 30 seconds.
 
 **Remaining opt-in switches** (environment of the engine, i.e. `"env"` in the config; each one below changes how work is
 scheduled or copied, not what is computed). `tools/batch_test.py` checks that every slot decodes the tokens it decodes

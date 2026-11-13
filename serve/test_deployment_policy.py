@@ -51,6 +51,10 @@ class Admission(unittest.TestCase):
     def test_no_switch_can_change_it(self):
         self.assertEqual(source_reads("STRATA_ADMIT_SHORT_FIRST"), [])
 
+    def test_the_long_wait_fallback_has_no_switch(self):
+        self.assertEqual(server.ADMIT_MAX_WAIT_S, 30.0)
+        self.assertEqual(source_reads("STRATA_ADMIT_MAX_WAIT_S"), [])
+
     def test_staged_read_is_a_constant(self):
         self.assertEqual(server.STAGED_READ_MIN_TOKENS, 2048)
 

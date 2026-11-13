@@ -332,7 +332,7 @@ ENGINE_STALL_S = _timeout_env("STRATA_ENGINE_STALL_S", 90.0)
 # in the same round it reads the line, and the request is already ending
 BCANCEL_DRAIN_S = 10.0
 # --batch: new requests take the control lines (one prompt read at a time) by the tokens left to read: at most
-# ADMIT_SHORT_FIRST goes before more work, and more that waited ADMIT_MAX_WAIT_S (default 30) counts as short.  A chat
+# ADMIT_SHORT_FIRST goes before more work, and more that waited ADMIT_MAX_WAIT_S counts as short.  A chat
 # question then waits for the one read in progress, not for every agent read that came before it.
 #
 # 2048 tokens, and not a setting: this deployment answers a chat turn (a few hundred tokens of question behind a long
@@ -340,7 +340,7 @@ BCANCEL_DRAIN_S = 10.0
 # agent turn.  It is this box's default because that is what the box is for (AGENTS.md: the default path is the
 # adapted path; no environment variable or tuning flag for performance).
 ADMIT_SHORT_FIRST = 2048
-ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
+ADMIT_MAX_WAIT_S = 30.0
 # With every slot busy, a prompt that still needs this much reading may be read into the engine's main session and
 # adopted into a free slot.  This is the deployment's measured W3 threshold, not a setting: staging a short
 # read delays the request that will fill the slot without hiding enough work to pay for the extra hand-off.
