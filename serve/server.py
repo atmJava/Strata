@@ -1886,6 +1886,11 @@ class StrataEngine:
         """Work an admission asks the engine for: the prompt tokens no known slot prefix covers."""
         return max(0, int(prompt_tokens) - max(0, int(known_reuse)))
 
+    def _known_prompt_work(self, prompt: list[int]) -> tuple[int, int]:
+        """The prompt prefix a slot already holds and the tokens the engine still has to read."""
+        reused = self._known_prompt_reuse(prompt)
+        return reused, self._tokens_left_to_read(len(prompt), reused)
+
     def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False, reused: int = 0):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
@@ -2002,8 +2007,7 @@ class StrataEngine:
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
-        prompt_reuse = self._known_prompt_reuse(prompt)
-        prompt_work = self._tokens_left_to_read(len(prompt), prompt_reuse)
+        prompt_reuse, prompt_work = self._known_prompt_work(prompt)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         # STRATA_BATCH_SERIAL_TWO (opt-in): exactly two low-concurrency requests
@@ -2028,7 +2032,8 @@ class StrataEngine:
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
-                    ok = yield from self._take_control(cancel, len(prompt))
+                    prompt_reuse, prompt_work = self._known_prompt_work(prompt)
+                    ok = yield from self._take_control(cancel, len(prompt), reused=prompt_reuse)
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -2100,8 +2105,7 @@ class StrataEngine:
                         carry_leg(carry, self.last)         # #1869: the solo leg's figures; the slot's admission (a copy of
                                                             # the held prefix: prompt_read 1) and BDONE replace them
                         prompt = list(ids) + out            # promoted: it continues in a batch slot from here
-                        prompt_reuse = self._known_prompt_reuse(prompt)
-                        prompt_work = self._tokens_left_to_read(len(prompt), prompt_reuse)
+                        prompt_reuse, prompt_work = self._known_prompt_work(prompt)
                 while True:
                     if slot is None:
                         # STRATA_MP_STAGED_READ: with every slot busy, read this prompt into the engine's main
@@ -2112,7 +2116,8 @@ class StrataEngine:
                                 and (staged_min_tokens <= 0 or len(prompt) >= staged_min_tokens)):
                             staged_attempts += 1
                             if not holding:
-                                ok = yield from self._take_control(cancel, len(prompt))
+                                prompt_reuse, prompt_work = self._known_prompt_work(prompt)
+                                ok = yield from self._take_control(cancel, len(prompt), reused=prompt_reuse)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
@@ -2206,7 +2211,8 @@ class StrataEngine:
                                 # loop in _run, not run(): a ("ping", None) here reaches the detokenizer as a token)
                                 yield None
                             if not holding:
-                                ok = yield from self._take_control(cancel, len(prompt))
+                                prompt_reuse, prompt_work = self._known_prompt_work(prompt)
+                                ok = yield from self._take_control(cancel, len(prompt), reused=prompt_reuse)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
@@ -2218,7 +2224,9 @@ class StrataEngine:
                         holding = False
                         with self.slot_cv:
                             epoch = self.ctl_epoch
-                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        prompt_reuse, prompt_work = self._known_prompt_work(prompt)
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch,
+                                                           reused=prompt_reuse)
                         if not ok:
                             return
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)

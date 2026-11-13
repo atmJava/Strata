@@ -5,7 +5,10 @@
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import sys
+import textwrap
 import threading
 import time
 import unittest
@@ -110,6 +113,28 @@ class AdmitOrderTest(unittest.TestCase):
         self.assertEqual(self.e._tokens_left_to_read(10_000, 10_000), 0)
         self.assertEqual(self.e._tokens_left_to_read(10_000, 12_000), 0)
         self.assertEqual(self.e._tokens_left_to_read(10_000, -1), 10_000)
+
+    def test_known_prompt_work_follows_the_slots(self):
+        """A re-admission asks again: a slot that now holds more of the prompt lowers the work."""
+        prompt = list(range(10_000))
+        self.e.slot_held[0] = prompt[:9_000]
+        self.assertEqual(self.e._known_prompt_work(prompt), (9_000, 1_000))
+        self.e.slot_held[0] = prompt[:9_500]
+        self.assertEqual(self.e._known_prompt_work(prompt), (9_500, 500))
+
+    def test_every_prompt_control_wait_reports_known_reuse(self):
+        """Solo promotion, staged wait and BYIELD re-entry must not fall back to the full prompt length."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(StrataEngine.generate_batched)))
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_take_control"
+        ]
+        self.assertTrue(calls)
+        missing = [ast.unparse(call) for call in calls
+                   if not any(keyword.arg == "reused" for keyword in call.keywords)]
+        self.assertEqual(missing, [], "every prompt-control wait must report its known slot reuse")
 
     def test_the_short_work_boundary_is_inclusive(self):
         now = time.monotonic()
