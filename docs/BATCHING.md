@@ -165,11 +165,14 @@ about 10-25% speed per request on this card". `--parallel N` is honoured as aske
   With `--batch-mtp`, each slot verifies one MTP proposal alongside its current token.
 - **A request left alone in a slot** (the others finished, nobody waits) goes back to the solo path: the slot is
   stopped, the engine copies its sessions back and decodes with MTP drafts again (at most twice per request; with
-  `--prompt-cache 0` it stays in the slot; `STRATA_PARALLEL_SOLO=0` turns it off). The draft layer's own K/V was
+  `--prompt-cache 0` it stays in the slot). The draft layer's own K/V was
   built for another conversation then, but measured it accepted as many drafts (140 of 172) as a draft layer that
   read the conversation (140 of 173).
 - **More requests than slots** wait for a free one (`/metrics` -> `live.slots` shows each slot: idle, reading or
   decoding, its tokens and tok/s; `live.running` the requests in flight).
+- **Exactly two low-concurrency requests run one after the other** on the solo path. On this pair of cards that
+  completed two 512-token streams in 10.004 s against 11.776 s with concurrent batch admission. The second request
+  starts later, but the pair finishes 15.05% sooner. A third request promotes the active stream back to a batch slot.
 - **A long read can start before a slot is free.** When every slot is busy and a prompt still has at least 2,048
   tokens left to read, the server reads it into the engine's main session, then adopts it into a free slot
   without reading it again. One staged read runs at a time. A shorter read waits for a slot instead, because the

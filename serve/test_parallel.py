@@ -379,8 +379,11 @@ class FakeEngineCase(unittest.TestCase):
     """The real StrataEngine and Service over HTTP, the fake engine behind them."""
 
     def start(self, slots, fit=None, slot_cache=False, fail=False, reuse=False, says_groups=0,
-              more=(), stage_plan=False, batch_sample=False, stage_sample=False):
+              more=(), stage_plan=False, batch_sample=False, stage_sample=False, serial_two=False):
+        """Start a fake batch engine; slot-mechanics tests opt out, the two serial-policy tests ask for the default."""
         import serve.server as server
+        self.serial_two = mock.patch.object(server, "SERIAL_TWO", serial_two)
+        self.serial_two.start()
         self.tmp = tempfile.TemporaryDirectory()
         script = Path(self.tmp.name) / "fake_strata.py"
         script.write_text(FAKE_BATCH, encoding="utf-8")
@@ -404,6 +407,8 @@ class FakeEngineCase(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
     def tearDown(self):
+        if getattr(self, "serial_two", None):
+            self.serial_two.stop()
         if getattr(self, "httpd", None):
             self.httpd.shutdown()
             self.httpd.server_close()
@@ -819,20 +824,19 @@ class ParallelService(FakeEngineCase):
         self.assertTrue(all(a <= 1 for a in active), active)
 
     def test_serial_two_keeps_exactly_two_on_the_solo_path(self):
-        with mock.patch.dict(os.environ, {"STRATA_BATCH_SERIAL_TWO": "1"}):
-            self.start(6, slot_cache=True, says_groups=2, more=("--batch-groups", "2"))
-            out = {}
+        self.start(6, slot_cache=True, says_groups=2, more=("--batch-groups", "2"), serial_two=True)
+        out = {}
 
-            def go(key, text):
-                out[key] = self.chat(text, max_tokens=64)
+        def go(key, text):
+            out[key] = self.chat(text, max_tokens=64)
 
-            first = threading.Thread(target=go, args=("a", "first LONGREPLY"))
-            second = threading.Thread(target=go, args=("b", "second"))
-            first.start()
-            time.sleep(0.05)
-            second.start()
-            first.join(30)
-            second.join(30)
+        first = threading.Thread(target=go, args=("a", "first LONGREPLY"))
+        second = threading.Thread(target=go, args=("b", "second"))
+        first.start()
+        time.sleep(0.05)
+        second.start()
+        first.join(30)
+        second.join(30)
 
         self.assertEqual(out["a"]["choices"][0]["message"]["content"], "ok, " + "la " * 15 + "done.")
         self.assertEqual(out["b"]["choices"][0]["message"]["content"], "ok, done.")
@@ -840,23 +844,22 @@ class ParallelService(FakeEngineCase):
         self.assertEqual([line.split()[0] for line in calls], ["GEN", "GEN"])
 
     def test_serial_two_promotes_when_a_third_request_waits(self):
-        with mock.patch.dict(os.environ, {"STRATA_BATCH_SERIAL_TWO": "1"}):
-            self.start(6, slot_cache=True, says_groups=2, more=("--batch-groups", "2"))
-            errors = []
+        self.start(6, slot_cache=True, says_groups=2, more=("--batch-groups", "2"), serial_two=True)
+        errors = []
 
-            def go(text):
-                try:
-                    self.chat(text, max_tokens=64)
-                except Exception as exc:  # noqa: BLE001 - surfaced below
-                    errors.append(exc)
+        def go(text):
+            try:
+                self.chat(text, max_tokens=64)
+            except Exception as exc:  # noqa: BLE001 - surfaced below
+                errors.append(exc)
 
-            threads = [threading.Thread(target=go, args=(text,))
-                       for text in ("first LONGREPLY", "second", "third")]
-            for thread in threads:
-                thread.start()
-                time.sleep(0.05)
-            for thread in threads:
-                thread.join(30)
+        threads = [threading.Thread(target=go, args=(text,))
+                   for text in ("first LONGREPLY", "second", "third")]
+        for thread in threads:
+            thread.start()
+            time.sleep(0.05)
+        for thread in threads:
+            thread.join(30)
 
         self.assertEqual(errors, [])
         calls = [line for line in self.log.read_text().splitlines() if line.startswith(("GEN ", "BGEN "))]

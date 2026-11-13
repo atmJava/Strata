@@ -342,9 +342,13 @@ BCANCEL_DRAIN_S = 10.0
 ADMIT_SHORT_FIRST = 2048
 ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
 # With every slot busy, a prompt that still needs this much reading may be read into the engine's main session and
-# adopted into the first free slot.  This is the deployment's measured W3 threshold, not a setting: staging a short
+# adopted into a free slot.  This is the deployment's measured W3 threshold, not a setting: staging a short
 # read delays the request that will fill the slot without hiding enough work to pay for the extra hand-off.
 STAGED_READ_MIN_TOKENS = 2048
+# Exactly two low-concurrency requests make better use of this pair of cards on the solo path: they run one after the
+# other, and a third request promotes the active stream back to a batch slot.  Measured on 2x RTX 2080 Ti: two
+# 512-token streams finished in 10.004 s versus 11.776 s with concurrent batch admission (15.05% faster end to end).
+SERIAL_TWO = True
 # DSH compacts at about 80% of a 200K window, so one conversation peaks near this many tokens, and the working set this
 # server is sized for is five of them (AGENTS.md).  Capacity is answered in these units - how many conversations fit -
 # not in gigabytes.
@@ -2014,11 +2018,7 @@ class StrataEngine:
         prompt_reuse, prompt_work = self._known_prompt_work(prompt)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
-        # STRATA_BATCH_SERIAL_TWO (opt-in): exactly two low-concurrency requests
-        # run one after the other on the faster solo path. A third request still
-        # promotes the active stream to a batch slot, and four streams keep the
-        # production batch layout. The default remains unchanged.
-        serial_two = os.environ.get("STRATA_BATCH_SERIAL_TWO") == "1"
+        serial_two = SERIAL_TWO
         ok = yield from self._take_control(cancel, len(prompt), new=True, reused=prompt_reuse)
         if not ok:
             return

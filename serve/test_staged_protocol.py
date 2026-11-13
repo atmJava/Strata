@@ -312,6 +312,9 @@ class FakeEngineCase(unittest.TestCase):
     """A StrataEngine + Service over the strict fake, with helpers for guarded requests and log assertions."""
 
     def setUp(self):
+        self.serial_two = mock.patch.object(_server, "SERIAL_TWO", False)
+        self.serial_two.start()
+        self.addCleanup(self.serial_two.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

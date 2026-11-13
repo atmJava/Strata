@@ -59,6 +59,12 @@ class Admission(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(source_reads(name), [])
 
+    def test_serial_two_is_a_constant(self):
+        self.assertIs(server.SERIAL_TWO, True)
+
+    def test_no_switch_can_change_serial_two(self):
+        self.assertEqual(source_reads("STRATA_BATCH_SERIAL_TWO"), [])
+
 
 class TheFourDshBehaviours(unittest.TestCase):
     """Each is a default with a shape check of its own, never an opt-in."""

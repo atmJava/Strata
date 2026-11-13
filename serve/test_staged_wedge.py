@@ -129,6 +129,9 @@ while True:
 @unittest.skipUnless(_HAS_STAGED_READ, "serve/server.py has no staged read (BREAD): apply the mp-w3 server patch")
 class StagedWedge(unittest.TestCase):
     def setUp(self):
+        self.serial_two = mock.patch.object(_server, "SERIAL_TWO", False)
+        self.serial_two.start()
+        self.addCleanup(self.serial_two.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
