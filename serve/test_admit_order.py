@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import queue
 import sys
 import textwrap
 import threading
@@ -252,6 +253,37 @@ class AdmitOrderTest(unittest.TestCase):
             next(wait)
         self.assertFalse(stopped.exception.value)
         self.assertTrue(e.ctl.acquire(blocking=False), "a cancelled admission must not retain the control lines")
+        e.ctl.release()
+
+    def test_a_request_cancelled_while_claiming_a_slot_does_not_send_bgen(self):
+        """A client can leave after it gets the control lines and before its slot is chosen. The claim must be
+        released without reading the prompt into the engine."""
+        e = engine_without_process(2)
+        e.slot_busy[0], e.slot_claims = True, {0}
+        e.slot_q = [queue.Queue(), queue.Queue()]
+        e.slot_live, e.slot_releasing = [None, None], set()
+        e.mp_staged, e._yielded = None, None
+        e.progress, e.progress_ms, e.reused = None, 0, 0
+        cancel = threading.Event()
+        original_pick = e.pick_slot
+
+        def pick_then_cancel(prompt):
+            slot = original_pick(prompt)
+            cancel.set()
+            return slot
+        e.pick_slot = pick_then_cancel
+        sends = []
+
+        def send(line):
+            sends.append(line)
+            raise AssertionError(f"cancelled request sent {line!r}")
+        e._send = send
+
+        self.assertEqual(list(e.generate_batched([1] * 100, 8, {}, cancel)), [])
+        self.assertEqual(sends, [])
+        self.assertEqual(e.slot_busy, [True, False])
+        self.assertEqual(e.slot_claims, {0})
+        self.assertTrue(e.ctl.acquire(blocking=False), "a cancelled admission must release the control lines")
         e.ctl.release()
 
     def test_the_short_work_boundary_is_inclusive(self):

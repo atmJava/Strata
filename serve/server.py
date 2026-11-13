@@ -2249,6 +2249,8 @@ class StrataEngine:
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
+                    if cancel.is_set():
+                        return
                     if self._yielded is not None:           # it gave way: the others waiting then go first
                         self.slot_held[slot] = list(prompt[:self._yielded[1]])
                         self._yielded = None
