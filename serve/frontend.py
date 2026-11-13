@@ -1299,7 +1299,8 @@ class OutputParser:
             return name
         m = _PREFIX_NAME.match(raw)
         member = m.group(1) if m else None
-        if member and (member in self.schemas or member in self.aliases or member in self.rewrite):
+        if member and (member in self.schemas or member in self.aliases or member in self.rewrite
+                       or "*" in self.rewrite):
             return self.aliases.get(member, member)
         return name
 
@@ -1547,7 +1548,7 @@ class OutputParser:
                 name = self._name_of(name)
                 if raw_name != raw_name.strip() and name not in self.schemas:
                     return out
-                if name not in self.schemas and name in self.rewrite:
+                if name not in self.schemas and (name in self.rewrite or "*" in self.rewrite):
                     return out          # delivered as the declared wrapper once whole: these arguments are not its own
                 self.scall = ToolCall(name=name, arguments={})
                 props = ((self.schemas.get(name) or {}).get("parameters") or {}).get("properties") or {}
