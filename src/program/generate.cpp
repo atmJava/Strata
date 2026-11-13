@@ -3950,7 +3950,7 @@ int main(int argc, char** argv) {
     // here, before any stage sizes its expert cache (the second verifier per stage and the snapshots are allocated
     // after the caches, so their room is kept out of them).  What it does not support turns it off, said once.  This
     // checkout has no architecture-dependent automatic pipeline: an omitted flag stays off on the sm_75 deployment.
-    const bool mtp_first_ok = [&] {
+    const bool mtp_draft_head_ready = [&] {
         if (o.mtp.empty() || o.spec < 2) return false;
         if (const char* fh = std::getenv("STRATA_MTP_FULL_HEAD"); fh != nullptr && fh[0] == '1') return false;
         std::error_code ec;
@@ -3981,7 +3981,7 @@ int main(int argc, char** argv) {
     // a slot that later does not fit may disable batching, but may not move a drafter whose memory was already planned
     // on the last stage.  Command-line --batch, its --slots alias, and the server's "parallel" all arrive as this input.
     const strata::program::mtp_placement::Inputs mtp_layout_inputs{
-        mtp_first_ok, o.pipeline_windows, split_devs.size(), o.batch};
+        mtp_draft_head_ready, o.pipeline_windows, split_devs.size(), o.batch};
     const strata::program::mtp_placement::Layout mtp_layout{
         strata::program::mtp_placement::resolve(mtp_layout_inputs)};
     if (!pw_auto && o.pipeline_windows >= 2 && split_devs.size() == 1 &&
@@ -4110,9 +4110,10 @@ int main(int argc, char** argv) {
             strata::program::mtp_placement::drafter_device(
                 mtp_layout, primary_device, last_st != nullptr ? last_st->dev : primary_device);
         std::fprintf(stderr,
-                     "strata diag placement: mtp_first_ok=%d pipeline_windows=%d stages=%zu requested_slots=%d mtp_first=%d "
+                     "strata diag placement: draft_head_ready=%d pipeline_windows=%d stages=%zu requested_slots=%d mtp_first=%d "
                      "mtp_dev=%d last_stage_dev=%d\n",
-                     mtp_first_ok, o.pipeline_windows, stages.size(), mtp_layout_inputs.requested_slots, mtp_first, mtp_dev,
+                     mtp_draft_head_ready, o.pipeline_windows, stages.size(), mtp_layout_inputs.requested_slots, mtp_first,
+                     mtp_dev,
                      last_st != nullptr ? last_st->dev : -1);
         std::fflush(stderr);
     }

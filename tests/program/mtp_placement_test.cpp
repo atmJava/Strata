@@ -2,7 +2,6 @@
 #include "strata/program/mtp_placement.hpp"
 
 #include <cstdio>
-#include <initializer_list>
 
 using strata::program::mtp_placement::DrafterStage;
 using strata::program::mtp_placement::drafter_device;
