@@ -325,6 +325,10 @@ inline int qsa_kv_format(const QsaState& st) {
 }
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
                         const QsaState* share_rope = nullptr, int64_t ring_cells = 0);
+/// Bytes one token of a conversation costs in the running KV format, over every QSA layer: the K/V pool, the page
+/// table and the pooled indexer key - the parts that grow with the cells.  This is what a parked conversation holds
+/// per token, so capacity is derived from it instead of from a round number.
+uint64_t qsa_kv_token_bytes(const ModelGeometry& g);
 /// KV streaming: the pools a reader sees (the VRAM slots) and, when streamed, make the selection's blocks resident.
 strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st);
 void qsa_kv_resolve(const QsaState& st, const ModelGeometry& g, const int32_t* ids, const int32_t* steps, int64_t n_q,

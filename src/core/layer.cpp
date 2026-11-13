@@ -707,15 +707,20 @@ KvPlan kv_plan(const QsaShapes& s, int64_t max_cells, int64_t ring_cells) {
     }
     return p;
 }
-uint64_t kv_pool_bytes(const QsaShapes& s, int64_t pages, bool hybrid, bool int8) {
+// One cell (one token) of one QSA layer, K and V storage only - no page table, no pooled indexer key.
+uint64_t kv_cell_storage_bytes(const QsaShapes& s, bool hybrid, bool int8, bool q4) {
     if (hybrid) {   // K8V4: the INT8 K half (codes + scales) plus the Q4_0 V half (kv_q4.hpp's rotation)
-        const uint64_t rows = (uint64_t) pages * s.page_size * s.n_head_kv;
-        return rows * (uint64_t) s.head_dim + rows * (uint64_t) (s.head_dim / strata::kernels::KV_Q8_GROUP) * 2 +
-               rows * strata::kernels::kv_q4_bytes_per_head((int) s.head_dim) + 64;
+        return (uint64_t) s.n_head_kv * (uint64_t) s.head_dim +
+               (uint64_t) s.n_head_kv * (uint64_t) (s.head_dim / strata::kernels::KV_Q8_GROUP) * 2 +
+               (uint64_t) s.n_head_kv * strata::kernels::kv_q4_bytes_per_head((int) s.head_dim);
     }
-    if (g_kv_q4) return (uint64_t) pages * s.page_size * strata::kernels::kv_q4_bytes_per_cell(s) + 64;
-    return int8 ? (uint64_t) pages * s.page_size * strata::kernels::kv_q8_bytes_per_cell(s) + 64
-                : (uint64_t) pages * s.n_head_kv * s.page_size * s.head_dim * 2 * 2;
+    if (q4) return strata::kernels::kv_q4_bytes_per_cell(s);
+    return int8 ? strata::kernels::kv_q8_bytes_per_cell(s) : (uint64_t) s.n_head_kv * s.head_dim * 2 * 2;
+}
+uint64_t kv_pool_bytes(const QsaShapes& s, int64_t pages, bool hybrid, bool int8) {
+    const uint64_t cells = (uint64_t) pages * (uint64_t) s.page_size;
+    // the INT8-family pools carry a per-state alignment pad; the FP16 pool is sized without one
+    return cells * kv_cell_storage_bytes(s, hybrid, int8, g_kv_q4) + (g_kv_q4 || int8 || hybrid ? 64 : 0);
 }
 }  // namespace
 
@@ -741,6 +746,15 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
     n += strata::kernels::qsa_step_bytes() + 16;                               // counts and aligned attention status
     n += (uint64_t) s.n_head * 4;                                              // pos_dev
     return align_up16(n) + 256;
+}
+
+uint64_t qsa_kv_token_bytes(const ModelGeometry& g) {
+    const QsaShapes s = qsa_shapes(g);
+    const uint64_t per_cell = kv_cell_storage_bytes(s, g_kv_hybrid, g_kv_int8 || g_kv_hybrid, g_kv_q4);
+    const uint64_t page_table = (4 + (uint64_t) s.page_size - 1) / (uint64_t) s.page_size;
+    // One FP32 pooled indexer key per block, over idx_dim - the term qsa_state_bytes sizes as pooled_rows * idx_dim * 4.
+    const uint64_t indexer = ((uint64_t) s.idx_dim * 4 + (uint64_t) s.idx_block - 1) / (uint64_t) s.idx_block;
+    return (uint64_t) g.n_qsa_layers() * (per_cell + page_table + indexer);
 }
 
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,

@@ -341,6 +341,10 @@ BCANCEL_DRAIN_S = 10.0
 # adapted path; no environment variable or tuning flag for performance).
 ADMIT_SHORT_FIRST = 2048
 ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
+# DSH compacts at about 80% of a 200K window, so one conversation peaks near this many tokens, and the working set this
+# server is sized for is five of them (AGENTS.md).  Capacity is answered in these units - how many conversations fit -
+# not in gigabytes.
+COMPACTION_TOKENS = 163_840
 STALL_CPU_EPS_S = 0.5       # CPU seconds the engine may use in the whole stall window and still count as frozen
 STALL_IO_EPS_B = 1 << 20    # bytes read or written in that window
 
@@ -915,12 +919,21 @@ def conversation_slots(engine) -> int | None:
 
 
 def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) -> dict:
-    """#596: the Monitor's Conversation cache card: the parked conversations (the engine's opt-in
-    --conversation-cache-mib: budget, slots, what its log says) and how much of the prompts the cache gave back."""
+    """#596: the Monitor's Conversation cache card: the parked conversations (the budget, the slots, what its log
+    says), what that budget buys in conversations at the compaction point, and how much of the prompts the cache gave
+    back."""
     mib = info.get("conversation_cache_mib")
+    # The engine reports what one token of a conversation costs in the running KV format (INFO kv_bytes_per_token), so
+    # the budget becomes the only number that matters here: how many conversations it holds at the compaction point.
+    per_token = info.get("kv_bytes_per_token")
+    capacity = (int(mib * 1024 * 1024 // per_token)
+                if isinstance(mib, int) and mib > 0 and isinstance(per_token, int) and per_token > 0 else None)
     last = hist[-1] if hist else None
     return {"enabled": isinstance(mib, int) and mib > 0, "budget_mib": mib if isinstance(mib, int) else None,
-            "slots": info.get("conversation_cache_slots"), **parked,
+            "slots": info.get("conversation_cache_slots"),
+            "kv_bytes_per_token": per_token, "capacity_tokens": capacity,
+            "capacity_conversations": round(capacity / COMPACTION_TOKENS, 1) if capacity else None,
+            **parked,
             "requests": len(hist), "requests_reused": sum(1 for r in hist if (r.get("reused") or 0) > 0),
             "reused_tokens": totals.get("reused", 0), "prompt_tokens": totals.get("prompt_tokens", 0),
             "last_reused": last.get("reused") if last else None,
