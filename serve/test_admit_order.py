@@ -122,6 +122,16 @@ class AdmitOrderTest(unittest.TestCase):
         self.e.slot_held[0] = prompt[:9_500]
         self.assertEqual(self.e._known_prompt_work(prompt), (9_500, 500))
 
+    def test_ranking_uses_reuse_a_free_slot_can_provide_now(self):
+        """A busy slot's prefix cannot make a request short while an empty slot is available."""
+        prompt = list(range(10_000))
+        self.e.slot_held[0] = prompt[:9_000]
+        self.e.slot_busy[0] = True
+        self.e.slot_held[1] = []
+        self.assertEqual(self.e._known_prompt_work(prompt), (0, 10_000))
+        self.e.slot_busy[0] = False
+        self.assertEqual(self.e._known_prompt_work(prompt), (9_000, 1_000))
+
     def test_every_prompt_control_wait_reports_known_reuse(self):
         """Solo promotion, staged wait and BYIELD re-entry must not fall back to the full prompt length."""
         tree = ast.parse(textwrap.dedent(inspect.getsource(StrataEngine.generate_batched)))

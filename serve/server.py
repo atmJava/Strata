@@ -2503,9 +2503,16 @@ class StrataEngine:
         return turn if 0 < turn < len(prompt) and prompt[:turn] == held[:turn] else 0
 
     def _known_prompt_reuse(self, prompt: list[int]) -> int:
-        """The longest known slot prefix for `prompt`, used to rank and yield by expected work."""
+        """The prefix `prompt` can use now: among free slots when one exists, else the best parked slot prefix.
+
+        Counting a busy slot while an empty slot is available makes a long read look short and lets it take the control
+        lines ahead of a genuinely short request.  While every slot is busy there is no such immediate mismatch: the
+        request must wait, and the best held prefix is the best estimate of the work its eventual slot will save.
+        """
         with self.slot_cv:
-            return max((self._held_prefix(b, prompt) for b in range(self.batch)), default=0)
+            free = [b for b in range(self.batch) if not self.slot_busy[b]]
+            usable = free if free else range(self.batch)
+            return max((self._held_prefix(b, prompt) for b in usable), default=0)
 
     def pick_slot(self, prompt: list[int]) -> int | None:
         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
