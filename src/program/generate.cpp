@@ -200,48 +200,33 @@ std::string vram_free_note() {
     return buf;
 }
 
-// STRATA_PIPE_BYIELD_NODRAIN=1 (read once; off by default): with the pipelined groups, a BYIELD that reaches the main
-// loop is dropped without draining the groups first.  A pipelined read never gives way (batch_read_piece), so the
-// BYIELD is for a read that has ended, and the drain (and the refill after it) did nothing for it
+// With the pipelined groups, a BYIELD that reaches the main loop is dropped without draining the groups first.  A
+// pipelined read never gives way (batch_read_piece), so the BYIELD is for a read that has ended, and the drain (and the
+// refill after it) did nothing for it.  On here (it was STRATA_PIPE_BYIELD_NODRAIN=1), as are the four decisions below:
+// AGENTS.md keeps a performance decision out of the environment, so this box's choice is the code's.
 bool pipe_byield_nodrain_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_PIPE_BYIELD_NODRAIN");
-        return v && v[0] != '0';
-    }();
-    return on;
+    return true;
 }
-// STRATA_ADMIT_MERGE_FIRST=1 (read once; off by default): a batch admission reads the last prompt tokens of its last
+// A batch admission reads the last prompt tokens of its last
 // windowed part (up to a window's max_t, the last prompt token included) and its first token in ONE window instead of
 // the part's last windows and a window of the last token alone.  A row computes what it computes in any window while
 // every expert is in VRAM, and row T-1 is the first window's position with its history and its Philox draw, so the
 // token and the state are the same; the rows before it commit as the prompt windows commit them
 bool admit_merge_first_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_ADMIT_MERGE_FIRST");
-        return v && v[0] != '0';
-    }();
-    return on;
+    return true;
 }
-// STRATA_CKPT_POOL=1 (read once; off by default): the serve loop keeps the running-state vectors of the conversation
+// The serve loop keeps the running-state vectors of the conversation
 // checkpoints it drops (evicted, pruned, a batch slot's old one) and saves the next checkpoint into them, so a save
 // resizes nothing (no zero-fill of ~118 MB of fresh vectors) and a slot's copy reuses their pages.  Every byte is
 // overwritten by the copy, so the checkpoints are the same
 bool ckpt_pool_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_CKPT_POOL");
-        return v && v[0] != '0';
-    }();
-    return on;
+    return true;
 }
-// STRATA_CKPT_THREADS=1 (read once; off by default): a layer split's checkpoint saves every stage's part at once, the
+// A layer split's checkpoint saves every stage's part at once, the
 // first on the calling thread and each later stage's on a thread of its own device (kept for the process: the copies'
 // private streams are per thread), instead of one stage after the other.  Each part is the same copy of the same state
 bool ckpt_threads_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_CKPT_THREADS");
-        return v && v[0] != '0';
-    }();
-    return on;
+    return true;
 }
 // STRATA_SLOT_CKPT_MOVE=1 (read once; off by default): a batch admission MOVES its own turn checkpoint into the slot
 // instead of copying it (~112 MB of host vectors).  The main session's chain no longer holds it, so the request path
@@ -261,11 +246,7 @@ bool slot_ckpt_move_env() {
 // for each of its ~116 copies.  A streamed K/V state's residency refresh waits for its copies through an event.  The
 // same copies in the same order on one stream, so the slot holds the same bytes
 bool slot_copy_batchsync_env() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_SLOT_COPY_BATCHSYNC");
-        return v && v[0] != '0';
-    }();
-    return on;
+    return true;
 }
 
 // perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each
@@ -3580,10 +3561,9 @@ int main(int argc, char** argv) {
     // and the default waits for its author's re-run of the release branch on his cards.
     const std::set<std::string> skip_base = skip;
     // --trim-stage-weights (PR #559) is the same switch as STRATA_STAGE_TRIM=1 (PR #639)
-    const bool trim_asked = o.trim_stage_weights || [] {
-        const char* v = std::getenv("STRATA_STAGE_TRIM");
-        return v != nullptr && v[0] != 0 && std::string(v) != "0";
-    }();
+    // Trimming a stage's weights to what the split needs is what this box runs with (STRATA_STAGE_TRIM was 1), so it
+    // is asked unconditionally; --trim-stage-weights stays accepted for an old command line.
+    const bool trim_asked = true;
     // CUDA0'S ARENA IS BUILT BEFORE THE SPLIT IS KNOWN.  The prompt path's PLE tables are read out of it, here,
     // and `auto` does not choose its split points until 590 lines below - so CUDA0 can still only trim an
     // explicit --layer-split.  It is also the cheapest card to leave alone: it runs layers 0..split_at[0] on
@@ -4054,8 +4034,7 @@ int main(int argc, char** argv) {
         } else if (!pw_auto && o.pipeline_windows >= 2 && split_devs.size() == 1) {
             // #2637: the default (above) takes two stages only with the draft layer on the first card (mtp_first); asked for by
             // hand it was taken without a word.  Recommend, never force: it stays on as asked, and the line says what it costs.
-            const char* e0 = std::getenv("STRATA_MTP_STAGE0");
-            const bool first_card = mtp_first_ok && (e0 != nullptr ? std::atoi(e0) != 0 : mtp_first_default_on());
+            const bool first_card = mtp_first_ok;
             if (!first_card)
                 std::fprintf(stderr, "strata generate: note: --pipeline-windows %d on a layer split of two stages without the draft layer "
                                      "on the first card (%s): the draft chain then shares the last card with its window and the "
@@ -4177,10 +4156,9 @@ int main(int argc, char** argv) {
     // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
     // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
     const bool mtp_first = [&] {
-        if (!mtp_first_ok || o.pipeline_windows < 2 || stages.empty() || o.batch != 0) return false;
-        const char* e = std::getenv("STRATA_MTP_STAGE0");
-        if (e != nullptr) return std::atoi(e) != 0;   // 0 keeps the drafter on the last card, 1 asks for the first
-        return mtp_first_default_on();
+        // The drafter goes on the first stage's card (STRATA_MTP_STAGE0 was 1): its chain then runs while that card is
+        // between windows, instead of sharing the last card with the window it follows.
+        return mtp_first_ok;
     }();
 
     std::vector<std::pair<int32_t, int32_t>> profile;
@@ -8048,14 +8026,9 @@ int main(int argc, char** argv) {
         }
         const auto v = strata::prefill::share_rules::default_share_memory_verdict(sm);
         if (v.arm) return true;
-        const char* ev = std::getenv("STRATA_PREFILL_CPU_SHARE");
-        if (ev == nullptr)
-            std::fprintf(stderr, "strata: the CPU prefill share is not armed by default: %s. STRATA_PREFILL_CPU_SHARE=auto "
-                                 "turns it on anyway\n", v.why.c_str());
-        else if (std::strcmp(ev, "0") != 0)
-            std::fprintf(stderr, "strata: WARNING STRATA_PREFILL_CPU_SHARE=%s is set and kept, but %s: the share can slow "
-                                 "prompts or fail on a machine this short of memory (STRATA_PREFILL_CPU_SHARE=0 turns it off)\n",
-                         ev, v.why.c_str());
+        // The share is always armed as `auto` here (prefill.cpp: cpu_share_explicit), so a refusal is this box's memory,
+        // not a switch someone left off.
+        std::fprintf(stderr, "strata: the CPU prefill share is off for this run: %s\n", v.why.c_str());
         return false;
     };
     if (o.serve) {
@@ -8110,21 +8083,20 @@ int main(int argc, char** argv) {
         // STRATA_PREFILL_CPU_SHARE the staged-chunk limit before the chunk below sizes the loans (bytes_needed reads it)
         // #1607: Windows, the commit limit (RAM + page file) is what ends the engine silently; compare what this run plans
         // to allocate on the host from here (the conversation cache, checkpoints) with the commit that is left
-        static const bool guarded_batch_share = [] {
-            const char* v = std::getenv("STRATA_PREFILL_CPU_SHARE_BATCH_GUARD");
-            return v != nullptr && std::atoi(v) != 0;
-        }();
+        // The batch guard is this box's shape (STRATA_PREFILL_CPU_SHARE_BATCH_GUARD was 1): with batch slots decoding
+        // between a prompt's parts, the pool is not idle, so every lease is checked.
+        const bool guarded_batch_share = true;
         const bool share_pool = (o.batch <= 0 || guarded_batch_share) && !o.no_pool;
         if (guarded_batch_share && o.batch > 0) {
             pool.set_batch_prefill_guard(true);
-            std::fprintf(stderr, "strata serve: batch CPU-share guard requested; prefill leases one layer only while "
+            std::fprintf(stderr, "strata serve: batch CPU-share guard armed; prefill leases one layer only while "
                                  "no decode window is active\n");
         }
         bool share_has_work = strata::prefill::share_rules::default_share_has_work(
             (int64_t) xcache.slots(), (int64_t) (g.n_layers * g.n_expert));   // #1595
         if (!share_has_work)
             std::fprintf(stderr, "strata serve: every expert is in the GPU cache (%lld of %lld): the CPU prefill share has "
-                                 "nothing to take, so it is not armed by default (STRATA_PREFILL_CPU_SHARE=auto forces it)\n",
+                                 "nothing to take, so it stays unarmed for this run\n",
                          (long long) xcache.slots(), (long long) (g.n_layers * g.n_expert));
         if (share_pool && stages.empty() && !multi_gpu && share_has_work && !share_default_ok()) share_has_work = false;   // H11
         strata::prefill::Prefill::arm_cpu_share(
@@ -9820,38 +9792,10 @@ int main(int argc, char** argv) {
         drive.d.pcie_num = std::max(0, std::min(256, (int) (o.pcie_frac * 256.0 + 0.5)));
         const bool all_experts_resident = !host_res.empty() &&
             std::all_of(host_res.begin(), host_res.end(), [](int32_t r) { return r >= 0; });
-        // STRATA_ROUTE_TAIL_SKIP: ON BY DEFAULT on CUDA builds (owner decision, 0.1.42) and on HIP gfx1200/gfx1201 (0.1.43): a missed expert that every token of
-        // a verify window routes at rank 7 or lower is neither copied nor computed (answers differ slightly from 0.1.41,
-        // KL ~0.003-0.006; docs/DETAILS.md).  =0 restores 0.1.41's bytes.  Nothing to do, so no default and no line, when every
-        // expert is in VRAM; off with --batch slots (a window then mixes requests, and one request's skip would depend on
-        // another's tokens) and, as in the dispatch, with a peer or helper GPU.  A layer split is fine: each stage skips by itself.
-        {
-            const char* tse = std::getenv("STRATA_ROUTE_TAIL_SKIP");
-            // #1884: with nearly every expert in the GPU cache (V100 32 GB, Coder IQ1_M: 94.8% of the experts, 99.9% decode hits) the few
-            // misses are cheap and the skip costs more draft acceptance (70.1% -> 68.2%) than it saves: -1..2% decode.  No default then.
-            size_t cached_experts = 0;
-            for (int32_t r : host_res) cached_experts += r >= 0 ? 1 : 0;
-            // (STRATA_TAIL_SKIP_MAX_CACHED=<percent>, default 90, moves the line; 101 = never).  0.1.43: 60 on a HIP layer split, where
-            // 2x R9700 (5 pairs, skip on vs off): Q2_0 story -6.2% at 70% cached, -1.8% at 60%; IQ3_S +6..15% at 44-52%, about 0 at 60%.
-            const double max_cached_default = 0.90;
-            const char* mcs = std::getenv("STRATA_TAIL_SKIP_MAX_CACHED");
-            const double max_cached = mcs != nullptr && mcs[0] != 0 ? std::atof(mcs) / 100.0 : max_cached_default;
-            const bool nearly_all_cached = !host_res.empty() && !all_experts_resident &&
-                                           (double) cached_experts >= max_cached * (double) host_res.size();
-            const bool tail_default_path = tse == nullptr && !all_experts_resident && !nearly_all_cached && o.batch == 0 &&
-                                           decode_defaults_arch_ok() &&
-                                           o.peer_device < 0;
-            if (tse == nullptr && nearly_all_cached && o.batch == 0 && o.peer_device < 0 && decode_defaults_arch_ok())
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP is off by default: %.1f%% of the experts are in the GPU cache, so "
-                                     "few are missed and skipping them costs more draft acceptance than it saves; "
-                                     "STRATA_ROUTE_TAIL_SKIP=7 turns it on\n", 100.0 * (double) cached_experts / (double) host_res.size());
-            if (tail_default_path) strata::core::set_tail_skip_rank(7);
-            if (strata::core::tail_skip_rank() > 0 && !all_experts_resident)
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP=%d is ON%s: a missed expert that every token of a verify window routes at rank %d or "
-                                     "lower is skipped (+10..20%% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); "
-                                     "STRATA_ROUTE_TAIL_SKIP=0 turns it off\n", strata::core::tail_skip_rank(),
-                             tse == nullptr ? " (default)" : "", strata::core::tail_skip_rank());
-        }
+        // The route tail skip is off here.  It pays where experts are missed (12-16 GB cards: +10..20% decode), but this
+        // box pins every expert in RAM (--resident-experts) and streams none, so there is no miss to skip and the skip
+        // would only cost draft acceptance - the deployment ran with STRATA_ROUTE_TAIL_SKIP=0, and a switch for it is not
+        // where this decision belongs (AGENTS.md).  tail_skip_rank() stays 0, so drive.d.tail_experts stays 0 too.
         if (o.adapt_every > 0 && o.adapt_swaps > 0 && !all_experts_resident)
             drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         PcieAuto pcie_auto;
@@ -11226,10 +11170,9 @@ int main(int argc, char** argv) {
             bool cvec = true, cont = false;
             double drain_ms = 0.0;
         } staged_admit;
-        static const bool staged_read_env = [] {
-            const char* staged_v = std::getenv("STRATA_BATCH_STAGED_READ");
-            return staged_v && *staged_v && std::strcmp(staged_v, "0") != 0;   // =0 disables, unlike a bare getenv
-        }();
+        // A prompt read that takes no slot yet is this deployment's shape (STRATA_BATCH_STAGED_READ was 1): the read
+        // fills the main session while the slots keep decoding.
+        const bool staged_read_env = true;
         auto batch_on = [&] { for (const BSlot& b : bs) if (b.active) return true; return false; };
         auto try_next_line = [&](std::string& out) -> bool {
             std::lock_guard<std::mutex> lk(in_mu);
@@ -11243,10 +11186,9 @@ int main(int argc, char** argv) {
         // a slot copy can go device to device (the same bytes into the same places as the checkpoint/K-V image
         // round trip through host memory, which costs ~40-90 ms per admission on a 4-card split); each device is
         // synchronized once before and once after.  Opt-in: STRATA_SLOT_COPY_DIRECT=1 (default: the host path).
-        static const bool slot_copy_direct = [] {
-            const char* v = std::getenv("STRATA_SLOT_COPY_DIRECT");
-            return v != nullptr && v[0] != '\0' && v[0] != '0';
-        }();
+        // Direct device-to-device slot copies, always (STRATA_SLOT_COPY_DIRECT was 1): the host round trip costs
+        // 40-90 ms per admission on a split, and these are the same bytes into the same places.
+        const bool slot_copy_direct = true;
         auto direct_slot_copy = [&](bool into_slot, int b, const std::vector<int32_t>& ids, std::string& e) -> bool {
             const int64_t upto = (int64_t) ids.size();
             auto sync_all = [&]() {
