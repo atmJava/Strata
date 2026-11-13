@@ -49,15 +49,14 @@ class AdmitOrderTest(unittest.TestCase):
     def take(self, name, prompt_or_len, **kw):
         """A request waiting for the control lines; once it has them it notes its name and gives them back."""
         if isinstance(prompt_or_len, list):
-            prompt, plen = prompt_or_len, len(prompt_or_len)
-            kw.setdefault("reused", self.e._known_prompt_reuse(prompt))
+            prompt = prompt_or_len
         else:
-            plen = prompt_or_len
+            prompt = [0] * prompt_or_len
         c = threading.Event()
         self.cancels.append(c)
 
         def go():
-            gen = self.e._take_control(c, plen, **kw)
+            gen = self.e._take_control(c, prompt, **kw)
             try:
                 while True:
                     next(gen)
@@ -104,7 +103,9 @@ class AdmitOrderTest(unittest.TestCase):
         self.assertEqual(order, ["chat", "agent"])
 
     def test_yielding_compares_the_waiters_tokens_left_to_read(self):
-        self.e.wait_lens = [[120_000, time.monotonic(), True, 1_000]]
+        prompt = [1] * 120_000
+        self.e.slot_held[0] = prompt[:119_000]
+        self.e.wait_lens = [[len(prompt), time.monotonic(), True, 1_000, prompt, False]]
         self.assertTrue(self.e._shorter_waiting(5_000))
         self.assertFalse(self.e._shorter_waiting(1_999))
 
@@ -139,8 +140,47 @@ class AdmitOrderTest(unittest.TestCase):
         self.e.slot_busy[0] = False
         self.assertEqual(self.e._known_prompt_work(prompt), (9_000, 1_000))
 
-    def test_every_prompt_control_wait_reports_known_reuse(self):
-        """Solo promotion, staged wait and BYIELD re-entry must not fall back to the full prompt length."""
+    def test_admission_refreshes_work_after_a_free_slot_is_taken(self):
+        """A waiter that looked short through a free cached slot must not keep that rank after another request takes it."""
+        cached, fresh = [7] * 10_000, [8] * 1_500
+        self.e.slot_held[0] = cached[:9_000]
+        with mock.patch.object(server, "ADMIT_SHORT_FIRST", 2048), mock.patch.object(server, "ADMIT_MAX_WAIT_S", 60.0):
+            self.assertTrue(self.e.ctl.acquire(timeout=1))
+            self.take("cached", cached, new=True)
+            self.until(lambda: self.e.waiting == 1)
+            with self.e.slot_cv:
+                self.assertEqual(self.e.wait_lens[0][3], 1_000)
+                self.assertIs(self.e.wait_lens[0][4], cached)
+                self.e.slot_busy[0] = True
+            self.take("fresh", fresh, new=True)
+            self.until(lambda: self.e.waiting == 2)
+            self.e.ctl.release()
+            self.until(lambda: len(self.order) == 2, s=15.0)
+        self.assertEqual(self.order, ["fresh", "cached"])
+
+    def test_yielding_refreshes_work_after_a_free_slot_is_taken(self):
+        """BYIELD must compare fresh work too, or it yields control for a cached prefix no free slot can provide."""
+        cached = [7] * 10_000
+        self.e.slot_held[0] = cached[:9_000]
+        self.e.wait_lens = [[len(cached), time.monotonic(), True, 1_000, cached, False]]
+        self.assertTrue(self.e._shorter_waiting(5_000))
+        with self.e.slot_cv:
+            self.e.slot_busy[0] = True
+        self.assertFalse(self.e._shorter_waiting(5_000))
+
+    def test_a_completed_staged_read_stays_zero_work_while_the_queue_changes(self):
+        """A staged read lives in the engine, so taking a slot must not restore its prompt-read work."""
+        prompt = [9] * 10_000
+        self.e.slot_held[0] = prompt[:9_000]
+        staged_wait = [len(prompt), time.monotonic(), True, 0, prompt, True]
+        fresh_wait = [1_500, time.monotonic() + 0.01, True, 1_500, [8] * 1_500, False]
+        self.e.wait_lens = [staged_wait, fresh_wait]
+        with self.e.slot_cv:
+            self.e.slot_busy[0] = True
+            self.assertIs(self.e._admit_next(), staged_wait)
+
+    def test_every_prompt_control_wait_passes_the_prompt(self):
+        """Every prompt wait passes its prompt so admission can refresh work while it waits."""
         tree = ast.parse(textwrap.dedent(inspect.getsource(StrataEngine.generate_batched)))
         calls = [
             node for node in ast.walk(tree)
@@ -150,13 +190,16 @@ class AdmitOrderTest(unittest.TestCase):
         ]
         self.assertTrue(calls)
         missing = [ast.unparse(call) for call in calls
-                   if not any(keyword.arg == "reused" for keyword in call.keywords)]
-        self.assertEqual(missing, [], "every prompt-control wait must report its known slot reuse")
+                   if not any(keyword.arg == "prompt" for keyword in call.keywords)]
+        self.assertEqual(missing, [], "every prompt-control wait must let admission refresh its slot reuse")
 
     def test_the_short_work_boundary_is_inclusive(self):
         now = time.monotonic()
-        at_boundary = [5_000, now, True, server.ADMIT_SHORT_FIRST]
-        over_boundary = [5_000, now - 1.0, True, server.ADMIT_SHORT_FIRST + 1]
+        prompt_at, prompt_over = [1] * 5_000, [2] * 5_000
+        self.e.slot_held[0] = prompt_at[:len(prompt_at) - server.ADMIT_SHORT_FIRST]
+        self.e.slot_held[1] = prompt_over[:len(prompt_over) - server.ADMIT_SHORT_FIRST - 1]
+        at_boundary = [5_000, now, True, server.ADMIT_SHORT_FIRST, prompt_at, False]
+        over_boundary = [5_000, now - 1.0, True, server.ADMIT_SHORT_FIRST + 1, prompt_over, False]
         self.e.wait_lens = [over_boundary, at_boundary]
         with self.e.slot_cv:
             self.assertIs(self.e._admit_next(), at_boundary)

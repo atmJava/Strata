@@ -1333,7 +1333,8 @@ class StrataEngine:
             self.slot_cv = threading.Condition()
             self.waiting = 0                            # requests waiting for the control lines (ctl)
             self.admitting = 0                          # #1603: ... and those that gave the lines back to wait for a slot
-            self.wait_lens: list[list] = []             # ... prompt length, arrival, ordered flag and expected work
+            self.wait_lens: list[list] = []             # ... prompt length, arrival, ordered flag, expected work,
+                                                         # prompt and staged-read-complete flag
             self.ctl_epoch = 0                          # how often the control lines were taken
             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
         self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
@@ -1894,25 +1895,39 @@ class StrataEngine:
         """Work an admission asks the engine for: the prompt tokens no known slot prefix covers."""
         return max(0, int(prompt_tokens) - max(0, int(known_reuse)))
 
-    def _known_prompt_work(self, prompt: list[int], read_complete: bool = False) -> tuple[int, int]:
-        """The prompt prefix a slot already holds and the tokens the engine still has to read.
+    def _known_prompt_work_locked(self, prompt: list[int], read_complete: bool = False) -> tuple[int, int]:
+        """The known prompt reuse and work left; the caller holds slot_cv.
 
         A staged read owns the prompt in the engine rather than in a slot, so once it reports BRDY the remaining
         admission work is zero even when no slot yet holds those tokens.
         """
         if read_complete:
             return len(prompt), 0
-        reused = self._known_prompt_reuse(prompt)
+        reused = self._known_prompt_reuse_locked(prompt)
         return reused, self._tokens_left_to_read(len(prompt), reused)
 
-    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False, reused: int = 0):
+    def _known_prompt_work(self, prompt: list[int], read_complete: bool = False) -> tuple[int, int]:
+        """The prompt prefix a slot already holds and the tokens the engine still has to read."""
+        with self.slot_cv:
+            return self._known_prompt_work_locked(prompt, read_complete)
+
+    def _refresh_waiting_work_locked(self) -> None:
+        """Refresh admission estimates after slot ownership or held prompts change; the caller holds slot_cv."""
+        for entry in self.wait_lens:
+            entry[3] = self._known_prompt_work_locked(entry[4], entry[5])[1]
+
+    def _take_control(self, cancel, prompt: list[int], after_epoch: int | None = None, new: bool = False,
+                      read_complete: bool = False):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
         `new`: the request's first admission (ADMIT_SHORT_FIRST orders only these).
-        `reused`: the prompt prefix the slots already hold; ordering uses the tokens left to read."""
-        work = self._tokens_left_to_read(plen, reused)
-        entry = [plen, time.monotonic(), new, work]     # (length, arrival, ordered, expected work)
+        `read_complete`: a staged read already owns the prompt in the engine."""
+        plen = len(prompt)
         with self.slot_cv:
+            work = self._known_prompt_work_locked(prompt, read_complete)[1]
+            # (length, arrival, ordered, expected work, prompt, staged read complete).  Admission refreshes work
+            # from the prompt because a slot can be taken or released while this request waits.
+            entry = [plen, time.monotonic(), new, work, prompt, read_complete]
             self.waiting += 1
             self.wait_lens.append(entry)
         beat = time.monotonic()
@@ -1945,8 +1960,9 @@ class StrataEngine:
                             self.ctl.release()
                             raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                         if _BTRACE:
-                            btrace("admit", "new" if new else "continuation", "prompt", plen, "reused", reused,
-                                   "work", work, "wait_s", round(time.monotonic() - entry[1], 3))
+                            btrace("admit", "new" if new else "continuation", "prompt", plen,
+                                   "reused", max(0, plen - entry[3]), "work", entry[3],
+                                   "wait_s", round(time.monotonic() - entry[1], 3))
                         break
                     self.ctl.release()                  # it died (or is being restarted) while this one was getting
                     turn = False                        # the lines: not the engine this request was meant for
@@ -1974,7 +1990,8 @@ class StrataEngine:
         (it is never held back for good).  At 0: whoever gets the lock first.  Only the order changes, never what is
         read."""
         now = time.monotonic()
-        ordered = [e for e in self.wait_lens if len(e) > 2 and e[2]]
+        self._refresh_waiting_work_locked()
+        ordered = [e for e in self.wait_lens if e[2]]
         if not ordered:
             return None
         return min(ordered, key=lambda e: (0 if e[3] <= ADMIT_SHORT_FIRST or now - e[1] >= ADMIT_MAX_WAIT_S else 1,
@@ -1996,6 +2013,7 @@ class StrataEngine:
     def _shorter_waiting(self, work: int) -> bool:
         """#656: someone waits for the control lines with under half this request's work left: worth giving way to."""
         with self.slot_cv:
+            self._refresh_waiting_work_locked()
             return any(e[3] * 2 <= work for e in self.wait_lens)
 
     def generate_batched(self, ids, max_new, sampling, cancel, embeddings=None):
@@ -2021,11 +2039,11 @@ class StrataEngine:
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
-        prompt_reuse, prompt_work = self._known_prompt_work(prompt)
+        prompt_work = self._known_prompt_work(prompt)[1]
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         serial_two = SERIAL_TWO
-        ok = yield from self._take_control(cancel, len(prompt), new=True, reused=prompt_reuse)
+        ok = yield from self._take_control(cancel, prompt=prompt, new=True)
         if not ok:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -2041,8 +2059,8 @@ class StrataEngine:
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
-                    prompt_reuse, prompt_work = self._known_prompt_work(prompt)
-                    ok = yield from self._take_control(cancel, len(prompt), reused=prompt_reuse)
+                    prompt_work = self._known_prompt_work(prompt)[1]
+                    ok = yield from self._take_control(cancel, prompt=prompt)
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -2114,7 +2132,7 @@ class StrataEngine:
                         carry_leg(carry, self.last)         # #1869: the solo leg's figures; the slot's admission (a copy of
                                                             # the held prefix: prompt_read 1) and BDONE replace them
                         prompt = list(ids) + out            # promoted: it continues in a batch slot from here
-                        prompt_reuse, prompt_work = self._known_prompt_work(prompt)
+                        prompt_work = self._known_prompt_work(prompt)[1]
                 while True:
                     if slot is None:
                         # With every slot busy, read this prompt into the engine's main
@@ -2125,8 +2143,8 @@ class StrataEngine:
                                 and prompt_work >= STAGED_READ_MIN_TOKENS):
                             staged_attempts += 1
                             if not holding:
-                                prompt_reuse, prompt_work = self._known_prompt_work(prompt)
-                                ok = yield from self._take_control(cancel, len(prompt), reused=prompt_reuse)
+                                prompt_work = self._known_prompt_work(prompt)[1]
+                                ok = yield from self._take_control(cancel, prompt=prompt)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
@@ -2220,9 +2238,10 @@ class StrataEngine:
                                 # loop in _run, not run(): a ("ping", None) here reaches the detokenizer as a token)
                                 yield None
                             if not holding:
-                                prompt_reuse, prompt_work = self._known_prompt_work(
-                                    prompt, read_complete=staged_ready is not None)
-                                ok = yield from self._take_control(cancel, len(prompt), reused=prompt_reuse)
+                                prompt_work = self._known_prompt_work(
+                                    prompt, read_complete=staged_ready is not None)[1]
+                                ok = yield from self._take_control(cancel, prompt=prompt,
+                                                                   read_complete=staged_ready is not None)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
@@ -2234,9 +2253,7 @@ class StrataEngine:
                         holding = False
                         with self.slot_cv:
                             epoch = self.ctl_epoch
-                        prompt_reuse, prompt_work = self._known_prompt_work(prompt)
-                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch,
-                                                           reused=prompt_reuse)
+                        ok = yield from self._take_control(cancel, prompt=prompt, after_epoch=epoch)
                         if not ok:
                             return
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -2509,17 +2526,21 @@ class StrataEngine:
         turn = next((i for i in range(len(held) - 1, -1, -1) if held[i] == self.TURN_ID), 0)
         return turn if 0 < turn < len(prompt) and prompt[:turn] == held[:turn] else 0
 
-    def _known_prompt_reuse(self, prompt: list[int]) -> int:
-        """The prefix `prompt` can use now: among free slots when one exists, else the best parked slot prefix.
+    def _known_prompt_reuse_locked(self, prompt: list[int]) -> int:
+        """The prefix `prompt` can use now; the caller holds slot_cv.
 
         Counting a busy slot while an empty slot is available makes a long read look short and lets it take the control
         lines ahead of a genuinely short request.  While every slot is busy there is no such immediate mismatch: the
         request must wait, and the best held prefix is the best estimate of the work its eventual slot will save.
         """
+        free = [b for b in range(self.batch) if not self.slot_busy[b]]
+        usable = free if free else range(self.batch)
+        return max((self._held_prefix(b, prompt) for b in usable), default=0)
+
+    def _known_prompt_reuse(self, prompt: list[int]) -> int:
+        """The prompt prefix the slots can provide under the current ownership."""
         with self.slot_cv:
-            free = [b for b in range(self.batch) if not self.slot_busy[b]]
-            usable = free if free else range(self.batch)
-            return max((self._held_prefix(b, prompt) for b in usable), default=0)
+            return self._known_prompt_reuse_locked(prompt)
 
     def pick_slot(self, prompt: list[int]) -> int | None:
         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
