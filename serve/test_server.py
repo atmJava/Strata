@@ -592,6 +592,15 @@ class VisionRequestTempFiles(unittest.TestCase):
 class ImageMarkers(unittest.TestCase):
     """#150: the text "<|image_pad|>" inside a message is text, not an image's place."""
 
+    def prepared(self, svc, messages, tools=None, sampling=None):
+        """Prepare a request and remove each combined embeddings file after the test, even if an assertion fails."""
+        try:
+            return svc.prepare(messages, tools, sampling or {})
+        finally:
+            path = getattr(getattr(svc, "embeddings", None), "path", None)
+            if path:
+                self.addCleanup(Path(path).unlink, missing_ok=True)
+
     class FakeVision:
         def __init__(self, d):
             self.dir = Path(d)
@@ -612,10 +621,9 @@ class ImageMarkers(unittest.TestCase):
                 with self.subTest(text=text):
                     msgs = [{"role": "user", "content": [{"type": "text", "text": text},
                                                          {"type": "image", "source": "x.png"}]}]
-                    ids, _, _ = svc.prepare(msgs, None, {})
+                    ids, _, _ = self.prepared(svc, msgs)
                     self.assertEqual(ids.count(pad), 3)          # the image's three rows, nothing else
                     self.assertIn("<|image_pad|> marks" if "docs" in text else "plain", tok.decode(ids))
-            svc.embeddings.path.unlink(missing_ok=True)
 
     def test_pictures_are_keyed_by_their_bytes_for_the_engine(self):
         """#2228: each picture's key (its normalized bytes' hash: the encoder's file name) goes to the engine as
@@ -633,9 +641,8 @@ class ImageMarkers(unittest.TestCase):
                           vision=Keyed(d))
             msgs = [{"role": "user", "content": [{"type": "image", "source": "b.png"}, {"type": "text", "text": "and"},
                                                  {"type": "image", "source": "a.png"}]}]
-            svc.prepare(msgs, None, {})
+            self.prepared(svc, msgs)
             self.assertEqual(svc.embeddings.keys, ["fedcba9876543210", "0123456789abcdef"])
-            svc.embeddings.path.unlink(missing_ok=True)
         keys = StrataEngine.sampling_keys({"strata_img_keys": ["fedcba9876543210", "0123456789abcdef"]})
         self.assertEqual(keys, " img_keys=fedcba9876543210,0123456789abcdef")
         for bad in ([], ["XYZ"], ["ab cd"], "abc", [3]):   # never sent malformed: the engine falls back to the embeddings
@@ -660,13 +667,12 @@ class ImageMarkers(unittest.TestCase):
                     msgs = [{"role": "user", "content": "look at a.png"}, call,
                             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": result}] + extra}]
                     m, _, _ = anthropic_to_messages({"messages": msgs})
-                    ids, _, _ = svc.prepare(m, None, {})
+                    ids, _, _ = self.prepared(svc, m)
                     self.assertEqual(ids.count(pad), n)
                     prompt = tok.decode(ids)
                     inside = prompt.split("<tool_response>", 1)[1].split("</tool_response>", 1)[0]
                     self.assertEqual("<|vision_start|>" in inside, not isinstance(result, str))
                     self.assertEqual("<|vision_start|>" in prompt.split("</tool_response>", 1)[1], bool(extra))
-            svc.embeddings.path.unlink(missing_ok=True)
         # a tool's picture the server cannot read is a note, not a 400 (the client resends it every turn); the user's
         # own picture still fails
         class Refusing(self.FakeVision):
@@ -685,11 +691,9 @@ class ImageMarkers(unittest.TestCase):
                     svc = Service(MockEngine(tok, "ok", max_context=CTX), tok,
                                   ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=vision)
                     m, _, _ = anthropic_to_messages({"messages": tool_msgs})
-                    ids, _, _ = svc.prepare(m, None, {})
+                    ids, _, _ = self.prepared(svc, m)
                     self.assertEqual(ids.count(pad), n)
                     self.assertIn(note, tok.decode(ids))
-                    if svc.embeddings.path:
-                        svc.embeddings.path.unlink(missing_ok=True)
             # a tool's picture at a URL is downloaded once (the check and the prompt share the bytes), and one that
             # cannot be fetched is a note too
             import serve.server as server
@@ -700,18 +704,17 @@ class ImageMarkers(unittest.TestCase):
                           vision=self.FakeVision(d))
             m, _, _ = anthropic_to_messages({"messages": url_msgs})
             with mock.patch.object(server.Vision, "download", return_value=b"the picture") as dl:
-                ids, _, _ = svc.prepare(m, None, {})
+                ids, _, _ = self.prepared(svc, m)
             self.assertEqual((dl.call_count, ids.count(pad)), (1, 3))
-            svc.embeddings.path.unlink(missing_ok=True)
             m, _, _ = anthropic_to_messages({"messages": url_msgs})
             with mock.patch.object(server.Vision, "download", side_effect=ValueError("the image URL could not be read")):
-                ids, _, _ = svc.prepare(m, None, {})
+                ids, _, _ = self.prepared(svc, m)
             self.assertEqual(ids.count(pad), 0)
             self.assertIn("[image omitted: the image URL could not be read]", tok.decode(ids))
             svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
             m, _, _ = anthropic_to_messages({"messages": [{"role": "user", "content": [good]}]})
             with self.assertRaises(ValueError):
-                svc.prepare(m, None, {})
+                self.prepared(svc, m)
         # a text-only tool result renders exactly as before: one string
         msgs = [{"role": "user", "content": "q"}, call,
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "r"}]}]}]
@@ -748,7 +751,7 @@ class ImageMarkers(unittest.TestCase):
                                                   {"role": "user", "content": pictures}], tools)}
             for name, (msgs, tools) in cases.items():
                 with self.subTest(case=name):
-                    ids, _, _ = svc.prepare(msgs, tools, {})
+                    ids, _, _ = self.prepared(svc, msgs, tools)
                     starts = [j for j, t in enumerate(ids) if t == start]
                     self.assertEqual(len(starts), 2)                 # the pictures' markers, nothing else
                     for j, rows in zip(starts, (2, 5)):              # each followed by its own picture's rows
@@ -756,13 +759,13 @@ class ImageMarkers(unittest.TestCase):
                     self.assertEqual((ids.count(pad), ids.count(end)), (7, 2))
                     self.assertTrue(holds(ids, tok.encode(quoted)))   # the text kept its own tokens
             # no picture: the quoted markers are text too
-            ids, _, _ = svc.prepare([{"role": "user", "content": quoted}], None, {})
+            ids, _, _ = self.prepared(svc, [{"role": "user", "content": quoted}])
             self.assertEqual([t for t in ids if t in (start, pad, end)], [])
             # markers cut apart across three text parts are no picture's: refused, not a silent shift
             cut = [{"type": "text", "text": "<|vision_sta"}, {"type": "text", "text": "rt|><|image_pa"},
                    {"type": "text", "text": "d|>"}, *pictures]
             with self.assertRaisesRegex(ValueError, "do not match"):
-                svc.prepare([{"role": "user", "content": cut}], None, {})
+                self.prepared(svc, [{"role": "user", "content": cut}])
             # a prompt without the marker strings has exactly the ids it had
             old = lambda m, t=None: tok.encode(svc.template.render(m, tools=t), parse_special=True)   # noqa: E731
             for msgs, tools in (([{"role": "user", "content": "plain text, no markers"}], None),   # (#931: control-token text is text now)
