@@ -1,5 +1,47 @@
 # AGENTS.md
 
+## This fork serves one machine
+
+This checkout is not a general Strata. It is the server for one deployment:
+
+- `192.168.9.100`, Linux x86_64, CUDA `sm_75`, 2 x RTX 2080 Ti 22 GB
+- the Swift-1.5-Qwen3.8-Flash-Next IQ3_S pack, 262,144 context, INT8 KV
+- DSH's agent traffic: 1-5 concurrent conversations, each compacted at about 80% of a 200K window, so a
+  conversation peaks near 160K tokens and a typical prompt is 15K-75K
+
+Latency on this machine is the only measure. A change that makes the tree more general, more configurable or
+closer to upstream is not worth making unless it makes this machine faster.
+
+The rules below follow from that, and they override upstream's conventions where the two differ.
+
+- **The default path is the adapted path.** A behaviour this deployment always wants is a default, not an
+  option. The "a new feature is opt-in, and the default path stays byte-identical to the last release" rule
+  in [CONTRIBUTING.md](CONTRIBUTING.md) does not apply here, and a run config is not where a performance
+  decision is made.
+- **No environment variables and no tuning flags for performance.** Concurrency, cache size, KV format,
+  prefill policy and admission are derived in code from the hardware and the working set. The run config
+  holds deployment identity only: paths, the model, the API key, the address.
+- **Upstream is a source of fixes, not a merge target.** Take a fix by editing the code by hand. Do not
+  cherry-pick, and do not keep a file byte-identical for the sake of a future merge.
+- **Capacity comes from the working set.** Size the conversation cache for 1-5 conversations at the 160K
+  compaction point, from the KV bytes per token the engine reports, not from a round number.
+- **Degrade the KV format before re-reading a prompt.** A conversation whose KV does not fit gives int8 up for
+  k8v4 and then q4_0. Measured on this deployment: a 65K-token read costs 33-55 s at the 1,190-1,990 tok/s
+  prefill it shows, while the whole point of the conversation cache is that the same tokens cost a host-memory
+  copy instead.
+- **Verify with a repeatable simulation, not a one-off probe.** A parameterised client with fixed seeds, a
+  fixed mix of conversation lengths and a table of per-turn results, so two builds are compared by running the
+  same load and reading the same table. Probing the box while it serves a live session measures contention,
+  not the change.
+
+### What was measured, 2026-11-13, on this deployment
+
+Twelve real DSH requests, prompts 15K-75K, outputs 79-1,522 tokens: 615 s spent waiting before the engine
+started against 114 s of decoding. A conversation whose KV was still in a slot reused 44,073 of its tokens;
+one whose slot held another conversation reused 9,036. Decoding ran at 64 tok/s with the box to itself and
+18.9-24.8 tok/s with five requests in flight. The conversation cache held 11.68 GB across 12 slots, with 65
+parks, 24 restores and 12 evictions in three hours.
+
 Version 0.2.7, engine 0.1.51. The public model families are DeepSeekV4.1-Flash-1017,
 Qwen3.8-Flash-Next and Qwen3.6-35B-A3B. DeepSeek V4.1-Flash runs in the app and in the Terminal
 (`strata launch --family deepseek41 --model ist-das-2.00bpw`; sets in
