@@ -570,16 +570,16 @@ int main() {
         // eviction.  The floor keeps a client's side requests from evicting the long conversation they interleave with.
         ConversationCache any(1024, 4, 0), floor(1024, 4, 12288);
         check(any.enabled() && floor.enabled(), "the minimum does not disable the cache");
-        check(any.wants(0) && any.wants(1) && any.wants(1 << 20), "0 protects every length, as before the flag");
-        check(!floor.wants(0) && !floor.wants(1) && !floor.wants(12287), "below the minimum is not protected");
-        check(floor.wants(12288) && floor.wants(12289), "the minimum itself and above are protected");
+        check(any.protects(0) && any.protects(1) && any.protects(1 << 20), "0 protects every length, as before the flag");
+        check(!floor.protects(0) && !floor.protects(1) && !floor.protects(12287), "below the minimum is not protected");
+        check(floor.protects(12288) && floor.protects(12289), "the minimum itself and above are protected");
         // the CLI rejects a negative, but the predicate must not invert for one that reaches it another way
         ConversationCache negative(1024, 4, -1);
-        check(negative.wants(0) && negative.wants(1), "a negative minimum protects everything, like 0");
-        // wants() answers for the length alone; admission separately checks enabled(), so a disabled cache stores
+        check(negative.protects(0) && negative.protects(1), "a negative minimum protects everything, like 0");
+        // protects() answers for the length alone; admission separately checks enabled(), so a disabled cache stores
         // nothing whatever the length - keep the two independent rather than folding one into the other
         ConversationCache disabled_min(0, 4, 12288);
-        check(!disabled_min.enabled() && disabled_min.wants(1 << 20), "a disabled cache still answers for length");
+        check(!disabled_min.enabled() && disabled_min.protects(1 << 20), "a disabled cache still answers for length");
     }
     {
         // Below-minimum conversations fill spare capacity and replace only other below-minimum conversations.  A full

@@ -670,9 +670,9 @@ struct Options {
     /// arrived.
     int conversation_cache_slots = 12;
     int64_t conversation_cache_min_free_mib = 4096;
-    /// --serve: park only conversations of at least this many tokens.  Every parked conversation costs one of
-    /// conversation_cache_slots whatever its length, so without it a client that interleaves short side requests
-    /// with one long conversation evicts the long one (oldest first).  0 = park every conversation.
+    /// --serve: protect conversations of at least this many tokens from eviction by shorter conversations.  A shorter
+    /// conversation may still park in spare capacity, but it cannot evict a protected one or discard retained K/V.
+    /// 0 protects every conversation; a negative value is rejected by the CLI.
     int64_t conversation_cache_min_tokens = 4096;
     /// --serve: park only after the conversation has advanced this many tokens past the copy it would supersede.
     /// A conversation that moved a few hundred tokens writes a full snapshot again, and the turn after that drops it
@@ -9192,7 +9192,7 @@ int main(int argc, char** argv) {
             // --conversation-cache-min-tokens: a below-minimum conversation may use spare capacity or replace
             // another below-minimum conversation, but it must never evict one of the long conversations the floor
             // protects.  The admission below decides from the snapshot's actual byte estimate.
-            const bool small_park = !conversations.wants((int64_t) src.ids.size());
+            const bool small_park = !conversations.protects((int64_t) src.ids.size());
             // A layer split parks one image per stage: the first stage's (with the draft layer's K/V) and one per
             // later stage (without it - the draft ring is saved once).  The checkpoints are MOVED apart into their
             // stage parts for the capture and put back together whichever way this ends (no running state copied).

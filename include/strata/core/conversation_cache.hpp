@@ -233,7 +233,7 @@ public:
     /// shorter one.  A short conversation may still use spare capacity or replace another short conversation.
     /// A client interleaving side requests with a long conversation therefore cannot evict the long one it needs.
     /// 0 turns the floor off and makes every conversation eligible for ordinary oldest-first eviction.
-    bool wants(int64_t tokens) const { return min_tokens_ <= 0 || tokens >= min_tokens_; }
+    bool protects(int64_t tokens) const { return min_tokens_ <= 0 || tokens >= min_tokens_; }
     size_t bytes() const { return bytes_ + reuse_.bytes(); }
     size_t size() const { return entries_.size(); }
     size_t evictions() const { return evictions_; }
@@ -518,7 +518,7 @@ public:
     // conversation or the active K/V.  A cache full of protected conversations refuses the park unchanged.
     bool put_small(SavedConversation&& image, size_t held = 0) {
         const size_t n = image.bytes();
-        if (!enabled() || wants((int64_t) image.live.ids.size()) || held > budget_ || n > budget_ - held)
+        if (!enabled() || protects((int64_t) image.live.ids.size()) || held > budget_ || n > budget_ - held)
             return false;
         if (!can_make_room_after_superseded_for_small(n, held, image.live.ids, image.live.imgs,
                                                       image.checkpoints, image.cvec))
@@ -534,7 +534,7 @@ public:
 private:
     bool evictable_small(size_t i) const {
         return !entries_[i].pinned() && !(guarded_ != 0 && serials_[i] == guarded_) &&
-               !wants((int64_t) entries_[i].live.ids.size());
+               !protects((int64_t) entries_[i].live.ids.size());
     }
     bool can_make_room_after_superseded_impl(
             size_t incoming, size_t held, const std::vector<int32_t>& ids,
@@ -547,7 +547,7 @@ private:
             if (!guarded && superseded_checkpoint(ids, images, checkpoints, cvec, entries_[i]) != nullptr)
                 continue;
             if (entries_[i].pinned() || guarded ||
-                (preserve_large && wants((int64_t) entries_[i].live.ids.size()))) {
+                (preserve_large && protects((int64_t) entries_[i].live.ids.size()))) {
                 ++kept;
                 kept_bytes += entries_[i].bytes();
             }
