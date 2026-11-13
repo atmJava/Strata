@@ -65,6 +65,9 @@ class Admission(unittest.TestCase):
     def test_no_switch_can_change_serial_two(self):
         self.assertEqual(source_reads("STRATA_BATCH_SERIAL_TWO"), [])
 
+    def test_going_back_to_the_solo_path_has_no_switch(self):
+        self.assertEqual(source_reads("STRATA_PARALLEL_SOLO"), [])
+
 
 class TheFourDshBehaviours(unittest.TestCase):
     """Each is a default with a shape check of its own, never an opt-in."""
