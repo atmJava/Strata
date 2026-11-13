@@ -170,6 +170,10 @@ about 10-25% speed per request on this card". `--parallel N` is honoured as aske
   read the conversation (140 of 173).
 - **More requests than slots** wait for a free one (`/metrics` -> `live.slots` shows each slot: idle, reading or
   decoding, its tokens and tok/s; `live.running` the requests in flight).
+- **A long read can start before a slot is free.** When every slot is busy and a prompt still has at least 2,048
+  tokens left to read, the server reads it into the engine's main session, then adopts it into a free slot
+  without reading it again. One staged read runs at a time. A shorter read waits for a slot instead, because the
+  hand-off would cost more than it hides. The threshold is a deployment default, not an environment switch.
 - **Each admission** reads the request's prompt through the usual prompt path (prompt cache and conversation
   checkpoints included) and produces its first token there; the state is then copied into the slot. Admissions
   are taken one at a time, and **the slots decode between the prompt's chunks**: after each chunk (`--prefill`,

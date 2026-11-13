@@ -51,6 +51,14 @@ class Admission(unittest.TestCase):
     def test_no_switch_can_change_it(self):
         self.assertEqual(source_reads("STRATA_ADMIT_SHORT_FIRST"), [])
 
+    def test_staged_read_is_a_constant(self):
+        self.assertEqual(server.STAGED_READ_MIN_TOKENS, 2048)
+
+    def test_no_switch_can_change_staged_read(self):
+        for name in ("STRATA_MP_STAGED_READ", "STRATA_MP_STAGED_READ_MIN_TOKENS"):
+            with self.subTest(name=name):
+                self.assertEqual(source_reads(name), [])
+
 
 class TheFourDshBehaviours(unittest.TestCase):
     """Each is a default with a shape check of its own, never an opt-in."""

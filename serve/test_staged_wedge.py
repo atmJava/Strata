@@ -1,6 +1,6 @@
 """S0c: an engine that dies during a staged read (BREAD) must not leave mp_staged set.
 
-The staged-read admission (STRATA_MP_STAGED_READ) marks the engine "staged" while a long prompt is read
+The staged-read admission marks the engine "staged" while a long prompt is read
 without a slot (BREAD -> BRDY -> BADOPT).  Every later admission whose request is not the staged one waits
 while `mp_staged` is set.  If the engine dies while a read is staged and the mark survives, every later
 admission waits forever - the WORK_QUEUE S0c wedge ("kill the engine before/during BREAD; after the
@@ -142,16 +142,12 @@ class StagedWedge(unittest.TestCase):
             py.write_text("#!" + sys.executable + "\n" + FAKE)
             py.chmod(0o700)
         self.log = self.root / "engine.log"
-        # staging on, but only for prompts over 4096 tokens by default: the requests that fill the slots must not
-        # take the staged path (only the tests' long request does, via stage_long_prompts())
-        self.env = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ": "1",
-                                                "STRATA_MP_STAGED_READ_MIN_TOKENS": "4096"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
+        # The short requests that fill the slots stay below the default staged-read threshold.  A test that needs the
+        # staged path lowers the threshold with stage_long_prompts().
 
     def stage_long_prompts(self):
-        """Let prompts of any length stage (the threshold is read per request, when the request starts)."""
-        p = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ_MIN_TOKENS": "1"})
+        """Let prompts with any pending read stage (the threshold is read when the request starts)."""
+        p = mock.patch.object(_server, "STAGED_READ_MIN_TOKENS", 1)
         p.start()
         self.addCleanup(p.stop)
 

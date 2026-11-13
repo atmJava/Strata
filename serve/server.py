@@ -341,6 +341,10 @@ BCANCEL_DRAIN_S = 10.0
 # adapted path; no environment variable or tuning flag for performance).
 ADMIT_SHORT_FIRST = 2048
 ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
+# With every slot busy, a prompt that still needs this much reading may be read into the engine's main session and
+# adopted into the first free slot.  This is the deployment's measured W3 threshold, not a setting: staging a short
+# read delays the request that will fill the slot without hiding enough work to pay for the extra hand-off.
+STAGED_READ_MIN_TOKENS = 2048
 # DSH compacts at about 80% of a 200K window, so one conversation peaks near this many tokens, and the working set this
 # server is sized for is five of them (AGENTS.md).  Capacity is answered in these units - how many conversations fit -
 # not in gigabytes.
@@ -1309,7 +1313,7 @@ class StrataEngine:
         # (its flag leaked) and would keep every later request waiting for a slot that nothing will free.
         self.slot_claims: set[int] = set()
         self.slot_releasing: set[int] = set()
-        self.mp_staged = None            # STRATA_MP_STAGED_READ: True while a read is staged in the engine (only
+        self.mp_staged = None            # True while a read is staged in the engine (only
                                          # its owner may BADOPT; other admissions wait, FCFS)
         self._orphan_seen: dict[int, float] = {}
         # what each slot's sessions hold (prompt + every token a window fed), so a conversation's next turn goes to
@@ -1711,7 +1715,7 @@ class StrataEngine:
                 f = line.split()
                 self._ctl_result = ("badm", len(f) >= 3 and f[2] == "1")
                 return
-            elif line.startswith("BRDY "):       # STRATA_MP_STAGED_READ: the read is done, no slot yet
+            elif line.startswith("BRDY "):       # the read is done, no slot yet
                 f = line.split()
                 if len(f) < 4 or not f[1].isdigit() or not f[2].isdigit() or f[3] not in ("0", "1"):
                     self._ctl_erred = True               # a truncated/odd line is a protocol error, not a read of 0
@@ -2025,10 +2029,9 @@ class StrataEngine:
         stop_sent = False
         yields, solo_again, refused = 0, 0, 0
         admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
-        staged_ready = None       # STRATA_MP_STAGED_READ: ("brdy", n, max_new, cont) once read without a slot
+        staged_ready = None       # ("brdy", n, max_new, cont) once read without a slot
         staged_attempts = 0
-        staged_enabled = os.environ.get("STRATA_MP_STAGED_READ") == "1" and not embeddings
-        staged_min_tokens = int(os.environ.get("STRATA_MP_STAGED_READ_MIN_TOKENS") or "4096")
+        staged_enabled = not embeddings
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
@@ -2108,12 +2111,12 @@ class StrataEngine:
                         prompt_reuse, prompt_work = self._known_prompt_work(prompt)
                 while True:
                     if slot is None:
-                        # STRATA_MP_STAGED_READ: with every slot busy, read this prompt into the engine's main
+                        # With every slot busy, read this prompt into the engine's main
                         # session first (BREAD, no slot) and adopt it the moment a slot frees (BADOPT).  One staged
                         # read at a time: while it exists, other admissions wait for it (it is first in line).
                         if (staged_enabled and staged_ready is None and self.mp_staged is None
                                 and staged_attempts < 1
-                                and (staged_min_tokens <= 0 or len(prompt) >= staged_min_tokens)):
+                                and prompt_work >= STAGED_READ_MIN_TOKENS):
                             staged_attempts += 1
                             if not holding:
                                 prompt_reuse, prompt_work = self._known_prompt_work(prompt)

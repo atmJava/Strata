@@ -1,4 +1,4 @@
-"""Strict protocol tests for the batch / staged-read path (STRATA_MP_STAGED_READ).
+"""Strict protocol tests for the default batch / staged-read path.
 
 `serve/test_staged_wedge.py` checks the S0c wedge: an engine that dies during BREAD must not leave `mp_staged`
 set.  These cases go further: the wire fields of BREAD / BRDY / BADOPT / BCANCEL, the heartbeat type the
@@ -10,9 +10,9 @@ a bad field, so a request that succeeds proves the server's lines were well form
 engine's side of the protocol (`BRDY <n> <max_new> <cont>`, `BADM <slot> 1`, `BCANCELLED`) and can inject the
 failure the case needs.
 
-The staged-read feature ships as the mp-w3 server patch.  On a tree whose serve/server.py is the plain base it
-is absent and the staged cases skip, as test_staged_wedge does.  The gate is stricter than `"BREAD " in
-source`: all of the pieces the protocol needs must be there (BRDY parsing, mp_staged, BADOPT, BCANCEL drain).
+The staged cases skip on a tree whose serve/server.py lacks the complete protocol.  The gate is stricter than
+`"BREAD " in source`: all of the pieces the protocol needs must be there (BRDY parsing, mp_staged, BADOPT,
+BCANCEL drain).
 The heartbeat cases do not depend on the staged feature at all (a PP progress line already reaches the
 consumer as `None`), so they also run - and must pass - on the plain base.
 
@@ -431,7 +431,7 @@ class FakeEngineCase(unittest.TestCase):
     def start_staged(self, svc: Service, ids, max_new: int = 200, sampling=None):
         """Start a request that must take the staged path (BREAD), and leave the low threshold before returning."""
         before = self.log_count("BREAD_RAW")
-        with mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ_MIN_TOKENS": "1"}):
+        with mock.patch.object(_server, "STAGED_READ_MIN_TOKENS", 1):
             run = self.start_run(svc, ids, max_new, sampling)
             self.wait_until(lambda: self.log_count("BREAD_RAW") > before or run["done"].is_set(),
                             "the request must take the staged path (send BREAD)", 10.0)
@@ -443,12 +443,6 @@ class HeartbeatTypes(FakeEngineCase):
 
     These do not need the staged feature: a PP progress line already reaches the consumer as None on the base
     tree, so this class runs (and must pass) on both the base and the mp-w3 tree."""
-
-    def setUp(self):
-        super().setUp()
-        self.env = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ": "0"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
 
     def test_generate_batched_yields_only_tokens_and_none(self):
         e = self.engine("normal", "--pp")
@@ -485,13 +479,6 @@ class HeartbeatTypes(FakeEngineCase):
 @unittest.skipUnless(_HAS_STAGED_READ, "serve/server.py has no complete staged read (BRDY/BADOPT/BCANCEL): "
                                       "apply the mp-w3 server patch")
 class StagedProtocol(FakeEngineCase):
-    def setUp(self):
-        super().setUp()
-        self.env = mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ": "1",
-                                                "STRATA_MP_STAGED_READ_MIN_TOKENS": "4096"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
-
     def bread_lines(self):
         return [line[len("BREAD_RAW "):] for line in self.log_text().splitlines() if line.startswith("BREAD_RAW ")]
 
@@ -600,7 +587,7 @@ class StagedProtocol(FakeEngineCase):
                 items.extend(e.generate(ids, 200, {}, cancel))
             except BaseException as exc:        # noqa: BLE001 - reported below
                 box["error"] = exc
-        with mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ_MIN_TOKENS": "1"}):
+        with mock.patch.object(_server, "STAGED_READ_MIN_TOKENS", 1):
             t = threading.Thread(target=go, daemon=True)
             t.start()
             self.addCleanup(self._stop_thread, t, cancel)
@@ -725,7 +712,7 @@ class StagedProtocol(FakeEngineCase):
         self.wait_until(lambda: self.log_count("BRDY_SENT") == 1 and e.mp_staged is True,
                         "the third request must be staged while both slots are busy", 10.0)
         # a fourth request while the read is staged: it must wait for that one, not stage a second read
-        with mock.patch.dict(os.environ, {"STRATA_MP_STAGED_READ_MIN_TOKENS": "1"}):
+        with mock.patch.object(_server, "STAGED_READ_MIN_TOKENS", 1):
             b = self.start_run(svc, list(b"a second request that must not stage"), max_new=200)
             time.sleep(0.6)
             self.assertEqual(self.log_count("BREAD_RAW"), 1,
