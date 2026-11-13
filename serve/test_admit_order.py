@@ -105,6 +105,20 @@ class AdmitOrderTest(unittest.TestCase):
         self.assertTrue(self.e._shorter_waiting(5_000))
         self.assertFalse(self.e._shorter_waiting(1_999))
 
+    def test_work_never_falls_below_zero_or_exceeds_the_prompt(self):
+        self.assertEqual(self.e._tokens_left_to_read(10_000, 7_500), 2_500)
+        self.assertEqual(self.e._tokens_left_to_read(10_000, 10_000), 0)
+        self.assertEqual(self.e._tokens_left_to_read(10_000, 12_000), 0)
+        self.assertEqual(self.e._tokens_left_to_read(10_000, -1), 10_000)
+
+    def test_the_short_work_boundary_is_inclusive(self):
+        now = time.monotonic()
+        at_boundary = [5_000, now, True, server.ADMIT_SHORT_FIRST]
+        over_boundary = [5_000, now - 1.0, True, server.ADMIT_SHORT_FIRST + 1]
+        self.e.wait_lens = [over_boundary, at_boundary]
+        with self.e.slot_cv:
+            self.assertIs(self.e._admit_next(), at_boundary)
+
     def test_a_long_request_that_waited_too_long_goes_first(self):
         with mock.patch.object(server, "ADMIT_SHORT_FIRST", 8192), mock.patch.object(server, "ADMIT_MAX_WAIT_S", 0.2):
             self.assertTrue(self.e.ctl.acquire(timeout=1))

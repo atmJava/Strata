@@ -1881,12 +1881,17 @@ class StrataEngine:
 
     YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
 
+    @staticmethod
+    def _tokens_left_to_read(prompt_tokens: int, known_reuse: int) -> int:
+        """Work an admission asks the engine for: the prompt tokens no known slot prefix covers."""
+        return max(0, int(prompt_tokens) - max(0, int(known_reuse)))
+
     def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False, reused: int = 0):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
         `new`: the request's first admission (ADMIT_SHORT_FIRST orders only these).
         `reused`: the prompt prefix the slots already hold; ordering uses the tokens left to read."""
-        work = max(0, plen - max(0, int(reused)))
+        work = self._tokens_left_to_read(plen, reused)
         entry = [plen, time.monotonic(), new, work]     # (length, arrival, ordered, expected work)
         with self.slot_cv:
             self.waiting += 1
@@ -1920,6 +1925,9 @@ class StrataEngine:
                         if deadline is not None and time.monotonic() >= deadline:
                             self.ctl.release()
                             raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+                        if _BTRACE:
+                            btrace("admit", "new" if new else "continuation", "prompt", plen, "reused", reused,
+                                   "work", work, "wait_s", round(time.monotonic() - entry[1], 3))
                         break
                     self.ctl.release()                  # it died (or is being restarted) while this one was getting
                     turn = False                        # the lines: not the engine this request was meant for
@@ -1995,7 +2003,7 @@ class StrataEngine:
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
         prompt_reuse = self._known_prompt_reuse(prompt)
-        prompt_work = max(0, len(prompt) - prompt_reuse)
+        prompt_work = self._tokens_left_to_read(len(prompt), prompt_reuse)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         # STRATA_BATCH_SERIAL_TWO (opt-in): exactly two low-concurrency requests
@@ -2093,7 +2101,7 @@ class StrataEngine:
                                                             # the held prefix: prompt_read 1) and BDONE replace them
                         prompt = list(ids) + out            # promoted: it continues in a batch slot from here
                         prompt_reuse = self._known_prompt_reuse(prompt)
-                        prompt_work = max(0, len(prompt) - prompt_reuse)
+                        prompt_work = self._tokens_left_to_read(len(prompt), prompt_reuse)
                 while True:
                     if slot is None:
                         # STRATA_MP_STAGED_READ: with every slot busy, read this prompt into the engine's main
