@@ -145,6 +145,14 @@ class AnyUndeclaredName(unittest.TestCase):
         self.assertEqual([c.name for c in calls], ["run_code"])
         self.assertIn('"some_tool_this_build_does_not_know"', calls[0].arguments["code"])
 
+    def test_the_sentinel_streams_nothing_under_the_tools_own_name(self):
+        # Seen live with rewrite={"*": "run_code"}: the streamed tool_start named the undeclared tool and only the
+        # closing event named the wrapper, so a client read `read_file` for a call that was delivered as run_code.
+        for width in (1, 5, len(CALL)):
+            _, events = parse(CALL, rewrite={"*": "run_code"}, width=width)
+            started = [e.call.name for e in events if e.kind == "tool_start"]
+            self.assertEqual(started, [], width)
+            self.assertEqual([c.name for c in calls_of(events)], ["run_code"], width)
     def test_a_declared_tool_is_still_called_as_declared(self):
         _, events = parse(self.body("run_code"), rewrite={"*": "run_code"})
         call = calls_of(events)[0]
