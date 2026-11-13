@@ -38,6 +38,16 @@ def engine_without_process(n=2):
     return e
 
 
+class CountingCondition(threading.Condition):
+    def __init__(self):
+        super().__init__()
+        self.notifications = 0
+
+    def notify_all(self):
+        self.notifications += 1
+        super().notify_all()
+
+
 class AdmitOrderTest(unittest.TestCase):
     def setUp(self):
         self.e = engine_without_process(16)
@@ -214,6 +224,22 @@ class AdmitOrderTest(unittest.TestCase):
         missing = [ast.unparse(call) for call in calls
                    if not any(keyword.arg == "prompt" for keyword in call.keywords)]
         self.assertEqual(missing, [], "every prompt-control wait must let admission refresh its slot reuse")
+
+    def test_cancelled_control_wait_wakes_the_next_request(self):
+        """Removing a cancelled waiter changes who may go next, so it must notify the condition immediately."""
+        e = engine_without_process()
+        e.slot_cv = CountingCondition()
+        cancel = threading.Event()
+        cancel.set()
+        self.assertTrue(e.ctl.acquire(timeout=1))
+        try:
+            wait = e._take_control(cancel, [1] * 100, new=True)
+            with self.assertRaises(StopIteration) as stopped:
+                next(wait)
+            self.assertFalse(stopped.exception.value)
+        finally:
+            e.ctl.release()
+        self.assertGreater(e.slot_cv.notifications, 0)
 
     def test_the_short_work_boundary_is_inclusive(self):
         now = time.monotonic()

@@ -1979,6 +1979,7 @@ class StrataEngine:
                 self.waiting = max(0, self.waiting - 1)
                 if entry in self.wait_lens:
                     self.wait_lens.remove(entry)
+                self.slot_cv.notify_all()
         with self.slot_cv:
             self.ctl_epoch += 1
             self.slot_cv.notify_all()
