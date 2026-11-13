@@ -2454,17 +2454,29 @@ class StrataEngine:
 
     slot_groups = 1         # --batch-groups (set when the engine starts)
     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
+    # Why a slot was chosen, so a run says whether reuse was lost by the choice or because the history was gone: a
+    # prefix hit is a slot whose held tokens are the start of this prompt, no_prefix is a slot picked empty or by
+    # least-recent-use instead, all_busy is every slot in flight, group_fill is the pipelined-groups order (which keeps
+    # no idle slot as a cache on purpose).  Read at /metrics; not a tuning knob.
+    pick_stats = {"prefix_hits": 0, "prefix_tokens": 0, "no_prefix": 0, "all_busy": 0, "group_fill": 0}
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
     def pick_slot(self, prompt: list[int]) -> int | None:
         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
         prompt (the engine then reads only the rest), else an empty one, else the one used longest ago - so the
         conversations other slots hold stay for their next turns.  None: every slot is busy."""
+        # an engine built lazily may not have run __init__: the class attribute is the template, copied on first use so
+        # two engines in one process do not add their counts together
+        stats = self.__dict__.get("pick_stats")
+        if stats is None:
+            stats = self.pick_stats = dict(type(self).pick_stats)
         free = [b for b in self.slot_order if not self.slot_busy[b]]
         if not free:
+            stats["all_busy"] += 1
             return None
         gs = getattr(self, "slot_gs", 0)
         if gs > 1:
+            stats["group_fill"] += 1
             # pipelined groups of several slots: the engine keeps no idle slot below a busy one as a conversation cache
             # (its pad row writes the slot), so nothing is worth keeping free for a next turn.  A group's window spans
             # its slots up to its last busy one, so first fill a hole below a busy slot of the same group (it costs no
@@ -2490,8 +2502,12 @@ class StrataEngine:
             return k if 0 < k < len(prompt) and prompt[:k] == h[:k] else 0
         best = max(free, key=held_prefix)
         # without --batch-groups a held prefix of any length is taken, as before
-        if held_prefix(best) >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
+        keep = held_prefix(best)
+        if keep >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
+            stats["prefix_hits"] += 1
+            stats["prefix_tokens"] += keep
             return best
+        stats["no_prefix"] += 1
         # with --batch-groups: the group with the fewest busy slots first, so the requests spread over the
         # pipeline's stages (two requests in one group leave the other stage idle); then empty, then least recent
         busy_in = {}
@@ -4865,6 +4881,9 @@ class Service:
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
+                # why each admission took the slot it took: a prefix hit reuses the slot's history, no_prefix means
+                # the history was not there (or was not long enough), all_busy means the request had to wait for one
+                "admission": dict(getattr(self.engine, "pick_stats", {})),
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}

@@ -42,6 +42,11 @@ one whose slot held another conversation reused 9,036. Decoding ran at 64 tok/s 
 18.9-24.8 tok/s with five requests in flight. The conversation cache held 11.68 GB across 12 slots, with 65
 parks, 24 restores and 12 evictions in three hours.
 
+The engine reports what a token of a conversation costs in the running K/V format: 14,220 B in INT8 over the 12
+QSA layers, which is 1,056 of K/V plus a page-table byte and the 128-byte pooled indexer key. At the 160K compaction
+point a conversation is about 2.3 GB, so the 11.68 GB cache already held about 5.4 of them - capacity was never the
+lever, and the 51 s median wait is admission and reuse.
+
 Version 0.2.7, engine 0.1.51. The public model families are DeepSeekV4.1-Flash-1017,
 Qwen3.8-Flash-Next and Qwen3.6-35B-A3B. DeepSeek V4.1-Flash runs in the app and in the Terminal
 (`strata launch --family deepseek41 --model ist-das-2.00bpw`; sets in
