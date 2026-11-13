@@ -44,7 +44,7 @@ bool in_range(const std::string& name) {
 // The hyper-connection projections' Q8_0 bytes for the verify read: the GGUF's own Q8_0 projections, or - a bf16 pack -
 // a Q8_0 copy quantized at load.  On: this deployment ran with STRATA_HC_Q8=1, and its other default (gfx12, gfx1151)
 // is not this box.
-bool hc_q8_env() {
+bool hc_q8_on() {
     return true;
 }
 bool hc_q8_name(const std::string& name) {
@@ -376,7 +376,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 }
                 pending.push_back(Pending{&ref, (int) tensor.type, bytes, std::move(data), std::move(packed)});
             }
-            if (hc_q8_env())
+            if (hc_q8_on())
                 for (const auto& tensor : gguf.tensors()) {
                     // S25: the F32 inject rows hold BF16-exact values: the read takes the pack's BF16 rows unless
                     // STRATA_HC_Q8_INJECT=1 asks for a Q8_0 copy
@@ -403,7 +403,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     hc_q8_bytes += bytes;
                 }
         }
-        if (hc_q8_env()) {
+        if (hc_q8_on()) {
             // a bf16 pack stores no Q8_0 copy: quantize the layers' down / up projections. A row the arena kept
             // (--keep-canonical, a layer split) is quantized on the GPU from the arena's bf16; a skipped row (the
             // single-GPU default: add_hc_skip) from the pack file on the host, and has no bf16 copy at all. The
@@ -440,7 +440,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 err = "native dense (STRATA_HC_Q8): quantizing the projections failed"; return false;
             }
         }
-        if (hc_q8_env()) {   // the scratches of hc_bf16_view (rows without a bf16 copy), here and not on first use
+        if (hc_q8_on()) {   // the scratches of hc_bf16_view (rows without a bf16 copy), here and not on first use
             uint64_t elems = 0;
             for (const auto& [name, ref] : table.table_)
                 if (ref.hc_q8 != nullptr && ref.data == nullptr) elems = (std::max)(elems, (uint64_t) ref.elements);
@@ -488,7 +488,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         scratch_ = scratch.release();
         bytes_ = total + hc_q8_bytes;
         allocated_ = allocated;
-        if (hc_q8_env())
+        if (hc_q8_on())
             std::fprintf(stderr, "strata: STRATA_HC_Q8=1: %.2f GiB of Q8_0 hyper-connection projections for the verify read\n",
                          (double) hc_q8_bytes / 1073741824.0);
         return true;
@@ -497,7 +497,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         return false;
     }
 }
-bool NativeDense::hc_q8_requested() { return hc_q8_env(); }
+bool NativeDense::hc_q8_requested() { return hc_q8_on(); }
 
 bool NativeDense::add_hc_skip(const std::string& pack_dir, std::set<std::string>& skip) {
     std::FILE* f = std::fopen((pack_dir + "/index.txt").c_str(), "rb");

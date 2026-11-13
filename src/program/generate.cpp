@@ -687,20 +687,22 @@ struct Options {
     /// the PLE history (~118 MB of host RAM); the KV cache itself is positional and stays where it is.
     int prompt_cache = 6;
     int64_t conversation_cache_mib = -1; // host RAM for independent conversations; -1: not given, --serve sizes it from the free RAM (#3493), 0: off
-    /// --serve: how many conversations the cache may hold.  The working set is what it has to hold - five
-    /// conversations open at once (strata/core/conversation_memory.hpp: kWorkingSetConversations) - so a slot count
-    /// below it would drop one the deployment is using.
-    int conversation_cache_slots = strata::core::kWorkingSetConversations;
-    int64_t conversation_cache_min_free_mib = 2560;
+    /// --serve: how many conversations the cache may hold.  The byte budget is what bounds the memory; this only caps
+    /// how many histories can be parked, and a history shorter than 160K costs a fraction of a full conversation, so
+    /// the cap has to be above the concurrency or the budget goes unused.  12 is what this deployment ran for three
+    /// hours - 65 parks, 12 evictions, 11.68 GB across 12 slots - and it was measured at 4 before the DSH traffic
+    /// arrived.
+    int conversation_cache_slots = 12;
+    int64_t conversation_cache_min_free_mib = 4096;
     /// --serve: park only conversations of at least this many tokens.  Every parked conversation costs one of
     /// conversation_cache_slots whatever its length, so without it a client that interleaves short side requests
     /// with one long conversation evicts the long one (oldest first).  0 = park every conversation.
-    int64_t conversation_cache_min_tokens = 0;
+    int64_t conversation_cache_min_tokens = 4096;
     /// --serve: park only after the conversation has advanced this many tokens past the copy it would supersede.
     /// A conversation that moved a few hundred tokens writes a full snapshot again, and the turn after that drops it
     /// (drop_superseded) after writing the same bytes once more, so on a long single conversation every turn pays a
     /// whole-snapshot copy for nothing.  0 = park every turn, as before.
-    int64_t conversation_cache_park_gain = 0;
+    int64_t conversation_cache_park_gain = 2048;
     /// --memory-limit-mib N / STRATA_MEMORY_LIMIT_MIB: the total RAM this engine's container or cgroup may use, for a
     /// container that cannot see its real limit (0 or unset = none; the flag wins over the variable)
     int64_t memory_limit_mib = -1;
@@ -708,13 +710,13 @@ struct Options {
     int64_t session_min_free_mib = 4096;
     bool session_save_reclaim = false;
     /// --serve: also keep a checkpoint every N freshly read prompt tokens (0 = only at the last turn boundary)
-    int64_t prompt_cache_every = 16384;
+    int64_t prompt_cache_every = 4096;
     bool prompt_cache_tail = false;   // optional extra checkpoint at an existing near-tail chunk boundary
     bool prompt_cache_spread = false;   ///< --prompt-cache-spread: keep checkpoints spread back from the end, not the latest
     /// --prompt-cache-long: for prompts >=128K, keep up to eight scale-spread checkpoints instead of only the
     /// configured LRU chain.  Measured motivation: on 2x RTX 2080 Ti, prompt-cache 3 + 4K interval reused only 8,192
     /// tokens after a 210K prompt changed at 25%; eight spread checkpoints reuse 155,648.  Opt-in; default unchanged.
-    bool prompt_cache_long = false;
+    bool prompt_cache_long = true;   // 4,096-token PLE histories: a 65K prompt's 16 of them (the deployment's shape)
     /// --serve: a prompt read from token 0 is also checkpointed at its first turn boundary - the end of the system
     /// prompt, which every chat of the same client shares - when that is at least N tokens (0 = never)
     int64_t prompt_cache_root = 2048;

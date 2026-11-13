@@ -1284,7 +1284,7 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
 
 /// The variant a card starts from before fused_gr_check has run on it: at most a split (STRATA_HC_SPLIT was 1 on this
 /// deployment).  The check below still decides what the card accepts.
-int env_variant() { return kHcSplit; }
+int preferred_variant() { return kHcSplit; }
 
 // per device: the variant `fused_gr_check` chose (0 = not checked yet)
 std::atomic<int> g_variant[64];
@@ -2344,14 +2344,14 @@ int fused_gr_variant() {
     const int v = dev >= 0 && dev < 64 ? g_variant[dev].load() : 0;
     if (v > 0) return v;
     // not checked on this card: the variant the deployment names, which the check may accept or replace
-    return env_variant();
+    return preferred_variant();
 }
 
 void fused_gr_check() {
     int dev = 0;
     cudaGetDevice(&dev);
     if (dev < 0 || dev >= 64 || g_variant[dev].load() > 0) return;
-    const int want = env_variant();
+    const int want = preferred_variant();
     if (want == kHcPlain) {
         g_variant[dev].store(kHcPlain);
         std::fprintf(stderr, "strata hc: CUDA%d: the hyper-connection read runs as the plain one (STRATA_HC_SPLIT=0)\n",

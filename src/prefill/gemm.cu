@@ -210,17 +210,14 @@ int current_cc() {
     }
     return v;
 }
-// 0: cuBLAS's BF16 GEMM, 1: through FP16 (tensor cores), 2: through FP32 (Pascal)
+// 0: cuBLAS's BF16 GEMM, 1: through FP16 (tensor cores), 2: through FP32 (Pascal).  Below compute 8.0 there is no
+// BF16 tensor core, so the GEMM goes through FP16 - what this deployment ran with (STRATA_BF16_TC=1) and what the
+// 2080 Ti (7.5) takes.
 int bf16_path() {
-    static const int forced = [] {
-        return 1;   // STRATA_BF16_TC=1 on this deployment: a bf16 GEMM below compute 8.0 goes through FP16
-    }();
     const int cc = current_cc();
-    if (forced == 2 && cc > 0) return 1;   // a test mode: the FP16 path on any card (gemm_bf16_parity on sm_80+)
     if (cc <= 0 || cc >= 80) return 0;
     if (cc < 70) return 2;
-    if (forced >= 0) return forced != 0 ? 1 : 0;
-    return cc < 75 ? 1 : 0;
+    return 1;
 }
 bool grow(uint16_t*& p, int64_t& have, int64_t want) {   // `have`, `want`: 2-byte elements
     if (have >= want) return true;
