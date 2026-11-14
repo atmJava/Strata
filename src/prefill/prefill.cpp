@@ -428,13 +428,11 @@ inline bool hcd_exact() {
 }
 // The sm_75 CUDA distribution has no gfx11 WMMA products.  Keep the callers below explicit about their fallback:
 // STRATA_PF_PAD declines to pad, and STRATA_PF_HCDOWN reports that its requested product is unavailable.
-#if !defined(STRATA_USE_HIP)
 inline bool strata_pf_padded_gemm_available() { return false; }
 inline bool strata_pf_hcdown_bf16(const uint16_t*, int64_t, const uint16_t*, const uint16_t*, int64_t, int64_t,
                                   float*, float*, int64_t, int64_t, void* = nullptr) {
     return false;
 }
-#endif
 inline bool hc_pad() { return pf_hcdown() || hcd_exact(); }
 inline bool cvec_fuse() {
     static const bool v = [] { const char* e = std::getenv("STRATA_CVEC_FUSE"); return e && e[0] == '1'; }();
@@ -3160,12 +3158,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     }
                     // #579 #613 (HIP, opt-in A/B, STRATA_KV_HOST_DMA=1): the append writes the staging pool and the
                     // resident slots only, and one DMA copies the chunk's blocks from the staging pool to the host copy
-                    // - no kernel writes host memory over PCIe.  The bytes every reader sees are the same (the staged
-                    // first block is complete; past the chunk's last cell nothing is read until a later append writes
-                    // it).  CUDA: never.
-                    constexpr bool kv_host_dma = false;
-                    const bool host_by_dma = staged && kv_host_dma;
-                    const strata::kernels::KvHostPools* host_w = host_by_dma ? nullptr : &st.host;
+                    // - no kernel writes host memory over PCIe.  CUDA: never.
+                    const strata::kernels::KvHostPools* host_w = &st.host;
                     if (st.kv_hybrid) {   // K8V4: K INT8 unrotated, V rotated Q4_0 (only V and the output rotate)
                         // streamed: each half writes its part of the host copy and of the staging pool
                         strata::kernels::fwht256_inplace_cuda(m.Vc, T * 2, m.cs);
@@ -3191,10 +3185,6 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             kv_append(m.Kc, m.Vc, T, p0, st.page_table, s.page_size, st.kv_int8 ? nullptr : st.k_pool,
                                       st.kv_int8 ? nullptr : st.v_pool, st.k_q, st.v_q, st.k_scale, st.v_scale, m.cs,
                                       host_w, staged ? &m.stage : nullptr);
-                        if (host_by_dma)
-                            strata::kernels::kv_unstage_to_host(pools_of(m.stage, m.ident_table), st.host,
-                                                                core::qsa_kv_format(st), p0 / s.page_size,
-                                                                (p0 + T + s.page_size - 1) / s.page_size, s, m.cs);
                     }
                     if (staged) pf_step("reading the prompt (batched, step sync): the K/V append at layer", l);
                     split_q(m.Qf, m.q, T, m.cs);
@@ -4978,14 +4968,9 @@ const char* lm_env_text() {   // STRATA_PREFILL_LAYER_MAJOR as set (nullptr: uns
 bool lm_env_explicit() { const char* e = lm_env_text(); return e != nullptr && e[0] != '\0'; }
 
 // 上游把"未设置环境变量时的默认值"放在 sm120_series.hpp（本 fork 已退役该文件），这里就地实现同一条规则：
-// 仅 CUDA 分层切分（stages >= 2）默认开启；HIP 构建与单卡保持关闭；显式设置 STRATA_PREFILL_LAYER_MAJOR 总是赢。
+// 仅 CUDA 分层切分（stages >= 2）默认开启；单卡保持关闭；显式设置 STRATA_PREFILL_LAYER_MAJOR 总是赢。
 bool lm_default_on(int stages) {
-#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
-    (void) stages;
-    return false;
-#else
     return stages >= 2;
-#endif
 }
 
 bool lm_even_env() {   // even super-chunks (STRATA_PREFILL_LM_EVEN=0: the largest that fits, then the rest)
@@ -5041,11 +5026,6 @@ void Prefill::lm_release() {
 int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     Impl& m = *impl_;
     if (m.g == nullptr) { why = "not initialized"; return 0; }
-#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
-    // only NVIDIA CUDA has run this path; on an AMD build the prompt stays on the chunk-major path
-    why = "layer-major prefill has only been run on NVIDIA CUDA";
-    return 0;
-#endif
     const core::ModelGeometry& g = *m.g;
     const core::OnDevice on_device(m.device);   // a layer split's later stage is sized on its own GPU
     // layer split (2026-10-24): each stage runs its own layers layer-major over the same super-chunk and hands the
@@ -5938,13 +5918,7 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
                                                                 (p0 + s.page_size - 1) / s.page_size, s, cs);
                             pt.mark(kPfQsa, cs);
                         }
-#if defined(STRATA_USE_HIP)
-                        static const bool kv_host_dma = [] { const char* e = std::getenv("STRATA_KV_HOST_DMA"); return e && e[0] == '1'; }();
-#else
-                        constexpr bool kv_host_dma = false;
-#endif
-                        const bool host_by_dma = staged && kv_host_dma;
-                        const strata::kernels::KvHostPools* host_w = host_by_dma ? nullptr : &st.host;
+                        const strata::kernels::KvHostPools* host_w = &st.host;
                         if (st.kv_hybrid) {
                             // streamed: each half writes its part of the host copy and of the staging pool
                             strata::kernels::fwht256_inplace_cuda(m.Vc, T * 2, cs);
@@ -5970,10 +5944,6 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
                                 kv_append(m.Kc, m.Vc, T, p0, st.page_table, s.page_size, st.kv_int8 ? nullptr : st.k_pool,
                                           st.kv_int8 ? nullptr : st.v_pool, st.k_q, st.v_q, st.k_scale, st.v_scale, cs,
                                           host_w, staged ? &m.stage : nullptr);
-                            if (host_by_dma)
-                                strata::kernels::kv_unstage_to_host(pools_of(m.stage, m.ident_table), st.host,
-                                                                    core::qsa_kv_format(st), p0 / s.page_size,
-                                                                    (p0 + T + s.page_size - 1) / s.page_size, s, cs);
                         }
                         split_q(m.Qf, m.q, T, cs);
                         rms_rows(m.q, (const float*) wqn->data, T * 24, 256, 256, EPS, cs);

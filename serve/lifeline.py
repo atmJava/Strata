@@ -180,11 +180,7 @@ def popen(args, role: str = "engine", **kw) -> subprocess.Popen:
     child = _the_anchor().call(lambda: subprocess.Popen(args, **kw))
     token = None
     try:
-        token = procs.write_record(
-            child.pid,
-            role,
-            profile=os.environ.get("STRATA_RUNTIME_PROFILE") or None,
-        )
+        token = procs.write_record(child.pid, role)
     except Exception:  # noqa: BLE001 - ownership records are best-effort
         pass
     if isinstance(child, _REAL_POPEN):

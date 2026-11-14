@@ -9,59 +9,18 @@
 #endif
 
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <filesystem>
-#include <cstdlib>
 #include <utility>
 #include <cstring>
 
 namespace strata::core {
 
-// See the header.  NVIDIA's DGX Spark Porting Guide (section 5.5, "Memory reporting on UMA systems") recommends the same:
-// not to rely on cudaMemGetInfo alone but to count the memory the OS can reclaim.  Swap is not counted here (unlike
-// NVIDIA's reference snippet): an expert cache that pushes the system into swap would be far slower than a smaller one.
+// See the header.  Both cards here are discrete, so cudaMemGetInfo's figure is the answer; the unified-memory
+// (APU) re-sizing it needed is not a path this deployment has.
 size_t device_free_bytes() {
     size_t free_b = 0, total_b = 0;
     cudaMemGetInfo(&free_b, &total_b);
-#if defined(__linux__)
-    // per device: a box can mix an integrated GPU (an APU) with a discrete one, and the answer is the CURRENT device's
-    static std::atomic<int> uma_cache[64];   // 0 unknown, 1 integrated (unified memory), 2 discrete
-    bool unified_memory = false;
-    {
-        int dev = 0, v = 0;
-        if (cudaGetDevice(&dev) == cudaSuccess && dev >= 0 && dev < 64) {
-            int c = uma_cache[dev].load(std::memory_order_acquire);
-            if (c == 0) {
-                c = cudaDeviceGetAttribute(&v, cudaDevAttrIntegrated, dev) == cudaSuccess && v ? 1 : 2;
-                uma_cache[dev].store(c, std::memory_order_release);
-            }
-            unified_memory = c == 1;
-        }
-    }
-    if (unified_memory) {
-        if (FILE* m = std::fopen("/proc/meminfo", "r")) {
-            char line[256];
-            unsigned long long kb = 0;
-            while (std::fgets(line, sizeof line, m))
-                if (std::sscanf(line, "MemAvailable: %llu kB", &kb) == 1) break;
-            std::fclose(m);
-            // STRATA_UMA_HEADROOM_GIB: a whole number of GiB, 0..1024; anything else keeps the default 6 (said once)
-            static const long gib = [] {
-                const char* h = std::getenv("STRATA_UMA_HEADROOM_GIB");
-                if (h == nullptr) return 6L;
-                char* end = nullptr;
-                const long v = std::strtol(h, &end, 10);
-                if (end != h && *end == '\0' && v >= 0 && v <= 1024) return v;
-                std::fprintf(stderr, "strata: STRATA_UMA_HEADROOM_GIB=%s is not a whole number of GiB (0-1024): using 6\n", h);
-                return 6L;
-            }();
-            const unsigned long long head = (unsigned long long) gib << 30;
-            const unsigned long long avail = kb << 10;
-            if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);
-        }
-    }
-#endif
     return free_b;
 }
 

@@ -69,7 +69,7 @@ def build(name: str, rows: int, cols: int, seed: int):
     """The .bin body (header + raw blocks) and the .f32 reference for one type."""
     kernel_type = KERNEL_IDS[name]
     n = rows * cols
-    rng = np.random.RandomState((seed, hash(name) & 0xFFFF) if False else (seed, KERNEL_IDS[name]))
+    rng = np.random.RandomState((seed, KERNEL_IDS[name]))
     if name == "Q2_0":                                 # the repository's own codec, gguf-py has no type 42
         w = rng.standard_normal(n).astype(np.float32)
         raw = np.frombuffer(quantize_q2_0(w), dtype=np.uint8)

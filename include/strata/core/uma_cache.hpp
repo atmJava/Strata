@@ -5,7 +5,7 @@
 // already counted in what the OS has used, but the cache copies experts INTO that same RAM, so a cache sized from the pool alone can ask for
 // more bytes than the OS has left - the OOM killer then takes the engine, or the desktop.  The auto cache is therefore sized from
 // min(what the GPU says is free, the RAM the OS says is available - a reserve for the desktop).  Only the AUTO size: --expert-cache N is
-// kept as asked (the engine warns).  STRATA_UMA_RESERVE_GIB=N sets the reserve (0 = no reserve: the old sizing).
+// kept as asked (the engine warns).  The reserve is the constant below: this deployment has no integrated GPU.
 #pragma once
 
 #include <cstdint>
@@ -13,9 +13,9 @@
 
 namespace strata::core {
 
-/// The RAM an integrated GPU's expert cache leaves to the OS and the desktop: STRATA_UMA_RESERVE_GIB when set (0 = none), else the larger of
+/// The RAM an integrated GPU's expert cache leaves to the OS and the desktop: the larger of
 /// 8 GiB and 8% of the installed RAM (a desktop session with a browser needs ~6 GiB; 8% is ~10 GiB on 128 GB).
-inline uint64_t uma_desktop_reserve_bytes(uint64_t total_ram, const char* env_gib = std::getenv("STRATA_UMA_RESERVE_GIB")) {
+inline uint64_t uma_desktop_reserve_bytes(uint64_t total_ram, const char* env_gib = nullptr) {
     constexpr uint64_t GiB = 1ull << 30;
     if (env_gib != nullptr && env_gib[0] != '\0') {
         char* end = nullptr;

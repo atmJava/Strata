@@ -308,21 +308,6 @@ class MaxTokens(unittest.TestCase):
         self.assertEqual(s2, 200)
         self.assertEqual(b["input_tokens"], n_in)
 
-    def test_request_line_parses_the_engine_summary(self):
-        line = ("strata serve: prompt 1200 tokens = 1000 reused + 200 read in 50 ms (4000.0 tok/s), 30 generated in "
-                "300 ms (100.0 tok/s), drafts accepted 20 of 28, 2 checkpoints")
-        from serve.server import ENGINE_REQUEST
-        m = ENGINE_REQUEST.search(line)
-        self.assertIsNotNone(m)
-        self.assertEqual((m["prompt"], m["reused"], m["gen"], m["tg"]), ("1200", "1000", "30", "100.0"))
-        # #471: a request cancelled while its prompt was read says how far it got
-        m = ENGINE_REQUEST.search("strata serve: prompt 98179 tokens = 0 reused + 12288 of 98179 read in 17565 ms "
-                                  "(699.6 tok/s), 0 generated in 0 ms (0.0 tok/s), drafts accepted 0 of 0, "
-                                  "0 checkpoints (cancelled)")
-        self.assertIsNotNone(m)
-        self.assertEqual((m["prompt"], m["reused"], m["read"], m["pp"], m["gen"]),
-                         ("98179", "0", "17565", "699.6", "0"))
-
     def test_unset_budget_is_the_rest_of_the_context(self):
         cases = {"openai": [{"max_tokens": -1}, {"max_tokens": 0}, {}, {"max_tokens": None},
                             {"max_completion_tokens": -1}, {"max_completion_tokens": None, "max_tokens": None}],
@@ -2015,12 +2000,6 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 9.0, 2: 6.0},
                                     {0: 8192, 1: 12288, 2: 24576}), [0, 1, 2])  # tail 1 (12G) < given tail 2 (24G)
         self.assertEqual(child_env({"gpu": [0, 2], "args": [], "gpu_order": "as_given"})["CUDA_VISIBLE_DEVICES"], "0,2")
-    def test_engine_nice_is_operator_selected(self):
-        from serve.server import engine_nice
-        self.assertEqual(engine_nice({}), 0)
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "0"}), 0)
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "9"}), 9)
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "x"}), 0)
 
     def test_vision_device(self):
         # #408: the image encoder on its own card; the engine's environment stays as it was
@@ -6337,27 +6316,10 @@ class EngineStartRollback(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "engine.log"
             engine = object.__new__(StrataEngine)
-            with mock.patch.dict(os.environ, {"STRATA_REQUEST_LINES": ""}), \
-                    self.reject_thread("strata-engine-narrator"):
+            with self.reject_thread("strata-engine-narrator"):
                 with self.assertRaisesRegex(RuntimeError, "narrator"):
                     StrataEngine.__init__(engine, "strata", [], log=str(log))
             self.assertIsNone(engine.proc)
-            self.assertIsNone(engine.log)
-
-    def test_an_echo_thread_failure_rolls_back_its_log_registration(self):
-        import serve.server as server
-
-        with tempfile.TemporaryDirectory() as d:
-            log = Path(d) / "engine.log"
-            log.write_text("", encoding="utf-8")
-            key = os.path.abspath(str(log))
-            engine = object.__new__(StrataEngine)
-            with mock.patch.dict(os.environ, {"STRATA_REQUEST_LINES": "1"}), \
-                    mock.patch.object(server, "narrate_start", lambda *a, **k: None), \
-                    self.reject_thread("strata-engine-echo"):
-                with self.assertRaisesRegex(RuntimeError, "echo"):
-                    StrataEngine.__init__(engine, "strata", [], log=str(log))
-            self.assertNotIn(key, server._echoing)
             self.assertIsNone(engine.log)
 
     def fake_engine(self, code):

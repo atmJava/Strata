@@ -113,9 +113,41 @@ class EngineDefaults(unittest.TestCase):
             "STRATA_MTP_STAGE0",
             "STRATA_PIPELINE_AUTO",
             "STRATA_PIPELINE_AUTO_MIN_STAGES",
+            "STRATA_PCIE_AUTO_SPLIT",
+            "STRATA_GFX12_CHUNK",
+            "STRATA_SPLIT_CHUNK16K",
+            "STRATA_UMA_HEADROOM_GIB",
+            "STRATA_UMA_RESERVE_GIB",
+            "STRATA_ATTN_PRE75",
         ):
             with self.subTest(name=name):
                 self.assertEqual(engine_reads(name), [])
+
+
+class ServerKnobs(unittest.TestCase):
+    """The serve/ side of the same rule: the behaviour this box runs is code, not an environment read."""
+
+    def test_the_folded_knobs_have_no_environment_reader(self):
+        for name in (
+            "STRATA_STREAM_WRITE_TIMEOUT_S",
+            "STRATA_START_RETRIES",
+            "STRATA_HTTP_BACKLOG",
+            "STRATA_REPLICA_START",
+            "STRATA_KEEP_LEFTOVERS",
+            "STRATA_BATCH_MTP",
+            "STRATA_BATCH_TRACE",
+            "STRATA_REQUEST_LINES",
+            "STRATA_KEEP_EMPTY_TURNS",
+            "STRATA_RUNTIME_PROFILE",
+            "STRATA_ENGINE_NICE",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(source_reads(name), [])
+
+    def test_the_folded_knobs_are_their_defaults(self):
+        self.assertEqual(server.STREAM_WRITE_TIMEOUT_S, 60.0)
+        self.assertEqual(server.START_RETRIES, 3)
+        self.assertEqual(server.Server.request_queue_size, 256)
 
 
 class Capacity(unittest.TestCase):

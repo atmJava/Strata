@@ -24,7 +24,6 @@
 #include <string>
 #include <vector>
 
-#define STRATA_GGUF_MAIN_DISABLED 1
 #include "strata/artifact/gguf_reader.hpp"
 
 namespace strata {

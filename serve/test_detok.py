@@ -80,7 +80,7 @@ class Detok(unittest.TestCase):
         n = len(self.tok.tokens)
         for _ in range(20):   # random ids: split and invalid UTF-8 sequences everywhere (no U+FFFD token itself)
             ids = [rng.randrange(n) for _ in range(300)]
-            ids = [t for t in ids if "\ufffd" not in self.tok.decode([t], errors="strict" if False else "replace")
+            ids = [t for t in ids if "\ufffd" not in self.tok.decode([t], errors="replace")
                    or len(self.tok.token_bytes(t)) < 3]
             self.same_stream(ids)
 

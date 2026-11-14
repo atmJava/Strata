@@ -6,7 +6,7 @@ namespace strata::core::proposal {
 // Never a vocabulary ID or the existing no-draft marker (-1).
 inline constexpr int32_t kProposalSamplerErrorToken = -2147483647;
 enum class RowKind { MuOffer, PointOffer, NullTail, PlainBonus };
-#if defined(__CUDACC__) || defined(__HIPCC__)
+#ifdef __CUDACC__
 #define STRATA_PROPOSAL_HD __host__ __device__
 #else
 #define STRATA_PROPOSAL_HD

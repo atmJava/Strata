@@ -17,17 +17,7 @@
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
 #include <dlfcn.h>
-#endif
 
 namespace strata::program::gpu_report {
 
@@ -135,27 +125,15 @@ struct Nvml {
 };
 
 inline void* open_lib() {
-#if defined(_WIN32)
-    return (void*) LoadLibraryA("nvml.dll");
-#else
     for (const char* n : {"libnvidia-ml.so.1", "libnvidia-ml.so"})
         if (void* h = dlopen(n, RTLD_LAZY | RTLD_LOCAL)) return h;
     return nullptr;
-#endif
 }
 inline void* sym(void* lib, const char* n) {
-#if defined(_WIN32)
-    return (void*) GetProcAddress((HMODULE) lib, n);
-#else
     return dlsym(lib, n);
-#endif
 }
 inline void close_lib(void* lib) {
-#if defined(_WIN32)
-    if (lib) FreeLibrary((HMODULE) lib);
-#else
     if (lib) dlclose(lib);
-#endif
 }
 }  // namespace detail
 

@@ -250,8 +250,7 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
     if (ldy <= 0) ldy = N;
     if (ldx <= K) ldx = 0;
     const float alpha = 1.0f;
-    constexpr bool kPascalPath = false;
-    if (const int path = K > 0 ? bf16_path() : 0; (path == 1 && N > 1 && beta == 0.0f) || (path == 2 && kPascalPath)) {
+    if (const int path = K > 0 ? bf16_path() : 0; path == 1 && N > 1 && beta == 0.0f) {
         // FP16 (path 1) or FP32 (path 2, Pascal) copies of the weight and of X, converted in tiles.  Issue #1757: when
         // the buffers did not fit in the VRAM that was left (a stage of a layer split keeps ~100 MiB), this fell through
         // to the raw BF16 cuBLAS call, which a Pascal card answers with CUBLAS_STATUS_INTERNAL_ERROR (14).  Now the

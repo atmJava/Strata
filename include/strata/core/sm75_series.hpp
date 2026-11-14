@@ -26,9 +26,10 @@
 
 namespace strata {
 
-/// The Turing kernels are on.  This box is two RTX 2080 Ti (compute 7.5) and the engine was adapted for them; the
-/// deployment set STRATA_SM75_PERF=1, and a card that is not a 7.5 never reaches one of these kernels anyway
-/// (sm75_default).
+/// The Turing kernels are on.  This box is two RTX 2080 Ti (compute 7.5) and the engine was adapted for them, so the
+/// series is always on here (no STRATA_SM75_PERF read remains); a card that is not a 7.5 never reaches one of these
+/// kernels anyway (sm75_default), and each kernel keeps its own sm75_switch variable, which still wins in both
+/// directions.
 inline bool sm75_series() { return true; }
 
 /// the device (raw cudaDevAttrComputeCapabilityMajor / Minor) is a Turing card, or emulates one (STRATA_EMULATE_CC=75)

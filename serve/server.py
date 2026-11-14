@@ -144,8 +144,6 @@ def end_leftover_engines(exe: str) -> None:
     10 s this used to wait): a 40 GiB arena loaded beside 50 GiB the old engine had not returned put a 60 GiB PC into
     memory reclaim for good.  One still there after LEFTOVER_SETTLE_S is said in plain words, and the start goes on
     (the engine waits for the RAM itself and warns; nothing is refused)."""
-    if os.environ.get("STRATA_KEEP_LEFTOVERS") == "1":
-        return
     try:
         from strata_control import procs
         say = lambda text: print(text, flush=True)        # noqa: E731
@@ -294,8 +292,8 @@ RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean s
 ENGINE_SILENCE_S = 300.0
 # #4271: a streaming client that stops reading (a hung process, a network that dropped) leaves the thread that writes to
 # it blocked once the socket buffers are full - and that thread holds the engine's turn.  A write that makes no progress
-# for this long ends the request as a disconnect (the engine is stopped, the turn given back).  0: no limit, as before.
-STREAM_WRITE_TIMEOUT_S = float(os.environ.get("STRATA_STREAM_WRITE_TIMEOUT_S", "60") or 0)
+# for this long ends the request as a disconnect (the engine is stopped, the turn given back).
+STREAM_WRITE_TIMEOUT_S = 60.0
 # Disk sessions: the longest allowance an engine may announce (`SWAIT <phase> <s>`) for one step that blocks in a
 # single call (a file flush, the host->device transfer); the engine's own bound is the same (session_phase_limit_s).
 SESSION_WAIT_MAX_S = 3600
@@ -494,15 +492,6 @@ def unload_wait(value, default: float) -> float:
     except ValueError:
         return default
 
-
-ENGINE_REQUEST = re.compile(
-    # "+ 12288 of 98179 read": a request cancelled while its prompt was read (#471)
-    r"prompt (?P<prompt>\d+) tokens = (?P<reused>\d+) reused \+ \d+(?: of \d+)? read in (?P<read>[\d.]+) ms "
-    r"\((?P<pp>[\d.]+) tok/s\), "
-    r"(?P<gen>\d+) generated in (?P<gen_ms>[\d.]+) ms \((?P<tg>[\d.]+) tok/s\)")
-
-
-_echoing: set[str] = set()      # the logs echo_requests already follows (restart() runs StrataEngine.__init__ again)
 
 DRAFT_HEAD_FAIL = "the draft head does not fit"
 DRAFT_HEAD_HINT = ("a smaller draft vocabulary needs less VRAM: --draft-vocab cyrillic (English, code and the Cyrillic "
@@ -732,7 +721,7 @@ def start_exit_note(rc: int | None, exe=None) -> str:
     return note
 
 
-START_RETRIES = max(0, int(os.environ.get("STRATA_START_RETRIES", "3") or 0))
+START_RETRIES = 3
 
 
 def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: int | None = None) -> bool:
@@ -754,29 +743,6 @@ def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: 
     # must not call it a GPU runtime start (#2324: an old CPU's illegal instruction was retried 3 times as "GPU
     # runtime" and the real reason never shown)
     return not engine_lines and rc != 1 and not engine_crashed(rc)
-
-
-def echo_requests(log_path: str, offset: int) -> None:
-    """STRATA_REQUEST_LINES=1: one stdout line per finished request, from the engine's own summary in its log.
-
-    The engine's stderr goes to the log file (the start narrator reads it), so a supervisor that only sees this
-    process's output - a tray, llama-swap - has no per-request numbers. This re-states the engine's line with the
-    total the two times make: `request prompt P cached C output O prompt_read R ms total S ms prefill X tok/s decode Y
-    tok/s` (prompt_read: the time the engine spent reading the prompt's new tokens, not a time to first token).
-    """
-    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-        f.seek(offset)
-        while True:
-            line = f.readline()
-            if not line:
-                time.sleep(0.2)
-                continue
-            m = ENGINE_REQUEST.search(line)
-            if m:
-                read_ms, gen_ms = float(m["read"]), float(m["gen_ms"])
-                print("[strata] request prompt %s cached %s output %s prompt_read %.0f ms total %.0f ms prefill %s "
-                      "tok/s decode %s tok/s" % (m["prompt"], m["reused"], m["gen"], read_ms, read_ms + gen_ms, m["pp"],
-                                                 m["tg"]), flush=True)
 
 
 def experts_loading_words(args: list, size: str) -> str:
@@ -946,14 +912,6 @@ def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) 
             "reused_tokens": totals.get("reused", 0), "prompt_tokens": totals.get("prompt_tokens", 0),
             "last_reused": last.get("reused") if last else None,
             "last_prompt": last.get("prompt_tokens") if last else None}
-
-
-_BTRACE = bool(os.environ.get("STRATA_BATCH_TRACE"))
-
-
-def btrace(*a):
-    if _BTRACE:
-        print("[batch-trace]", threading.get_ident() % 10000, *a, file=sys.stderr, flush=True)
 
 
 EOS_IDS = {248044, 248046}   # <|endoftext|>, <|im_end|>: the engine's default --eos-ids
@@ -1134,18 +1092,6 @@ class StrataEngine:
                     name="strata-engine-narrator", daemon=True,
                 )
                 narrator.start()
-                # once per log: the follower keeps reading the same (appended) log across restarts and reloads
-                if os.environ.get("STRATA_REQUEST_LINES") and os.path.abspath(log) not in _echoing:
-                    echo_key = os.path.abspath(log)
-                    _echoing.add(echo_key)
-                    try:
-                        threading.Thread(
-                            target=echo_requests, args=(log, log_start),
-                            name="strata-engine-echo", daemon=True,
-                        ).start()
-                    except Exception:
-                        _echoing.discard(echo_key)
-                        raise
             if log:                                      # #779: when an engine started (a crash report has the time)
                 try:
                     self.log.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
@@ -1157,11 +1103,6 @@ class StrataEngine:
             pin = {}
             if cpus and hasattr(os, "sched_setaffinity"):    # replicas: this engine's own physical cores (serve/replicas.py)
                 pin["preexec_fn"] = lambda: os.sched_setaffinity(0, cpus)
-            nice = engine_nice(env)                          # optional operator-selected CPU priority
-            if nice:
-                say_nice = pin.get("preexec_fn")
-                pin["preexec_fn"] = lambda: (say_nice() if say_nice else None, os.nice(nice))[0]
-                print(f"[strata] engine priority: nice +{nice} (STRATA_ENGINE_NICE=0 turns it off)", flush=True)
             end_leftover_engines(exe)                    # one an earlier run lost still holds the GPU and the memory
             spawned_at = time.monotonic()
             self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
@@ -1642,7 +1583,6 @@ class StrataEngine:
         return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
     def _send(self, text: str):
-        btrace("send>", text[:60])
         try:
             with self.wlock:
                 self.proc.stdin.write(text + "\n")
@@ -1683,8 +1623,6 @@ class StrataEngine:
             beat = time.monotonic()
             if line is None:
                 raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
-            if not line.startswith(("PP ", "INFO")):
-                btrace("ctl<", self._ctl_mode, line.strip()[:60])
             if line.startswith("T "):
                 t = int(line[2:])
                 if want_lp:
@@ -2010,10 +1948,6 @@ class StrataEngine:
                         if deadline is not None and time.monotonic() >= deadline:
                             self.ctl.release()
                             raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
-                        if _BTRACE:
-                            btrace("admit", "new" if new else "continuation", "prompt", plen,
-                                   "reused", max(0, plen - entry[3]), "work", entry[3],
-                                   "wait_s", round(time.monotonic() - entry[1], 3))
                         break
                     self.ctl.release()                  # it died (or is being restarted) while this one was getting
                     turn = False                        # the lines: not the engine this request was meant for
@@ -2097,7 +2031,6 @@ class StrataEngine:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
         prompt_work = self._known_prompt_work(prompt)[1]  # slot ownership may have changed while this request waited
-        btrace("ctl acquired")
         slot, gen0, reserved = None, None, None
         slot_touched = False      # a slot claimed but cancelled before its command keeps its LRU position
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
@@ -2491,12 +2424,10 @@ class StrataEngine:
                                 reused0 = (self.last or {}).get("reused")
                             prompt, left = list(ids) + out, int(max_new) - len(out)
                             solo_again += 1
-                            btrace("back to the solo path")
                             break
                         return
         finally:
             # a consumer that left early (or an error): keep the engine and this server in step
-            btrace("finally phase", phase, "slot", slot, "holding", holding)
             try:
                 if phase in ("staged", "staged_wait") or staged_ready is not None:
                     took = False
@@ -3763,7 +3694,7 @@ def parallel_args(cfg: dict, args: list[str]) -> list[str]:
         return []
     if n <= 1:
         return []
-    if n > PARALLEL_MAX and "--batch-mtp" not in args and os.environ.get("STRATA_BATCH_MTP", "0") in ("", "0"):
+    if n > PARALLEL_MAX and "--batch-mtp" not in args:
         print(f'[strata] "parallel": {n} - the engine runs at most {PARALLEL_MAX} requests together; it will use '
               f"{PARALLEL_MAX}", flush=True)
     return ["--batch", str(n)]
@@ -3861,17 +3792,6 @@ def gpu_speed_scores(indices: list[int]) -> dict[int, float] | None:
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return got if all(i in got and got[i] > 0 for i in indices) else None
-
-
-def engine_nice(env: dict | None = None) -> int:
-    """The optional Linux nice value from STRATA_ENGINE_NICE (0..19; 0 is the default)."""
-    asked = (env or os.environ).get("STRATA_ENGINE_NICE")
-    if asked is not None and str(asked).strip() != "":
-        try:
-            return max(0, min(19, int(str(asked).strip())))
-        except ValueError:
-            return 0
-    return 0
 
 
 def gpu_vram_mib(indices: list[int]) -> dict[int, int] | None:
@@ -7848,11 +7768,10 @@ def make_handler(svc: Service):
             self.send_header("X-Accel-Buffering", "no")   # nginx and similar proxies pass each event at once
             self._cors()
             self.end_headers()
-            if STREAM_WRITE_TIMEOUT_S > 0:
-                try:
-                    self.connection.settimeout(STREAM_WRITE_TIMEOUT_S)     # (#4271) a stuck write ends as OSError: disconnected
-                except OSError:
-                    pass
+            try:
+                self.connection.settimeout(STREAM_WRITE_TIMEOUT_S)     # (#4271) a stuck write ends as OSError: disconnected
+            except OSError:
+                pass
 
         def _capture(self, items, api):
             """Retain bounded input/output for the monitor without changing the API response (the items as they
@@ -8254,8 +8173,7 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
     # socketserver listens with a backlog of 5: a burst of 30-40 clients at once got "connection reset by peer" on the
     # first ones (measured on 4 x R9700, also with one request at a time); the requests wait in the server, not the kernel
-    # (STRATA_HTTP_BACKLOG overrides it)
-    request_queue_size = max(5, int(os.environ.get("STRATA_HTTP_BACKLOG") or 256))
+    request_queue_size = 256
 
     def server_bind(self):
         # http.server's own server_bind also asks socket.getfqdn(host) for a server_name nothing here reads; on a host whose reverse
@@ -8748,11 +8666,7 @@ def start_replicas(cfg: dict, groups: list[list[int]], exe: str, effort_end: lis
             errors.append((i, e))
     rc0 = rp.replica_cfg(cfg, 0, groups[0])
     warn_budget_over_ram(engine_args(rc0) if "args" in rc0 else [])
-    if os.environ.get("STRATA_REPLICA_START", "") == "serial":
-        for i in range(n):
-            one(i)
-    else:
-        rp._run_together(lambda i=i: one(i) for i in range(n))
+    rp._run_together(lambda i=i: one(i) for i in range(n))
     if errors:
         for e in engines:
             if e is not None:

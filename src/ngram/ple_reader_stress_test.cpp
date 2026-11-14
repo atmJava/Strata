@@ -36,14 +36,7 @@
 #include <thread>
 #include <vector>
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <winioctl.h>
-#else
 #include <unistd.h>
-#endif
 
 namespace ng = strata::ngram;
 
@@ -283,7 +276,6 @@ bool run_config(const std::string& dir, const Spec& s, const Config& c, double s
     return true;
 }
 
-#if !defined(_WIN32)
 /// After a failed read the reader must keep failing (collect returns false) and must not hang.
 void error_does_not_hang(const std::string& dir) {
     const Spec s{"error", 90, 192, 20000, 0};
@@ -324,30 +316,10 @@ void error_does_not_hang(const std::string& dir) {
     std::filesystem::remove(path);
     std::printf("  error path: a failed read fails the next tickets too, none hangs\n");
 }
-#endif
 
 // ----------------------------------------------------------------------------------------------- the big sparse table
 /// A sparse file of `size` bytes with the given (offset, bytes) pieces written.
 bool make_sparse(const std::string& path, uint64_t size, const std::vector<std::pair<uint64_t, std::vector<uint8_t>>>& pieces) {
-#if defined(_WIN32)
-    HANDLE h = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    DWORD ret = 0;
-    DeviceIoControl(h, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &ret, nullptr);   // if it is refused the file is just big
-    bool ok = true;
-    for (const auto& p : pieces) {
-        LARGE_INTEGER at;
-        at.QuadPart = (LONGLONG) p.first;
-        DWORD w = 0;
-        ok = ok && SetFilePointerEx(h, at, nullptr, FILE_BEGIN) && WriteFile(h, p.second.data(), (DWORD) p.second.size(), &w, nullptr) &&
-             w == p.second.size();
-    }
-    LARGE_INTEGER end;
-    end.QuadPart = (LONGLONG) size;
-    ok = ok && SetFilePointerEx(h, end, nullptr, FILE_BEGIN) && SetEndOfFile(h);
-    CloseHandle(h);
-    return ok;
-#else
     {
         std::ofstream f(path, std::ios::binary | std::ios::trunc);
         if (!f) return false;
@@ -360,7 +332,6 @@ bool make_sparse(const std::string& path, uint64_t size, const std::vector<std::
     std::error_code ec;
     std::filesystem::resize_file(path, size, ec);
     return !ec;
-#endif
 }
 
 void big_offsets(const std::string& dir) {
@@ -486,9 +457,7 @@ int main(int argc, char** argv) {
         std::filesystem::remove(path);
         if (g_fail.load() > 0) break;
     }
-#if !defined(_WIN32)
     if (g_fail.load() == 0) error_does_not_hang(dir);
-#endif
     if (big && g_fail.load() == 0) big_offsets(dir);
     std::printf("ple_reader stress: %s\n", g_fail.load() ? "FAILED" : "OK");
     return g_fail.load() ? 1 : 0;

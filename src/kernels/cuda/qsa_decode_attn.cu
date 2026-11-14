@@ -469,8 +469,6 @@ bool attn_v3_on() {
 // no DPP it is the Daily's (be4cf1c) attn_chunk_kernel line for line - the same reduce12 scores, the same cell-major
 // probabilities and the same four-cell value fold - except that `spt` shares `sq`'s storage here (no arithmetic
 // change).  Without the variable nothing selects it on a card at or above sm_75.
-#define STRATA_ATTN_PRE75_BUILT 1
-#if defined(STRATA_ATTN_PRE75_BUILT)
 // A butterfly step's lane exchange, `M` = 1, 2, 4, 8 or 16.  DPP (HIP, wave32): in registers - DPP row_xmask within a
 // 16-lane row, v_permlanex16 across the two rows - instead of ds_bpermute; the same value moves, so every sum is
 // unchanged bit for bit.
@@ -691,7 +689,6 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_kernel_pre75(const float* 
 #pragma unroll
     for (int h = 0; h < G; ++h) part_acc[((size_t) slot * G + h) * HD + t] = acc[h];
 }
-#endif  // STRATA_ATTN_PRE75_BUILT
 
 __global__ void __launch_bounds__(HD) attn_merge_kernel(const float* __restrict__ part_acc,
                                                         const float* __restrict__ part_m,
@@ -807,25 +804,14 @@ __global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restri
     return on;
 }
 
-#if defined(STRATA_ATTN_PRE75_BUILT)
-// CUDA: the current device is below sm_75 (experimental build) or STRATA_ATTN_DAILY=1 (any card); HIP: it is gfx103x
-// (per device: a layer split can mix cards).
-// STRATA_ATTN_PRE75=0 turns PR #540's kernel off (A/B); on HIP =1 also runs it on another wave32 card.
+// CUDA: the kernel below sm_75's line is selected only by STRATA_ATTN_DAILY=1 (the sm_75 A/B seam);
+// the pre-Turing gate that used to pick it never opens on this card.
 bool pre75_attn() {
-    static const int env = [] {
-        const char* e = std::getenv("STRATA_ATTN_PRE75");
-        return e == nullptr ? -1 : e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1;
-    }();
-    if (env == 0) return false;
     return daily_attn();   // the ready-made engine: upstream's attn_chunk_kernel unless STRATA_ATTN_DAILY=1
 }
-// `PRE` picks PR #540's kernel; the environment's choice is STRATA_ATTN_CHUNK.
+// `PRE` picks PR #540's kernel.
 #define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M> : attn_chunk_kernel<M>)
 #define STRATA_ATTN_CHUNK(M) STRATA_ATTN_CHUNK_SEL(M, pre75_attn())
-#else
-#define STRATA_ATTN_CHUNK_SEL(M, PRE) attn_chunk_kernel<M>
-#define STRATA_ATTN_CHUNK(M) attn_chunk_kernel<M>
-#endif
 
 // S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
 bool lane_cell_attn() {
@@ -873,9 +859,7 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
     float* part_l = part_m + (size_t) n_chunks * s.n_head;
     const float scale = 1.0f / sqrtf((float) HD);
     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
-#if defined(STRATA_ATTN_PRE75_BUILT)
     const bool pre = kernel < 0 ? pre75_attn() : kernel == 1;
-#endif
     // S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
     const bool lane_cell = kernel < 0 && lane_cell_attn();
 #define STRATA_ATTN_LC(M) attn_chunk_kernel<M, true><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
@@ -957,9 +941,7 @@ bool qsa_decode_attn_slots(const float* q, const QsaAttnSlotPools& pools, const 
     }
     const bool lane_cell = lane_cell_attn();
     // only where qsa_decode_attn_batch runs attn_chunk_kernel; its other variants keep the per-query calls
-#if defined(STRATA_ATTN_PRE75_BUILT)
     if (!lane_cell && pre75_attn()) return false;
-#endif
     const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
     const long long stride = (long long) qsa_decode_attn_scratch_floats(cap, s);
     float* part_acc = scratch;
@@ -1014,9 +996,7 @@ void qsa_decode_attn_batch_rows(const float* q, const QsaAttnPoolsRows& rows, co
     // pre-sm_75 / gfx103x kernel, the gfx906 swizzle): there each row goes through that call, one launch per row.
     static const bool lane_cell_rows = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
     bool per_row = lane_cell_rows;
-#if defined(STRATA_ATTN_PRE75_BUILT)
     per_row = per_row || pre75_attn();
-#endif
     if (per_row) {
         for (int64_t r = 0; r < n_q; ++r)
             qsa_decode_attn_batch(q + (size_t) r * s.n_head * HD, rows.p[r], ids + (size_t) r * cap,
