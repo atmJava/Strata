@@ -7,18 +7,15 @@
 // is neither always on nor always off: where the engine could run it (CUDA, `--serve`, one GPU, the expert arena, no batch
 // slots, no layer split) it starts on the blocking tier, measures ~64 windows, and only when the tier's wait is a large part
 // of a window does it try the asynchronous tier for ~64 windows and go back to the blocking tier if the decode got slower by more than 2%.
-// Off switches: `--adapt-async 0`, `STRATA_ADAPT_ASYNC=0`.  `--adapt-async 1` keeps its old meaning (always on).
+// The off switch: `--adapt-async 0`.  `--adapt-async 1` keeps its old meaning (always on).
 // Not bit-exact from run to run, like the adaptive tier itself.  The identity gates run with `--adapt-every 100000` (no
 // adaptive tier), so they never reach this.
 #pragma once
-
-#include <cstdlib>
 
 namespace strata::core {
 
 struct AdaptAsyncAuto {
     int flag = -1;               ///< --adapt-async on the command line: -1 not given, else 0 / 1
-    int env = -1;                ///< STRATA_ADAPT_ASYNC: -1 unset, else its value (0 = off)
     bool cuda = false;           ///< a CUDA build (the HIP builds keep it opt-in)
     bool serve = false;
     bool adaptive = false;       ///< --adapt-every and --adapt-swaps both above 0
@@ -28,20 +25,12 @@ struct AdaptAsyncAuto {
     bool batch = false;          ///< --batch slots
     bool peer = false;           ///< --peer-device
     bool remote_opt = false;     ///< --remote-expert-opt
-    bool adapt_overlap = false;  ///< the opt-in STRATA_ADAPT_OVERLAP tier, which excludes the asynchronous one
 };
-
-/// STRATA_ADAPT_ASYNC as the process sees it (-1 unset).
-inline int adapt_async_env() {
-    const char* v = std::getenv("STRATA_ADAPT_ASYNC");
-    return v == nullptr || v[0] == '\0' ? -1 : std::atoi(v);
-}
 
 /// true: the engine may choose the asynchronous tier by measurement.  `why_not` (may be null) gets a short reason otherwise.
 inline bool adapt_async_self_decides(const AdaptAsyncAuto& a, const char** why_not = nullptr) {
     auto no = [&](const char* why) { if (why_not != nullptr) *why_not = why; return false; };
     if (a.flag >= 0) return no("--adapt-async was given");          // the user's choice, 0 or 1, is applied as before
-    if (a.env == 0) return no("STRATA_ADAPT_ASYNC=0");
     if (!a.cuda) return no("not a CUDA build");
     if (!a.serve) return no("it needs --serve");
     if (!a.adaptive) return no("the adaptive tier is off");
@@ -51,7 +40,6 @@ inline bool adapt_async_self_decides(const AdaptAsyncAuto& a, const char** why_n
     if (a.batch) return no("--batch slots");
     if (a.peer) return no("--peer-device");
     if (a.remote_opt) return no("--remote-expert-opt");
-    if (a.adapt_overlap) return no("STRATA_ADAPT_OVERLAP");
     return true;
 }
 

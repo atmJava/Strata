@@ -271,7 +271,7 @@ public:
         return got;
     }
     virtual void prefetch_end() {}
-    /// 149 STRATA_IO_PF_GATE: whether the decode's read-ahead runs now (the look-ahead then predicts one layer, not two)
+    /// Whether the decode's read-ahead runs now (the look-ahead then predicts one layer, not two)
     virtual bool read_ahead_open() const { return true; }
     /// 0.2.0: the source the Linux file-tier defaults apply to (the GGUF read in place); STRATA_COLD_OVERLAP's default
     virtual bool linux_file_defaults() const { return false; }
@@ -281,13 +281,6 @@ public:
     /// CS-T: the experts of `layer` a predictor expects next - a source that reads a file may start reading their
     /// pages now, in the background.  Only warms: what `blob` returns is unchanged.  Default: nothing.
     virtual void warm(int64_t layer, const int64_t* experts, int64_t n) { (void) layer; (void) experts; (void) n; }
-    /// 149-prefetch (STRATA_IO_PF_SCHED=1): `warm` with each expert's confidence (0..1) and how many layers ahead of the
-    /// decode its layer is (the deadline: past it the read is dropped).  Default: plain `warm`.
-    virtual void warm_scored(int64_t layer, const int64_t* experts, const float* conf, int64_t n, int ahead) {
-        (void) conf; (void) ahead; warm(layer, experts, n);
-    }
-    /// Whether the predictor should compute the confidences for warm_scored (else it calls plain warm).
-    virtual bool wants_scores() const { return false; }
     /// Whether `warm` does anything (the predictor is not run otherwise).
     virtual bool warms() const { return false; }
 protected:
@@ -302,7 +295,6 @@ protected:
 /// next - takes each token's top `k` experts, drops the ones the GPU cache or the RAM copy holds, and asks the
 /// source to `warm` the rest, so their pages are on the way while layer l computes.  A prediction only warms pages:
 /// it never changes which experts are computed or how.
-struct ForesightSwap;
 class RouterLookahead {
 public:
     RouterLookahead() = default;
@@ -311,24 +303,14 @@ public:
     RouterLookahead& operator=(const RouterLookahead&) = delete;
     /// `routers[l]`: layer l's ffn_gate_inp as BF16 bits, n_expert rows of n_embd.
     bool start(std::vector<std::vector<uint16_t>> routers, int64_t n_embd, int64_t n_expert, int k, ExpertSource* src,
-               std::string& err, bool allow_cold_source = false);
-    /// One prefetch design (#1348): the predicted experts that no cache holds also go to the Foresight swap space
-    /// (ForesightSwap::predict), which copies them to VRAM ahead of the layer.  nullptr detaches it (waits for a
-    /// prediction in progress), so the swap space can be destroyed first.
-    void set_foresight(ForesightSwap* fs);
+               std::string& err);
     /// Layer `layer`'s MoE input for `n_tok` tokens (host floats): predict and warm layer + 1.  Never waits: a
     /// prediction still running for an earlier layer makes this one skip.
     void submit(int64_t layer, const float* x, int64_t n_tok, const int32_t* host_res);
-    /// STRATA_IO_PREFETCH_DEPTH: how many layers ahead of `layer` are predicted and warmed (default 1, the next layer).
+    /// How many layers ahead of `layer` are predicted and warmed (default 1, the next layer; 2 with io prefetch).
     /// A deeper one predicts layer + j from layer's input, which is less exact the further it looks.
     void set_depth(int d) { depth_ = d < 1 ? 1 : d > 4 ? 4 : d; }
     int depth() const { return depth_; }
-    /// STRATA_LOOKAHEAD_STATS=1 (measurement only): remember each prediction (top k, k+4 and k+10 per token) and let the
-    /// dispatch score it against the experts the next layer really routes outside the GPU cache.
-    void enable_stats(int64_t n_layers);
-    bool stats_on() const { return stats_on_; }
-    void stats_window_start() { gen_.fetch_add(1, std::memory_order_relaxed); }
-    void stats_score(int64_t layer, const int32_t* ids, int64_t n, const int32_t* host_res, int pcie_num = 0);
     int64_t predicted() const { return predicted_.load(std::memory_order_relaxed); }
     int64_t skipped() const { return skipped_.load(std::memory_order_relaxed); }
     double busy_ms() const { return (double) busy_us_.load(std::memory_order_relaxed) / 1000.0; }
@@ -346,23 +328,9 @@ private:
     bool quit_ = false, pending_ = false, busy_ = false;
     int64_t layer_ = -1, n_tok_ = 0;
     const int32_t* host_res_ = nullptr;
-    uint64_t sub_gen_ = 0;
-    ForesightSwap* fs_ = nullptr;                   ///< (under mu_)
     std::vector<float> x_;
     std::atomic<int64_t> predicted_{0}, skipped_{0};
     std::atomic<uint64_t> busy_us_{0};
-    // STRATA_LOOKAHEAD_STATS
-    bool stats_on_ = false;
-    int64_t words_ = 0;
-    std::unique_ptr<std::atomic<uint64_t>[]> pmask_;   // [layer][3 sizes][words]
-    std::unique_ptr<std::atomic<uint64_t>[]> pstamp_;  // [layer]: gen + 1 of the prediction (0 = none)
-    std::unique_ptr<std::atomic<int32_t>[]> pvote_;    // [layer][kVoteN]: experts by votes, expert + 1 (0 = none)
-    std::atomic<uint64_t> gen_{0};
-    uint64_t st_layers_ = 0, st_nopred_ = 0, st_actual_ = 0, st_hit_[3] = {0, 0, 0}, st_pred_[3] = {0, 0, 0},
-             st_predhit_[3] = {0, 0, 0};
-    uint64_t st_windows_ = 0;
-    uint64_t st_vhit_[3] = {0, 0, 0}, st_vpred_[3] = {0, 0, 0}, st_pch_ = 0, st_pcov_[3] = {0, 0, 0};
-    static constexpr int kVoteN = 16;
 };
 
 /// Plan v0.3 P6: what the GPU computes in a verify window's layer, written by the pool (mapped host memory) right
@@ -484,10 +452,7 @@ struct PcieModel {
 };
 
 /// The adapter's own state.  One per session, reused every layer so the token path allocates nothing (P2.T10).
-struct ForesightSwap;
-
 struct ExpertDispatch {
-    ForesightSwap* fs = nullptr;   ///< Foresight swap space (STRATA_FS_SLOTS; null = off)
     strata::kernels::cpu::ExpertPool* pool = nullptr;
     ExpertSource* src = nullptr;
     RouterLookahead* lookahead = nullptr;   ///< CS-T: warms the next layer's predicted file-tier experts
@@ -632,18 +597,6 @@ struct ExpertDispatch {
     /// Plan v0.3 P6: decayed routing counts per (layer, expert) during decode (sized by the caller; empty = off),
     /// which the driver uses to swap the most-routed missing experts into the VRAM tier between rounds.
     std::vector<float> usage;
-    /// The adaptive tier's evictions reach the device's table before the next window, not when the round's copies
-    /// land: until then doorbell_publish_res can skip a layer's activation while the pool computes an evicted expert
-    /// from the one published before.  The driver sets it where the tier does not wait for its copies
-    /// (STRATA_ADAPT_NOWAIT=1, STRATA_ADAPT_LAG > 1; STRATA_ADAPT_EVICT_SYNC=0: off, for an A/B).  `res_dirty` asks the
-    /// driver to patch the device's copy before the next window, `res_dirty_idx` lists the entries changed since.
-    bool evict_sync = false;
-    bool res_dirty = false;
-    std::vector<int32_t> res_dirty_idx;
-    /// STRATA_ADAPT_CHECKRES: the device's residency table as read back before the window; a layer with CPU experts
-    /// whose routed ids all look resident there publishes no activation (doorbell_publish_res) - counted
-    const int32_t* dres_check = nullptr;
-    int64_t stale_x = 0;
     int64_t multi_misses = 0;      ///< distinct (layer, expert) pairs the CPU computed in verify windows
     int64_t multi_entries = 0;     ///< routed (token, expert) entries the CPU served in verify windows
     /// Multi-GPU: the second GPU's tier.  Its experts are computed there instead of on the CPU (kind 2).
@@ -798,45 +751,15 @@ public:
     void prepare_overrides() { if (override_.empty()) override_.assign((size_t) blobs_, nullptr); }
     /// After the GPU copies of every staged swap have landed.  Returns how many exchanges were applied.
     int64_t commit_exchanges();
-    /// 0.1.43 (STRATA_ADAPT_OVERLAP): BEFORE the GPU copies of the staged swaps have landed, make each staged `out` look to the
-    /// planner as it will after `commit_exchanges` (pinned, with a device alias into its exchange buffer, so the PCIe share
-    /// treats it exactly as a committed one) without touching `in`'s place, which the copy still reads.  `commit_exchanges`
-    /// (after the copies have landed) ends it.  False: not possible here (rotation, exchange buffers not page-locked): the
-    /// caller waits for the copies instead.
-    bool soft_commit_exchanges();
     /// `commit_exchanges` in two halves, for the asynchronous adaptive tier (--adapt-async): `commit_copies` moves
     /// every staged evicted blob into its `in`'s place in the copy (on another thread: safe once nothing computes `in`
     /// from RAM - it is resident on the GPU - while `out` is still read from its exchange buffer), then `commit_flip`
     /// (the caller's thread, between windows) points `out` there and drops the staging.  Returns how many were applied.
     void commit_copies();
     int64_t commit_flip();
-    /// #2134: the Foresight swap space (STRATA_FS_SLOTS), null = none.  Each commit above holds the staged experts in it
-    /// (ForesightSwap::hold: their slots are dropped and not refilled) while their bytes move, so no slot is served
-    /// with bytes copied from a place an exchange rewrote.
-    void set_foresight_swap(ForesightSwap* fs) { fs_swap_.store(fs, std::memory_order_release); }
     /// The compact copy's blob of `(layer, expert)`, or null; not counted as a read (any thread).
     const uint8_t* resident_blob(int64_t layer, int64_t expert) const;
     int64_t exchanges() const { return exchanges_; }
-    /// STRATA_RAM_ADAPT: the compact copy gives `out`'s place to `in`, read from the file, so the RAM tier can follow
-    /// the conversation as the VRAM tier does.  Both are experts of `layer` (one blob size), `out` is held by the copy
-    /// and `in` is not, no exchange is staged, and nothing may be reading `out`'s blob: the caller's thread, between
-    /// windows, with no adaptive round in flight.  A failed read leaves the copy as it was.  Not with
-    /// STRATA_EXCHANGE_ROTATE (false, nothing changes).
-    bool replace_resident(int64_t layer, int64_t in, int64_t out);
-    int64_t ram_adapts() const { return ram_adapts_; }
-    // ---- 149-prefetch (STRATA_RAM_ADAPT2): the same promotion, staged.  `ram_stage` queues the read of `in` on an I/O thread
-    // (false: already queued, the queue is full, or no compact copy); `ram_install` - called by the decode thread at a window
-    // boundary, when no window reads the RAM copy - puts every read that has landed into `out`'s place, unless the GPU tier
-    // took `in` or `out` meanwhile (`host_res`: the residency table, n_expert per layer) or the copy no longer fits.
-    bool ram_stage(int64_t layer, int64_t in, int64_t out);
-    int64_t ram_install(const int32_t* host_res, int64_t n_expert);
-    bool ram_queued(int64_t layer, int64_t expert) const;   ///< `expert` is the `in` or `out` of a staged promotion
-    int64_t ram_staged_reads() const { return ram_staged_reads_.load(std::memory_order_relaxed); }
-    int64_t ram_install_skips() const { return ram_install_skips_.load(std::memory_order_relaxed); }
-    int64_t ram_install_gpu() const { return ram_install_gpu_.load(std::memory_order_relaxed); }   ///< skipped: the GPU tier took in or out
-    /// Where an expert outside the GPU is now: 0 the RAM copy, 1 the files with its pages in the page cache, 2 the files, cold
-    /// (Linux: four sampled pages; elsewhere 2).
-    int tier_of(int64_t layer, int64_t expert) const;
     uint64_t blob_bytes(int64_t layer) const {
         return layer >= 0 && (size_t) layer < layer_blob_bytes_.size() ? layer_blob_bytes_[(size_t) layer] : 0;
     }
@@ -926,11 +849,6 @@ public:
     /// CS-T: the GGUF in place asks the OS for the predicted experts' pages (PrefetchVirtualMemory on Windows,
     /// madvise(WILLNEED) elsewhere), skipping the RAM copy's.
     void warm(int64_t layer, const int64_t* experts, int64_t n) override;
-    /// 149-prefetch: the scheduled read-ahead (STRATA_IO_PF_SCHED=1 with STRATA_IO_PREFETCH=1): admission by confidence
-    /// against the queue's pressure, a speculative byte budget per decode window, a deadline per read.
-    void warm_scored(int64_t layer, const int64_t* experts, const float* conf, int64_t n, int ahead) override;
-    bool io_sched() const { return io_sched_; }
-    bool wants_scores() const override { return io_sched_ && io_pf_; }
     /// Not when the reads are unbuffered: the warmed pages would be read through the file cache, a second time.
     bool warms() const override { return (!role_ptr_.empty() || io_pf_) && direct_.empty(); }
     /// Of the blobs the file tier read for the decode, how many had been warmed for their layer beforehand.
@@ -943,7 +861,7 @@ public:
     /// interesting once Phase 3 makes it not so.
     int64_t reads() const override { return reads_.load(std::memory_order_relaxed); }
 
-    // ---- the Linux I/O path of the mapped file tier (STRATA_IO_PREFETCH=1, opt in; no effect on Windows)
+    // ---- the Linux I/O path of the mapped file tier (on by default on Linux; no effect on Windows)
     //
     // The file tier's reads are page faults: the CPU kernels (experts.bin) or the fetch threads (the GGUF in place)
     // touch the mapping, and each fault is a read of a few pages that blocks the layer.  With this on:
@@ -959,8 +877,7 @@ public:
     /// thread at a time (the concurrent prompt read is off with such a source)
     bool stages_blobs() const { return staged(); }
     /// Counts the cached / uncached bytes of every blob read from the files (mincore, page-granular).  Free with
-    /// io_prefetch; otherwise opt in with STRATA_IO_STATS=1 (the check costs a few microseconds per blob).
-    void set_io_stats(bool on) { io_stats_ = on || io_pf_; }
+    /// io_prefetch; off otherwise (the check costs a few microseconds per blob).
     bool io_stats() const { return io_stats_; }
     struct IoCounters {
         uint64_t cached_bytes = 0, uncached_bytes = 0;       ///< file reads at hand-out, by page-cache residency
@@ -973,9 +890,6 @@ public:
         // 149-prefetch: the read-ahead's bytes and what came of them
         uint64_t pf_bytes = 0;                               ///< bytes the read-ahead workers read (all modes)
         uint64_t pf_used_bytes = 0;                          ///< of them, blobs a layer then asked for (arrived before demand)
-        uint64_t pf_late = 0;                                ///< reads dropped because the decode had reached their layer
-        uint64_t pf_rej_conf = 0, pf_rej_budget = 0;         ///< predictions not admitted (STRATA_IO_PF_SCHED)
-        uint64_t pf_budget_bytes = 0;                        ///< the current per-window speculative budget (scheduler)
     };
     IoCounters io_counters() const;
 
@@ -997,10 +911,10 @@ private:
                     bool zc = false);
     std::vector<int64_t> zc_keys_;   ///< 149-cold mode 3: the keys the last prefetch_begin left in the mapping
 public:
-    /// 149 STRATA_IO_PF_GATE=1 (with STRATA_IO_PREFETCH=1): the decode's read-ahead and its pread demand reads run only
+    /// The decode gate (with io prefetch): the decode's read-ahead and its pread demand reads run only
     /// while the page cache can hold enough of the file tier: (the memory available, cgroup limits included, + the
     /// file-tier bytes cached now) / the experts' bytes, checked every 16 decode windows; it closes below
-    /// STRATA_IO_PF_GATE_LO 0.55 and opens above STRATA_IO_PF_GATE_HI 0.65.  Closed, the decode reads as without io
+    /// 0.55 and opens above 0.65.  Closed, the decode reads as without io
     /// prefetch; the prompt path is not gated.  (A held share at demand would not do: the read-ahead itself raises it.)
     /// `DecodeScope` marks the decode thread (and the fetch threads it starts).
     double gate_ratio() const { return gate_ratio_; }
@@ -1027,7 +941,7 @@ public:
 #endif
     }
     /// the memory the page cache can use (the tightest cgroup limit less what is not page cache, else MemAvailable) over the
-    /// experts' bytes; 0 when unknown.  The decode gate's room test (STRATA_IO_PF_GATE_LO), asked once at start.
+    /// experts' bytes; 0 when unknown.  The decode gate's room test (its 0.55), asked once at start.
     double cache_room_ratio() const;
     bool gate_on() const { return gate_on_; }
     double gate_held() const { return gate_ewma_; }
@@ -1106,19 +1020,6 @@ private:
     std::unordered_map<int64_t, size_t> stage_of_;
     uint64_t stage_blob_ = 0;
     uint64_t stage_seq_ = 0;
-    int64_t ram_adapts_ = 0;                  ///< replace_resident: experts moved from the file into the compact copy
-    std::vector<uint8_t> ram_adapt_buf_;      ///< ...one blob, read here before it replaces another
-    // 149-prefetch: the staged promotions (ram_stage / ram_install)
-    struct RamJob { int64_t layer, in, out; std::vector<uint8_t> buf; int state; };   ///< state 0 queued, 1 reading, 2 landed, 3 failed
-    mutable std::mutex ram_mu_;
-    std::condition_variable ram_cv_;
-    std::deque<std::unique_ptr<RamJob>> ram_jobs_;
-    std::thread ram_thread_;
-    bool ram_quit_ = false;
-    std::atomic<int64_t> ram_staged_reads_{0}, ram_install_skips_{0}, ram_install_gpu_{0};
-    bool install_resident(int64_t layer, int64_t in, int64_t out, const uint8_t* src);   ///< the second half of replace_resident
-    void ram_worker();
-    void ram_stop();
     uint64_t epoch_ = 0;
     int64_t last_layer_ = -1;
     bool stage_grew_ = false;
@@ -1135,7 +1036,6 @@ private:
     // ---- the Linux I/O path (set_io_prefetch)
     bool io_pf_ = false;
     bool io_fill_ = false;                            ///< experts.bin: the workers only fill the page cache (large preads), no staging, nothing waits
-    bool io_ahead_ = true;                            ///< STRATA_IO_PF_AHEAD=0: no read-ahead workers' queue, demand preads only
     bool io_stats_ = false;
     int io_threads_ = 4;
     std::vector<std::thread> io_workers_;
@@ -1143,27 +1043,8 @@ private:
     std::condition_variable io_cv_;
     std::deque<std::pair<int32_t, int32_t>> io_q_;   ///< (layer, expert) to read ahead
     bool io_quit_ = false;
-    // ---- 149-prefetch: the scheduled read-ahead (STRATA_IO_PF_SCHED=1)
-    struct IoJob { int32_t layer, expert; float conf; uint64_t deadline; uint64_t bytes; };
-    bool io_sched_ = false;
-    float io_minconf_ = 0.5f;                          ///< STRATA_IO_PF_MINCONF: the bar with an empty queue
-    uint64_t io_budget_fixed_ = 0;                     ///< STRATA_IO_PF_BUDGET_MB (0: auto from the measured rates)
-    double io_budget_frac_ = 0.5;                      ///< STRATA_IO_PF_BUDGET_FRAC: share of what the drive can read in a window
-    std::vector<IoJob> io_jobs_;                       ///< (under io_mu_) admitted, not yet started
-    uint64_t io_q_bytes_ = 0;                          ///< (under io_mu_) their bytes
-    uint64_t io_win_bytes_ = 0;                        ///< (under io_mu_) admitted in the current window
-    double io_bw_ = 0.0;                               ///< (under io_mu_) EWMA bytes/us of one worker's reads
-    double io_win_us_ = 0.0;                           ///< (under io_mu_) EWMA of a decode window's wall time
-    std::chrono::steady_clock::time_point io_win_t0_{};
-    double io_scale_ = 1.0;                           ///< (under io_mu_) the budget's feedback factor: shrinks while read-ahead goes unused
-    double io_useful_ = -1.0;                         ///< (under io_mu_) EWMA of used / read-ahead bytes
-    uint64_t io_prev_pf_ = 0, io_prev_used_ = 0;       ///< (under io_mu_) the counters at the last window tick
-    double io_target_ = 0.5;                          ///< STRATA_IO_PF_TARGET: the used share the feedback aims at (0: no feedback)
-    std::atomic<uint64_t> io_epoch_{0};                ///< the decode's layer clock (begin_layer), read by the workers
     std::unique_ptr<std::atomic<uint8_t>[]> pf_mark_;  ///< per (layer, expert): read ahead, not yet asked for (fill mode)
-    std::atomic<uint64_t> io_pf_bytes_{0}, io_pf_used_bytes_{0}, io_pf_late_{0}, io_pf_rej_conf_{0}, io_pf_rej_budget_{0};
-    uint64_t io_budget_now() const;                    ///< (io_mu_ held) the per-window budget in bytes
-    void io_window_tick();                             ///< begin_layer: a new decode window starts at layer 0
+    std::atomic<uint64_t> io_pf_bytes_{0}, io_pf_used_bytes_{0};
     std::vector<char> stage_pf_;                      ///< per stage buffer: filled ahead, not yet used by a layer
     std::vector<int> io_fds_;                         ///< per mapped file: a plain descriptor (POSIX_FADV_RANDOM) for the preads
     mutable std::atomic<uint64_t> io_cached_{0}, io_uncached_{0}, io_pread_bytes_{0}, io_pread_us_{0}, io_pread_n_{0};
@@ -1204,10 +1085,6 @@ private:
     std::vector<const uint8_t*> override_;    ///< staged exchanges: an evicted expert read from its exchange buffer
     struct Exchange { size_t in, out; int64_t q; uint64_t bytes; };
     std::vector<Exchange> staged_;
-    std::atomic<ForesightSwap*> fs_swap_{nullptr};   ///< set_foresight_swap
-    void fs_hold_staged(bool hold);
-    std::vector<size_t> soft_in_;             ///< soft_commit_exchanges: per `out` index, the `in` whose place it will take (SIZE_MAX: none)
-    const uint8_t* xstage_dev_ = nullptr;     ///< the exchange buffers' device alias (soft_commit_exchanges)
     uint8_t* xstage_ = nullptr;               ///< exchange buffers, `xstage_cap_ x xstage_blob_`
     bool xstage_pinned_ = false;
     int64_t xstage_cap_ = 0;
@@ -1262,31 +1139,17 @@ public:
     int64_t reads() const { return reads_.load(std::memory_order_relaxed); }
     bool pinned(int64_t layer, int64_t expert) const override;
     const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
-    /// Prefix pinning: the old rule (device_alias(layer, 0)); pin by need: at least one pinned range in the layer.
+    /// Prefix pinning: the old rule (device_alias(layer, 0)).
     bool pcie_layer(int64_t layer) const override;
     void prefetch(int64_t layer, int64_t expert) override;
     uint64_t release(int64_t layer, int64_t expert) override;
-
-    /// Pin by need (STRATA_PIN_BY_NEED=1): BEFORE open(), the (layer, expert) pairs worth pinning, by decreasing
-    /// priority - the profile's ranked pairs the GPU cache will NOT hold, then the unranked ones.  open() merges
-    /// neighbours into byte ranges and registers only those (PinnedArena::ByNeed); pinned()/device_alias()/pcie_layer()
-    /// then follow the registered ranges instead of a prefix.  Never called: the old prefix pinning, unchanged.
-    /// `n_first`: the first n_first pairs are the non-resident estimate; the rest (the pairs taken as GPU-resident, which
-    /// only get what the cap leaves over) never merge into a run with them, so their ranges come after all of the first.
-    void set_pin_priority(std::vector<std::pair<int32_t, int32_t>> ranked, size_t n_first = (size_t) -1) {
-        pin_pairs_ = std::move(ranked);
-        pin_first_ = n_first;
-        pin_by_need_ = true;
-    }
-    /// Pin by need, after open(): the registered ranges (0 when the prefix rule, or nothing, is in force)
-    size_t pin_ranges() const { return pin_start_.size(); }
 
     /// What backing was obtained and why, for the startup print.  "The engine adapts to the machine it is on" is
     /// only true if the engine says what it got.
     const std::string& note() const { return note_; }
     /// #633: set by `open` when the RAM available is less than the arena needs (a recommendation; it still loads)
     const std::string& ram_warning() const { return ram_warning_; }
-    uint64_t pinned_arena_bytes() const { return pinned_bytes_; }   ///< what the driver registered (the pinned prefix, or the total by need)
+    uint64_t pinned_arena_bytes() const { return pinned_bytes_; }   ///< what the driver registered (the pinned prefix)
     double load_gib_per_second() const { return gib_per_s_; }
     // Loader fix: the load, split.  `load_seconds()` is the wall clock of the load loop; the other two are
     // sums over the reader threads (see LoadStats), so on their own they say how much of that wall was spent
@@ -1312,22 +1175,8 @@ private:
     double load_read_s_ = 0.0;
     double load_copy_s_ = 0.0;
     uint64_t pinned_bytes_ = 0;
-    // pin by need: set_pin_priority's pairs, and (after open) the registered ranges - sorted starts, ends and the
-    // device alias of each start - plus pcie_layer's answer per layer.  `ranges_` false = the prefix rule above.
-    bool pin_by_need_ = false;
-    bool ranges_ = false;
-    // pin by need: the arena's page-aligned blob stride (see PadMap); `padded_` false = the packed experts.bin layout
-    bool padded_ = false;
-    PadMap pad_;
     /// where blob (layer, expert) starts in the arena: the ONE address function of this class
     uint64_t arena_off(int64_t layer, int64_t expert) const;
-    std::vector<std::pair<int32_t, int32_t>> pin_pairs_;
-    size_t pin_first_ = (size_t) -1;   // pin_pairs_[0, pin_first_) are the first tier (see set_pin_priority)
-    std::vector<uint64_t> pin_start_, pin_end_;
-    std::vector<const uint8_t*> pin_dev_;
-    std::vector<uint8_t> layer_pcie_;
-    /// index of the registered range holding [off, off + len), or -1
-    int64_t pin_range_of(uint64_t off, uint64_t len) const;
     std::string gguf_;
 };
 
@@ -1338,9 +1187,7 @@ bool check_experts_gguf(const std::string& native, const strata::kernels::cpu::E
 /// Fills `dst` (lay.total bytes, the experts.bin layout) from the GGUF files, one role at a time.
 /// `unbuffered`: each chunk read past the file cache (Windows); `ready`: layer l is written only once
 /// *ready > l + 1 (an arena that is still being registered).
-/// `pad` (optional): the destination is the page-aligned padded layout (pin by need), see PadMap.
 LoadStats load_experts_gguf(const std::string& native, uint8_t* dst, const strata::kernels::cpu::ExpertLayout& lay,
-                            int threads, bool unbuffered = false, const std::atomic<int>* ready = nullptr,
-                            const PadMap* pad = nullptr);
+                            int threads, bool unbuffered = false, const std::atomic<int>* ready = nullptr);
 
 }  // namespace strata::core

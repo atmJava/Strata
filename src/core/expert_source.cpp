@@ -1,6 +1,5 @@
 // src/core/expert_source.cpp - the adapter.  See the header for the three clauses of the contract.
 #include "strata/core/expert_source.hpp"
-#include "strata/core/foresight_swap.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/platform/aux_cpus.hpp"
 #include "strata/core/remote_experts.hpp"
@@ -1026,83 +1025,7 @@ FileExpertSource::IoCounters FileExpertSource::io_counters() const {
     c.crit_n = io_crit_n_.load(std::memory_order_relaxed);
     c.pf_bytes = io_pf_bytes_.load(std::memory_order_relaxed);
     c.pf_used_bytes = io_pf_used_bytes_.load(std::memory_order_relaxed);
-    c.pf_late = io_pf_late_.load(std::memory_order_relaxed);
-    c.pf_rej_conf = io_pf_rej_conf_.load(std::memory_order_relaxed);
-    c.pf_rej_budget = io_pf_rej_budget_.load(std::memory_order_relaxed);
-    if (io_sched_) {
-        std::lock_guard<std::mutex> lk(const_cast<std::mutex&>(io_mu_));
-        c.pf_budget_bytes = io_budget_now();
-    }
     return c;
-}
-
-// 149-prefetch: the speculative bytes a decode window may read ahead.  Fixed (STRATA_IO_PF_BUDGET_MB), or what the workers
-// measured they can read in one window (one worker's rate x the workers x the window's time) times STRATA_IO_PF_BUDGET_FRAC;
-// 256 MB until both rates are known.
-uint64_t FileExpertSource::io_budget_now() const {
-    if (io_budget_fixed_ > 0) return io_budget_fixed_;
-    if (io_bw_ <= 0.0 || io_win_us_ <= 0.0) return 256ull << 20;
-    const double b = io_bw_ * (double) std::max(1, io_threads_) * io_win_us_ * io_budget_frac_ * io_scale_;
-    return (uint64_t) std::max(16.0 * 1048576.0, b);
-}
-
-void FileExpertSource::io_window_tick() {
-    const auto now = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lk(io_mu_);
-    if (io_win_t0_.time_since_epoch().count() != 0) {
-        const double us = std::chrono::duration<double, std::micro>(now - io_win_t0_).count();
-        io_win_us_ = io_win_us_ <= 0.0 ? us : 0.8 * io_win_us_ + 0.2 * us;
-    }
-    io_win_t0_ = now;
-    io_win_bytes_ = 0;
-    // feedback: the share of the read-ahead bytes that a layer then used (the used count lags the reads by a window or
-    // so; an EWMA over windows evens that out).  Below STRATA_IO_PF_TARGET the budget shrinks (x0.7 a window, to 1/20),
-    // above it it grows back (x1.1, to 1): a box whose page cache cannot hold what is read ahead stops paying for it.
-    const uint64_t pf = io_pf_bytes_.load(std::memory_order_relaxed), used = io_pf_used_bytes_.load(std::memory_order_relaxed);
-    const uint64_t dpf = pf - io_prev_pf_, du = used - io_prev_used_;
-    io_prev_pf_ = pf;
-    io_prev_used_ = used;
-    if (io_target_ > 0.0 && dpf > 0) {
-        const double u = std::min(1.0, (double) du / (double) dpf);
-        io_useful_ = io_useful_ < 0.0 ? u : 0.8 * io_useful_ + 0.2 * u;
-        io_scale_ = io_useful_ < io_target_ ? std::max(0.05, io_scale_ * 0.7) : std::min(1.0, io_scale_ * 1.1);
-    }
-}
-
-// 149-prefetch: admit the predicted experts that are not resident.  An expert's bar is the base confidence, raised with
-// the queue's fill against the window budget (a busy drive takes only the surer guesses); the window's speculative bytes
-// stay within the budget; each job carries the layer clock by which it must have started (else the worker drops it).
-void FileExpertSource::warm_scored(int64_t layer, const int64_t* experts, const float* conf, int64_t n, int ahead) {
-    if (!io_sched_ || !io_pf_ || !direct_.empty() || !io_ahead_ || !gate_open()) { warm(layer, experts, n); return; }
-    if (n <= 0 || layer < 0 || layer >= n_layers_) return;
-    const uint64_t bytes = layer_blob_bytes_[(size_t) layer];
-    const uint64_t deadline = io_epoch_.load(std::memory_order_relaxed) + (uint64_t) std::max(1, ahead);
-    bool any = false;
-    {
-        std::lock_guard<std::mutex> lk(io_mu_);
-        const uint64_t budget = io_budget_now();
-        for (int64_t j = 0; j < n; ++j) {
-            const int64_t e = experts[j];
-            if (e < 0 || e >= n_expert_) continue;
-            const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) e;
-            if (complement_ready_ && resident_blob(index) != nullptr) continue;   // in the RAM copy
-            warm_count_.fetch_add(1, std::memory_order_relaxed);
-            const double pressure = std::min(1.0, (double) io_q_bytes_ / (double) std::max<uint64_t>(1, budget));
-            const double bar = (double) io_minconf_ + (1.0 - (double) io_minconf_) * pressure;
-            const float c = conf != nullptr ? conf[j] : 1.0f;
-            if ((double) c < bar) { io_pf_rej_conf_.fetch_add(1, std::memory_order_relaxed); continue; }
-            if (io_win_bytes_ + bytes > budget) { io_pf_rej_budget_.fetch_add(1, std::memory_order_relaxed); continue; }
-            bool dup = false;
-            for (const IoJob& q : io_jobs_)
-                if (q.layer == (int32_t) layer && q.expert == (int32_t) e) { dup = true; break; }
-            if (dup) continue;
-            io_jobs_.push_back({(int32_t) layer, (int32_t) e, c, deadline, bytes});
-            io_q_bytes_ += bytes;
-            io_win_bytes_ += bytes;
-            any = true;
-        }
-    }
-    if (any) io_cv_.notify_all();
 }
 
 void FileExpertSource::set_io_prefetch(bool on, int threads) {
@@ -1135,27 +1058,11 @@ void FileExpertSource::set_io_prefetch(bool on, int threads) {
         }
         if (!warm_stamp_) warm_stamp_.reset(new std::atomic<uint32_t>[(size_t) (n_layers_ * n_expert_)]());
         io_threads_ = threads > 0 ? threads : 8;
-        if (const char* v = std::getenv("STRATA_IO_PF_AHEAD")) io_ahead_ = std::atoi(v) != 0;
-        {   // experts.bin: fill the page cache from the workers and let the kernels read the mapping (STRATA_IO_PF_STAGE=1: stage)
-            const char* v = std::getenv("STRATA_IO_PF_STAGE");
-            io_fill_ = role_ptr_.empty() && !(v != nullptr && std::atoi(v) != 0);
-        }
+        io_fill_ = role_ptr_.empty();   // experts.bin: fill the page cache from the workers and let the kernels read the mapping
         io_pf_ = true;
         io_stats_ = true;
         io_quit_ = false;
-        {   // 149-prefetch: STRATA_IO_PF_SCHED=1 - deadlines, confidence admission and a per-window byte budget (off: as before)
-            const char* v = std::getenv("STRATA_IO_PF_SCHED");
-            io_sched_ = v != nullptr && std::atoi(v) != 0;
-            if (const char* m = std::getenv("STRATA_IO_PF_MINCONF")) io_minconf_ = (float) std::clamp(std::atof(m), 0.0, 1.0);
-            if (const char* m = std::getenv("STRATA_IO_PF_BUDGET_MB")) io_budget_fixed_ = (uint64_t) std::max(0.0, std::atof(m) * 1048576.0);
-            if (const char* m = std::getenv("STRATA_IO_PF_BUDGET_FRAC")) io_budget_frac_ = std::clamp(std::atof(m), 0.01, 4.0);
-            if (const char* m = std::getenv("STRATA_IO_PF_TARGET")) io_target_ = std::clamp(std::atof(m), 0.0, 1.0);
-            gate_on_ = true;   // 0.2.0: the decode gate comes with io prefetch; STRATA_IO_PF_GATE=0 turns it off
-            if (const char* m = std::getenv("STRATA_IO_PF_GATE"); m != nullptr && m[0] != '\0') gate_on_ = std::atoi(m) != 0;
-            if (const char* m = std::getenv("STRATA_IO_PF_GATE_LO")) gate_lo_ = std::clamp(std::atof(m), 0.0, 1.0);
-            if (const char* m = std::getenv("STRATA_IO_PF_GATE_HI")) gate_hi_ = std::clamp(std::atof(m), gate_lo_, 1.0);
-            if (const char* m = std::getenv("STRATA_IO_PF_GATE_USEFUL")) gate_min_useful_ = std::clamp(std::atof(m), 0.0, 1.0);
-        }
+        gate_on_ = true;   // 0.2.0: the decode gate comes with io prefetch
         if (!pf_mark_) {
             pf_mark_.reset(new std::atomic<uint8_t>[(size_t) (n_layers_ * n_expert_)]);
             for (int64_t i = 0; i < n_layers_ * n_expert_; ++i) pf_mark_[(size_t) i].store(0, std::memory_order_relaxed);
@@ -1177,8 +1084,6 @@ void FileExpertSource::io_stop() {
         std::lock_guard<std::mutex> lk(io_mu_);
         io_quit_ = true;
         io_q_.clear();
-        io_jobs_.clear();
-        io_q_bytes_ = 0;
     }
     io_cv_.notify_all();
     for (std::thread& t : io_workers_)
@@ -1190,9 +1095,7 @@ void FileExpertSource::io_stop() {
     io_fds_.clear();
     io_pf_ = false;
     io_fill_ = false;
-    io_sched_ = false;
     io_stats_ = false;
-    io_ahead_ = true;
     gate_on_ = false;
     gate_open_.store(true, std::memory_order_relaxed);
     io_quit_ = false;
@@ -1219,56 +1122,17 @@ void FileExpertSource::io_worker() {
         bool ahead = true;   // a prediction (marked for the used / unused count), not a layer's own demand read
         {
             std::unique_lock<std::mutex> lk(io_mu_);
-            io_cv_.wait(lk, [&] { return io_quit_ || !io_q_.empty() || !io_jobs_.empty(); });
+            io_cv_.wait(lk, [&] { return io_quit_ || !io_q_.empty(); });
             if (io_quit_) return;
-            if (io_sched_ && io_q_.empty() && !io_jobs_.empty()) {   // (the layers' own reads in io_q_ go first)
-                // 149-prefetch: drop the jobs whose layer the decode has reached (its demand read covers them); then the
-                // earliest deadline, the surest guess first among equals
-                const uint64_t now = io_epoch_.load(std::memory_order_relaxed);
-                size_t best = io_jobs_.size();
-                for (size_t i = 0; i < io_jobs_.size();) {
-                    if (io_jobs_[i].deadline <= now) {
-                        io_q_bytes_ -= std::min(io_q_bytes_, io_jobs_[i].bytes);
-                        io_jobs_[i] = io_jobs_.back();
-                        io_jobs_.pop_back();
-                        io_pf_late_.fetch_add(1, std::memory_order_relaxed);
-                        continue;
-                    }
-                    ++i;
-                }
-                best = io_jobs_.size();
-                for (size_t i = 0; i < io_jobs_.size(); ++i)
-                    if (best == io_jobs_.size() || io_jobs_[i].deadline < io_jobs_[best].deadline ||
-                        (io_jobs_[i].deadline == io_jobs_[best].deadline && io_jobs_[i].conf > io_jobs_[best].conf))
-                        best = i;
-                if (best == io_jobs_.size()) continue;   // all were late
-                layer = io_jobs_[best].layer;
-                expert = io_jobs_[best].expert;
-                io_q_bytes_ -= std::min(io_q_bytes_, io_jobs_[best].bytes);
-                io_jobs_[best] = io_jobs_.back();
-                io_jobs_.pop_back();
-            } else {
-                if (io_q_.empty()) continue;
-                layer = io_q_.back().first;   // the newest prediction first: it is the layer that comes next
-                expert = io_q_.back().second & ~kIoAhead;
-                ahead = (io_q_.back().second & kIoAhead) != 0;
-                io_q_.pop_back();
-            }
+            layer = io_q_.back().first;   // the newest prediction first: it is the layer that comes next
+            expert = io_q_.back().second & ~kIoAhead;
+            ahead = (io_q_.back().second & kIoAhead) != 0;
+            io_q_.pop_back();
         }
         io_pf_jobs_.fetch_add(1, std::memory_order_relaxed);
         const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
         if (complement_ready_ && resident_blob(index) != nullptr) continue;
         if (!override_.empty() && override_[index] != nullptr) continue;
-        const auto tjob = std::chrono::steady_clock::now();
-        // 149-prefetch: one worker's read rate (bytes per microsecond), for the scheduler's window budget
-        auto note_rate = [&](uint64_t b) {
-            if (b == 0) return;
-            const double us = std::max(1.0, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tjob).count());
-            io_pf_bytes_.fetch_add(b, std::memory_order_relaxed);
-            std::lock_guard<std::mutex> lk(io_mu_);
-            const double r = (double) b / us;
-            io_bw_ = io_bw_ <= 0.0 ? r : 0.9 * io_bw_ + 0.1 * r;
-        };
         if (io_fill_) {   // read what is not cached into a scratch buffer: the pages stay in the page cache for the kernels
 #if defined(__linux__)
             static thread_local std::vector<uint8_t> scratch;
@@ -1298,7 +1162,7 @@ void FileExpertSource::io_worker() {
             if (any) {
                 io_pf_blobs_.fetch_add(1, std::memory_order_relaxed);
                 if (pf_mark_ && ahead) pf_mark_[index].store(1, std::memory_order_relaxed);   // read ahead: scored at the demand
-                note_rate(got);
+                if (got > 0) io_pf_bytes_.fetch_add(got, std::memory_order_relaxed);
             }
             else io_pf_skips_.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -1336,7 +1200,7 @@ void FileExpertSource::io_worker() {
         }
         io_pf_blobs_.fetch_add(1, std::memory_order_relaxed);
         if (ok) file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
-        if (ok) note_rate(layer_blob_bytes_[(size_t) layer]);
+        if (ok) io_pf_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lk(stage_mu_);
             stage_busy_[v] = 0;
@@ -1497,7 +1361,6 @@ bool FileExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64
 
 void FileExpertSource::close() {
     prefetch_end();
-    ram_stop();
     io_stop();
     inputs_.clear();
     if (complement_arena_ != nullptr) {
@@ -1841,7 +1704,7 @@ bool FileExpertSource::claim_stage(int64_t key, size_t& v, bool& fill, bool ahea
     return false;
 }
 
-// 149 STRATA_IO_PF_GATE: whether this thread reads for the decode (the dispatch's thread, and the fetch threads it starts)
+// The decode gate: whether this thread reads for the decode (the dispatch's thread, and the fetch threads it starts)
 namespace { thread_local bool tl_decode = false; }
 FileExpertSource::DecodeScope::DecodeScope() : prev(tl_decode) { tl_decode = true; }
 FileExpertSource::DecodeScope::~DecodeScope() { tl_decode = prev; }
@@ -1926,7 +1789,7 @@ void FileExpertSource::gate_capacity() {
     if (total == 0 || room == 0) return;   // unknown: the state stays
     gate_ratio_ = (double) room / (double) total;
     // and the read-ahead must pay: the share of its bytes a layer then used, over these 16 windows (64 MB at least read
-    // ahead to judge).  Below STRATA_IO_PF_GATE_USEFUL (0.10) it closes (a RAM tier holds what it would read: an 18 GiB
+    // ahead to judge).  Below the useful bar (0.10) it closes (a RAM tier holds what it would read: an 18 GiB
     // RAM tier, 0% used, -9..-15% decode); closed for that reason, it opens again for a probe every 256 windows.
     const uint64_t pf = io_pf_bytes_.load(std::memory_order_relaxed), used = io_pf_used_bytes_.load(std::memory_order_relaxed);
     const uint64_t dpf = pf - gate_prev_pf_, dused = used - gate_prev_used_;
@@ -2670,7 +2533,7 @@ void FileExpertSource::warm(int64_t layer, const int64_t* experts, int64_t n) {
         if (warm_stamp_) warm_stamp_[index].store(stamp, std::memory_order_relaxed);
         warm_count_.fetch_add(1, std::memory_order_relaxed);
         if (io_pf_ && direct_.empty() && gate_open()) {   // read it ahead with pread on the I/O threads (instead of an madvise hint)
-            if (io_ahead_) io_enqueue(layer, e, true);
+            io_enqueue(layer, e, true);
             continue;
         }
         if (role_ptr_.empty() || unmapped_) continue;
@@ -2683,12 +2546,6 @@ void FileExpertSource::warm(int64_t layer, const int64_t* experts, int64_t n) {
     }
 }
 
-static inline int la_pc64(uint64_t x) {   // (portable: no compiler builtin)
-    int n = 0;
-    for (; x != 0; x &= x - 1) ++n;
-    return n;
-}
-
 RouterLookahead::~RouterLookahead() {
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -2698,20 +2555,9 @@ RouterLookahead::~RouterLookahead() {
     if (thread_.joinable()) thread_.join();
 }
 
-void RouterLookahead::set_foresight(ForesightSwap* fs) {
-    for (;;) {
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (fs != nullptr || !busy_) { fs_ = fs; return; }
-        }
-        // detaching: a prediction in progress finishes first (the swap space is about to go away)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
-
 bool RouterLookahead::start(std::vector<std::vector<uint16_t>> routers, int64_t n_embd, int64_t n_expert, int k,
-                            ExpertSource* src, std::string& err, bool allow_cold_source) {
-    if (src == nullptr || (!allow_cold_source && !src->warms())) { err = "RouterLookahead: the expert source does not warm"; return false; }
+                            ExpertSource* src, std::string& err) {
+    if (src == nullptr || !src->warms()) { err = "RouterLookahead: the expert source does not warm"; return false; }
     if (n_embd % 8 != 0) { err = "RouterLookahead: n_embd is not a multiple of 8"; return false; }
     for (const auto& r : routers)
         if (r.size() != (size_t) (n_embd * n_expert)) { err = "RouterLookahead: a router of another shape"; return false; }
@@ -2749,117 +2595,18 @@ void RouterLookahead::submit(int64_t layer, const float* x, int64_t n_tok, const
         std::memcpy(x_.data(), x, (size_t) (n_tok_ * n_embd_) * sizeof(float));
         layer_ = layer + 1;
         host_res_ = host_res;
-        sub_gen_ = gen_.load(std::memory_order_relaxed);
         pending_ = true;
     }
     cv_.notify_one();
-}
-
-void RouterLookahead::enable_stats(int64_t n_layers) {
-    words_ = (n_expert_ + 63) / 64;
-    pmask_.reset(new std::atomic<uint64_t>[(size_t) (n_layers * 3 * words_)]);
-    pstamp_.reset(new std::atomic<uint64_t>[(size_t) n_layers]);
-    for (int64_t i = 0; i < n_layers * 3 * words_; ++i) pmask_[(size_t) i].store(0, std::memory_order_relaxed);
-    for (int64_t i = 0; i < n_layers; ++i) pstamp_[(size_t) i].store(0, std::memory_order_relaxed);
-    pvote_.reset(new std::atomic<int32_t>[(size_t) (n_layers * kVoteN)]);
-    for (int64_t i = 0; i < n_layers * kVoteN; ++i) pvote_[(size_t) i].store(0, std::memory_order_relaxed);
-    stats_on_ = true;
-}
-
-// the dispatch thread: score the prediction made for `layer` against the experts it routes outside the GPU cache
-void RouterLookahead::stats_score(int64_t layer, const int32_t* ids, int64_t n, const int32_t* host_res, int pcie_num) {
-    if (!stats_on_ || layer < 1 || layer >= (int64_t) routers_.size()) return;
-    ++st_layers_;
-    if (pstamp_[(size_t) layer].load(std::memory_order_acquire) != gen_.load(std::memory_order_relaxed) + 1) {
-        ++st_nopred_;
-        return;
-    }
-    std::vector<uint64_t> act((size_t) words_, 0);
-    for (int64_t i = 0; i < n; ++i) {
-        const int32_t e = ids[i];
-        if (e < 0 || e >= n_expert_) continue;
-        if (host_res != nullptr && host_res[(size_t) (layer * n_expert_ + e)] >= 0) continue;
-        act[(size_t) (e >> 6)] |= 1ull << (e & 63);
-    }
-    uint64_t na = 0;
-    for (int64_t w = 0; w < words_; ++w) na += (uint64_t) la_pc64(act[(size_t) w]);
-    st_actual_ += na;
-    {   // the vote-ranked top M (the experts most tokens predict) against the misses, and against the PCIe share
-        static const int vm[3] = {4, 8, 12};
-        int32_t vt[kVoteN];
-        int nv = 0;
-        for (int i = 0; i < kVoteN; ++i) {
-            const int32_t v = pvote_[(size_t) (layer * kVoteN + i)].load(std::memory_order_relaxed);
-            if (v == 0) break;
-            vt[nv++] = v - 1;
-        }
-        // the misses in routing order (first appearance), the PCIe share = the last (n_miss * pcie_num / 256) of them
-        std::vector<int32_t> order_miss;
-        for (int64_t i = 0; i < n; ++i) {
-            const int32_t e = ids[i];
-            if (e < 0 || e >= n_expert_) continue;
-            if (host_res != nullptr && host_res[(size_t) (layer * n_expert_ + e)] >= 0) continue;
-            if (std::find(order_miss.begin(), order_miss.end(), e) == order_miss.end()) order_miss.push_back(e);
-        }
-        const int m = ((int) order_miss.size() * pcie_num) >> 8;
-        st_pch_ += (uint64_t) m;
-        for (int s = 0; s < 3; ++s) {
-            const int top = std::min(vm[s], nv);
-            st_vpred_[s] += (uint64_t) top;
-            for (int j = 0; j < top; ++j) {
-                if ((act[(size_t) (vt[j] >> 6)] >> (vt[j] & 63)) & 1ull) ++st_vhit_[s];
-                const auto it = std::find(order_miss.begin(), order_miss.end(), vt[j]);
-                if (it != order_miss.end() && (int) (it - order_miss.begin()) >= (int) order_miss.size() - m) ++st_pcov_[s];
-            }
-        }
-    }
-    for (int s = 0; s < 3; ++s) {
-        uint64_t hit = 0, np = 0;
-        for (int64_t w = 0; w < words_; ++w) {
-            const uint64_t pm = pmask_[(size_t) ((layer * 3 + s) * words_ + w)].load(std::memory_order_relaxed);
-            hit += (uint64_t) la_pc64(pm & act[(size_t) w]);
-            np += (uint64_t) la_pc64(pm);
-        }
-        st_hit_[s] += hit;
-        st_pred_[s] += np;
-    }
-    if (layer == (int64_t) routers_.size() - 1 && (++st_windows_ % 100) == 0) {
-        const uint64_t scored = st_layers_ - st_nopred_;
-        std::fprintf(stderr, "strata lookahead stats: %llu windows, %llu layers scored, %llu without a prediction (%.1f%%); "
-                     "%.2f actual non-resident experts/layer;",
-                     (unsigned long long) st_windows_, (unsigned long long) scored, (unsigned long long) st_nopred_,
-                     st_layers_ ? 100.0 * (double) st_nopred_ / (double) st_layers_ : 0.0,
-                     scored ? (double) st_actual_ / (double) scored : 0.0);
-        std::fprintf(stderr, " predictor thread %.2f ms/window;",
-                     (double) busy_us_.load(std::memory_order_relaxed) / 1000.0 / (double) st_windows_);
-        static const int add[3] = {0, 4, 10};
-        for (int s = 0; s < 3; ++s)
-            std::fprintf(stderr, " k=%d: recall %.3f precision %.3f (%.2f predicted/layer);", k_ + add[s],
-                         st_actual_ ? (double) st_hit_[s] / (double) st_actual_ : 0.0,
-                         st_pred_[s] ? (double) st_hit_[s] / (double) st_pred_[s] : 0.0,
-                         scored ? (double) st_pred_[s] / (double) scored : 0.0);
-        static const int vm[3] = {4, 8, 12};
-        for (int s = 0; s < 3; ++s)
-            std::fprintf(stderr, " votes top%d: %.2f/layer, covers %.3f of the misses (precision %.3f), %.3f of the PCIe share (%.2f/layer);",
-                         vm[s], scored ? (double) st_vpred_[s] / (double) scored : 0.0,
-                         st_actual_ ? (double) st_vhit_[s] / (double) st_actual_ : 0.0,
-                         st_vpred_[s] ? (double) st_vhit_[s] / (double) st_vpred_[s] : 0.0,
-                         st_pch_ ? (double) st_pcov_[s] / (double) st_pch_ : 0.0,
-                         scored ? (double) st_pch_ / (double) scored : 0.0);
-        std::fprintf(stderr, "\n");
-    }
 }
 
 void RouterLookahead::run() {
     std::vector<float> logits((size_t) (8 * n_expert_));
     std::vector<int32_t> order((size_t) n_expert_);
     std::vector<int64_t> want;
-    std::vector<float> wconf;   // 149-prefetch: per wanted expert, its best rank's confidence (warm_scored)
     for (;;) {
         int64_t layer, nt;
         const int32_t* host_res;
-        ForesightSwap* fs;
-        uint64_t sgen;
         {
             std::unique_lock<std::mutex> lk(mu_);
             cv_.wait(lk, [&] { return quit_ || pending_; });
@@ -2869,8 +2616,6 @@ void RouterLookahead::run() {
             layer = layer_;
             nt = n_tok_;
             host_res = host_res_;
-            fs = fs_;
-            sgen = sub_gen_;
         }
         const auto t0 = std::chrono::steady_clock::now();
         const int64_t layer0 = layer;
@@ -2878,8 +2623,6 @@ void RouterLookahead::run() {
         for (int dj = 0; dj < depth && layer0 + dj < (int64_t) routers_.size(); ++dj) {
         layer = layer0 + dj;
         want.clear();
-        wconf.clear();
-        const bool scored = src_->wants_scores();
         // The router dot is AVX2 (router_avx2.cpp); a CPU without AVX2 takes the AVX1 one (router_avx1.cpp) or,
         // without AVX, the same sums in plain C++.  From the Strata_Dirigo fork (rwkeyes): an
         // AVX-only Xeon E5-2687W died here (vpmovzxwd) on its first request.  An estimate only (which experts to
@@ -2909,59 +2652,18 @@ void RouterLookahead::run() {
                 }
             }
         }
-        const int kmax = stats_on_ ? (int) std::min<int64_t>(k_ + 10, n_expert_) : k_;
-        const int ks[3] = {k_, (int) std::min<int64_t>(k_ + 4, n_expert_), kmax};
-        std::vector<uint64_t> sm;
-        if (stats_on_) sm.assign((size_t) (3 * words_), 0);
         for (int64_t t = 0; t < nt; ++t) {
             const float* lt = logits.data() + (size_t) (t * n_expert_);
             for (int64_t e = 0; e < n_expert_; ++e) order[(size_t) e] = (int32_t) e;
-            std::partial_sort(order.begin(), order.begin() + kmax, order.end(),
+            std::partial_sort(order.begin(), order.begin() + k_, order.end(),
                               [&](int32_t a, int32_t b) { return lt[(size_t) a] > lt[(size_t) b]; });
-            for (int j = 0; j < kmax; ++j) {
+            for (int j = 0; j < k_; ++j) {
                 const int64_t e = order[(size_t) j];
                 if (host_res != nullptr && host_res[(size_t) (layer * n_expert_ + e)] >= 0) continue;   // on the GPU
-                if (j < k_) {
-                    const auto it = std::find(want.begin(), want.end(), e);
-                    // confidence: 1 for a token's top pick down to 1/k_ for its k_-th, the best over the window's tokens,
-                    // halved for every layer further ahead than the next (a deeper guess is less often right)
-                    const float c = (float) (k_ - j) / (float) k_ * (dj == 0 ? 1.0f : std::pow(0.5f, (float) dj));
-                    if (it == want.end()) { want.push_back(e); wconf.push_back(c); }
-                    else if (scored && c > wconf[(size_t) (it - want.begin())]) wconf[(size_t) (it - want.begin())] = c;
-                }
-                if (stats_on_ && dj == 0)
-                    for (int s = 0; s < 3; ++s)
-                        if (j < ks[s]) sm[(size_t) (s * words_ + (e >> 6))] |= 1ull << (e & 63);
+                if (std::find(want.begin(), want.end(), e) == want.end()) want.push_back(e);
             }
         }
-        if (stats_on_ && dj == 0) {
-            // votes: how many tokens put each non-resident expert in their top k_
-            std::vector<std::pair<int, int32_t>> votes;   // (sum of 64 - rank, expert)
-            for (int64_t t = 0; t < nt; ++t) {
-                const float* lt = logits.data() + (size_t) (t * n_expert_);
-                for (int64_t e = 0; e < n_expert_; ++e) order[(size_t) e] = (int32_t) e;
-                std::partial_sort(order.begin(), order.begin() + k_, order.end(),
-                                  [&](int32_t a, int32_t b) { return lt[(size_t) a] > lt[(size_t) b]; });
-                for (int j = 0; j < k_; ++j) {
-                    const int32_t e = order[(size_t) j];
-                    if (host_res != nullptr && host_res[(size_t) (layer * n_expert_ + e)] >= 0) continue;
-                    auto it = std::find_if(votes.begin(), votes.end(), [&](const auto& v) { return v.second == e; });
-                    if (it == votes.end()) votes.emplace_back(64 - j, e);
-                    else it->first += 64 - j;
-                }
-            }
-            std::sort(votes.begin(), votes.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-            for (int i = 0; i < kVoteN; ++i)
-                pvote_[(size_t) (layer * kVoteN + i)].store(i < (int) votes.size() ? votes[(size_t) i].second + 1 : 0,
-                                                            std::memory_order_relaxed);
-            for (int64_t i = 0; i < 3 * words_; ++i)
-                pmask_[(size_t) (layer * 3 * words_ + i)].store(sm[(size_t) i], std::memory_order_relaxed);
-            pstamp_[(size_t) layer].store(sgen + 1, std::memory_order_release);
-        }
-        if (scored) src_->warm_scored(layer, want.data(), wconf.data(), (int64_t) want.size(), dj + 1);
-        else src_->warm(layer, want.data(), (int64_t) want.size());
-        if (fs != nullptr && dj == 0)   // the next layer only: a deeper guess is too often wrong to spend a copy on
-            for (const int64_t e : want) fs->predict(src_, layer, (int32_t) e);
+        src_->warm(layer, want.data(), (int64_t) want.size());
         predicted_.fetch_add((int64_t) want.size(), std::memory_order_relaxed);
         }
         busy_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
@@ -2984,10 +2686,8 @@ void FileExpertSource::begin_layer(int64_t layer, const int32_t* ids, int64_t k)
             ++epoch_;
             new_window = layer < last_layer_;
             last_layer_ = layer;
-            io_epoch_.store(epoch_, std::memory_order_relaxed);   // 149-prefetch: the workers' deadline clock
         }
     }
-    if (new_window && io_sched_) io_window_tick();
     if (new_window && gate_on_ && tl_decode) { gate_capacity(); gate_tick(); }
 }
 
@@ -3887,37 +3587,8 @@ bool FileExpertSource::stage_exchange(int64_t layer, int64_t in, int64_t out, in
     return true;
 }
 
-bool FileExpertSource::soft_commit_exchanges() {
-    if (staged_.empty()) return true;
-    if (exchange_storage_.active() || !xstage_pinned_ || xstage_ == nullptr || !complement_pinned_ || complement_device_ == nullptr)
-        return false;
-    if (xstage_dev_ == nullptr) {
-        void* d = nullptr;
-        if (cudaHostGetDevicePointer(&d, xstage_, 0) != cudaSuccess || d == nullptr) { (void) cudaGetLastError(); return false; }
-        xstage_dev_ = (const uint8_t*) d;
-    }
-    if (soft_in_.empty()) soft_in_.assign((size_t) blobs_, SIZE_MAX);
-    for (const Exchange& x : staged_) soft_in_[x.out] = x.in;
-    return true;
-}
-
-void FileExpertSource::fs_hold_staged(bool hold) {
-    ForesightSwap* fs = fs_swap_.load(std::memory_order_acquire);
-    if (fs == nullptr || n_expert_ <= 0) return;
-    for (const Exchange& x : staged_)
-        for (const size_t i : {x.in, x.out}) {
-            const int64_t layer = (int64_t) (i / (size_t) n_expert_);
-            const int32_t expert = (int32_t) (i % (size_t) n_expert_);
-            if (hold) fs->hold(layer, expert);
-            else fs->unhold(layer, expert);
-        }
-}
-
 int64_t FileExpertSource::commit_exchanges() {
     int64_t n = 0;
-    fs_hold_staged(true);   // #2134: both experts' bytes move (in's place takes out's bytes, out leaves its buffer)
-    for (const Exchange& x : staged_)
-        if (!soft_in_.empty()) soft_in_[x.out] = SIZE_MAX;
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_[x.out];
         if (exchange_storage_.active()) {
@@ -3938,195 +3609,12 @@ int64_t FileExpertSource::commit_exchanges() {
         }
         override_[x.out] = nullptr;
     }
-    fs_hold_staged(false);
     staged_.clear();
     exchanges_ += n;
     return n;
 }
 
-bool FileExpertSource::replace_resident(int64_t layer, int64_t in, int64_t out) {
-    if (!complement_ready_ || complement_host_ == nullptr || exchange_storage_.active() || !staged_.empty() ||
-        layer < 0 || layer >= n_layers_ || in < 0 || out < 0 || in >= n_expert_ || out >= n_expert_ || in == out)
-        return false;
-    const size_t i_in = (size_t) layer * (size_t) n_expert_ + (size_t) in;
-    const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
-    if (i_in >= complement_offsets_.size() || i_out >= complement_offsets_.size()) return false;
-    if (!override_.empty() && (override_[i_in] != nullptr || override_[i_out] != nullptr)) return false;
-    const uint64_t at = complement_offsets_[i_out], bytes = layer_blob_bytes_[(size_t) layer];
-    if (at == kNoComplement || complement_offsets_[i_in] != kNoComplement || at > complement_bytes_ ||
-        bytes > complement_bytes_ - at) return false;
-    (void) at;
-    // read beside the copy first: a failed read leaves `out` where it was
-    if (ram_adapt_buf_.size() < (size_t) bytes) ram_adapt_buf_.resize((size_t) bytes);
-    const auto t0 = std::chrono::steady_clock::now();
-    if (!copy_from_files(layer, in, ram_adapt_buf_.data())) return false;
-    file_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
-                       std::memory_order_relaxed);
-    file_read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
-    return install_resident(layer, in, out, ram_adapt_buf_.data());
-}
-
-// `in`'s bytes (src) into `out`'s place of the compact copy, and the two offsets swapped - the checks again, as the caller
-// may have read `src` a while ago (149-prefetch: ram_install)
-bool FileExpertSource::install_resident(int64_t layer, int64_t in, int64_t out, const uint8_t* src) {
-    if (!complement_ready_ || complement_host_ == nullptr || exchange_storage_.active() || !staged_.empty() ||
-        layer < 0 || layer >= n_layers_ || in < 0 || out < 0 || in >= n_expert_ || out >= n_expert_ || in == out || src == nullptr)
-        return false;
-    const size_t i_in = (size_t) layer * (size_t) n_expert_ + (size_t) in;
-    const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
-    if (i_in >= complement_offsets_.size() || i_out >= complement_offsets_.size()) return false;
-    if (!override_.empty() && (override_[i_in] != nullptr || override_[i_out] != nullptr)) return false;
-    const uint64_t at = complement_offsets_[i_out], bytes = layer_blob_bytes_[(size_t) layer];
-    if (at == kNoComplement || complement_offsets_[i_in] != kNoComplement || at > complement_bytes_ ||
-        bytes > complement_bytes_ - at) return false;
-    // #2134: a Foresight slot may be copying out of `out`'s place right now; it is dropped (never served) before the place is rewritten
-    ForesightSwap* fs = fs_swap_.load(std::memory_order_acquire);
-    if (fs != nullptr) fs->hold(layer, (int32_t) out);
-    std::memcpy((uint8_t*) complement_host_ + (size_t) at, src, (size_t) bytes);
-    const bool moved = detail::exchange_cache_complement(complement_offsets_, i_out, i_in);
-    if (fs != nullptr) fs->unhold(layer, (int32_t) out);
-    if (!moved) return false;
-    ++ram_adapts_;
-    return true;
-}
-
-// ---- 149-prefetch: staged promotions.  The read of `in` runs on this source's own thread (one at a time: the drive's
-// queue stays the decode's first); the install is the decode thread's (ram_install, at a window boundary).
-bool FileExpertSource::ram_stage(int64_t layer, int64_t in, int64_t out) {
-    if (!complement_ready_ || complement_host_ == nullptr || layer < 0 || layer >= n_layers_ || in < 0 || out < 0 ||
-        in >= n_expert_ || out >= n_expert_ || in == out)
-        return false;
-    {
-        std::lock_guard<std::mutex> lk(ram_mu_);
-        static const size_t cap = [] {
-            const char* v = std::getenv("STRATA_RAM_ADAPT_QUEUE");
-            return v != nullptr ? (size_t) std::max(1, std::atoi(v)) : (size_t) 64;
-        }();
-        if (ram_jobs_.size() >= cap) return false;
-        for (const auto& j : ram_jobs_)
-            if (j->layer == layer && (j->in == in || j->out == out || j->in == out || j->out == in)) return false;
-        bool queued = false;
-        try {
-            auto j = std::make_unique<RamJob>();
-            j->layer = layer; j->in = in; j->out = out; j->state = 0;
-            ram_jobs_.push_back(std::move(j));
-            queued = true;
-            if (!ram_thread_.joinable()) {
-                ram_quit_ = false;
-                ram_thread_ = std::thread([this] { ram_worker(); });
-            }
-        } catch (const std::exception& e) {
-            if (queued && !ram_thread_.joinable()) ram_jobs_.pop_back();
-            ram_quit_ = false;
-            std::fprintf(stderr, "FileExpertSource: cannot queue the RAM promotion (%s)\n", e.what());
-            return false;
-        } catch (...) {
-            if (queued && !ram_thread_.joinable()) ram_jobs_.pop_back();
-            ram_quit_ = false;
-            std::fprintf(stderr, "FileExpertSource: cannot queue the RAM promotion\n");
-            return false;
-        }
-    }
-    ram_cv_.notify_one();
-    return true;
-}
-
-bool FileExpertSource::ram_queued(int64_t layer, int64_t expert) const {
-    std::lock_guard<std::mutex> lk(ram_mu_);
-    for (const auto& j : ram_jobs_)
-        if (j->layer == layer && (j->in == expert || j->out == expert)) return true;
-    return false;
-}
-
-void FileExpertSource::ram_worker() {
-    strata::platform::name_this_thread("strata-ram");
-    for (;;) {
-        RamJob* job = nullptr;
-        {
-            std::unique_lock<std::mutex> lk(ram_mu_);
-            ram_cv_.wait(lk, [&] {
-                if (ram_quit_) return true;
-                for (const auto& j : ram_jobs_)
-                    if (j->state == 0) return true;
-                return false;
-            });
-            if (ram_quit_) return;
-            for (const auto& j : ram_jobs_)
-                if (j->state == 0) { job = j.get(); break; }
-            job->state = 1;
-        }
-        const uint64_t bytes = layer_blob_bytes_[(size_t) job->layer];
-        bool ok = false;
-        try {
-            job->buf.resize((size_t) bytes);
-            const auto t0 = std::chrono::steady_clock::now();
-            ok = copy_from_files(job->layer, job->in, job->buf.data());
-            file_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
-                               std::memory_order_relaxed);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "FileExpertSource: a RAM promotion read failed (%s)\n", e.what());
-        } catch (...) {
-            std::fprintf(stderr, "FileExpertSource: a RAM promotion read failed\n");
-        }
-        if (ok) {
-            file_read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
-            ram_staged_reads_.fetch_add(1, std::memory_order_relaxed);
-        }
-        std::lock_guard<std::mutex> lk(ram_mu_);
-        job->state = ok ? 2 : 3;
-    }
-}
-
-int64_t FileExpertSource::ram_install(const int32_t* host_res, int64_t n_expert) {
-    std::vector<std::unique_ptr<RamJob>> done;
-    {
-        std::lock_guard<std::mutex> lk(ram_mu_);
-        for (auto it = ram_jobs_.begin(); it != ram_jobs_.end();) {
-            if ((*it)->state >= 2) { done.push_back(std::move(*it)); it = ram_jobs_.erase(it); }
-            else ++it;
-        }
-    }
-    int64_t n = 0;
-    for (const auto& j : done) {
-        if (j->state != 2) { ram_install_skips_.fetch_add(1, std::memory_order_relaxed); continue; }
-        if (host_res != nullptr && (host_res[(size_t) (j->layer * n_expert + j->in)] >= 0 ||
-                                    host_res[(size_t) (j->layer * n_expert + j->out)] >= 0)) {
-            ram_install_gpu_.fetch_add(1, std::memory_order_relaxed);   // the GPU tier took one of them meanwhile
-            continue;
-        }
-        if (install_resident(j->layer, j->in, j->out, j->buf.data())) ++n;
-        else ram_install_skips_.fetch_add(1, std::memory_order_relaxed);
-    }
-    return n;
-}
-
-void FileExpertSource::ram_stop() {
-    {
-        std::lock_guard<std::mutex> lk(ram_mu_);
-        ram_quit_ = true;
-    }
-    ram_cv_.notify_all();
-    if (ram_thread_.joinable()) ram_thread_.join();
-    std::lock_guard<std::mutex> lk(ram_mu_);
-    ram_jobs_.clear();
-    ram_quit_ = false;
-}
-
-int FileExpertSource::tier_of(int64_t layer, int64_t expert) const {
-    if (layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return 2;
-    const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
-    if (complement_ready_ && resident_blob(index) != nullptr) return 0;
-#if defined(__linux__)
-    uint64_t total = 0;
-    const uint64_t c = cached_bytes(layer, expert, total, false);
-    return total > 0 && c >= total ? 1 : 2;
-#else
-    return 2;
-#endif
-}
-
 void FileExpertSource::commit_copies() {
-    fs_hold_staged(true);   // #2134: held until commit_flip has pointed `out` at its new place
     if (exchange_storage_.active()) return;   // STRATA_EXCHANGE_ROTATE: ownership moves in commit_flip, nothing to copy
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_.empty() ? nullptr : override_[x.out];
@@ -4139,7 +3627,6 @@ void FileExpertSource::commit_copies() {
 
 int64_t FileExpertSource::commit_flip() {
     int64_t n = 0;
-    fs_hold_staged(true);   // (already held by commit_copies; idempotent)
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_[x.out];
         if (exchange_storage_.active()) {   // STRATA_EXCHANGE_ROTATE: the same ownership transfer as commit_exchanges
@@ -4158,7 +3645,6 @@ int64_t FileExpertSource::commit_flip() {
             ++n;
         override_[x.out] = nullptr;
     }
-    fs_hold_staged(false);
     staged_.clear();
     exchanges_ += n;
     return n;
@@ -4187,7 +3673,7 @@ const uint8_t* FileExpertSource::blob_stable(int64_t layer, int64_t expert) {
 
 int FileExpertSource::blob_parts(int64_t layer, int64_t expert, BlobPart* out) {
     // the GGUF mapped in place only (three tensors per expert); the RAM copy, an exchange override, the unbuffered
-    // reads, a closed mapping and the I/O prefetch (STRATA_IO_PREFETCH: it preads the ranges the page cache lacks, which a copy out
+    // reads, a closed mapping and the I/O prefetch (it preads the ranges the page cache lacks, which a copy out
     // of the mapping would fault in one page at a time) keep going through blob(), which knows them
     if (role_ptr_.empty() || !direct_.empty() || io_pf_ || unmapped_ || base_ == nullptr || layer < 0 || expert < 0 ||
         layer >= n_layers_ || expert >= n_expert_)
@@ -4229,7 +3715,7 @@ const uint8_t* FileExpertSource::blob(int64_t layer, int64_t expert) {
             if (result != nullptr) {
                 file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
 #if defined(__linux__)
-                if (io_stats_) {   // STRATA_IO_STATS=1: what the page cache held when the kernels were handed the blob
+                if (io_stats_) {   // what the page cache held when the kernels were handed the blob
                     uint64_t total = 0;
                     const uint64_t c = cached_bytes(layer, expert, total);
                     io_cached_.fetch_add(c, std::memory_order_relaxed);
@@ -4249,21 +3735,16 @@ bool FileExpertSource::pinned(int64_t layer, int64_t expert) const {
         layer >= n_layers_ || expert >= n_expert_) return false;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     if (exchange_storage_.active()) return exchange_storage_.resident(index).host != nullptr;
-    // soft_commit_exchanges: a staged `out` is judged by the place it will take (`in`'s), as after the commit
-    const size_t at_index = !soft_in_.empty() && soft_in_[index] != SIZE_MAX ? soft_in_[index] : index;
-    if (at_index >= complement_offsets_.size() || complement_offsets_[at_index] == kNoComplement) return false;
+    if (index >= complement_offsets_.size() || complement_offsets_[index] == kNoComplement) return false;
     // a partial pin (CS-T): only the registered prefix
     return !complement_partial_ ||
-           complement_offsets_[at_index] + layer_blob_bytes_[(size_t) layer] <= complement_pin_limit_;
+           complement_offsets_[index] + layer_blob_bytes_[(size_t) layer] <= complement_pin_limit_;
 }
 
 const uint8_t* FileExpertSource::device_alias(int64_t layer, int64_t expert) const {
     if (!pinned(layer, expert) || complement_device_ == nullptr) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     if (exchange_storage_.active()) return exchange_storage_.resident(index).device;
-    if (!soft_in_.empty() && soft_in_[index] != SIZE_MAX)   // soft_commit_exchanges: out is read from its exchange buffer
-        return override_.empty() || override_[index] == nullptr || xstage_dev_ == nullptr
-                   ? nullptr : xstage_dev_ + (size_t) (override_[index] - xstage_);
     return complement_device_ + (size_t) complement_offsets_[index];
 }
 
@@ -4426,10 +3907,6 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         return;
     }
     if (d.lookahead != nullptr) {
-        if (d.lookahead->stats_on()) {
-            if (d.layers == 0) d.lookahead->stats_window_start();
-            d.lookahead->stats_score(d.layers, ids, n_tok * k, d.host_res, d.pcie_num);
-        }
         d.lookahead->submit(d.layers, x_f, n_tok, d.host_res);   // CS-T: warm layer + 1
     }
     if (k < 1 || n_tok * k > kMaxWindowEntries) {
@@ -4449,7 +3926,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         if (ptrace) { std::fprintf(stderr, "pool trace: layer %lld %s %lld\n", (long long) d.layers, what, a); std::fflush(stderr); }
     };
     const auto c0 = std::chrono::steady_clock::now();
-    const FileExpertSource::DecodeScope decode_scope;   // 149 STRATA_IO_PF_GATE: this thread reads for the decode
+    const FileExpertSource::DecodeScope decode_scope;   // the decode gate: this thread reads for the decode
     // 149-cold STRATA_COLD_OVERLAP: 0 off, 1 overlap, 2 measure only, 3 overlap + zero-copy, 4 zero-copy only.
     // 0.2.0: unset, 4 for the GGUF read in place on Linux (zero-copy needs the page cache's residency query), else 0
     static const int cold_env = [] {
@@ -4545,10 +4022,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     kd = 2;                        // multi-GPU: the second GPU computes it
                 } else if (helper_holds(e)) {
                     // left to the helper: kind -1 until RemoteExperts::begin() claims the row (see above)
-                } else if (d.fs != nullptr && d.fs->take(d.layers, e, ptr)) {
-                    kd = 0;                        // Foresight: a landed swap-space slot holds it - a GPU group like a hit
                 } else {
-                    if (d.fs != nullptr) d.fs->note_miss(d.src, d.layers, e);
                     if (miss_rank >= nmiss - m && fetches < P.staging_cap && fetches < 64) {
                         const uint8_t* src = d.src->pinned(d.layers, e) ? d.src->blob(d.layers, e) : nullptr;
                         if (src != nullptr) {
@@ -4633,13 +4107,6 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     bool any_cpu = false;
     for (int64_t i = 0; i < n; ++i)
         if (kind[i] == -1) { any_cpu = true; break; }   // -2: skipped (STRATA_ROUTE_TAIL_SKIP), no work
-    if (d.dres_check != nullptr && any_cpu) {   // STRATA_ADAPT_CHECKRES
-        bool published = false;
-        for (int64_t i = 0; i < n && !published; ++i)
-            published = ids[i] < 0 || ids[i] >= d.n_expert ||
-                        d.dres_check[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] < 0;
-        if (!published) ++d.stale_x;
-    }
     const auto c1 = std::chrono::steady_clock::now();
     if (any_cpu) {
         // #578 --remote-expert-opt: a token whose experts all run on a GPU (CUDA0 or a helper) needs no CPU activation
@@ -5148,10 +4615,10 @@ bool check_experts_gguf(const std::string& gguf, const strata::kernels::cpu::Exp
 // `unbuffered` (Windows, experts_unbuffered): each chunk's 4 KiB-aligned window is read with FILE_FLAG_NO_BUFFERING into
 // an aligned buffer and scattered into the blobs - no copy through the file cache when the drive is read anyway.
 LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata::kernels::cpu::ExpertLayout& lay,
-                            int threads, bool unbuffered, const std::atomic<int>* ready, const PadMap* pad) {
-    // where blob (l, e) goes in `dst`: packed (experts.bin) or the padded layout of pin by need
-    auto dst_blob = [&lay, pad](int64_t l, int64_t e) -> uint64_t {
-        return pad != nullptr ? pad->blob_off(l, e) : lay.blob_offset(l, e);
+                            int threads, bool unbuffered, const std::atomic<int>* ready) {
+    // where blob (l, e) goes in `dst`: the packed experts.bin layout
+    auto dst_blob = [&lay](int64_t l, int64_t e) -> uint64_t {
+        return lay.blob_offset(l, e);
     };
     // `ready`: layer l is written only once *ready > l + 1 (a PinnedArena registering its slices meanwhile; the next
     // slice too, since its registration starts on the page that may hold this layer's tail)
@@ -5288,7 +4755,6 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             pinned_bytes_ = 0;
             dev_slice_.clear();
             slice_bytes_ = 0;
-            ranges_ = false;
             blobs_ = n_layers * n_expert;
             n_expert_ = n_expert;
             reads_ = 0;
@@ -5344,56 +4810,6 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         lbytes.push_back(lay.blob_bytes(l) * (uint64_t) n_expert);
     }
     bounds.push_back(want);
-    // Pin by need: the arena gets a page-aligned blob STRIDE (blob rounded up to 4 KiB, ~+0.15 %), so every blob starts
-    // on a page and any set of blobs can be registered exactly (a canonical blob is 337.5 pages: packed, an isolated
-    // blob could never be registered without its neighbours' bytes).  Not with the mapped arena file (STRATA_ARENA_MMAP
-    // writes experts.bin from the arena).  The file offsets (loff) stay packed; only the destination moves.
-    padded_ = false;
-    pad_ = PadMap{};
-    if (pin_by_need_ && !pin_pairs_.empty() && !arena_mmap && shared_arena_file.empty()) {   // (a shared arena file has one layout for every process: the packed one)
-        padded_ = true;
-        uint64_t at = 0;
-        for (int64_t l = 0; l < n_layers; ++l) {
-            const uint64_t b = lay.blob_bytes(l), s = (b + 4095) & ~(uint64_t) 4095;
-            pad_.dst_off.push_back(at);
-            pad_.blob.push_back(b);
-            pad_.stride.push_back(s);
-            at += s * (uint64_t) n_expert;
-        }
-        pad_.total = at;
-    }
-    const uint64_t arena_bytes = padded_ ? pad_.total : want;   // the spare blob below comes on top, as before
-    // Pin by need: the pairs set_pin_priority gave, as byte ranges in priority order.  Neighbours (adjacent blobs) merge
-    // into one range that takes the best rank of its members, so the hottest experts are registered first and the
-    // number of cudaHostRegister calls stays far below the number of pairs.
-    std::vector<std::pair<uint64_t, uint64_t>> need_ranges;
-    const bool by_need = padded_;
-    if (by_need) {
-        // every blob starts on a page and owns its whole stride (pad included), so a run of adjacent blobs is one exact
-        // range: [first start, last start + stride).  The best rank of a run's members is its priority.
-        struct Ext { uint64_t off, len; size_t rank; int tier; };
-        std::vector<Ext> ex;
-        ex.reserve(pin_pairs_.size());
-        std::vector<uint8_t> seen((size_t) (n_layers * n_expert), 0);
-        for (size_t i = 0; i < pin_pairs_.size(); ++i) {
-            const int64_t l = pin_pairs_[i].first, e = pin_pairs_[i].second;
-            if (l < 0 || l >= n_layers || e < 0 || e >= n_expert || seen[(size_t) (l * n_expert + e)]) continue;
-            seen[(size_t) (l * n_expert + e)] = 1;
-            ex.push_back({arena_off(l, e), pad_.stride[(size_t) l], i, i < pin_first_ ? 0 : 1});
-        }
-        std::sort(ex.begin(), ex.end(), [](const Ext& a, const Ext& b) { return a.off < b.off; });
-        std::vector<Ext> merged;
-        for (const Ext& x : ex) {
-            if (!merged.empty() && merged.back().off + merged.back().len == x.off && merged.back().tier == x.tier) {
-                merged.back().len += x.len;
-                merged.back().rank = std::min(merged.back().rank, x.rank);
-            } else {
-                merged.push_back(x);
-            }
-        }
-        std::stable_sort(merged.begin(), merged.end(), [](const Ext& a, const Ext& b) { return a.rank < b.rank; });
-        for (const Ext& x : merged) need_ranges.emplace_back(x.off, x.len);
-    }
     // #285: on Windows the per-layer registration runs on a thread ahead of the readers, which wait for their
     // layer's slice (the whole arena registered before the load cost ~2.5 s at 33 GiB of 4 KB pages, not hidden).
     // Only where the whole arena would be registered: no cap (STRATA_ARENA_PIN_GIB, multi-GPU), no shared arena.
@@ -5401,9 +4817,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     // arena registered per layer before it is filled decoded ~10% slower than the old order (whole-arena try, sliced
     // fallback after the load) with identical output; the start-time gain does not pay for that.
     const bool deferred = false;
-    PinnedArena* a = by_need ? new PinnedArena(arena_bytes + (uint64_t) blob, PinnedArena::ByNeed{}, need_ranges,
-                                               max_pinned_bytes, shared_arena_file, pack_hash)
-                   : deferred ? new PinnedArena(want + (uint64_t) blob, bounds, PinnedArena::Deferred{})
+    PinnedArena* a = deferred ? new PinnedArena(want + (uint64_t) blob, bounds, PinnedArena::Deferred{})
                               : new PinnedArena(want + (uint64_t) blob, bounds, max_pinned_bytes,
                                                 shared_arena_file, pack_hash);
     if (!a->valid()) {
@@ -5442,11 +4856,11 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     }
     const std::atomic<int>* rp = deferred ? &ready : nullptr;
     if (from_gguf) {
-        st = load_experts_gguf(gguf_, a->data(), lay, readers, unbuffered, rp, padded_ ? &pad_ : nullptr);
+        st = load_experts_gguf(gguf_, a->data(), lay, readers, unbuffered, rp);
     } else {
-        if (unbuffered && !padded_) st = load_experts_direct(path, a->data(), loff, lbytes, readers, /*chunk=*/8u << 20, rp);
-        if (!unbuffered || padded_ || (!st.ok && st.error.empty()))   // unaligned ranges / the padded layout: the buffered reader
-            st = load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20, rp, padded_ ? &pad_ : nullptr);
+        if (unbuffered) st = load_experts_direct(path, a->data(), loff, lbytes, readers, /*chunk=*/8u << 20, rp);
+        if (!unbuffered || !st.ok)   // unaligned ranges: the buffered reader
+            st = load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20, rp);
     }
     if (reg.joinable()) reg.join();
     std::fprintf(stderr, "strata generate: expert arena read %s (%s)\n", unbuffered ? "unbuffered" : "through the file cache",
@@ -5495,34 +4909,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     // plan v0.3 P6: device aliases of the mapped registration, for the PCIe share of the misses
     dev_slice_.clear();
     slice_bytes_ = a->slice_bytes;
-    pin_start_.clear(); pin_end_.clear(); pin_dev_.clear(); layer_pcie_.clear();
-    ranges_ = false;
-    if (a->by_need) {
-        // device alias of each registered range's start (device_alias adds the blob's distance from it); one
-        // refusal drops the whole table: no PCIe share rather than a wrong pointer
-        ranges_ = true;
-        for (const auto& r : a->pin_ranges) {
-            void* d = nullptr;
-            if (cudaHostGetDevicePointer(&d, (void*) (base_ + r.first), 0) != cudaSuccess) {
-                (void) cudaGetLastError();
-                ranges_ = false;
-                break;
-            }
-            pin_start_.push_back(r.first);
-            pin_end_.push_back(r.first + r.second);
-            pin_dev_.push_back((const uint8_t*) d);
-        }
-        if (!ranges_) {
-            pin_start_.clear(); pin_end_.clear(); pin_dev_.clear();
-            pinned_bytes_ = 0;
-        } else {
-            layer_pcie_.assign((size_t) n_layers, 0);
-            n_expert_ = n_expert;   // pinned() reads it; the common tail below sets the same value
-            for (int64_t l = 0; l < n_layers; ++l)
-                for (int64_t e = 0; e < n_expert && !layer_pcie_[(size_t) l]; ++e)
-                    layer_pcie_[(size_t) l] = pinned(l, e) ? 1 : 0;
-        }
-    } else if (a->registered_bytes > 0) {
+    if (a->registered_bytes > 0) {
         std::vector<uint64_t> starts = a->slice_bytes > 0 ? a->slice_starts : std::vector<uint64_t>{0};
         for (uint64_t off : starts) {
             void* d = nullptr;
@@ -5584,39 +4971,21 @@ uint64_t ArenaExpertSource::release(int64_t layer, int64_t expert) {
     return end - off;
 }
 
-int64_t ArenaExpertSource::pin_range_of(uint64_t off, uint64_t len) const {
-    // last range starting at or before the blob; it must also end after it (a blob is inside ONE range: merged
-    // neighbours are contiguous, and a blob split by a trimmed page is reported unpinned - the safe answer)
-    const auto it = std::upper_bound(pin_start_.begin(), pin_start_.end(), off);
-    if (it == pin_start_.begin()) return -1;
-    const size_t i = (size_t) (it - pin_start_.begin()) - 1;
-    return off + len <= pin_end_[i] ? (int64_t) i : -1;
-}
-
 uint64_t ArenaExpertSource::arena_off(int64_t layer, int64_t expert) const {
-    return padded_ ? pad_.blob_off(layer, expert) : strata::kernels::cpu::expert_layout().blob_offset(layer, expert);
+    return strata::kernels::cpu::expert_layout().blob_offset(layer, expert);
 }
 
 bool ArenaExpertSource::pcie_layer(int64_t layer) const {
-    if (!ranges_) return device_alias(layer, 0) != nullptr;   // the prefix rule (ExpertSource's default)
-    return layer >= 0 && (size_t) layer < layer_pcie_.size() && layer_pcie_[(size_t) layer] != 0;
+    return device_alias(layer, 0) != nullptr;   // the prefix rule (ExpertSource's default)
 }
 
 bool ArenaExpertSource::pinned(int64_t layer, int64_t expert) const {
     if (base_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_) return false;
     const auto& lay = strata::kernels::cpu::expert_layout();
-    if (ranges_) return pin_range_of(arena_off(layer, expert), lay.blob_bytes(layer)) >= 0;   // the whole blob inside ONE registered range
     return lay.blob_offset(layer, expert) + lay.blob_bytes(layer) <= pinned_bytes_;
 }
 
 const uint8_t* ArenaExpertSource::device_alias(int64_t layer, int64_t expert) const {
-    if (ranges_) {   // pin by need: the range's device base + the blob's offset inside it
-        if (base_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_) return nullptr;
-        const auto& rl = strata::kernels::cpu::expert_layout();
-        const uint64_t off = arena_off(layer, expert);
-        const int64_t i = pin_range_of(off, rl.blob_bytes(layer));
-        return i < 0 ? nullptr : pin_dev_[(size_t) i] + (off - pin_start_[(size_t) i]);
-    }
     if (dev_slice_.empty() || !pinned(layer, expert)) return nullptr;
     const auto& lay = strata::kernels::cpu::expert_layout();
     if (slice_bytes_ == 0) return dev_slice_[0] + lay.blob_offset(layer, expert);
@@ -5640,336 +5009,7 @@ const uint8_t* ArenaExpertSource::blob_at(int64_t layer, int64_t expert) const {
     if (base_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_) return nullptr;
     const int64_t idx = layer * n_expert_ + expert;
     if (idx < 0 || idx >= blobs_) return nullptr;
-    return base_ + arena_off(layer, expert);   // (the padded layout of pin by need too)
-}
-
-}  // namespace strata::core
-
-// ---- Foresight swap space (see include/strata/core/foresight_swap.hpp) ------------------------------------------
-namespace strata::core {
-
-bool ForesightSwap::init(int slots_per_layer, int64_t layers, int64_t experts, const std::vector<int>& card_of_layer,
-                         const std::vector<int>& devices, std::string& err) {
-    err.clear();
-    if (init_started_) {
-        err = "foresight swap: init was already attempted";
-        return false;
-    }
-    if (slots_per_layer <= 0 || layers <= 0 || experts <= 0) {
-        err = "foresight swap: invalid empty geometry";
-        return false;
-    }
-    if ((uint64_t) layers > std::numeric_limits<size_t>::max() / (uint64_t) slots_per_layer ||
-        (uint64_t) layers > std::numeric_limits<size_t>::max() / (uint64_t) experts) {
-        err = "foresight swap: geometry is too large";
-        return false;
-    }
-    if (card_of_layer.size() != (size_t) layers || devices.empty()) {
-        err = "foresight swap: a layer has no device card";
-        return false;
-    }
-    for (int card : card_of_layer)
-        if (card < 0 || (size_t) card >= devices.size()) {
-            err = "foresight swap: a layer names an unknown device card";
-            return false;
-        }
-    init_started_ = true;
-    slots = slots_per_layer;
-    n_layers = layers;
-    n_expert = experts;
-    const size_t ns = (size_t) (layers * slots);
-    slot.reset(new Slot[ns]);
-    where.assign((size_t) (layers * experts), -1);
-    miss_cnt.assign((size_t) (layers * experts), 0);
-    miss_at.assign((size_t) (layers * experts), 0);
-    layer_card = card_of_layer;
-    layer_dev.resize((size_t) layers);
-    card_dev = devices;
-    card_stream.assign(devices.size(), nullptr);
-    card_mem.assign(devices.size(), nullptr);
-    card_round.assign(devices.size(), ~0ull);
-    card_used.assign(devices.size(), 0);
-    const auto& lay = strata::kernels::cpu::expert_layout();
-    for (size_t c = 0; c < devices.size(); ++c) {
-        uint64_t bytes = 0;
-        for (int64_t l = 0; l < layers; ++l) {
-            if (card_of_layer[(size_t) l] != (int) c) continue;
-            const uint64_t blob = lay.blob_bytes(l);
-            if (blob > std::numeric_limits<uint64_t>::max() / (uint64_t) slots ||
-                bytes > std::numeric_limits<uint64_t>::max() - blob * (uint64_t) slots) {
-                err = "foresight swap: device allocation size overflows";
-                return false;
-            }
-            bytes += blob * (uint64_t) slots;
-        }
-        if (bytes == 0) continue;
-        const OnDevice on(devices[c]);
-        cudaStream_t s = nullptr;
-        if (cudaMalloc(&card_mem[c], bytes) != cudaSuccess ||
-            cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) != cudaSuccess) {
-            cudaGetLastError();
-            err = "cannot allocate " + std::to_string(bytes >> 20) + " MiB on CUDA" + std::to_string(devices[c]) +
-                  " (raise --vram-reserve-mib by about that much)";
-            return false;
-        }
-        card_stream[c] = s;
-        uint64_t off = 0;
-        for (int64_t l = 0; l < layers; ++l) {
-            if (card_of_layer[(size_t) l] != (int) c) continue;
-            layer_dev[(size_t) l] = devices[c];
-            const uint64_t bb = (uint64_t) lay.blob_bytes(l);
-            for (int s2 = 0; s2 < slots; ++s2) {
-                Slot& sl = slot[(size_t) (l * slots + s2)];
-                sl.dptr = (unsigned long long) ((uint8_t*) card_mem[c] + off);
-                sl.bytes = bb;
-                cudaEvent_t ev = nullptr;
-                if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
-                    cudaGetLastError();
-                    err = "cannot create the copy events";
-                    return false;
-                }
-                sl.ev = ev;
-                off += bb;
-            }
-        }
-    }
-    try {
-        filler_ = std::thread([this] { fill_loop(); });
-    } catch (const std::exception& e) {
-        err = std::string("foresight swap: cannot start the copy thread: ") + e.what();
-        return false;
-    }
-    return true;
-}
-
-ForesightSwap::~ForesightSwap() {
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        stop_ = true;
-    }
-    cv_.notify_all();
-    if (filler_.joinable()) filler_.join();
-    for (size_t c = 0; c < card_dev.size(); ++c) {
-        const OnDevice on(card_dev[c]);
-        if (card_stream[c]) cudaStreamSynchronize((cudaStream_t) card_stream[c]);
-        if (card_mem[c]) cudaFree(card_mem[c]);
-        if (card_stream[c]) cudaStreamDestroy((cudaStream_t) card_stream[c]);
-    }
-    if (slot)
-        for (int64_t i = 0; i < n_layers * slots; ++i)
-            if (slot[(size_t) i].ev) cudaEventDestroy((cudaEvent_t) slot[(size_t) i].ev);
-}
-
-void ForesightSwap::fill_loop() {
-    strata::platform::name_this_thread("strata-fill");
-    int cur_dev = -1;
-    for (;;) {
-        int64_t idx;
-        {
-            std::unique_lock<std::mutex> lk(mu_);
-            cv_.wait(lk, [&] { return stop_ || !queue_.empty(); });
-            if (stop_) return;
-            idx = queue_.front();
-            queue_.pop_front();
-        }
-        Slot& sl = slot[(size_t) idx];
-        const int64_t l = idx / slots;
-        const int dev = layer_dev[(size_t) l];
-        if (dev != cur_dev) { cudaSetDevice(dev); cur_dev = dev; }
-        cudaStream_t s = (cudaStream_t) card_stream[(size_t) layer_card[(size_t) l]];
-        if (cudaMemcpyAsync((void*) sl.dptr, sl.src, sl.bytes, cudaMemcpyHostToDevice, s) != cudaSuccess ||
-            cudaEventRecord((cudaEvent_t) sl.ev, s) != cudaSuccess) {
-            cudaGetLastError();
-            if (!failed.exchange(true)) std::fprintf(stderr, "strata serve: foresight swap: a copy failed - swap space off\n");
-            continue;   // never marked issued: the slot is never used
-        }
-        sl.issued.store(true, std::memory_order_release);
-    }
-}
-
-bool ForesightSwap::take(int64_t layer, int32_t expert, unsigned long long& ptr) {
-    if (layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return false;
-    std::lock_guard<std::mutex> smu_lk(smu_);
-    const int s = where[(size_t) (layer * n_expert + expert)];
-    if (s < 0) return false;
-    Slot& sl = slot[(size_t) (layer * slots + s)];
-    if (!sl.ready) {
-        if (!sl.loading || !sl.issued.load(std::memory_order_acquire)) { ++pending; return false; }
-        const cudaError_t q = cudaEventQuery((cudaEvent_t) sl.ev);
-        if (q != cudaSuccess) {
-            if (q != cudaErrorNotReady) cudaGetLastError();
-            ++pending;
-            return false;
-        }
-        sl.ready = true;
-        sl.loading = false;
-        if (verify) {   // test mode: the bytes the GPU will read must be the expert's own
-            std::vector<uint8_t> back((size_t) sl.bytes);
-            const OnDevice on(layer_dev[(size_t) layer]);
-            const bool same = cudaMemcpy(back.data(), (const void*) sl.dptr, (size_t) sl.bytes, cudaMemcpyDeviceToHost) ==
-                                  cudaSuccess && std::memcmp(back.data(), sl.src, (size_t) sl.bytes) == 0;
-            if (same) ++verify_ok;
-            else {
-                cudaGetLastError();
-                ++verify_bad;
-                sl.ready = false;                           // never serve it
-                where[(size_t) (layer * n_expert + expert)] = -1;
-                sl.expert = -1;
-                return false;
-            }
-        }
-    }
-    sl.last_ref = completed.load(std::memory_order_acquire);
-    ptr = sl.dptr;
-    ++hits;
-    return true;
-}
-
-void ForesightSwap::hold(int64_t layer, int32_t expert) {
-    if (layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return;
-    std::lock_guard<std::mutex> smu_lk(smu_);
-    const size_t key = (size_t) (layer * n_expert + expert);
-    const int s = where[key];
-    where[key] = kHeld;
-    if (s < 0) return;
-    Slot& sl = slot[(size_t) (layer * slots + s)];
-    sl.expert = kDropped;   // `loading` and `last_ref` stay: a copy in flight and a window that read it are waited for
-    sl.ready = false;
-    ++dropped;
-}
-
-void ForesightSwap::unhold(int64_t layer, int32_t expert) {
-    if (layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return;
-    std::lock_guard<std::mutex> smu_lk(smu_);
-    int16_t& w = where[(size_t) (layer * n_expert + expert)];
-    if (w == kHeld) w = -1;
-}
-
-void ForesightSwap::note_miss(ExpertSource* src, int64_t layer, int32_t expert) {
-    if (src == nullptr || layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return;
-    std::lock_guard<std::mutex> smu_lk(smu_);
-    request_locked(src, layer, expert, false);
-}
-
-void ForesightSwap::predict(ExpertSource* src, int64_t layer, int32_t expert) {
-    if (layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return;
-    std::lock_guard<std::mutex> smu_lk(smu_);
-    request_locked(src, layer, expert, true);
-}
-
-void ForesightSwap::request_locked(ExpertSource* src, int64_t layer, int32_t expert, bool predicted_copy) {
-    if (failed.load(std::memory_order_relaxed)) return;
-    if (src == nullptr || layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return;
-    const size_t key = (size_t) (layer * n_expert + expert);
-    if (where[key] != -1) return;                       // already on its way, or held by an exchange (#2134)
-    const uint64_t now = completed.load(std::memory_order_acquire);
-    if (admit > 1 && !predicted_copy) {
-        if (now > miss_at[key] + 4) miss_cnt[key] = 0;
-        miss_at[key] = now;
-        if (miss_cnt[key] < 255) ++miss_cnt[key];
-        if (miss_cnt[key] < admit) return;
-    }
-    const int c = layer_card[(size_t) layer];
-    if (card_round[(size_t) c] != now) { card_round[(size_t) c] = now; card_used[(size_t) c] = 0; }
-    if (card_used[(size_t) c] >= budget) { ++over_budget; return; }
-    if (!src->pinned(layer, expert)) return;   // async copies need the pinned arena
-    const uint8_t* b = src->blob(layer, expert);
-    if (b == nullptr) return;
-    int best = -1;
-    uint64_t best_ref = ~0ull;
-    for (int s = 0; s < slots; ++s) {   // an empty slot, else the one used longest ago that no window can still read
-        Slot& sl = slot[(size_t) (layer * slots + s)];
-        if (sl.loading) {   // copied in but never asked for since: landed long ago -> an ordinary candidate
-            if (sl.last_ref + (uint64_t) depth > now || !sl.issued.load(std::memory_order_acquire)) continue;
-            const cudaError_t q = cudaEventQuery((cudaEvent_t) sl.ev);
-            if (q != cudaSuccess) { if (q != cudaErrorNotReady) cudaGetLastError(); continue; }
-            sl.loading = false;
-            sl.ready = true;
-        }
-        if (sl.expert == -1) { best = s; break; }      // never used (a dropped slot, kDropped, waits like a used one)
-        if (sl.last_ref + (uint64_t) depth > now) continue;
-        if (sl.last_ref < best_ref) { best_ref = sl.last_ref; best = s; }
-    }
-    if (best < 0) { ++busy; return; }
-    Slot& sl = slot[(size_t) (layer * slots + best)];
-    const int32_t displaced = sl.expert;
-    const bool old_ready = sl.ready, old_loading = sl.loading;
-    const bool old_issued = sl.issued.load(std::memory_order_relaxed);
-    const uint64_t old_last_ref = sl.last_ref;
-    const uint8_t* old_src = sl.src;
-    if (sl.expert >= 0) where[(size_t) (layer * n_expert + sl.expert)] = -1;
-    sl.expert = expert;
-    sl.ready = false;
-    sl.loading = true;
-    sl.issued.store(false, std::memory_order_relaxed);
-    sl.src = b;
-    sl.last_ref = now;
-    where[key] = (int16_t) best;
-    ++card_used[(size_t) c];
-    ++copies;
-    if (predicted_copy) ++predicted;
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        try {
-            queue_.push_back(layer * slots + best);
-        } catch (...) {
-            where[key] = -1;
-            sl.expert = displaced;
-            sl.ready = old_ready;
-            sl.loading = old_loading;
-            sl.issued.store(old_issued, std::memory_order_relaxed);
-            sl.last_ref = old_last_ref;
-            sl.src = old_src;
-            if (displaced >= 0) where[(size_t) (layer * n_expert + displaced)] = (int16_t) best;
-            --card_used[(size_t) c];
-            --copies;
-            if (predicted_copy) --predicted;
-            ++busy;
-            return;
-        }
-    }
-    cv_.notify_one();
-}
-
-std::string ForesightSwap::report() const {
-    std::lock_guard<std::mutex> smu_lk(const_cast<std::mutex&>(smu_));
-    char buf[320];
-    std::snprintf(buf, sizeof buf, "foresight swap: %llu experts served from the swap space, %llu copies (%llu from the "
-                                   "router look-ahead), %llu not landed yet, %llu no free slot, %llu over budget%s",
-                  (unsigned long long) hits, (unsigned long long) copies, (unsigned long long) predicted,
-                  (unsigned long long) pending, (unsigned long long) busy, (unsigned long long) over_budget, verify ? "" : "");
-    std::string r = buf;
-    if (dropped > 0) r += ", " + std::to_string(dropped) + " dropped by exchanges";
-    if (verify) r += ", verified " + std::to_string(verify_ok) + " ok / " + std::to_string(verify_bad) + " BAD";
-    return r;
-}
-
-ForesightSwap* foresight_swap_from_env(int64_t layers, int64_t experts, const std::vector<int>& card_of_layer,
-                                       const std::vector<int>& devices) {
-    const char* v = std::getenv("STRATA_FS_SLOTS");
-    const int slots = v ? std::atoi(v) : 0;
-    if (slots <= 0) return nullptr;
-    if (const char* dp = std::getenv("STRATA_VERIFY_DEVICE_PLAN"); dp && std::atoi(dp) != 0) {
-        std::fprintf(stderr, "strata serve: foresight swap: off beside STRATA_VERIFY_DEVICE_PLAN (the device would plan "
-                             "resident layers without the host)\n");
-        return nullptr;
-    }
-    auto* f = new ForesightSwap();
-    auto env_int = [](const char* name, int def, int lo) { const char* e = std::getenv(name); const int x = e ? std::atoi(e) : def; return x < lo ? lo : x; };
-    f->budget = env_int("STRATA_FS_BUDGET", 32, 1);
-    f->admit = env_int("STRATA_FS_ADMIT", 1, 1);
-    f->depth = env_int("STRATA_FS_DEPTH", 4, 2);
-    f->verify = env_int("STRATA_FS_VERIFY", 0, 0) != 0;
-    std::string err;
-    if (!f->init(std::min(slots, 64), layers, experts, card_of_layer, devices, err)) {
-        std::fprintf(stderr, "strata serve: foresight swap: %s - swap space off\n", err.c_str());
-        delete f;
-        return nullptr;
-    }
-    std::fprintf(stderr, "strata serve: foresight swap: %d slots per layer on %zu card(s), up to %d copies per card and "
-                         "window, admit after %d miss(es), reuse after %d windows\n",
-                 f->slots, devices.size(), f->budget, f->admit, f->depth);
-    return f;
+    return base_ + arena_off(layer, expert);
 }
 
 }  // namespace strata::core

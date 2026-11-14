@@ -43,9 +43,6 @@ int main() {
     CHECK(strata::core::adapt_async_self_decides(good(), &why));
     { AdaptAsyncAuto a = good(); a.flag = 0; CHECK(!strata::core::adapt_async_self_decides(a, &why)); CHECK(why && std::strstr(why, "given")); }
     { AdaptAsyncAuto a = good(); a.flag = 1; CHECK(!strata::core::adapt_async_self_decides(a)); }
-    { AdaptAsyncAuto a = good(); a.env = 0; CHECK(!strata::core::adapt_async_self_decides(a, &why)); CHECK(why && std::strstr(why, "STRATA_ADAPT_ASYNC")); }
-    { AdaptAsyncAuto a = good(); a.env = 1; CHECK(strata::core::adapt_async_self_decides(a)); }
-    { AdaptAsyncAuto a = good(); a.env = -1; CHECK(strata::core::adapt_async_self_decides(a)); }
     { AdaptAsyncAuto a = good(); a.cuda = false; CHECK(!strata::core::adapt_async_self_decides(a)); }
     { AdaptAsyncAuto a = good(); a.serve = false; CHECK(!strata::core::adapt_async_self_decides(a)); }
     { AdaptAsyncAuto a = good(); a.adaptive = false; CHECK(!strata::core::adapt_async_self_decides(a)); }   // --adapt-every 100000 gates
@@ -55,7 +52,6 @@ int main() {
     { AdaptAsyncAuto a = good(); a.batch = true; CHECK(!strata::core::adapt_async_self_decides(a)); }
     { AdaptAsyncAuto a = good(); a.peer = true; CHECK(!strata::core::adapt_async_self_decides(a)); }
     { AdaptAsyncAuto a = good(); a.remote_opt = true; CHECK(!strata::core::adapt_async_self_decides(a)); }
-    { AdaptAsyncAuto a = good(); a.adapt_overlap = true; CHECK(!strata::core::adapt_async_self_decides(a)); }
     CHECK(!strata::core::adapt_async_self_decides(AdaptAsyncAuto{}));
 
     // ---- the state machine
