@@ -13,7 +13,7 @@ void qsa_block_scores_reference(const float* pooled, const float* dead, const fl
     // a block past a query's n_bid returns at once: the grid need only reach the batch's largest n_bid (C-1)
     if (nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
         block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
-                                                                                     max_blocks, scores, true);
+                                                                                     max_blocks, scores);
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores multi: %s\n", cudaGetErrorString(e)); std::exit(1); }
         return;

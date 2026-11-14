@@ -2,7 +2,7 @@
 """Collect a bounded 2/4/6/8-stream decode-window profile.
 
 This tool does not enable instrumentation itself. Run it against an engine whose config has already
-been started with STRATA_VERIFY_PROFILE / STRATA_BATCH_TELEMETRY when those records are wanted.
+been started with the engine's profiling output enabled when those records are wanted.
 It keeps the inference load frozen, records every response, samples live slot occupancy, and joins
 the raw BSTAT/PSTAT/stage records from the server log to each repetition.
 """

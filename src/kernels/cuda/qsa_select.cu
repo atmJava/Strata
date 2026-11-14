@@ -552,12 +552,10 @@ __device__ __forceinline__ void block_scores_multi_body(const float* __restrict_
                                                         const float* __restrict__ dead,
                                                         const float* __restrict__ q_idx,
                                                         const int32_t* __restrict__ steps, int nq, int64_t max_blocks,
-                                                        float* __restrict__ out, bool early_exit,
+                                                        float* __restrict__ out,
                                                         const QsaScoreRows& srow) {
     __shared__ __align__(16) float qs[MQ * IDX_HEADS * IDX_DIM];
     __shared__ int64_t s_nkv[MQ], s_nbid[MQ];
-    if (!early_exit)
-        for (int i = threadIdx.x; i < nq * IDX_HEADS * IDX_DIM; i += blockDim.x) qs[i] = q_idx[i];
     if (threadIdx.x < nq) {
         s_nkv[threadIdx.x] = steps[threadIdx.x * kStepCount + kStepNKv];
         s_nbid[threadIdx.x] = steps[threadIdx.x * kStepCount + kStepNBid];
@@ -565,14 +563,12 @@ __device__ __forceinline__ void block_scores_multi_body(const float* __restrict_
     __syncthreads();
     int64_t top = 0;
     for (int q = 0; q < nq; ++q) top = s_nbid[q] > top ? s_nbid[q] : top;
-    if (early_exit) {
-        // (#783, stuchapin909) a CTA whose first block is past the batch's largest n_bid has no work: the grid is a
-        // fixed 256 CTAs and a decode window reaches only a few of them, so those return before staging the queries.
-        // Every thread of the CTA takes the same branch (top and blockIdx are CTA-uniform), so the barrier is safe.
-        if ((int64_t) blockIdx.x * SCORE_WARPS > top) return;
-        for (int i = threadIdx.x; i < nq * IDX_HEADS * IDX_DIM; i += blockDim.x) qs[i] = q_idx[i];
-        __syncthreads();
-    }
+    // (#783, stuchapin909) a CTA whose first block is past the batch's largest n_bid has no work: the grid is a
+    // fixed 256 CTAs and a decode window reaches only a few of them, so those return before staging the queries.
+    // Every thread of the CTA takes the same branch (top and blockIdx are CTA-uniform), so the barrier is safe.
+    if ((int64_t) blockIdx.x * SCORE_WARPS > top) return;
+    for (int i = threadIdx.x; i < nq * IDX_HEADS * IDX_DIM; i += blockDim.x) qs[i] = q_idx[i];
+    __syncthreads();
     const int lane = threadIdx.x & 31;
     const int64_t wstride = (int64_t) gridDim.x * SCORE_WARPS;
     for (int64_t b = (int64_t) blockIdx.x * SCORE_WARPS + (threadIdx.x >> 5); b <= top && b < max_blocks; b += wstride) {
@@ -609,8 +605,8 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_multi_kernel(co
                                                                               const float* __restrict__ q_idx,
                                                                               const int32_t* __restrict__ steps, int nq,
                                                                               int64_t max_blocks, float* __restrict__ out,
-                                                                              bool early_exit, QsaScoreRows srow = {}) {
-    block_scores_multi_body(pooled, dead, q_idx, steps, nq, max_blocks, out, early_exit, srow);
+                                                                              QsaScoreRows srow = {}) {
+    block_scores_multi_body(pooled, dead, q_idx, steps, nq, max_blocks, out, srow);
 }
 
 // Queries of different slots, each with its own indexer keys: blockIdx.y is the query, and its CTAs run exactly the
@@ -622,8 +618,7 @@ struct ScoreSlotKeys {
 __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_slots_kernel(ScoreSlotKeys keys,
                                                                               const float* __restrict__ q_idx,
                                                                               const int32_t* __restrict__ steps,
-                                                                              int64_t max_blocks, float* __restrict__ out,
-                                                                              bool early_exit) {
+                                                                              int64_t max_blocks, float* __restrict__ out) {
     const unsigned z = blockIdx.y;
     // the slot's pointers picked by unrolled selects: indexing the argument array by z would copy it to local memory
     const float* pooled = keys.pooled[0];
@@ -632,7 +627,7 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_slots_kernel(Sc
     for (unsigned i = 1; i < MQ; ++i)
         if (z == i) { pooled = keys.pooled[i]; dead = keys.dead[i]; }
     block_scores_multi_body(pooled, dead, q_idx + (size_t) z * IDX_HEADS * IDX_DIM,
-                            steps + (size_t) z * kStepCount, 1, max_blocks, out + (size_t) z * max_blocks, early_exit,
+                            steps + (size_t) z * kStepCount, 1, max_blocks, out + (size_t) z * max_blocks,
                             QsaScoreRows{});
 }
 
@@ -795,8 +790,6 @@ __global__ void __launch_bounds__(256, 1) block_scores_thread_kernel(const float
     }
 }
 
-// The multi-query scorer stages the queries once per CTA.
-bool scores_early_exit() { return true; }
 }  // namespace
 
 bool qsa_block_scores_slots(const float* const* pooled, const float* const* dead, const float* q_idx,
@@ -814,7 +807,7 @@ bool qsa_block_scores_slots(const float* const* pooled, const float* const* dead
         keys.dead[z] = dead[z];
     }
     block_scores_slots_kernel<<<dim3(256, (unsigned) nq), SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(
-        keys, q_idx, steps, max_blocks, scores, scores_early_exit());
+        keys, q_idx, steps, max_blocks, scores);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores_slots: %s\n", cudaGetErrorString(e)); std::exit(1); }
     return true;
@@ -985,7 +978,7 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
             return;
         }
         block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
-                                                                                     max_blocks, scores, scores_early_exit());
+                                                                                     max_blocks, scores);
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores multi: %s\n", cudaGetErrorString(e)); std::exit(1); }
         g_multi_launches.fetch_add(1, std::memory_order_relaxed);
@@ -1034,7 +1027,7 @@ void qsa_block_scores_rows(const QsaScoreRows& rows, const float* q_idx, const i
         std::exit(1);
     }
     block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(nullptr, nullptr, q_idx, steps, (int) nq,
-                                                                                 max_blocks, scores, true, rows);
+                                                                                 max_blocks, scores, rows);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores_rows: %s\n", cudaGetErrorString(e)); std::exit(1); }
 }

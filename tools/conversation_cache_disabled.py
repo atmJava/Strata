@@ -127,9 +127,6 @@ def main():
                     'Reply with only that code.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n')
     args = common_args(cfg, a.spec)
     env = child_env(cfg)
-    env.pop('STRATA_SNAPSHOT_VERIFY', None)
-    env['STRATA_STATE_HASH'] = '1'
-    env['STRATA_MTP_BATCH'] = '1'
     a.output.mkdir(mode=0o700, parents=False, exist_ok=False)
     results = {'config': cfg, 'paragraphs': a.paragraphs, 'spec': a.spec, 'arms': [], 'requests': [],
                'compared_state_fields': STATE_KEYS,

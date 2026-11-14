@@ -1,6 +1,6 @@
 """Compare (or merge) the engine's DFlash2 tap dumps, so the tap wiring can be checked without a model run.
 
-The engine writes one file per verifier when `STRATA_TAP_FILE` is set (src/core/verify.cpp, tap_write; a process
+The engine writes one file per verifier when its tap dump is enabled (src/core/verify.cpp, tap_write; a process
 that runs two Verifiers - the pipeline parity pair - would share one path, so give a layer-split run the `%d` spelling
 below, and compare a merge of those files with a single-stage run): a 16-byte header `int32 magic 'STAP', int32 version 1, int32 n_embd, int32 n_taps`, then `n_taps` int32 layer
 numbers, then one record per row of every window: `int32 position, int32 input token`, then `n_taps * n_embd`
@@ -176,7 +176,7 @@ def compare(a: Dump, b: Dump, tol: float, allow_missing: bool = False,
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="compare or merge the engine's DFlash2 tap dumps (STRATA_TAP_FILE)")
+    ap = argparse.ArgumentParser(description="compare or merge the engine's DFlash2 tap dumps")
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("compare", help="two files of the same layers must agree")
     c.add_argument("first")

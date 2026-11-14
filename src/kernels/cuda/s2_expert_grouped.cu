@@ -528,10 +528,6 @@ bool old_kernels() {
     return g_select_old.load(std::memory_order_relaxed) != 0;   // moe_grouped_select_old (the parity test)
 }
 
-// The per-hit path uses the new per-hit kernels (two rows per warp); `moe_grouped_select_old` still forces the
-// previous ones.
-long long pair_min_hits() { return 0; }
-
 // The new kernels read the activations as aligned words (`load_x_chunk`), so they need 4-byte aligned activation
 // rows - the input's and the intermediate's in `scratch`; the per-hit ones also read a blob's codes as uint2, which
 // needs an 8-byte aligned arena and slot size (the grouped kernels above already did).  Anything else keeps the
@@ -543,8 +539,8 @@ bool new_grouped(const void* x_q8_0, const void* scratch) {
 }
 
 bool new_hit(const void* blob_base, long long blob_bytes, const void* x_q8_0, const void* scratch, long long cap) {
-    const bool fast = new_grouped(x_q8_0, scratch) && ((uintptr_t) blob_base & 7) == 0 && (blob_bytes & 7) == 0 &&
-                      cap >= pair_min_hits();
+    (void) cap;
+    const bool fast = new_grouped(x_q8_0, scratch) && ((uintptr_t) blob_base & 7) == 0 && (blob_bytes & 7) == 0;
     g_last_path.store(fast ? 1 : 0, std::memory_order_relaxed);
     return fast;
 }

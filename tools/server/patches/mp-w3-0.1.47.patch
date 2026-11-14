@@ -1,10 +1,10 @@
 --- strata-0.2.2/src/program/generate.cpp	2026-10-24 10:34:33.687089624 +0000
 +++ strata-mp/src/program/generate.cpp	2026-10-25 02:15:37.895554171 +0000
-@@ -11224,6 +11224,25 @@
+@@ -11224,6 +11224,24 @@
          };
          int admit_slot = -1;               ///< the slot the request being read will continue in (BGEN)
          long long admit_max_new = 0;
-+        // STRATA_BATCH_STAGED_READ (default off): a prompt read that takes no slot yet.  BREAD reads into the
++        // A staged read (the code's default) takes no slot yet.  BREAD reads into the
 +        // main session like a GEN, keeps the state there and answers BRDY; BADOPT <slot> copies it into that slot
 +        // and answers BADM, exactly as a BGEN admission would.  One staged read at a time (the main session holds
 +        // it); the server adopts it before it reads another request.
@@ -20,8 +20,7 @@
 +            double drain_ms = 0.0;
 +        } staged_admit;
 +        static const bool staged_read_env = [] {
-+            const char* staged_v = std::getenv("STRATA_BATCH_STAGED_READ");
-+            return staged_v && *staged_v && std::strcmp(staged_v, "0") != 0;   // =0 disables, unlike a bare getenv
++            return true;   // the staged read is the default, as in the 0.2.3 tree
 +        }();
          auto batch_on = [&] { for (const BSlot& b : bs) if (b.active) return true; return false; };
          auto try_next_line = [&](std::string& out) -> bool {
@@ -120,7 +119,7 @@
              std::fflush(stdout);
 -            if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
 +            if (staged_read) {
-+                // STRATA_BATCH_STAGED_READ: the read is done and lives in the main session; keep what the slot will
++                // a staged read: the read is done and lives in the main session; keep what the slot will
 +                // need and wait for the server's BADOPT.  No slot is touched here.
 +                const bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 &&
 +                                  std::strcmp(finish, "length") == 0 && (int64_t) live.size() == p;

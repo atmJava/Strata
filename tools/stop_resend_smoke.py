@@ -5,7 +5,7 @@ The reports are an all-logits NaN (one token repeated, "!!!!") after a request w
 or a resend of the same prompt, started while the engine was still winding the first down.  This drives that loop
 against a running server: stream an answer, read a few lines, close the connection (the client's Stop), wait 0 to
 ~0.4 s (sometimes not at all, sometimes a second request already running), send the edited prompt, and check the
-answer.  Run the engine with STRATA_DBG_NAN=1 to get the first non-finite layer named in its log.
+answer.  The engine's NaN check names the first non-finite layer in its log.
 
   STRATA_KEY=... python3 tools/stop_resend_smoke.py http://127.0.0.1:8090 [rounds=40] [seed=1]
 

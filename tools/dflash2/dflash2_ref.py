@@ -1,7 +1,7 @@
 """A plain-torch port of the DFlash2 drafter (z-lab/dflash model.py, DFlash2DraftModel) for the offline acceptance experiment.
 
 Everything is fp32 on the CPU. The target's embedding table and LM head are the dequantized tensors of OUR GGUF (IQ4_XS embedding,
-Q6_K head), the context features are the hidden states dumped by the engine's STRATA_TAP_FILE hook.
+Q6_K head), the context features are the hidden states dumped by the engine's tap hook.
 """
 import json, struct, sys
 import numpy as np

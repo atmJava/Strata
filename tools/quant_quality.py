@@ -8,17 +8,16 @@ This checkout does not carry that set (the 0.2.7 prune removed data/quant_qualit
         (data/quant_quality/v1/set.ids.json), so a box without the tokenizer scores the same positions
     python tools/quant_quality.py run --config CFG.json --out RUN.tsv [--ids set.ids.json] [--env K=V ...] [--gpu-experts]
         one `strata --serve` engine (the config's exe and args), every segment one request whose tokens are all read
-        through the decode windows (--short-read), where STRATA_LOGPOS / STRATA_LOGPOS_TOPK=64 write, per position,
-        the log-probability of the text's next token and the 64 most likely tokens.  Fixed: the experts on the CPU
-        (one VRAM slot, --expert-cache 1: the verify windows need a profile-filled tier, so the config must have
-        --expert-profile; --gpu-experts: 1500 slots), no expert adaptation, no PCIe share, no suffix drafts, no prompt
-        cache, FP16 K/V, STRATA_ROUTE_TAIL_SKIP=0, STRATA_PREFILL_CPU_SHARE=0.  RUN.tsv + RUN.tsv.seg.json (line ranges).
+        through the decode windows (--short-read).  Fixed: the experts on the CPU (one VRAM slot, --expert-cache 1:
+        the verify windows need a profile-filled tier, so the config must have --expert-profile; --gpu-experts: 1500
+        slots), no expert adaptation, no PCIe share, no suffix drafts, no prompt cache, FP16 K/V.  RUN.tsv +
+        RUN.tsv.seg.json (line ranges).
     python tools/quant_quality.py compare REF.tsv RUN.tsv [...]   (REF = the Q8_0 run)
         per segment and overall: top-1 agreement (same argmax), mean / p99 KL(REF || RUN) over REF's 64 most likely
         tokens (both renormalized to that set; a token RUN does not list gets RUN's 64th log-probability), and the
         perplexity of the text under each.
 
-The RUN.tsv rows are the engine's STRATA_LOGPOS format: pos, target id, logp(target), argmax id, logp(argmax),
+The RUN.tsv rows are the engine's log-probability row format: pos, target id, logp(target), argmax id, logp(argmax),
 argmax==target, logp(<|im_end|>), logp(target without <|im_end|>), then 64 `id:logp` fields (natural log).
 """
 from __future__ import annotations
@@ -38,7 +37,6 @@ SEGMENTS = ["code", "docs", "english", "multilingual", "agent"]
 TOPK = 64
 FIXED = ["--expert-cache", "1", "--adapt-every", "100000", "--pcie-frac", "0", "--suffix-draft", "0",
          "--prompt-cache", "0", "--kv", "fp16"]
-FIXED_ENV = {"STRATA_ROUTE_TAIL_SKIP": "0", "STRATA_PREFILL_CPU_SHARE": "0", "STRATA_PCIE_FRAC_DEFAULT": "old"}
 # config args the yardstick replaces (value-taking) or drops (flags)
 DROP_VALUE = {"--expert-cache", "--adapt-every", "--pcie-frac", "--suffix-draft", "--prompt-cache", "--max-context",
               "--prefill", "--prompt-cache-every", "--short-read", "--conversation-cache-mib", "--eos-ids",
@@ -112,12 +110,9 @@ def cmd_run(a) -> int:
     env.update(cfg.get("env", {}))
     if cfg.get("lib_dirs"):
         env["LD_LIBRARY_PATH"] = ":".join(cfg["lib_dirs"] + [env.get("LD_LIBRARY_PATH", "")])
-    env.update(FIXED_ENV)
     for kv in a.env or []:
         k, _, v = kv.partition("=")
         env[k] = v
-    env["STRATA_LOGPOS"] = str(out)
-    env["STRATA_LOGPOS_TOPK"] = str(TOPK)
     if mem_available_gb() < a.min_free_gb:
         raise SystemExit(f"only {mem_available_gb():.0f} GB available (< {a.min_free_gb}): not starting an engine")
     args = engine_args(cfg, a.gpu_experts, st["seg_tokens"])
@@ -177,7 +172,7 @@ PROMPT_LENS = (256, 512, 768, 1000)
 
 def cmd_prompt(a) -> int:
     """The batched prompt path's answer: every segment's first 256 / 512 / 768 / 1000 tokens as a prompt (one request
-    each, no prompt cache), and the logits after it (STRATA_DUMP_FIRST_LOGITS: float32, the whole vocabulary)."""
+    each, no prompt cache), and the logits after it (float32, the whole vocabulary)."""
     cfg = json.load(open(a.config, encoding="utf-8-sig"))
     st = json.load(open(a.ids))
     out = pathlib.Path(a.out).resolve()
@@ -188,11 +183,9 @@ def cmd_prompt(a) -> int:
     env.update(cfg.get("env", {}))
     if cfg.get("lib_dirs"):
         env["LD_LIBRARY_PATH"] = ":".join(cfg["lib_dirs"] + [env.get("LD_LIBRARY_PATH", "")])
-    env.update(FIXED_ENV)
     for kv in a.env or []:
         k, _, v = kv.partition("=")
         env[k] = v
-    env["STRATA_DUMP_FIRST_LOGITS"] = str(out / "first")
     if mem_available_gb() < a.min_free_gb:
         raise SystemExit(f"only {mem_available_gb():.0f} GB available (< {a.min_free_gb}): not starting an engine")
     args = engine_args(cfg, a.gpu_experts, max(PROMPT_LENS))

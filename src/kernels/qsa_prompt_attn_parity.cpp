@@ -136,7 +136,7 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
             for (int64_t c = 0; c < w; ++c) ids[i * cap + c] = (int32_t) (base + c);
         }
     }
-    // QA_DUMP=<file> QA_LAYER=n (S23 probe): the engine's own selections (STRATA_QSA_DUMP records {layer, pos0, T, cap} +
+    // QA_DUMP=<file> QA_LAYER=n (S23 probe): the engine's own selections (a record holds {layer, pos0, T, cap} +
     // T*cap cells): the last record of that layer, whose T must be nq and pos0 + T ctx
     if (const char* df = std::getenv("QA_DUMP")) {
         const int want = std::getenv("QA_LAYER") ? std::atoi(std::getenv("QA_LAYER")) : 3;

@@ -211,7 +211,6 @@ def clean_env(env_extra):
     for k in list(env):
         if k.startswith("STRATA_"):
             env.pop(k, None)
-    env["STRATA_DECODE_TIMING"] = "1"
     env.update(env_extra)
     return env
 

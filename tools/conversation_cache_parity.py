@@ -186,7 +186,6 @@ def main():
                     '<|im_start|>assistant\n<think>\n\n</think>\n\n')
     a.output.mkdir(mode=0o700, parents=False, exist_ok=False)
     env = child_env(cfg)
-    env['STRATA_STATE_HASH'] = '1'
     results = {'engine_info': {}}
     for label, budget in [('baseline', 0), ('candidate', a.cache_mib)]:
         log = a.output / f'{label}.log'

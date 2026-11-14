@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Live parity check for STRATA_SPLIT_MTP_BATCH (needs a running engine; no model on the build box).
+"""Live parity check for the split-MTP batch path (needs a running engine; no model on the build box).
 
   split_mtp_batch_parity.py dump OUT.json [--url URL] [--key-file FILE] [--long-words N]
   split_mtp_batch_parity.py compare A.json B.json
 
 `dump` sends 5 fixed greedy prompts x 256 tokens and one long prompt (default ~25k tokens) x 256 tokens to a
-server started WITHOUT the env (A) or WITH STRATA_SPLIT_MTP_BATCH=1 (B), and stores the texts.  `compare` exits 0
+server (A or B, for example two builds), and stores the texts.  `compare` exits 0
 when every text is identical, 1 otherwise, printing PASS/FAIL lines.  The drafter's K/V is not bit-identical
 (Q8_1 x Q8_0 MMQ instead of mmvq), so only the target's tokens are compared here; read `drafts accepted X of Y`
 from the engine log for each arm (expect within +-3 points).

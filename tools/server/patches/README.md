@@ -28,9 +28,9 @@ against the newer text on `hw/server-adapt-0.2.3`: that tree already contains
 the full `share_rope_from` integration at the newer line numbers.
 
 The patch makes every batch slot on a stage borrow the stage session's
-read-only RoPE tables. The stage session outlives every borrower. The switch is
-opt-in: unset, empty, or `0` keeps the previous allocation path; any other
-value enables sharing. Token arithmetic is unchanged.
+read-only RoPE tables. The stage session outlives every borrower. Sharing is
+the code's default in the patch (there is no switch). Token arithmetic is
+unchanged.
 
 Provenance:
 
@@ -51,7 +51,8 @@ Round-trip check on 2026-10-26: applying this patch to the preserved unpatched
 source produced md5 `6727fd87f7fe6df40faf705fedae8910` and sha256
 `245e9a126119b4b70e77e0bbdb96433f66f690c9ef45c55f01d5561f4c5d7b75`,
 byte-identical to the deployed source. The patch itself has sha256
-`8c3bd61d8c9cb9317b71e24936f557115394f4a236d926792021226449d14700`.
+`68754e7b93f53aa2617547ab63a30462e90d879ccafbaab4f27cb8ad30b93a1c` (after the environment lines were removed on
+2026-11-14; the patched-source and binary hashes in the table are the pre-cleanup artifacts).
 
 Apply to a copy of an engine 0.1.49.1 tree:
 
@@ -127,15 +128,13 @@ before that, so a deploy from a clean checkout lacked them.
   read another request's `T`/`DONE`. The `finally` now takes the control lines first (and holds `mp_staged` until
   then); `serve/test_staged_protocol.py` pins it. Cost: it can wait for a solo stream to give the lines back.
 
-## Switches (exact semantics)
+## Constants (exact semantics)
 
-- Engine `STRATA_BATCH_STAGED_READ`: **unset/empty/`0` = off**; any other value = on.
-  (Before 2026-10-25 the code used a bare `getenv() != nullptr`, so `=0` still enabled it — fixed.)
-- Server `STRATA_MP_STAGED_READ`: `1` = on, anything else = off.
-- Server `STRATA_MP_STAGED_READ_MIN_TOKENS`: default **4096**; `0` = stage every prompt
-  (short prompts then show the "first token, then silence until a slot frees" pattern — not recommended).
-- Engine side also needs `STRATA_BATCH_STAGED_READ` in `strata-022.json`'s `env`; the server flag must be
-  **exported in `run-022.sh`** (the config `env` reaches only the engine child).
+- The engine patch's staged read is on: the 0.2.3 tree carries it with no switch, and the patch now sets the
+  same constant.
+- The server patch's staged read is on for every non-embedding request; a prompt shorter than **2048** tokens
+  never stages (the current `serve/server.py` constant).
+- No engine or server environment variable changes any of this.
 
 ## Tests
 

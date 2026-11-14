@@ -139,13 +139,8 @@ struct RopeReg {
     RopeScaling scaling;
 };
 RopeReg rope_tab[kMropeDevices] = {};
-bool same_scaling(const RopeScaling& a, const RopeScaling& b) {
-    return a.type == b.type && a.freq_base == b.freq_base && a.factor == b.factor && a.freq_scale_in == b.freq_scale_in &&
-           a.orig_ctx == b.orig_ctx && a.ext_factor == b.ext_factor && a.attn_factor == b.attn_factor &&
-           a.beta_fast == b.beta_fast && a.beta_slow == b.beta_slow;
-}
-// The table's angles differ from the fast-math ones in the last bits, so the table path is off.
-bool rope_table_enabled() { return false; }
+// The table's angles differ from the fast-math ones in the last bits, so the table path is off.  The function stays
+// as the kernels' single selector; it returns no table and every launch below takes its fast-math kernel.
 }  // namespace
 void rope_table_set(const float* cos_tab, const float* sin_tab, int max_pos, const RopeScaling& scaling) {
     rope_tab[mrope_dev()] = RopeReg{RopeTab{cos_tab, sin_tab, max_pos}, scaling};
@@ -155,11 +150,7 @@ void rope_table_release(const float* cos_tab) {
     for (RopeReg& r : rope_tab)
         if (cos_tab != nullptr && r.tab.cos == cos_tab) r = RopeReg{};
 }
-RopeTab rope_table_for(const RopeScaling& scaling) {
-    if (!rope_table_enabled()) return {};
-    const RopeReg& r = rope_tab[mrope_dev()];
-    return r.tab.cos != nullptr && same_scaling(r.scaling, scaling) ? r.tab : RopeTab{};
-}
+RopeTab rope_table_for(const RopeScaling&) { return {}; }
 void native_rope_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 bool native_rope_enabled() { return enabled.load(std::memory_order_relaxed); }
 bool native_norm_rope_usable(int head_dim, int n_rot) {
@@ -184,15 +175,10 @@ void native_rope_apply(const float* x, float* out, int rows, int head_dim,
     // Match pinned host-side float powf before device fast powf/trigonometry.
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / n_rot);
     const RopeKernelArgs k = scaling.kernel_args(n_rot);   // none: the identity constants
-    const RopeTab rt = rope_table_for(scaling);
     const unsigned threads = (x == out && n_rot == 64 && native_norm_rope_usable(head_dim, n_rot)) ? 32u : 128u;
     const dim3 grid(threads == 32u ? 1u : unsigned((head_dim / 2 + 127) / 128), rows);
-    if (rt.cos != nullptr)
-        apply<true><<<grid, threads, 0, static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
-            k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), rt);
-    else
-        apply<false><<<grid, threads, 0, static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
-            k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), rt);
+    apply<false><<<grid, threads, 0, static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
+        k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), RopeTab{});
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
@@ -210,15 +196,9 @@ void native_qsa_rms_norm_rope(const float* x, int in_stride, const float* gamma,
     }
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / n_rot);
     const RopeKernelArgs k = scaling.kernel_args(n_rot);
-    const RopeTab rt = rope_table_for(scaling);
-    if (rt.cos != nullptr)
-        norm_rope_kernel<true><<<unsigned(rows), 256, 0, static_cast<cudaStream_t>(stream)>>>(
-            x, in_stride, gamma, out, head_dim, n_rot, epsilon, theta_scale,
-            k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), rt);
-    else
-        norm_rope_kernel<false><<<unsigned(rows), 256, 0, static_cast<cudaStream_t>(stream)>>>(
-            x, in_stride, gamma, out, head_dim, n_rot, epsilon, theta_scale,
-            k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), rt);
+    norm_rope_kernel<false><<<unsigned(rows), 256, 0, static_cast<cudaStream_t>(stream)>>>(
+        x, in_stride, gamma, out, head_dim, n_rot, epsilon, theta_scale,
+        k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), RopeTab{});
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

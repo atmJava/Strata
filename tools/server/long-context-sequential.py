@@ -47,27 +47,7 @@ def median(rows: list[dict], path: tuple[str, ...]) -> float | None:
 
 
 def process_env(pid: int | None) -> dict[str, object]:
-    if pid is None:
-        return {}
-    try:
-        raw = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return {}
-    values: dict[str, str] = {}
-    for item in raw.split(b"\0"):
-        key, separator, value = item.partition(b"=")
-        if separator:
-            values[key.decode(errors="replace")] = value.decode(errors="replace")
-    names = (
-        "STRATA_PA_V2T",
-        "STRATA_PROMPT_ATTN_V1",
-        "STRATA_SEL_OVERLAP",
-        "STRATA_IDX_FP16_CHECK",
-        "STRATA_PREFILL_TIMING",
-        "STRATA_SM75_PERF",
-        "STRATA_SELECT_SIMT",
-    )
-    return {name: values.get(name) for name in names}
+    return {}
 
 
 def summary(meta: dict, rows: list[dict], sampler, elapsed: float) -> dict:

@@ -240,46 +240,12 @@ class Calibrate(unittest.TestCase):
         self.assertIsNone(CAL.arg_value(starts[0], "--pool-workers"))
         self.assertEqual(CAL.arg_value(starts[0], "--spec-min-p"), "0.5")
 
-    def test_sh_stream_is_measured_on_hip_only(self):
-        # #1272 / #816: the shared-expert fork is measured off (the HIP default) against on, each with a restart and
-        # the engine variable set explicitly; it is kept only when it wins by more than MIN_GAIN
-        def run(bonus, hip=True):
-            starts, envs = [], []
-
-            def start(args, env=None):
-                envs.append(dict(env or {}))
-                fork = (env or {}).get(CAL.SH_STREAM) == "1"
-                return FakeEngine(args, lambda f, p, w: 50.0 * (bonus if fork else 1.0), 6, starts)
-            res = CAL.measure(BASE, [[1, 2, 3]] * 3, start, say=lambda *_: None, hip=hip)
-            return res, starts, envs
-        res, starts, envs = run(1.08)
-        self.assertEqual(res["env"], {CAL.SH_STREAM: "1"})
-        self.assertEqual(envs[-2:], [{CAL.SH_STREAM: "0"}, {CAL.SH_STREAM: "1"}])
-        self.assertEqual(starts[-1], starts[-2])                      # the same args for both: only the variable differs
-        self.assertGreater(res["report"]["tok_s"], 52.0)              # the reported speed is the fork's
-        flat, _, _ = run(1.02)                                        # within noise: the default stays
-        self.assertEqual(flat["env"], {})
-        self.assertEqual(set(flat["report"]["sh_stream"]), {"0", "1"})
-        slower, _, _ = run(0.80)
-        self.assertEqual(slower["env"], {})
-        cuda, _, envs = run(1.50, hip=False)                          # not AMD: no step, no engine variable
-        self.assertEqual(cuda["env"], {})
-        self.assertNotIn("sh_stream", cuda["report"])
-        self.assertTrue(all(e == {} for e in envs))
-
-    def test_a_failed_fork_start_keeps_the_default(self):
-        def start(args, env=None):
-            if (env or {}).get(CAL.SH_STREAM) == "1":
-                raise RuntimeError("out of memory")
-            return FakeEngine(args, lambda f, p, w: 50.0, 6)
-        res = CAL.measure(BASE, [[1, 2, 3]] * 3, start, say=lambda *_: None, hip=True)
-        self.assertEqual(res["env"], {})
-        self.assertIn(f"{CAL.SH_STREAM}=1", res["report"]["failed_starts"])
-
     def test_apply_env(self):
-        old = {"STRATA_ROCBLAS_TUNING": "tools/hip", CAL.SH_STREAM: "1"}
-        self.assertEqual(CAL.apply_env(old, {}), {"STRATA_ROCBLAS_TUNING": "tools/hip"})   # an older choice goes
-        self.assertEqual(CAL.apply_env({"X": "1"}, {CAL.SH_STREAM: "1"}), {"X": "1", CAL.SH_STREAM: "1"})
+        # no calibration key exists any more (the shared-expert fork went with the deleted switch), so apply_env is a
+        # merge: the config's variables stay and the calibration's are set on top.
+        old = {"STRATA_ROCBLAS_TUNING": "tools/hip", "STRATA_TEST_SWITCH": "1"}
+        self.assertEqual(CAL.apply_env(old, {}), old)
+        self.assertEqual(CAL.apply_env({"X": "1"}, {"STRATA_TEST_SWITCH": "1"}), {"X": "1", "STRATA_TEST_SWITCH": "1"})
         self.assertEqual(CAL.apply_env(None, None), {})
 
     def test_apply(self):

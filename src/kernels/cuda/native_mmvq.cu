@@ -2001,8 +2001,6 @@ bool q6_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 }
 } // namespace
 
-bool native_q8_0_packed_enabled() { return false; }
-
 bool native_q8_0_packed_eligible(int n_in, int n_out) {
     return q8_packed_shape(n_in, n_out);
 }
@@ -2028,8 +2026,6 @@ void native_q8_0_packed_register(const void* gguf_weights, const void* packed, i
 }
 
 void native_q8_0_packed_unregister(const void* gguf_weights) { q8_packed_registry().erase(gguf_weights); }
-
-bool native_q6_k_packed_enabled() { return false; }
 
 bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what) {
     (void) weights;
@@ -2592,8 +2588,7 @@ constexpr IlRows kIlRows_75[] = {
     {14, {{0, 0, 1, 2, 1}, {0, 2, 2, 4, 4}, {0, 4, 4, 4, 4}}},   // Q6_K
     {11, {{1, 2, 4, 4, 4}, {1, 2, 4, 4, 4}, {1, 2, 2, 2, 2}}},   // Q3_K
 };
-// Q3_K's IL kernels are on.
-bool il_q3k_on() { return true; }
+}  // namespace
 int native_mmvq_il_rows_for(int cc, int type, int ncols, int n_out) {
     if (cc != 75 || ncols < 2 || ncols > 4) return 0;
     const int cls = n_out < 2048 ? 0 : n_out < 4096 ? 1 : n_out < 8192 ? 2 : n_out < 12288 ? 3 : 4;

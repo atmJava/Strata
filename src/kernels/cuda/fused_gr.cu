@@ -1095,11 +1095,6 @@ __global__ void __launch_bounds__(THREADS) gr_up_fast_kernel(GrMulti m);
 static bool gr_fast();
 namespace {
 #endif
-// The split norm on CUDA uses the register form, which measured no gain on sm_70: the plain split kernel runs.
-bool norm_fast_on() { return false; }
-
-// The 32-column up kernel runs under STRATA_QFUSE_HC.
-bool qfuse_hc_local() { return true; }
 // Turing: gr_up75_kernel for 3+ tokens (bitwise gr_up_multi_kernel; fused_gr_bench cold on an RTX 2080 Ti, up incl. a
 // stamp: T 3 27.3 -> 24.6 us, T 4 33.2 -> 28.7, T 6 46.6 -> 36.6).
 bool up75_on() {
@@ -1138,14 +1133,12 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
     // they replace (gr_parity checks the multi-token read against single-token calls bitwise)
     const bool fast = gr_fast();
     if (variant >= kHcSplit) {
-        if (norm_fast_on()) gr_norm_split_fast_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
-        else gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+        gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
     } else if (fast) gr_norm_fast_kernel<<<n_tok, THREADS, 0, st>>>(m);
     else gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
 #else
     if (variant >= kHcSplit) {
-        if (norm_fast_on()) gr_norm_split_fast_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
-        else gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+        gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
     } else gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
 #endif
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, (void*) st);
@@ -1208,8 +1201,8 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
     else
 #endif
 #if !STRATA_FUSED_GR_FAST_BUILD
-    if (!q8w && m.a[0].q8_mixed != nullptr && qfuse_hc_local()) {
-        switch (no_multi_gr ? kFusedGrMaxT : n_tok) {
+    if (!q8w && m.a[0].q8_mixed != nullptr) {
+        switch (n_tok) {
             case 1: gr_up_q32_kernel<1, true><<<Q32_BLOCKS, Q32_THREADS, 0, st>>>(m); break;
             case 2: gr_up_q32_kernel<2, true><<<Q32_BLOCKS, Q32_THREADS, 0, st>>>(m); break;
             case 3: gr_up_q32_kernel<3, true><<<Q32_BLOCKS, Q32_THREADS, 0, st>>>(m); break;
@@ -1222,7 +1215,7 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
     }
 #endif
     if (q8w) {   // STRATA_HC_REQ8: the up kernel on int8 rows
-        switch (no_multi_gr ? kFusedGrMaxT : n_tok) {
+        switch (n_tok) {
             case 1: gr_up_multi_kernel<1, true, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             case 2: gr_up_multi_kernel<2, true, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             case 3: gr_up_multi_kernel<3, true, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
@@ -1232,7 +1225,7 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
             default: gr_up_multi_kernel<kFusedGrMaxT, false, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
         }
     } else if (n_tok >= 3 && up75_on()) {   // T 1-2: gr_up_multi_kernel is as fast or faster (fused_gr_bench, cold)
-        switch (no_multi_gr ? kFusedGrMaxT : n_tok) {
+        switch (n_tok) {
             case 1: gr_up75_kernel<1, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             case 2: gr_up75_kernel<2, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             case 3: gr_up75_kernel<3, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
@@ -1242,7 +1235,7 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
             default: gr_up75_kernel<kFusedGrMaxT, false><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
         }
     } else
-    switch (no_multi_gr ? kFusedGrMaxT : n_tok) {
+    switch (n_tok) {
         case 1: gr_up_multi_kernel<1, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
         case 2: gr_up_multi_kernel<2, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
         case 3: gr_up_multi_kernel<3, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
@@ -1956,7 +1949,7 @@ template <int T> void launch_q8_t(const GrMulti& m, float* part, float* ssg, cud
     gr_down_q8_kernel<T><<<dim3(Q8_RG + 1, Q8_NKC), THREADS, 0, st>>>(m, part, ssg);
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
 #if !STRATA_FUSED_GR_FAST_BUILD
-    if (m.a[0].q8_mixed != nullptr && qfuse_hc_local()) {   // HIP (not gfx906): the block owns a q8_1 group
+    if (m.a[0].q8_mixed != nullptr) {   // HIP (not gfx906): the block owns a q8_1 group
         gr_up_q8_q32_kernel<T><<<Q32_BLOCKS, Q32_THREADS, 0, st>>>(m, part, ssg);
         return;
     }
@@ -2363,16 +2356,5 @@ __global__ void hc_q8_bf16_kernel(const int8_t* __restrict__ q, const float* __r
 void hc_q8_to_bf16(const void* codes, const float* scales, uint16_t* out, long long n, void* stream) {
     hc_q8_bf16_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, (cudaStream_t) stream>>>((const int8_t*) codes, scales, out, n);
 }
-
-// ===================================== the read as ONE persistent kernel (opt-in STRATA_HC_PERSIST=1, HIP) ==============
-// 80 blocks that must all be resident (a start-up run per T decides; larger T keep the default read) and two grid
-// barriers on an atomic counter.  Block b: (A) stages R' * w_norm for columns [128 b, 128 b + 128) (one stream) and writes
-// that slice's sum of squares and the UNSCALED partial dots of the 320 down + 4 inject rows (the v3 identity
-// w . xn = sum_c rs[c] (w[:, c] . x'[c])); barrier; (B) rs per stream, then rows (k, r) = b + 80 j reduced to lo / inject;
-// barrier; (C) the up projection read straight from VRAM, a thread pair per row, the epilogue as gr_up_kernel.
-// ANOTHER SUMMATION ORDER than the default read (not bitwise; the init check bounds the difference).  Only the verifier's hyper-connection reads use it: they run on one stream per card (both pipeline
-// verifiers share it), so two of these kernels never wait on each other; the drafter's reads keep the default kernels.
-void fused_gr_persist_init() {}
-bool fused_gr_read_persist(const FusedGrArgs*, int, void*) { return false; }
 
 }  // namespace strata::kernels

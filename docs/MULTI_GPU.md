@@ -138,21 +138,14 @@ that stays flat from 4K to 16K tokens is the sign of an idle card. On an unequal
 
 ## Tuning options
 
-These are engine flags and environment variables. Put flags in the config's `"args"` and variables in its `"env"` object, then
-restart. Defaults are off unless the table says otherwise.
+These are engine flags. Put them in the config's `"args"` and restart. The split's buffer layout, helper share, batched
+draft fill, ring size and hand-off overlap are chosen in code; the environment switches of earlier releases are gone.
 
 | Setting | What it does | Notes |
 | --- | --- | --- |
 | `"split_skip_if_fits": true` (flag `--split-skip-if-fits`) | Runs on the first card alone when it holds every profiled expert plus the context's KV, the draft layer and the reserve. Otherwise the split stays. | Opt-in. Needs `--layer-split auto`. |
-| `STRATA_SPLIT_OWN=1` or `auto` | Gives every card its own prompt buffers. `auto` does it only where the buffers are at most 12% of each card's VRAM. | Output differs from the default's (stable and coherent). |
-| `STRATA_PREFILL_HELP=1` | The idle card computes a share of the streamed experts of a one-chunk prompt. `STRATA_PREFILL_HELP_FRAC=f` fixes the share. | Helps prompts up to about 3.3K tokens on slow links only; not bit-identical; native packs on the MMQ prompt path only. |
-| `STRATA_SPLIT_MTP_BATCH=1` | The last card fills the draft layer's prompt K/V in batches, as on one card. | Needs a `--native` pack and a paged or ring draft K/V; says why once if it declines. |
 | `--vram-reserve-later-mib N` | A separate VRAM reserve for the later cards (default: `--vram-reserve-mib`). Use it when the display sits on the last card. | `--vram-reserve-mib 300 --vram-reserve-later-mib 1800` gives the first card that VRAM. |
-| `--prefill-pipe R` (or `STRATA_PREFILL_PIPE=R`) | Reads each prompt in the chunk count with the least pipeline time for b/a = R tokens. `1` evens out today's chunk count. | Opt-in. `./setup.sh --calibrate` measures it per PC and writes it to the config. |
-| `STRATA_SPLIT_RING=N` | Sets the prompt path's streamed ring to N slots (`0`: the pinned-share rule). A split uses 96 when at least 75% of the (layer, expert) pairs sit in some card's cache. | The startup line `lend sizing: ...` shows the result. |
-| `STRATA_SPLIT_CHUNK16K=1` | Keeps the 16384-token auto chunk on AMD gfx12 splits (default 8192). | |
-| `STRATA_SPLIT_OVERLAP=1` | Overlapped hand-off between stages on different cards. | Helps AMD; no gain on NVIDIA. See [below](#overlapped-hand-off). |
-| `STRATA_HANDOFF_P2P=1` | The prompt path copies each layer-split chunk directly from the producing card's residual buffer to the consuming card's buffer, with a device event for ordering. | Opt-in. On 2x RTX 2080 Ti, a 7,936 x 10,240 FP32 chunk (325 MB) took 6.9 ms over two NVLink links versus 53.2 ms through pinned host memory. The end-to-end effect was about 0.2 s on 57–85 s long-context rewrites, so the host route remains the default. Unsupported peer access falls back automatically. |
+| `--prefill-pipe R` | Reads each prompt in the chunk count with the least pipeline time for b/a = R tokens. `1` evens out today's chunk count. | `./setup.sh --calibrate` measures it per PC and writes it to the config. |
 | `--split-device D1[,D2..]` | The later stages' devices (default: the next visible ones). `--layer-split K --split-device 0` runs both stages on one card; a bit-exact hand-off check, not a speed mode. | |
 
 **The resident RAM mode works on a split.** `--resident-experts` (the low-RAM mode) leaves out of the RAM copy the experts any
@@ -165,11 +158,10 @@ pinned staging ring. Linux pins the whole arena. `STRATA_ARENA_PIN_GIB=N` pins a
 
 ### Overlapped hand-off
 
-By default each verify window runs the stages one after another. `STRATA_SPLIT_OVERLAP=1` (stages on different cards only) gives
-the hand-off a ready flag, so the next stage's graph is launched while the earlier stage still runs and waits on the flag on
-its GPU. It takes one stream sync and one graph launch per window off the critical path. Batch windows keep the serial order, and
-it is off beside `--pipeline-windows`. The wait is bounded by `STRATA_SPLIT_WAIT_MS` (default 30000, `0` = no bound); on timeout
-the window fails with an error naming the setting and the server restarts the engine.
+On a split across different cards each verify window hands off with a ready flag: the next stage's graph is launched while the earlier stage still runs and waits on the flag on its GPU. It takes
+one stream sync and one graph launch per window off the critical path. Batch windows keep the serial order, and it is off beside
+`--pipeline-windows`. The wait is bounded at 30 s (fixed in code); on timeout the window fails with an error and the server
+restarts the engine.
 
 ## Pipeline windows
 
@@ -183,7 +175,7 @@ tokens. The tokens are the serial loop's, up to CPU rounding.
 - **Draft layer placement:** a non-batch decode with the pipeline on loads the draft layer on the first card, whose
   window has finished when the chain starts. Any requested `--batch`/`--slots` or server `"parallel"` keeps the solo
   drafter and every slot drafter on the last stage. A slot that later does not fit may turn batching off, but it does
-  not move a drafter whose VRAM was already planned. These are code decisions; `STRATA_MTP_STAGE0` is no longer read.
+  not move a drafter whose VRAM was already planned. These are code decisions.
 - **Off, with one log line saying why:** `--batch` slots, `--peer-device`, the helper caches (`--expert-cache-device1..3`, which
   `--remote-expert-opt` builds on), a split onto one GPU, no draft layer, and on three or more stages `--pipeline-windows 1` and
   `--adapt-async 1`. A request with repetition penalties or coupled draft sampling decodes serially.
@@ -191,10 +183,8 @@ tokens. The tokens are the serial loop's, up to CPU rounding.
   recurrent state (about 3 MiB per GDN layer it runs).
 - **Config:** `"args": [ ..., "--pipeline-windows", "2" ]` with `"layer_split": "20"`.
 
-`--remote-expert-opt` does something only with a helper cache; on a plain layer split it is inert.
-The `STRATA_PIPELINE_*` tuning and test variables are read only with `STRATA_PIPELINE_DEBUG=1`.
-`STRATA_PIPELINE_SWITCH` can put one request on the serial decode path for an A/B test; it does not recompute the
-drafter's device or move memory after startup.
+`--remote-expert-opt` does something only with a helper cache; on a plain layer split it is inert. The pipeline's tuning
+and test variables of earlier releases are gone; the drafter's device and the memory plan are fixed at startup.
 
 ## Two models on two cards
 

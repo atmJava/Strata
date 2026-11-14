@@ -10,8 +10,6 @@ What changes vs strata-022.json:
   --pcie-frac 0              the PCIe share is chosen per window
   --adapt-every 1000000      the VRAM tier is fixed
   --no-prefill-borrow        the prompt path lends no expert slot
-  STRATA_IQ_MT_MIN=1         multi-token CPU expert kernels for every group
-  STRATA_SM75_PERF=1 when "on" (removed when "off")
 """
 import json
 import pathlib
@@ -49,11 +47,6 @@ args += ["--pcie-frac", "0", "--adapt-every", "1000000", "--batch-groups", "1", 
 cfg["args"] = args
 
 env = dict(cfg.get("env") or {})
-env["STRATA_IQ_MT_MIN"] = "1"
-if arm == "on":
-    env["STRATA_SM75_PERF"] = "1"
-else:
-    env.pop("STRATA_SM75_PERF", None)
 cfg["env"] = env
 
 DST.write_text(json.dumps(cfg, indent=1), encoding="utf-8")

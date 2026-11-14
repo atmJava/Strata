@@ -6,78 +6,11 @@ those bytes into the promoted expert's old RAM slot. Rotation removes that last
 host copy: the temporary buffer becomes resident, and the old RAM slot becomes
 the next temporary buffer.
 
-## Enable
+## Retired
 
-Rotation is **off by default**. Set `STRATA_EXCHANGE_ROTATE=1` before starting the
-engine with your existing arguments:
-
-```bash
-export STRATA_EXCHANGE_ROTATE=1
-```
-
-```powershell
-$env:STRATA_EXCHANGE_ROTATE = '1'
-```
-
-Only the exact value `1` opts in. Set it to `0` or remove it to restore the copy
-path. This setting does not select resident RAM mode or change any preset.
-It applies only when the resident complement is fully pinned and GPU-mapped
-and the exchange buffers can also be pinned and mapped. Other layouts keep the
-copy path and log why rotation could not be enabled. Configurations without a
-resident complement do not use it. Layers may differ in expert block size (a
-GGUF with mixed quantizations per layer): see
-[Layers of different block sizes](#layers-of-different-block-sizes).
-
-The startup diagnostic confirms activation:
-
-```text
-FileExpertSource: exchange buffer rotation enabled: ...; no host commit memcpy
-```
-
-Serving diagnostics report the cumulative rotated block count and avoided
-`memcpy` payload bytes. This counts the copied payload once, not read plus write
-traffic, and does not include the GPU transfers, which still occur.
-
-## Ownership and synchronization
-
-The original allocations own their memory until `FileExpertSource::close()`.
-Rotation updates slot ownership and keeps each host pointer paired with its GPU
-alias. Atomic slot IDs let background residency queries observe those immutable
-pairs. Compute readers and GPU transfers must still finish before the existing
-serialized commit; rotation adds no overlapping compute or new synchronization
-policy. Reserve the maximum exchange capacity before rotation starts: growing a
-live exchange arena is rejected because it can now hold resident experts.
-
-## Layers of different block sizes
-
-A swap exchanges two experts of the same layer, so the RAM slot the promoted
-expert leaves has exactly the size of the block the evicted one needs. Rotation
-therefore keeps its spare buffers per block size: an exchange of a layer takes
-a spare of that layer's size and hands back one of the same size, and every
-size keeps its number of spares for good. The first version required one size
-for all layers and fell back to the copy path on any other pack; Swift 1.5
-IQ3_S has seven sizes (1,510,400 to 2,662,400 bytes) and IQ3_XXS has nine
-too, so neither could rotate.
-
-The exchange allocation holds one spare of every size per swap of a round:
-`--adapt-swaps` (at most 96) times the sum of the distinct sizes. With
-`--adapt-async 1` the second half of the buffers only stages copies and is
-kept in the largest size alone. On IQ3_S with `--adapt-swaps 80` that is
-1.06 GiB of page-locked RAM (1.26 GiB with `--adapt-async 1`), against 0.20
-and 0.40 GiB for the copy path's buffers. The startup line says how many sizes
-and how much:
-
-```text
-FileExpertSource: exchange buffer rotation enabled: 80 buffers in 7 block sizes (largest 2662400 bytes, 1.06 GiB page-locked); no host commit memcpy
-```
-
-With `--adapt-async 1` a rotated round also ends one verify window sooner:
-there are no bytes for the background job to move, so the ownership flip runs
-in the tick that sees the copies in.
-
-`tests/core/exchange_storage_test.cpp` covers it without CUDA (three sizes,
-6,144 exchanges: bytes, aliases, a spare of another size or an expert of
-another layer refused, overlapping resident blocks refused).
+Rotation is gone: the engine carries the copy path, and there is no switch to enable rotation. The measurements below were
+taken on builds that had `STRATA_EXCHANGE_ROTATE=1`; they record what the change gave at the time. This deployment never
+enabled it.
 
 ### Measured: Swift 1.5 IQ3_S on an RTX 5090 with 64 GB (Windows 11)
 

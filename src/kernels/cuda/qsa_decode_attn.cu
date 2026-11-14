@@ -791,27 +791,16 @@ __global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restri
     attn[(size_t) h * HD + d] = L > 0.0f ? acc / L : 0.0f;
 }
 
-// The Daily's decode-attention variant is not selected on this build.
-[[maybe_unused]] bool daily_attn() { return false; }
-
-// CUDA: the kernel below sm_75's line is the pre-Turing gate, which never opens on this card.
-bool pre75_attn() { return false; }
-// `PRE` picks PR #540's kernel.
+// `PRE` picks PR #540's kernel: the parity harness names it, the engine always runs attn_chunk_kernel.
 #define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M> : attn_chunk_kernel<M>)
-#define STRATA_ATTN_CHUNK(M) STRATA_ATTN_CHUNK_SEL(M, pre75_attn())
-
-// The score phase uses the shuffle reduction (no lane-cell variant).
-bool lane_cell_attn() { return false; }
 
 // 0 fp16, 1 int8, 2 q4_0, 3 int8 K with q4_0 V
 int attn_kv_mode(const QsaAttnPools& p) {
     return p.k_q4 != nullptr ? 2 : (p.k_q != nullptr && p.v_q4 != nullptr ? 3 : (p.k_q != nullptr ? 1 : 0));
 }
 
-// 0 merges with attn_merge_kernel (the upstream merger).
-int attn_merge_v2() { return 0; }
-
-// the merge of `n_q` queries' partials: v2 = 0 attn_merge_kernel, 1 attn_merge_v2_kernel (bitwise the same output)
+// the merge of `n_q` queries' partials: v2 = 0 attn_merge_kernel (the engine), 1 attn_merge_v2_kernel (the parity harness;
+// bitwise the same output)
 void launch_merge(int v2, const float* part_acc, const float* part_m, const float* part_l, int n_chunks,
                   const int32_t* steps, float* attn, long long stride, unsigned n_head, unsigned n_q, cudaStream_t st) {
     if (v2)
@@ -822,7 +811,7 @@ void launch_merge(int v2, const float* part_acc, const float* part_m, const floa
 }
 
 // qsa_decode_attn_batch's chunk pass: `n_q` queries' partials into `scratch` (one stride each).  `kernel` < 0 is the
-// caller's choice; 0 is attn_chunk_kernel and 1 PR #540's kernel where it is built (the parity harness: never a knob).
+// engine (attn_chunk_kernel); 0 is attn_chunk_kernel and 1 PR #540's kernel, for the parity harness.
 void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                          int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, cudaStream_t st, int kernel) {
     const int kv_mode = pools.k_q4 != nullptr ? 2 : (pools.k_q != nullptr && pools.v_q4 != nullptr ? 3
@@ -835,17 +824,7 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
     float* part_l = part_m + (size_t) n_chunks * s.n_head;
     const float scale = 1.0f / sqrtf((float) HD);
     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
-    const bool pre = kernel < 0 ? pre75_attn() : kernel == 1;
-    // S25: the score phase one cell per thread (bit-identical scores, no shuffle reductions)
-    const bool lane_cell = kernel < 0 && lane_cell_attn();
-#define STRATA_ATTN_LC(M) attn_chunk_kernel<M, true><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
-    if (lane_cell) {
-        if (kv_mode == 3) STRATA_ATTN_LC(3);
-        else if (kv_mode == 2) STRATA_ATTN_LC(2);
-        else if (kv_mode == 1) STRATA_ATTN_LC(1);
-        else STRATA_ATTN_LC(0);
-    } else
-#undef STRATA_ATTN_LC
+    const bool pre = kernel == 1;   // the parity harness names PR #540's kernel; the engine runs the default
     if (kernel < 0 && kv_mode == 1 && attn_v3_on())   // (the parity harness names its kernel: never the environment)
         attn_chunk_q8_v3_kernel<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
                                                           scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
@@ -891,7 +870,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     }
     cudaStream_t st = (cudaStream_t) stream;
     launch_chunks_batch(q, pools, ids, steps, cap, s, scratch, n_q, st, -1);
-    launch_merge_batch(steps, cap, s, scratch, attn, n_q, attn_merge_v2(), st);
+    launch_merge_batch(steps, cap, s, scratch, attn, n_q, 0, st);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "qsa_decode_attn_batch: %s\n", cudaGetErrorString(e));
@@ -915,9 +894,6 @@ bool qsa_decode_attn_slots(const float* q, const QsaAttnSlotPools& pools, const 
         }
         if (attn_kv_mode(pools.p[z]) != kv_mode) return false;
     }
-    const bool lane_cell = lane_cell_attn();
-    // only where qsa_decode_attn_batch runs attn_chunk_kernel; its other variants keep the per-query calls
-    if (!lane_cell && pre75_attn()) return false;
     const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
     const long long stride = (long long) qsa_decode_attn_scratch_floats(cap, s);
     float* part_acc = scratch;
@@ -926,20 +902,13 @@ bool qsa_decode_attn_slots(const float* q, const QsaAttnSlotPools& pools, const 
     const float scale = 1.0f / sqrtf((float) HD);
     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
     cudaStream_t st = (cudaStream_t) stream;
-#define STRATA_ATTN_SLOTS(M, LC) attn_chunk_slots_kernel<M, LC><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
-    if (lane_cell) {
-        if (kv_mode == 3) STRATA_ATTN_SLOTS(3, true);
-        else if (kv_mode == 2) STRATA_ATTN_SLOTS(2, true);
-        else if (kv_mode == 1) STRATA_ATTN_SLOTS(1, true);
-        else STRATA_ATTN_SLOTS(0, true);
-    } else {
-        if (kv_mode == 3) STRATA_ATTN_SLOTS(3, false);
-        else if (kv_mode == 2) STRATA_ATTN_SLOTS(2, false);
-        else if (kv_mode == 1) STRATA_ATTN_SLOTS(1, false);
-        else STRATA_ATTN_SLOTS(0, false);
-    }
+#define STRATA_ATTN_SLOTS(M) attn_chunk_slots_kernel<M, false><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
+    if (kv_mode == 3) STRATA_ATTN_SLOTS(3);
+    else if (kv_mode == 2) STRATA_ATTN_SLOTS(2);
+    else if (kv_mode == 1) STRATA_ATTN_SLOTS(1);
+    else STRATA_ATTN_SLOTS(0);
 #undef STRATA_ATTN_SLOTS
-    launch_merge(attn_merge_v2(), part_acc, part_m, part_l, n_chunks, steps, attn, stride, (unsigned) s.n_head,
+    launch_merge(0, part_acc, part_m, part_l, n_chunks, steps, attn, stride, (unsigned) s.n_head,
                  (unsigned) n_q, st);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
@@ -968,15 +937,6 @@ void qsa_decode_attn_batch_rows(const float* q, const QsaAttnPoolsRows& rows, co
     const float scale = 1.0f / sqrtf((float) HD);
     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
     cudaStream_t st = (cudaStream_t) stream;
-    // The plain kernel is what qsa_decode_attn_batch runs; the pre-sm_75 / gfx103x kernel would go one launch per row.
-    const bool per_row = pre75_attn();
-    if (per_row) {
-        for (int64_t r = 0; r < n_q; ++r)
-            qsa_decode_attn_batch(q + (size_t) r * s.n_head * HD, rows.p[r], ids + (size_t) r * cap,
-                                  steps + (size_t) r * kStepCount, cap, s, scratch + (size_t) r * stride,
-                                  attn + (size_t) r * s.n_head * HD, 1, stream);
-        return;
-    }
 #define STRATA_ATTN_ROWS(M) attn_chunk_rows_kernel<M><<<grid, THREADS, 0, st>>>(q, rows, ids, steps, (int) s.n_head_kv, \
         (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
     if (kv_mode == 3) STRATA_ATTN_ROWS(3);
@@ -984,7 +944,7 @@ void qsa_decode_attn_batch_rows(const float* q, const QsaAttnPoolsRows& rows, co
     else if (kv_mode == 1) STRATA_ATTN_ROWS(1);
     else STRATA_ATTN_ROWS(0);
 #undef STRATA_ATTN_ROWS
-    launch_merge(attn_merge_v2(), part_acc, part_m, part_l, n_chunks, steps, attn, stride, (unsigned) s.n_head,
+    launch_merge(0, part_acc, part_m, part_l, n_chunks, steps, attn, stride, (unsigned) s.n_head,
                  (unsigned) n_q, st);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
@@ -1025,18 +985,18 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
                                                           scale, part_acc, part_m, part_l, n_chunks, 0, 0);
     else
     if (kv_mode == 3)
-        STRATA_ATTN_CHUNK(3)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+        attn_chunk_kernel<3><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                         scale, part_acc, part_m, part_l, n_chunks, 0, 0);
     else if (kv_mode == 2)
-        STRATA_ATTN_CHUNK(2)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+        attn_chunk_kernel<2><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                         scale, part_acc, part_m, part_l, n_chunks, 0, 0);
     else if (kv_mode == 1)
-        STRATA_ATTN_CHUNK(1)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+        attn_chunk_kernel<1><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                         scale, part_acc, part_m, part_l, n_chunks, 0, 0);
     else
-        STRATA_ATTN_CHUNK(0)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+        attn_chunk_kernel<0><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                         scale, part_acc, part_m, part_l, n_chunks, 0, 0);
-    launch_merge(attn_merge_v2(), part_acc, part_m, part_l, n_chunks, step, attn, 0, (unsigned) s.n_head, 1u, st);
+    launch_merge(0, part_acc, part_m, part_l, n_chunks, step, attn, 0, (unsigned) s.n_head, 1u, st);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "qsa_decode_attn: %s\n", cudaGetErrorString(e));

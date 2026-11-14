@@ -13,7 +13,7 @@ the feature exists for.
 
 When the gate refuses, the engine says so instead, and no read line appears:
 
-  ... an expert source that stages its blobs (the GGUF in place, unbuffered, STRATA_IO_PREFETCH)
+  ... an expert source that stages its blobs (the GGUF in place, unbuffered)
 
 So "read line present" means the gate was open for that read, and a window with a big cold read and
 no read lines means the gate was closed.  That is how this tells which engine sessions ran with the

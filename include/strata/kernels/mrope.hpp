@@ -38,8 +38,8 @@ struct RopeTab {
 void rope_table_set(const float* cos_tab, const float* sin_tab, int max_pos, const RopeScaling& scaling);
 /// Forgets the table `cos_tab` (on every device) - before the memory that holds it is freed (session_release).
 void rope_table_release(const float* cos_tab);
-/// The registered table when the table path is on and it was built with `scaling`; otherwise none (the default: the
-/// kernels compute the angle exactly as before).
+/// No table: the table path is off (its angles differ from the fast-math ones in the last bits), so the kernels compute
+/// the angle as before.  Kept as their single selector.
 RopeTab rope_table_for(const RopeScaling& scaling);
 
 #if defined(__CUDACC__)

@@ -134,16 +134,6 @@ RouteResidentCfg& route_resident_cfg() {
 }
 // fork F4 (Eddoursul): 2-4 token dense projections read an interleaved copy of the q8_1 activations (bitwise the same
 // outputs).
-// fork 34a35db + b063c13 (Eddoursul), STRATA_SIDE_MIXER=1 / =2: the mixer's work that reads only the layer's input on
-// branches of the window's graph (bitwise the same outputs); 0 = in line, and no branch stream is created.
-inline int g_side_mixer() {
-    return 0;
-}
-// STRATA_BATCH_SIDE_MIXER=1: the GDN qkv/gate and QSA query/K/V projections on two streams only for
-// two-row production batch windows; every other row count keeps the original serial order.
-inline bool g_batch_side_mixer() {
-    return false;
-}
 
 std::string diag_key(const std::vector<int>& key) {
     std::string out;
@@ -455,10 +445,6 @@ Verifier::~Verifier() {
     if (cs_ && cs_ != ext_stream_) cudaStreamDestroy(cs_);   // set_stream: the stage's stream, shared, not ours
     if (sh_cs_) cudaStreamDestroy(sh_cs_);
     if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
-    if (side_) cudaStreamDestroy(side_);
-    if (side2_) cudaStreamDestroy(side2_);
-    for (cudaEvent_t e : {mfork_, mjoin_, pfork_, pjoin_})
-        if (e) cudaEventDestroy(e);
     if (commit_done_) cudaEventDestroy(commit_done_);
     if (ev_done_) cudaEventDestroy(ev_done_);
     if (ev_commit_) cudaEventDestroy(ev_commit_);
@@ -522,7 +508,6 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     cudaGetDevice(&device_);   // a layer split's stage on another GPU: its streams, graphs and buffers live there
     rr_stats_ = route_resident_cfg().stats_on(device_);   // STRATA_ROUTE_RESIDENT: this GPU's counters, outside graph capture
     strata::kernels::fused_gr_check();   // once per card: which bitwise-equal hyper-connection read runs there
-    strata::kernels::fused_gr_persist_init();   // opt-in STRATA_HC_PERSIST=1 (HIP)
     wt_ = &wt;
     g_ = &g;
     ss_ = &ss;
@@ -907,16 +892,6 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             all_resident_ = all_ok;
         }
     }
-    if ((g_side_mixer() > 0 || g_batch_side_mixer()) &&
-        (cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking) != cudaSuccess ||
-        cudaEventCreateWithFlags(&mfork_, cudaEventDisableTiming) != cudaSuccess ||
-        cudaEventCreateWithFlags(&mjoin_, cudaEventDisableTiming) != cudaSuccess ||
-        cudaStreamCreateWithFlags(&side2_, cudaStreamNonBlocking) != cudaSuccess ||
-        cudaEventCreateWithFlags(&pfork_, cudaEventDisableTiming) != cudaSuccess ||
-        cudaEventCreateWithFlags(&pjoin_, cudaEventDisableTiming) != cudaSuccess)) {
-        err = "verify: the mixer branch's stream / events could not be created";
-        return false;
-    }
     // E-6: a layer whose routed experts are all resident is planned on the device (STRATA_VERIFY_DEVICE_PLAN=1: on;
     // exact, but neutral on RIBPC 1-2 GPUs: off by default)
     device_plan_ = false;   // the all-resident graph covers the case this device plan helped with
@@ -970,20 +945,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     // Pipelined windows must wait for the host verdict/snapshot fence before mutating state.
     const bool self_commit = T == 1 && !always_publish_ && !batch_rec_;   // see Verifier::commit
     const bool dec_batch = true;
-    // fork 34a35db: the GDN gates and the QSA indexer beside the projections (STRATA_SIDE_MIXER=1; 0 / unset = in line)
-    const int side_mixer_mode = g_side_mixer();
-    const bool side_mixer = side_mixer_mode >= 1;
-    const bool side_proj = side_mixer_mode >= 2 && !batch_rec_;   // fork b063c13: the GDN gate projection, the QSA queries
-    const bool batch_side = g_batch_side_mixer() && batch_rec_ && T == 2 && !prof_on_;
-    const bool gdn_side_proj = side_proj || batch_side;
-    const bool qsa_side_proj = side_proj || batch_side;
     auto branch = [&](cudaEvent_t e, cudaStream_t from, cudaStream_t to, const char* what) {
         if (cudaEventRecord(e, from) == cudaSuccess && cudaStreamWaitEvent(to, e, 0) == cudaSuccess) return true;
         err = std::string("verify: the mixer branch could not ") + what;
         return false;
     };
-    // a batch window's rows each read their own slot's indexer: in line there
-    const bool sidem = side_mixer && !batch_rec_;
     auto stamp = [&](int64_t l, int i, int grp) {
         if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
         if (trace_m_ != nullptr) gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);   // #649
@@ -994,7 +960,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     // makes side i depend on everything captured on `cs` so far, join(i) makes `cs` depend on everything captured on
     // side i: a branch never races with what came before its fork or after its join.  Not in a split or batch window,
     // nor under the stage profiler (whose stamps are on `cs`).
-    const bool br = df_branch_ && G == 1 && !batch_rec_ && !prof_on_ && !side_mixer;   // STRATA_SIDE_MIXER wins
+    const bool br = df_branch_ && G == 1 && !batch_rec_ && !prof_on_;
     auto fork = [&](int i) {
         cudaEventRecord(df_fork_, cs);
         cudaStreamWaitEvent(df_side_[i], df_fork_, 0);
@@ -1167,7 +1133,6 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 a.eps = EPS; a.lo = lo_ + t * g.hc_lr; a.rs = rs_ + t * HC;
                 a.inject_out = inj_out + t * HC; a.mixed = mixed_ + t * N;
             }
-            if (strata::kernels::fused_gr_read_persist(fa, n, cs)) return false;   // STRATA_HC_PERSIST=1; q8_mixed is never set there
             return fused_gr_read_multi(fa, n, xn_ + (size_t) tb * HC * N, cs, (prof_on_ && grp == 0) ? prof_ : nullptr,
                                 (int) (l * kProfPer + (half == 0 ? 27 : 30)));
         };
@@ -1227,30 +1192,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 float* hb = h_L_ + (size_t) gi * MT * C;
                 float* gate = gate_L_ + (size_t) gi * MT * HV;
                 float* beta = beta_L_ + (size_t) gi * MT * HV;
-                if (sidem) {   // the gates (a few blocks, latency-bound) beside the projections, joined below
-                    if (!branch(mfork_, cs, side_, "fork")) return false;
-                    gdn_ab_multi(xm, (const uint16_t*) wa->data, (const uint16_t*) wb->data, (const float*) wdt->data,
-                                 (const float*) wsa->data, gate + (size_t) tb * HV, beta + (size_t) tb * HV, (int) N,
-                                 (int) HV, n, side_);
-                    if (cudaEventRecord(mjoin_, side_) != cudaSuccess) { err = "verify: the GDN gates' branch could not join"; return false; }
-                }
                 if (!q8_attn) quant_in(xm, (int) N);
-                if (gdn_side_proj) {   // the gate projection (compute-bound for i-quants) beside qkv and the conv
-                    // the branch reads F4's interleaved copy too (written on cs before the fork; bitwise native_mmvq's
-                    // output), and qkv is recorded before the branch's launch, so its grid is dispatched first and the
-                    // conv / recurrence that wait for it start sooner (z is read only after the recurrence)
-                    const bool g_il = strata::kernels::native_mmvq_il_supported(wg->native_type, n, (int) ZV);
-                    if (g_il && !il_ready && n >= 2) {
-                        strata::kernels::native_q8_1_interleave(xq_, xil_, (int) N, n, cs);
-                        il_ready = true;
-                    }
-                    if (!branch(pfork_, cs, side2_, "fork")) return false;
-                    mm(wqkv, qkv + (size_t) tb * C, (int) N, (int) C);
-                    if (g_il) strata::kernels::native_mmvq_il(wg->native_type, wg->native_data, xq_, xil_, z_ + (size_t) tb * ZV,
-                                                              (int) N, (int) ZV, n, side2_);
-                    else native_mmvq(wg->native_type, wg->native_data, xq_, z_ + (size_t) tb * ZV, (int) N, (int) ZV, n, side2_);
-                    if (cudaEventRecord(pjoin_, side2_) != cudaSuccess) { err = "verify: the gate projection's branch could not join"; return false; }
-                }
                 if (br) {   // STRATA_DF_BRANCH: a/b and z beside q/k/v and the conv; all of them read only this layer's input
                     fork(0);
                     gdn_ab_multi(xm, (const uint16_t*) wa->data, (const uint16_t*) wb->data, (const float*) wdt->data,
@@ -1260,7 +1202,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     native_mmvq(wg->native_type, wg->native_data, xq_, z_ + (size_t) tb * ZV, (int) N, (int) ZV, n,
                                 df_side_[1]);
                 }
-                if (!gdn_side_proj) mm(wqkv, qkv + (size_t) tb * C, (int) N, (int) C);   // with side_proj: above, first
+                mm(wqkv, qkv + (size_t) tb * C, (int) N, (int) C);
                 stamp(l, 2, grp);
                 if (batch_rec_) {   // contiguous rows may be proposals for the same slot
                     for (int t = tb; t < te;) {
@@ -1282,40 +1224,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     join(0);
                     join(1);
                 } else {
-                if (!sidem)   // the gates: here unless the side mixer's branch computes them
                 gdn_ab_multi(xm, (const uint16_t*) wa->data, (const uint16_t*) wb->data, (const float*) wdt->data,
                              (const float*) wsa->data, gate + (size_t) tb * HV, beta + (size_t) tb * HV, (int) N, (int) HV,
                              n, cs);
                 stamp(l, 4, grp);
-                if (!gdn_side_proj) mm(wg, z_ + (size_t) tb * ZV, (int) N, (int) ZV);
+                mm(wg, z_ + (size_t) tb * ZV, (int) N, (int) ZV);
                 stamp(l, 5, grp);
-                if (gdn_side_proj && cudaStreamWaitEvent(cs, pjoin_, 0) != cudaSuccess) {
-                    err = "verify: the gate projection's branch could not join";
-                    return false;
-                }
-                if (sidem && cudaStreamWaitEvent(cs, mjoin_, 0) != cudaSuccess) {
-                    err = "verify: the GDN gates' branch could not join";
-                    return false;
-                }
                 }
                 // the recurrence from the untouched state over tokens [0, te); outputs only for this group's
-                static const bool gdn_groups_on = [] {   // STRATA_BATCH_GDN_GROUPS=1, all slots in one launch
-                    return false;
-                }();
-                if (batch_rec_ && gdn_groups_on && te - tb <= 8) {
-                    strata::kernels::GdnGroups gg;
-                    for (int t = tb; t < te;) {
-                        const int first = t;
-                        while (t < te && brow_[t] == brow_[first]) ++t;
-                        SessionState& sx = slot_ss(first);
-                        gg.state[gg.n] = sx.gdn_state + (size_t) (gi - sx.gdn_ord0) * gdn_floats;
-                        gg.first[gg.n] = first;
-                        gg.ntok[gg.n] = t - first;
-                        ++gg.n;
-                    }
-                    strata::kernels::gdn_step_norm_groups(gg, hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS,
-                                                          y_, (int) HK, (int) HV, false, cs);
-                } else
                 if (batch_rec_) {   // each slot's recurrence over its own proposed-token group
                     for (int t = tb; t < te;) {
                         const int first = t;
@@ -1368,17 +1284,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 };
                 float* idx_raw = idx_raw_L_ + (size_t) qi * MT * ID;
                 // the per-token GEMVs / norms / RoPEs / copies of this layer as one launch over the
-                // window's rows each - row-wise identical arithmetic (STRATA_DEC_BATCH=0: token by token)
-                // STRATA_DF_QB_Q4 (default on since 0.1.45; STRATA_DF_QB_Q4=0 gives the old token-by-token path): a Q4_0 KV cache
-                // takes the batched window too - its one per-token extra, the query's rotation, is row-wise and the batched
-                // path rotates (270650e).  The generated ids are identical (p620 gfx1201, A4000 sm_86, P100 sm_60, short and
-                // long prompts), and the 6-token verify graph is 1950 nodes instead of 2610 (#2403: an RX 6900 XT faulted in
-                // the first verify graph launch with --kv q4_0 + KV streaming + MTP; whether the graph size is the cause is
-                // not confirmed)
-                static const bool qb_q4 = [] {
-                    return true;
-                }();
-                const bool qb = dec_batch && n > 1 && native_qsa_enabled() && native_rope_enabled() && (!st.kv_q4 || qb_q4);
+                // window's rows each - row-wise identical arithmetic
+                // A Q4_0 KV cache takes the batched window too (since 0.1.45): its one per-token extra, the query's
+                // rotation, is row-wise and the batched path rotates (270650e).  The generated ids are identical
+                // (p620 gfx1201, A4000 sm_86, P100 sm_60, short and long prompts), and the 6-token verify graph is 1950
+                // nodes instead of 2610 (#2403: an RX 6900 XT faulted in the first verify graph launch with --kv q4_0 +
+                // KV streaming + MTP; whether the graph size is the cause is not confirmed)
+                const bool qb = dec_batch && n > 1 && native_qsa_enabled() && native_rope_enabled();
                 if (!q8_attn) quant_in(xm, (int) N);
                 // STRATA_DF_BRANCH: the query side (q and its norm/RoPE/rotation on side 0, the indexer query on side 1)
                 // beside the K/V side; the indexer query joins before the block scores, the query before attention
@@ -1396,12 +1308,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                               IQ * ID, N, IQ * ID, n, df_side_[1]);
                     norm_rope_on(qidx_ + tb * IQ * ID, wiqn, (int) (n * IQ), (int) ID, pos_i + tb * IQ, df_side_[1]);
                 }
-                // STRATA_SIDE_MIXER=1 / =2 (fork Eddoursul 34a35db + b063c13): the indexer's key projection,
-                // the tail's snapshot, its keys appended, its query projection, norm and RoPE, the block scores and the
-                // top-k read only the mixer's input and the indexer's own state - =1 runs them on a branch beside the
-                // attention's projections; =2 also the queries' chain on a second branch.  Each step below is
-                // the in-line code with its stream as a parameter; with the switch off they run on cs in the same order
-                // as before (STRATA_DF_BRANCH, the same idea for fewer of these steps, is off whenever this is on).
+                // The indexer's key projection, its tail snapshot, the keys appended, its query projection, norm and
+                // RoPE, the block scores and the top-k read only the mixer's input and the indexer's own state; each is
+                // the in-line code with its stream as a parameter, run on cs in order.
                 auto norm_rope_s = [&](float* data, const WeightRef* norm, int rows, int cols, const int32_t* pos, cudaStream_t ns) {
                     if (fuse_nr && native_norm_rope_usable(cols, (int) s.n_rot)) {
                         native_qsa_rms_norm_rope(data, cols, (const float*) norm->data, data, rows, cols, (int) s.n_rot, EPS,
@@ -1461,14 +1370,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 // the attention's queries: the projection (mm on cs, which may read F4's interleaved copy; on a branch
                 // F4's kernel too, its copy written on cs before the fork - bitwise the same), the q/gate
                 // split with norm and RoPE, the rotation
-                const bool q_il = qsa_side_proj &&
-                                  strata::kernels::native_mmvq_il_supported(wq->native_type, n, (int) (NH * 2 * HD));
                 auto q_chain = [&](cudaStream_t ns) -> bool {
-                    if (ns == cs) mm(wq, qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD));
-                    else if (q_il) strata::kernels::native_mmvq_il(wq->native_type, wq->native_data, xq_, xil_,
-                                                                   qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD), n, ns);
-                    else native_mmvq(wq->native_type, wq->native_data, xq_, qfull_ + tb * NH * 2 * HD, (int) N,
-                                     (int) (NH * 2 * HD), n, ns);
+                    mm(wq, qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD));
                     if (qb) {
                         if (fuse_nr) {   // the q/gate split reads q straight out of the q|gate rows (stride 2 * HD)
                             native_qsa_rms_norm_rope(qfull_ + tb * NH * 2 * HD, (int) (2 * HD), (const float*) wqn->data,
@@ -1498,24 +1401,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     }
                     return true;
                 };
-                if (sidem) {
-                    if (!branch(mfork_, cs, side_, "fork")) return false;
-                    idx_key(side_);
-                    idx_snap(side_);
-                    idx_append(side_);
-                    idx_query(side_);
-                    idx_select(side_);
-                    if (cudaEventRecord(mjoin_, side_) != cudaSuccess) { err = "verify: the indexer's branch could not join"; return false; }
-                }
-                if (qsa_side_proj) {   // the queries beside the keys and values (fork b063c13)
-                    if (q_il && !il_ready && n >= 2) {   // the copy before the fork (mm(wk) / mm(wv) on cs reuse it)
-                        strata::kernels::native_q8_1_interleave(xq_, xil_, (int) N, n, cs);
-                        il_ready = true;
-                    }
-                    if (!branch(pfork_, cs, side2_, "fork") || !q_chain(side2_)) return false;
-                    if (cudaEventRecord(pjoin_, side2_) != cudaSuccess) { err = "verify: the queries' branch could not join"; return false; }
-                }
-                if (!sidem) idx_key(cs);
+                idx_key(cs);
                 stamp(l, 7, grp);
                 mm(wk, kcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
                 mm(wv, vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
@@ -1528,7 +1414,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     fwht256_inplace_cuda(vcur_ + tb * NKV * HD, (int64_t) n * NKV, cs);
                 }
                 stamp(l, 8, grp);
-                if (!sidem) idx_snap(cs);
+                idx_snap(cs);
                 // #783 PR-d (stuchapin909): the window's K/V cells in one launch per pool instead of one per token (a
                 // batch's rows each have their own K/V, so that case keeps the loop)
                 if (dec_batch && !batch_rec_) {
@@ -1576,19 +1462,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                         kv_append_step(st.k_pool, st.v_pool, st.page_table, step_t, kcur_ + t * NKV * HD,
                                        vcur_ + t * NKV * HD, s, cs, &st.host);
                 }
-                if (!sidem) idx_append(cs);
+                idx_append(cs);
                 stamp(l, 9, grp);
                 if (qbr) {
                     join(1);   // the indexer query, for the block scores
                 } else {
-                    if (!qsa_side_proj && !q_chain(cs)) return false;
-                    if (!sidem) idx_query(cs);
+                    if (!q_chain(cs)) return false;
+                    idx_query(cs);
                 }
                 stamp(l, 10, grp);
-                if (batch_side && cudaStreamWaitEvent(cs, pjoin_, 0) != cudaSuccess) {
-                    err = "verify: the batch queries' branch could not join";
-                    return false;
-                }
                 if (batch_rec_) {   // each row selects and attends over its own slot's K/V
                     for (int t = tb; t < te; ++t) {
                         const QsaState& sx = slot_ss(t).qsa_states[qi];
@@ -1603,15 +1485,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                               attn_ + t * NH * HD, 1, cs);
                     }
                 } else {
-                if (!sidem) idx_select(cs);
-                else if (cudaStreamWaitEvent(cs, mjoin_, 0) != cudaSuccess) {
-                    err = "verify: the indexer's branch could not join";
-                    return false;
-                }
-                if (side_proj && cudaStreamWaitEvent(cs, pjoin_, 0) != cudaSuccess) {
-                    err = "verify: the queries' branch could not join";
-                    return false;
-                }
+                idx_select(cs);
                 stamp(l, 11, grp);
                 // KV streaming: the n selections' blocks resident (device-side, inside the graph)
                 qsa_kv_resolve(st, *g_, sel_ + (size_t) tb * cap_, step_ + tb * kStepCount, n, cap_, cs);
@@ -2018,7 +1892,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             sample_tokens(head_logits_, T, (int) n_vocab_, nullptr, 0, sp, m_out_, cs);
         }
         // #879: whether each row's logits are all finite, beside the pick (read after the window's own sync)
-        if (nan_guard_on()) strata::kernels::logits_nonfinite_rows(head_logits_, T, (int) n_vocab_, m_nf_, cs);
+        strata::kernels::logits_nonfinite_rows(head_logits_, T, (int) n_vocab_, m_nf_, cs);
     }
     stamp(g.n_layers, 1, 0);
     // the window's rows (a batch window's S too) into the mapped copy: run() appends its records from it.  A batch
@@ -3152,14 +3026,6 @@ bool Verifier::capture_commit_batch(const int* rows, int S, int hbase, std::stri
             if (!is_qsa_layer(g, l)) {
                 const WeightRef* wnm = need(v, "ssm_norm.weight", err);
                 if (!wnm) { ok = false; break; }
-                // STRATA_BATCH_GDN_GROUPS=1: one-row groups (no --batch-mtp proposals) commit their recurrence
-                // in one launch for all slots; the conv commits stay per slot
-                static const bool gdn_groups_on = [] {
-                    return false;
-                }();
-                bool one_row = S <= 8;
-                for (int t = 1; one_row && t < S; ++t) one_row = rows[t] != rows[t - 1];
-                strata::kernels::GdnGroups gg;
                 for (int t = 0; t < S;) {
                     const int first = t;
                     while (t < S && rows[t] == rows[first]) ++t;
@@ -3169,14 +3035,6 @@ bool Verifier::capture_commit_batch(const int* rows, int S, int hbase, std::stri
                     float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
                     gdn_conv_commit(conv, qkv_L_ + (size_t) gdn_index * MT * C + (size_t) first * C,
                                     (int) C, keep, cs_);
-                    if (gdn_groups_on && one_row) {
-                        gg.state[gg.n] = state;
-                        gg.keep[gg.n] = keep;
-                        gg.first[gg.n] = first;
-                        gg.ntok[gg.n] = 1;
-                        ++gg.n;
-                        continue;
-                    }
                     gdn_step_norm_multi(state, h_L_ + (size_t) gdn_index * MT * C + (size_t) first * C, (int) C,
                                         gate_L_ + (size_t) gdn_index * MT * HV + (size_t) first * HV,
                                         beta_L_ + (size_t) gdn_index * MT * HV + (size_t) first * HV,
@@ -3185,11 +3043,6 @@ bool Verifier::capture_commit_batch(const int* rows, int S, int hbase, std::stri
                                         (int) HV, t - first, keep, cs_,
                                         t - first > 1 ? t - first : 0);   // a 1-row group keeps the 0.1.39 kernel
                 }
-                if (gg.n > 0)
-                    gdn_step_norm_groups(gg, h_L_ + (size_t) gdn_index * MT * C, (int) C,
-                                         gate_L_ + (size_t) gdn_index * MT * HV, beta_L_ + (size_t) gdn_index * MT * HV,
-                                         z_, (const float*) wnm->data, EPS, y_dummy_, (int) g.ssm_k_heads, (int) HV, true,
-                                         cs_);
                 ++gdn_index;
             } else {
                 const WeightRef* wikn = need(v, "indexer.k_norm.weight", err);
@@ -3765,44 +3618,16 @@ int Verifier::batch_poll(PoolMultiFn pool, void* user, std::string& err) {
     return 1;
 }
 
-// #879: STRATA_NAN_GUARD=0 turns the guard off (no kernel is recorded; the graphs are captured once, so it is read once)
-bool Verifier::nan_guard_on() {
-    static const bool on = [] {
-        return true;
-    }();
-    return on;
-}
-
-namespace {
-// STRATA_NAN_INJECT=<n>[,<n>...] (debug): the windows (counted from 1 over the process) the guard reports as non-finite
-const std::vector<long long>& nan_inject_list() {
-    static const std::vector<long long> list = [] {
-        std::vector<long long> v;
-        (void) 0;
-        return v;
-    }();
-    return list;
-}
-std::atomic<long long> g_nf_windows{0};
-}  // namespace
-
+// #879: the non-finite guard is always on; every window's graph checks its T rows on the device.
 void Verifier::note_nonfinite(int T, const int64_t* pos_b) {
     nf_row_ = -1;
     nf_pos_ = -1;
     nf_mask_ = 0;
-    if (!nan_guard_on() || h_nf_ == nullptr || !last_stage()) return;   // (a stage without the head checks nothing)
+    if (h_nf_ == nullptr || !last_stage()) return;   // (a stage without the head checks nothing)
     const volatile uint32_t* f = h_nf_;
     for (int t = 0; t < T && t < strata::kernels::kVerifyMaxT; ++t)
         for (int b = 0; b < strata::kernels::kNonfiniteBlocks; ++b)
             if (f[t * strata::kernels::kNonfiniteBlocks + b] != 0) { nf_mask_ |= 1u << t; break; }
-    const std::vector<long long>& inject = nan_inject_list();
-    if (!inject.empty()) {
-        const long long k = g_nf_windows.fetch_add(1) + 1;
-        if (nf_mask_ == 0 && std::find(inject.begin(), inject.end(), k) != inject.end()) {
-            nf_mask_ = 1u;
-            std::fprintf(stderr, "strata verify: STRATA_NAN_INJECT: window %lld reported as non-finite\n", k);
-        }
-    }
     for (int t = 0; t < T && nf_row_ < 0; ++t)
         if ((nf_mask_ >> t) & 1u) nf_row_ = t;
     if (nf_row_ >= 0) nf_pos_ = pos_b != nullptr ? pos_b[nf_row_] : last_pos0_ + nf_row_;

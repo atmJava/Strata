@@ -202,7 +202,6 @@ void launch_sigmoid_scale_rows(float* out, const float* g, int n_embd, int n_tok
     }
 }
 
-bool fused_swiglu_q81_enabled() { return true; }
 }  // namespace
 
 void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, const NativeSharedWeights& nw,
@@ -225,12 +224,7 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
         native_mmvq(nw.up_type, nw.up_data, x_q8_1, up, (int) n_embd, (int) n_ff, n_tok, stream);
     }
     const int n = (int) (n_ff * n_tok);
-    if (fused_swiglu_q81_enabled()) {
-        native_swiglu_quantize_q8_1(gate, up, nw.q8_1, (int) n_ff, n_tok, stream);
-    } else {
-        native_swiglu_kernel<<<(unsigned) ((n + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate, up, gate, n);
-        native_quantize_q8_1(gate, nw.q8_1, (int) n_ff, n_tok, stream);
-    }
+    native_swiglu_quantize_q8_1(gate, up, nw.q8_1, (int) n_ff, n_tok, stream);
     native_mmvq(nw.down_type, nw.down_data, nw.q8_1, out, (int) n_ff, (int) n_embd, n_tok, stream);
     if (gate_deferred) {   // the caller computed g (raw) with the router and scales `out` in the combine
         const cudaError_t e = cudaGetLastError();
@@ -335,7 +329,7 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* 
         native_mmvq(native->up_type, native->up_data, native->q8_1, up, (int) n_embd, (int) n_ff, 1, stream);
     else
         gemv(up_form, up_codes, up_scales, up_off, x_q8_0, x_q8k, up, n_embd, n_ff);
-    if (native_projection && native_down && fused_swiglu_q81_enabled()) {
+    if (native_projection && native_down) {
         native_swiglu_quantize_q8_1(gate, up, native->q8_1, (int) n_ff, 1, stream);
         native_mmvq(native->down_type, native->down_data, native->q8_1, out, (int) n_ff, (int) n_embd, 1, stream);
     } else {

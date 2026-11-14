@@ -35,19 +35,19 @@ int main(int argc, char** argv) {
     CK(cudaEventCreateWithFlags(&ready,cudaEventDisableTiming));
     int cases=0;
     for(size_t bytes:{size_t(37),size_t(4096),size_t(2*1024*1024)}) {
-        for(int n:{0,1,4,17,64,128,129}) for(int mode:{0,1,2}) {
+        for(int n:{0,1,4,17,64,128,129}) {
             std::vector<const uint8_t*> src(n);
             for(int i=0;i<n;++i) src[i]=host+(size_t)((i*37)%129)*bytes;
-            std::printf("case mode=%d n=%d bytes=%zu\n",mode,n,bytes); std::fflush(stdout);
+            std::printf("case n=%d bytes=%zu\n",n,bytes); std::fflush(stdout);
             CK(cudaMemsetAsync(device,0xa5,std::max<size_t>(bytes*n,1),copy));
-            CK(strata::core::copy_expert_blobs(device,src.data(),n,bytes,copy,mode));
+            CK(strata::core::copy_expert_blobs(device,src.data(),n,bytes,copy));
             CK(cudaEventRecord(ready,copy));
             CK(cudaStreamWaitEvent(consume,ready,0));
             CK(cudaMemcpyAsync(out,device,std::max<size_t>(bytes*n,1),cudaMemcpyDeviceToHost,consume));
             CK(cudaStreamSynchronize(consume));
             if(!n && out[0]!=0xa5) return 2;
             for(int i=0;i<n;++i) if(std::memcmp(out+(size_t)i*bytes,src[i],bytes)) {
-                std::fprintf(stderr,"mismatch mode=%d n=%d bytes=%zu i=%d\n",mode,n,bytes,i);return 2;
+                std::fprintf(stderr,"mismatch n=%d bytes=%zu i=%d\n",n,bytes,i);return 2;
             }
             ++cases;
         }
@@ -59,19 +59,18 @@ int main(int argc, char** argv) {
         const size_t bytes=2*1024*1024;
         std::vector<const uint8_t*> src(n);
         for(int i=0;i<n;++i) src[i]=host+(size_t)((i*37)%129)*bytes;
-        std::vector<double> wall[3],enqueue[3];
+        std::vector<double> wall,enqueue;
 #if defined(_WIN32)
-        std::vector<double> cycles[3];
+        std::vector<double> cycles;
 #endif
-        for(int rep=0;rep<6;++rep) for(int j=0;j<3;++j) {
-            int mode=(rep%2)?2-j:j;
+        for(int rep=0;rep<6;++rep) {
             CK(cudaStreamSynchronize(copy));
 #if defined(_WIN32)
             ULONG64 cycle_start=0,cycle_end=0;
             if (!QueryThreadCycleTime(GetCurrentThread(), &cycle_start)) return 3;
 #endif
             auto start=std::chrono::steady_clock::now();
-            for(int k=0;k<16;++k) CK(strata::core::copy_expert_blobs(device,src.data(),n,bytes,copy,mode));
+            for(int k=0;k<16;++k) CK(strata::core::copy_expert_blobs(device,src.data(),n,bytes,copy));
             auto submitted=std::chrono::steady_clock::now();
 #if defined(_WIN32)
             if (!QueryThreadCycleTime(GetCurrentThread(), &cycle_end)) return 3;
@@ -79,22 +78,20 @@ int main(int argc, char** argv) {
             CK(cudaStreamSynchronize(copy));
             auto end=std::chrono::steady_clock::now();
             if(rep) {
-                enqueue[mode].push_back(std::chrono::duration<double,std::milli>(submitted-start).count()/16);
-                wall[mode].push_back(std::chrono::duration<double,std::milli>(end-start).count()/16);
+                enqueue.push_back(std::chrono::duration<double,std::milli>(submitted-start).count()/16);
+                wall.push_back(std::chrono::duration<double,std::milli>(end-start).count()/16);
 #if defined(_WIN32)
-                cycles[mode].push_back(double(cycle_end-cycle_start)/16);
+                cycles.push_back(double(cycle_end-cycle_start)/16);
 #endif
             }
         }
-        for(int mode=0;mode<3;++mode) {
-            std::sort(wall[mode].begin(),wall[mode].end());std::sort(enqueue[mode].begin(),enqueue[mode].end());
-            std::printf("n=%d bytes=%zu mode=%d median_submit_ms=%.4f median_total_ms=%.4f",n,bytes,mode,enqueue[mode][2],wall[mode][2]);
+        std::sort(wall.begin(),wall.end());std::sort(enqueue.begin(),enqueue.end());
+        std::printf("n=%d bytes=%zu median_submit_ms=%.4f median_total_ms=%.4f",n,bytes,enqueue[2],wall[2]);
 #if defined(_WIN32)
-            std::sort(cycles[mode].begin(),cycles[mode].end());
-            std::printf(" median_thread_cycles=%.0f",cycles[mode][2]);
+        std::sort(cycles.begin(),cycles.end());
+        std::printf(" median_thread_cycles=%.0f",cycles[2]);
 #endif
-            std::printf("\n");
-        }
+        std::printf("\n");
     }
     CK(cudaEventDestroy(ready)); CK(cudaStreamDestroy(copy)); CK(cudaStreamDestroy(consume));
     CK(cudaFree(device));

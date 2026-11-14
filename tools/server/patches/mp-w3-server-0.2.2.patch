@@ -14,7 +14,7 @@
          # (its flag leaked) and would keep every later request waiting for a slot that nothing will free.
          self.slot_claims: set[int] = set()
          self.slot_releasing: set[int] = set()
-+        self.mp_staged = None            # STRATA_MP_STAGED_READ: True while a read is staged in the engine (only
++        self.mp_staged = None            # staged read: True while a read is staged in the engine (only
 +                                         # its owner may BADOPT; other admissions wait, FCFS)
          self._orphan_seen: dict[int, float] = {}
          # what each slot's sessions hold (prompt + every token a window fed), so a conversation's next turn goes to
@@ -23,7 +23,7 @@
                  f = line.split()
                  self._ctl_result = ("badm", len(f) >= 3 and f[2] == "1")
                  return
-+            elif line.startswith("BRDY "):       # STRATA_MP_STAGED_READ: the read is done, no slot yet
++            elif line.startswith("BRDY "):       # staged read: the read is done, no slot yet
 +                f = line.split()
 +                if len(f) < 4 or not f[1].isdigit() or not f[2].isdigit() or f[3] not in ("0", "1"):
 +                    self._ctl_erred = True               # a truncated/odd line is a protocol error, not a read of 0
@@ -37,10 +37,10 @@
          stop_sent = False
          yields, solo_again, refused = 0, 0, 0
          admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
-+        staged_ready = None       # STRATA_MP_STAGED_READ: ("brdy", n, max_new, cont) once read without a slot
++        staged_ready = None       # staged read: ("brdy", n, max_new, cont) once read without a slot
 +        staged_attempts = 0
-+        staged_enabled = os.environ.get("STRATA_MP_STAGED_READ") == "1" and not embeddings
-+        staged_min_tokens = int(os.environ.get("STRATA_MP_STAGED_READ_MIN_TOKENS") or "4096")   # safe default: short reads never stage
++        staged_enabled = not embeddings
++        staged_min_tokens = 2048   # safe default: short reads never stage
          try:
              while True:   # a request in a slot that is left alone goes back to the solo path
                  if not holding:
@@ -48,7 +48,7 @@
                          prompt = list(ids) + out            # promoted: it continues in a batch slot from here
                  while True:
                      if slot is None:
-+                        # STRATA_MP_STAGED_READ: with every slot busy, read this prompt into the engine's main
++                        # staged read: with every slot busy, read this prompt into the engine's main
 +                        # session first (BREAD, no slot) and adopt it the moment a slot frees (BADOPT).  One staged
 +                        # read at a time: while it exists, other admissions wait for it (it is first in line).
 +                        if (staged_enabled and staged_ready is None and self.mp_staged is None

@@ -1,7 +1,7 @@
 import json
 import numpy as np
 
-TV = {1: 39.96, 2: 43.21, 3: 48.39, 4: 53.68, 5: 59.40, 6: 66.00, 7: 74.66, 8: 80.34}   # ms per verify window, gfx1151 IQ3_S (STRATA_SPEC_T_CYCLE run)
+TV = {1: 39.96, 2: 43.21, 3: 48.39, 4: 53.68, 5: 59.40, 6: 66.00, 7: 74.66, 8: 80.34}   # ms per verify window, gfx1151 IQ3_S (a fixed-seed measurement run)
 HOST = 0.07
 PROD = {"chat_explain": (2.39, 43.33, 2.38, 43.97), "code_py": (2.27, 43.32, 2.22, 42.72), "code_cpp": (2.11, 40.60, 2.05, 39.93),
         "math": (2.99, 52.38, 2.95, 52.29), "summarize": (2.81, 48.25, 2.75, 48.06), "json_extract": (3.25, 53.91, 3.22, 54.22),

@@ -592,9 +592,6 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
             dhead_type_ = head->type();
             if (q4_head_ && !make_q4_head(err)) return false;
-            if (dhead_type_ == 14 && strata::kernels::native_q6_k_packed_enabled())   // STRATA_Q6_PACKED=1
-                strata::kernels::native_q6_k_pack(dhead_, (int) (row_bytes / 210) * 256, (int) n_dvocab_,
-                                                  "MTP draft head");
         }
     }
     // No subset: the draft head is the main head, so its width is the whole vocabulary (and today's allocation).

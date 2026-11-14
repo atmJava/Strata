@@ -67,9 +67,8 @@ with the switch named beside it.
 | --- | --- |
 | have only Pascal / Volta NVIDIA cards (and no AMD card it can use) | uses them, with the CUDA 12 engine |
 | name the card: `START-HERE.bat --setup --gpu 1`, or `--gpus 0,1` with a newer card | uses it; the model gets the CUDA 12 engine |
-| `--cuda 12` (or `STRATA_CUDA=12`) | the CUDA 12 engine for this model, on any card |
+| `--cuda 12` | the CUDA 12 engine for this model, on any card |
 | `--cuda 13` | the CUDA 13 engine even with an older card (a warning: it has no code for that card) |
-| `STRATA_EXPERIMENTAL_SM60=1` | the older cards are listed as usable |
 
 The choice is kept in the model's config (`"cuda": 12`). Starts and `UPDATE.bat` keep it, and other models keep their own engine.
 Setting the model up again chooses again (add `--cuda 12` to keep a forced choice). A Pascal or Volta card added to a model at a
@@ -94,7 +93,7 @@ cmake -S . -B build-cuda12 -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF -DST
 cmake --build build-cuda12 --target strata -j
 ```
 
-Setup does the same when it compiles: it looks for the newest CUDA 12.x toolkit. `STRATA_NVCC=<path to nvcc>` picks one. On
+Setup does the same when it compiles: it looks for the newest CUDA 12.x toolkit. On
 glibc 2.43 use 12.8 ([TROUBLESHOOTING.md](TROUBLESHOOTING.md)). On GCC 12.3 with nvcc (openEuler 24.03, CUDA 12.8) one report
 needed `-D_BITS_OPT_RANDOM_H` added to the host flags (#1074, not reproduced here).
 
@@ -126,15 +125,16 @@ tensor-core sums round differently.
 
 ## Tesla P100 (sm_60)
 
-On a Tesla P100 the engine turns on seven changes that alter only how the work is scheduled, so answers stay bit for bit the
-same: the adaptation, side-mixer, folded-wait, B6, fused-decode and up-projection defaults in
-[DETAILS.md](DETAILS.md#rtx-30-series-sm_86-and-tesla-p100-sm_60-bitwise-decode-switches-on-by-default). The set is used when
-every visible card has compute capability 6.0; the code chooses it from the compute capability.
+On a Tesla P100 the engine used to turn on a set of scheduling changes that altered only how the work was scheduled, so
+answers stayed bit for bit the same. Those sets and their switches are gone; the code chooses the scheduling path from the
+compute capability. The measured set is in
+[DETAILS.md](DETAILS.md#rtx-30-series-sm_86-and-tesla-p100-sm_60-what-the-code-selects).
 
 ## Pascal GP100: a Q8_0 decode kernel (opt-in)
 
 GP100 (P100, PH402) is the one Pascal chip without `__dp4a`. Its dense projections read their weights at 40-80 GB/s of about
-730, decoding K- and i-quant blocks one int at a time. Two opt-in changes, both measured on a PH402 only:
+730, decoding K- and i-quant blocks one int at a time. Two changes were measured on a PH402 only; the switches below are
+history and the code chooses the path:
 
 - **`STRATA_Q8_SM60=1`** packs every Q8_0 dense matrix and the head into the planes of `STRATA_Q8_PACKED` and runs them on
   `src/kernels/cuda/q8_sm60.cuh`: a warp per row, 16-byte weight loads, activations copied once per workgroup into shared memory,
@@ -156,8 +156,8 @@ Upstream's `tools/q8_sm60_check.cu` checked the kernel against a CPU reference o
 
 ## Tesla P40 (sm_61): what was measured and changed
 
-Three things run differently on compute capability 6.1 by default and a fourth is opt-in. Each gives the same bits as what it
-replaces.
+Three things run differently on compute capability 6.1 by default and a fourth was measured as an option. Each gives the same
+bits as what it replaces; the switches are history.
 
 | Change | What it replaces | Switch |
 | --- | --- | --- |
@@ -166,9 +166,9 @@ replaces.
 | The interleaved small-batch matvec with a P40 table (`kIlRows_61`) | `native_mmvq` | on; `STRATA_SM61_TABLE=0` (or `STRATA_MMVQ_IL=0`) |
 | The large dense GEMMs as `cublasSgemm` on FP32 copies of the FP16 operands | cuBLAS's FP16-operand kernels (4.3 TFLOPS instead of 7.6 for most chunk sizes) | **opt-in**, `STRATA_DENSE_F32=1` |
 
-The GEMM route is opt-in because its equality is a property of the cuBLAS build, not of the code. It was measured with cuBLAS
-12.4.5.8 only. Run `gemm_f32_parity` (a build with `-DSTRATA_BUILD_TESTS=ON`; exit 0 = every size bitwise) with your toolkit's
-library before you set it.
+The GEMM route was measured as an option because its equality is a property of the cuBLAS build, not of the code. It was
+measured with cuBLAS 12.4.5.8 only. Run `gemm_f32_parity` (a build with `-DSTRATA_BUILD_TESTS=ON`; exit 0 = every size
+bitwise) with your toolkit's library before you rely on it.
 
 The fast GR path was slower on the P40 below 5 tokens, and the CPU share and the overlapped adaptation gave nothing there.
 

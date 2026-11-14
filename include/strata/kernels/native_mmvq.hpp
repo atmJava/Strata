@@ -97,7 +97,6 @@ void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
 /// followed by a d plane (n_out x n_in / 32 fp16), the same bytes (34 per 32 values). A registered matrix's
 /// native_q8_0_mmvq calls (keyed by its GGUF-layout device pointer, which stays valid for the prompt path) read the
 /// packed copy instead; every output is bitwise equal to the GGUF-layout kernels.
-bool native_q8_0_packed_enabled();
 bool native_q8_0_packed_eligible(int n_in, int n_out);
 void native_q8_0_pack_host(const void* gguf_blocks, void* out, int n_in, int n_out);
 void native_q8_0_packed_register(const void* gguf_weights, const void* packed, int n_in, int n_out);
@@ -107,7 +106,6 @@ void native_q8_0_packed_unregister(const void* gguf_weights);
 /// scales / d planes - that native_q6_k_mmvq calls on `weights` read instead (bitwise equal outputs). The copy is
 /// owned here: native_q6_k_pack builds it from the device matrix (false: not eligible or failed; nothing changes),
 /// native_q6_k_unpack frees it.
-bool native_q6_k_packed_enabled();
 bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what);
 void native_q6_k_unpack(const void* weights);
 

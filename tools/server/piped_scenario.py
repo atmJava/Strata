@@ -2,7 +2,7 @@
 """Coexistence scenario: one stream decodes while another reads a cold ~127K-token prompt.
 
 This is the scenario the concurrent prompt read exists for, and the shape the production-shape
-A-B-A of STRATA_PIPED_CONCURRENT has to be measured in (L-015: on an otherwise idle box 97% of the
+A-B-A of the piped-concurrency behaviour has to be measured in (L-015: on an otherwise idle box 97% of the
 concurrent reads helped nobody, with a second stream alive that falls to 46% and the slots advance a
 median of 57 rows per read - so switching the gate on an idle box measures the idle box, not the gate).
 

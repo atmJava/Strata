@@ -1,6 +1,6 @@
 """A/B two engine builds or environments on one config: restart the server per arm, alternate arms over rounds.
 
-    python tools/ab_engine.py strata-q2_0.json A:exe=/path/a B:exe=/path/b,STRATA_EXP_MODE=0 [--rounds 3]
+    python tools/ab_engine.py strata-q2_0.json A:exe=/path/a B:exe=/path/b,an environment setting=0 [--rounds 3]
 
 An arm is NAME:key=value,...; `exe` replaces the config's engine, `xargs` appends ';'-separated engine arguments,
 every other key is set in the engine's environment.  Each round starts the server once per arm (the arms' order alternates), warms it up with one short

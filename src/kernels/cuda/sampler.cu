@@ -1029,13 +1029,6 @@ spec_verify_merge_kernel(const int2* __restrict__ cand, int n_blocks, int n_voca
     }
 }
 
-// The split top_k runs wherever it applies; the one-block kernel is the captured-stream fallback.
-enum class SampledPath { Split, OneBlock };
-
-bool gumbel_env() { return false; }
-
-SampledPath sampled_path() { return SampledPath::Split; }
-
 // A stream being captured into a graph must not reach `split_scratch` (cudaMalloc): it
 // gets the one-block kernel, which needs no memory of its own.  The legacy stream cannot be captured.
 bool stream_capturing(void* stream) {
@@ -1106,7 +1099,6 @@ int2* split_scratch(void* stream, size_t entries) {
 void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* history, int history_len,
                    const SamplerParams& p_in, int* out, void* stream) {
     SamplerParams p = p_in;
-    p.gumbel = p_in.gumbel || gumbel_env();            // the target's pick; greedy rows never read it
     if (n_tokens <= 0 || n_vocab <= 0) return;
     if (p.penalty_last_n > 0 && (history == nullptr || history_len <= 0)) {
         std::fprintf(stderr, "sample_tokens: penalty_last_n %d needs a history (got %p, len %d)\n",
@@ -1129,8 +1121,7 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
         const int k = sampled_k(p.top_k, n_vocab);
         const int n_blocks = (n_vocab + kSplitBlockSpan - 1) / kSplitBlockSpan;
         int2* scratch = nullptr;
-        if (sampled_path() == SampledPath::Split && n_blocks <= kSplitMaxBlocks && n_tokens <= kSplitMaxRows &&
-            !stream_capturing(stream))
+        if (n_blocks <= kSplitMaxBlocks && n_tokens <= kSplitMaxRows && !stream_capturing(stream))
             // sized for 16 rows and 64 entries at least, so a verify window or a wider top_k does not regrow it
             scratch = split_scratch(stream, (size_t) (n_tokens > 16 ? n_tokens : 16) * n_blocks * kSelMax);
         if (scratch != nullptr) {
@@ -1172,7 +1163,7 @@ size_t coupled_draft_scratch_bytes(int nv) {
 void coupled_draft_stage(const SamplerParams* mapped_params, const int32_t* mapped_hist, SamplerParams* params,
                          int32_t* ring, int cap, void* stream) {
     coupled_stage_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(mapped_params, mapped_hist, params, ring, cap,
-                                                               gumbel_env() ? 1 : 0);
+                                                               0);
     coupled_check("coupled_draft_stage");
 }
 
@@ -1211,9 +1202,7 @@ static bool sample_tokens_spec_impl(const float* logits, int n_tokens, int n_voc
     if (p.penalty_last_n > 0 && (history == nullptr || history_len <= 0)) return false;
     const int k = sampled_k(p.top_k, n_vocab);
     const int n_blocks = (n_vocab + kSplitBlockSpan - 1) / kSplitBlockSpan;
-    if (sampled_path() != SampledPath::Split || n_blocks > kSplitMaxBlocks || n_tokens > kSplitMaxRows ||
-        stream_capturing(stream))
-        return false;
+    if (n_blocks > kSplitMaxBlocks || n_tokens > kSplitMaxRows || stream_capturing(stream)) return false;
     int2* scratch = split_scratch(stream, (size_t) (n_tokens > 16 ? n_tokens : 16) * n_blocks * kSelMax);
     if (scratch == nullptr) return false;
     sampler_split_part_kernel<<<dim3((unsigned) n_blocks, (unsigned) n_tokens), kSplitWarps * 32, 0,

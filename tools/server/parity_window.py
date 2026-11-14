@@ -12,7 +12,7 @@ this box a difference in draft acceptance is often the first sign that something
 
 Read the result honestly:
   - Run it in the gate config the upstream docs ask for (single slot, --pcie-frac 0, adaptive off,
-    STRATA_IQ_MT_MIN=1): in this box's production shape (4 slots, --pcie-frac 0.31, adaptive) the
+    one multi-token kernel choice): in this box's production shape (4 slots, --pcie-frac 0.31, adaptive) the
     output is not reproducible at all, so a hash difference there proves nothing.
   - Run it several times per arm, including a cold start, and report the count (e.g. 9 of 10), not a
     single pair.

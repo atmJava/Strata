@@ -1,6 +1,7 @@
-# EXPDEC: the verify window's routed experts with the group's activations in shared memory (`STRATA_EXPDEC=1`, opt-in)
+# EXPDEC: the verify window's routed experts with the group's activations in shared memory (retired)
 
-Opt-in: `STRATA_EXPDEC=1`. Unset (or `0`) the engine launches exactly the kernels it launched before. CUDA only; the
+The EXPDEC kernels are gone from the engine: the code launches the kernels it launched before them. The switch and its
+tuning variables below are history, kept with their measurements. CUDA only; the
 output is bitwise the default kernels' (see "Bit for bit" below; `expdec_bench` checks it).
 
 ## What it changes

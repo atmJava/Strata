@@ -1,8 +1,8 @@
 """tools/q8_dense_gguf.py - a copy of a model whose natively served dense projections and head are Q8_0, for the
-Pascal GP100 decode kernel (STRATA_Q8_SM60=1, docs/OLDER_GPUS.md).
+Pascal GP100 decode kernel (docs/OLDER_GPUS.md).
 
 The GSQ-RCO packs keep those matrices in K- and i-quants (Q6_K, IQ4_XS, Q4_K, IQ3_S, Q5_K, Q2_0, IQ4_NL), whose
-decode is what a GP100 die is slowest at; STRATA_Q8_SM60 only runs Q8_0 matrices. Every shard of the model is
+decode is what a GP100 die is slowest at; the GP100 decode kernel only runs Q8_0 matrices. Every shard of the model is
 handled, because a model may keep dense matrices in more than one (Swift 1.5 IQ3_XXS: 78 in shard 1, 223 in
 shard 2). A shard that holds any of them is written as:
 
@@ -20,7 +20,7 @@ A shard that holds none is hard-linked into the output folder (--copy copies it)
     python tools/q8_dense_gguf.py <folder>/<model>-00001-of-00002.gguf <new folder> [--copy]
 
 Any shard of the model may be named. Then point the config's --native and --ple-gguf at the new folder and run the
-engine with STRATA_Q8_SM60=1.
+engine: the GP100 kernel is chosen from the card's architecture.
 """
 from __future__ import annotations
 
