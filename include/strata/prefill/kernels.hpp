@@ -30,7 +30,7 @@ void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float*
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
                       float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr,
                       int64_t ldx = 0, bool f16img = false, bool reread_r = true);
-/// S23 (STRATA_CVEC_FUSE=1): gr_write, then the control vector (v_l = layer l's direction row, *s_l its scale,
+/// S23: gr_write, then the control vector (v_l = layer l's direction row, *s_l its scale,
 /// *on the request flag, mode 0 project / 1 add; cvec_kernel's arithmetic), then gr_norm_rs with the next half's
 /// norm - one pass over R, the same bits as the three kernels.
 void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* v_l,
@@ -40,11 +40,6 @@ void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t 
 void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream, uint16_t* lo16_lo = nullptr);
 /// The BF16-weight GEMMs' activation image (gr_* kernels, to_bf16) in FP16 instead of BF16, on the current device.
 void set_act_f16(bool on);
-/// STRATA_F16_RANGE: count what the activation images convert to FP16 on this device (hf_sat): the largest |value| and
-/// how many were beyond 65504 or NaN.  f16_range_read returns them (and resets when asked); false if the device
-/// refused the copy.
-void set_f16_range(bool on);
-bool f16_range_read(float& max_abs, unsigned long long& over, bool reset);
 /// mixed[t, d] = mean_c xn[t, c, d] * sigmoid(gated[t, c, d]); FP32, BF16 and FP16 (either image may be null).
 void gr_mix(const float* xn, const float* gated, float* mixed, uint16_t* mixed16, int64_t T, void* stream,
             uint16_t* mixed_h = nullptr, uint16_t* mixed16_lo = nullptr);
@@ -63,17 +58,7 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
 /// out projection reads); y is FP32 scratch.
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
                     const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream,
-                    int64_t ld16 = 0);   // ld16: y16's row stride (0 = 6144; S23 STRATA_PF_PAD pads it)
-/// The kernels behind gdn_recurrence, for the parity test: 0 = the column-split kernels + the norm kernel (or the
-/// one-block-per-head kernel under STRATA_GDN_REC_HEADS), 1 = four lanes per column (no barrier per token) + the grid-stride norm, 2 = the
-/// one-block-per-head kernel (its fused norm rounds differently).  0 and 1 give the same bits.  On HIP, 0 and 1 run the opt-in
-/// chunked WMMA recurrence instead (gfx11, STRATA_GDN_CHUNKED=1, 64 tokens and more: other bits, see docs/AMD_HIP.md).
-/// SYCL only: 6 = the Xe sub-group recurrence (16-lane sub-groups, one barrier per token) + the norm kernel, the same
-/// bits as 0 on an Arc A770; gdn_recurrence takes it by default on Alchemist (STRATA_GDN_XE=0 off, =1 any Intel GPU).
-void gdn_recurrence_variant(int variant, float* state, const float* h, const float* gate, const float* beta,
-                            const float* z, const float* gamma, float eps, float* y, uint16_t* y16, int64_t T,
-                            void* stream, int64_t ld16 = 0);
-
+                    int64_t ld16 = 0);   // ld16: y16's row stride (0 = 6144)
 // ---- MoE
 /// softmax over 512, top-10 (ties to the lower id), weights renormalised over the ten (the native router).
 void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream);
@@ -94,7 +79,7 @@ void gather_rows16(const uint16_t* x16, const int32_t* src, uint16_t* dst16, int
 /// bo[t, :] = shared[t, :] * sigmoid(sg[t]) + sum_k w[t, k] * D[slot[t, k], :]
 void moe_combine(const float* D, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
                  int64_t T, void* stream);
-/// Layer-major prefill (STRATA_PREFILL_LAYER_MAJOR=1): acc[t, :] = shared[t, :] * sigmoid(sg[t]) - the shared expert's
+/// Layer-major prefill: acc[t, :] = shared[t, :] * sigmoid(sg[t]) - the shared expert's
 /// part of moe_combine, written before the routed experts are known.
 void moe_shared_init(const float* shared, const float* sg, float* acc, int64_t T, void* stream);
 /// Layer-major prefill: one expert group's rows added into the super-chunk's accumulator, per token in a fixed order

@@ -37,11 +37,6 @@ bool conversation_kv_copy(const QsaState& from, const QsaState& to, const ModelG
 // restore followed by a rewind to a checkpoint.
 bool conversation_kv_restore_prefix(const ConversationKv& image, const QsaState& state, const ModelGeometry& g,
                                     int64_t captured, int64_t upto, bool include_index, std::string& error);
-// Diagnostic read-back after a synchronized restore. Uses 64 KiB of stack
-// workspace, compares authoritative bytes and resident draft-ring pages, and
-// fingerprints the authoritative payload only. Never changes model state.
-bool conversation_kv_verify(const ConversationKv& image, const QsaState& state, const ModelGeometry& g,
-                            int64_t upto, bool include_index, uint64_t& fingerprint, std::string& error);
 // Disk save without a host copy: the layer's authoritative K/V as a streamed source (same bytes and metadata as
 // conversation_kv_save).  Caller synchronizes the device first and keeps the state untouched while it is read.
 bool conversation_kv_source(SessionKvSource& source, const QsaState& state, const ModelGeometry& g,

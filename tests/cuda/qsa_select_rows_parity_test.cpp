@@ -1,9 +1,9 @@
 // tests/cuda/qsa_select_rows_parity_test.cpp - the QSA block-score selection's two paths, bit for bit, on one input.
 //
-//   default dispatch            qsa_block_scores (no active-block count, <= 8 queries): block_scores_multi_kernel,
-//                               or block_scores_halve_kernel on a Turing card once the opt-in STRATA_SM75_PERF=1
-//                               series is asked for (sm75_series.hpp)
-//   STRATA_QSA_ROWS=1           block_scores_rows_kernel (QSAROWS, docs/QSAROWS.md), calls of up to 4 queries
+//   production dispatch         qsa_block_scores (no active-block count, <= 8 queries): block_scores_multi_kernel,
+//                               or block_scores_halve_kernel on a Turing card (the series is the default there,
+//                               sm75_series.hpp)
+//   the rows entry point        qsa_block_scores_rows (QSAROWS, docs/QSAROWS.md), calls of up to 4 queries
 //
 // Both must produce the same scores bytes and the same top-k ids bytes (the ids the decoder actually consumes), and
 // every score must be finite.  The same synthetic input is generated on the device from a fixed splitmix64 seed:
@@ -11,11 +11,10 @@
 // three (context, capacity) pairs - 4096/65536, 32768/262144 (capacity twice the context, as verify.cpp reserves it)
 // and 2047/8192 (n_kv <= idx_top_k: the identity selection, plus a partial tail block that takes the +1e9 rule).
 //
-// WHY TWO PROCESSES.  qsa_select.cu reads STRATA_QSA_ROWS, STRATA_SCORES_HALVE and STRATA_SCORES_MULTI once into
-// function-local statics (`static const bool rows_env = [] ...`), so one process can never run both dispatch arms:
-// whichever call comes first freezes the choice.  The driver therefore re-executes itself twice, once with the
-// variable unset and once with STRATA_QSA_ROWS=1, each child dumps its scores/ids to a file, and the driver compares
-// the files.  The driver itself never calls the selector, so a variable in the caller's environment cannot bias it.
+// WHY TWO PROCESSES.  The two arms launch different kernels through counters, and the driver keeps each child's device
+// state separate from the comparison.  The driver re-executes itself twice, once for the production dispatch and once
+// for the rows entry point, each child dumps its scores/ids to a file, and the driver compares the files.  No
+// environment variable selects the arm: the rows child calls the entry point directly.
 //
 // A host-only shape defense needs no GPU and runs first: qsa_decode_attn_scratch_floats' n_chunks arithmetic at the
 // caps 2051 / 131072 / 262144 (+ chunk boundaries), and the rows entry point's documented refusal (nq > 4, another
@@ -127,8 +126,8 @@ bool shape_defense() {
                         (long long) chunks, (unsigned long long) got, (double) got * 4.0 / (1024.0 * 1024.0), c.why);
         }
     }
-    // What makes the env dispatch arm safe: the rows entry point refuses geometries it cannot do, without launching,
-    // and the caller then falls through to the halve/multi kernel.  These calls never reach CUDA.
+    // What makes the rows entry point safe: it refuses geometries it cannot do, without launching, and the caller
+    // then falls through to the halve/multi kernel.  These calls never reach CUDA.
     if (!k::qsa_block_scores_rows(nullptr, nullptr, nullptr, nullptr, 0, 1024, s, nullptr, nullptr)) {
         std::fprintf(stderr, "FAIL shape: qsa_block_scores_rows(nq=0) should succeed as a no-op\n");
         ok = false;
@@ -276,37 +275,12 @@ int64_t max_blocks_for(int64_t cap_ctx) { return cap_ctx / kBlock + 2; }
 
 int64_t widths_for(int64_t ctx, int nq, const k::QsaShapes& s);
 
-const char* env_state(const char* name, char* buf, size_t n) {
-    const char* v = std::getenv(name);
-    if (v == nullptr) {
-        std::snprintf(buf, n, "%s unset", name);
-    } else {
-        std::snprintf(buf, n, "%s=%s", name, v);
-    }
-    return buf;
-}
-
 int run_child(bool rows_path, const std::string& out_path, int device) {
 #if !defined(__linux__) && !defined(__APPLE__)
     (void) rows_path; (void) out_path; (void) device;
     std::puts("SKIP: this test's two-process dispatch check uses fork/exec (POSIX only)");
     return 77;
 #else
-    // Before any qsa_select call: the dispatch and the two Turing switches are read once per process.
-    //
-    // STRATA_SCORES_MULTI=0 would take the rows branch out of play entirely (it sits inside `scores_multi_on()`), and
-    // then the "rows" child would quietly run the plain per-query kernel: the comparison would pass without ever
-    // comparing the kernel under test.  Clear it; the multi scorer's default is on.
-    unsetenv("STRATA_SCORES_MULTI");
-    // STRATA_SCORES_HALVE=0 would make the "default" arm the multi kernel even on Turing.  A regression test of the
-    // default must not be redirected by the A/B switch it is checking around: clear it, so the card's own default
-    // (halve on Turing, multi elsewhere) runs.
-    unsetenv("STRATA_SCORES_HALVE");
-    if (rows_path) {
-        setenv("STRATA_QSA_ROWS", "1", 1);
-    } else {
-        unsetenv("STRATA_QSA_ROWS");
-    }
     int devices = 0;
     const cudaError_t count_err = cudaGetDeviceCount(&devices);
     if (count_err != cudaSuccess || devices == 0) {
@@ -329,19 +303,15 @@ int run_child(bool rows_path, const std::string& out_path, int device) {
     const int64_t cap_width = k::qsa_selection_width(kTopkMaxCells, s);   // 2051 for the artifact geometry
     char dispatch[160];
     if (rows_path) {
-        std::snprintf(dispatch, sizeof(dispatch), "STRATA_QSA_ROWS=1 -> block_scores_rows_kernel (QSAROWS)");
+        std::snprintf(dispatch, sizeof(dispatch), "rows entry point -> block_scores_rows_kernel (QSAROWS)");
     } else {
-        // HEAD's default: the multi kernel.  The Turing halve kernel is part of the opt-in STRATA_SM75_PERF series
-        // (sm75_series.hpp), so it runs here only when that is set - the counters below say which one actually ran.
-        std::snprintf(dispatch, sizeof(dispatch), "default dispatch -> %s",
-                      strata::sm75_default(prop.major, prop.minor) ? "block_scores_halve_kernel (STRATA_SM75_PERF on)"
-                                                                   : "block_scores_multi_kernel (HEAD default)");
+        // the production dispatch: the multi kernel, or the Turing halve kernel (the series is the default on a 7.5)
+        std::snprintf(dispatch, sizeof(dispatch), "production dispatch -> %s",
+                      strata::sm75_default(prop.major, prop.minor) ? "block_scores_halve_kernel (Turing series)"
+                                                                   : "block_scores_multi_kernel");
     }
-    char e1[80], e2[80], e3[80];
-    std::printf("[child:%s] device %d (%s, %d.%d), %s; %s, %s, %s (STRATA_SCORES_MULTI and "
-                "STRATA_SCORES_HALVE cleared)\n", rows_path ? "rows" : "default", device, prop.name, prop.major,
-                prop.minor, dispatch, env_state("STRATA_QSA_ROWS", e1, sizeof(e1)),
-                env_state("STRATA_SCORES_HALVE", e2, sizeof(e2)), env_state("STRATA_SM75_PERF", e3, sizeof(e3)));
+    std::printf("[child:%s] device %d (%s, %d.%d), %s\n", rows_path ? "rows" : "default", device, prop.name,
+                prop.major, prop.minor, dispatch);
     std::fflush(stdout);
 
     // One allocation of the largest case's buffers, reused for every case.  ~32 MiB of pooled keys dominates.
@@ -442,21 +412,29 @@ int run_child(bool rows_path, const std::string& out_path, int device) {
             // cannot tell them apart - a dispatch that silently fell back to the default kernel would still match.
             const long long rows0 = k::qsa_rows_launches(), halve0 = k::qsa_halve_launches();
             const long long multi0 = k::qsa_multi_launches();
-            k::qsa_block_scores(d_pooled, d_dead, d_q, d_steps, nq, mb, s, d_scores, nullptr);
+            if (rows_path) {
+                // the entry point directly: no environment variable selects an arm any more
+                if (!k::qsa_block_scores_rows(d_pooled, d_dead, d_q, d_steps, nq, mb, s, d_scores, nullptr)) {
+                    std::fprintf(stderr, "FAIL: qsa_block_scores_rows refused case %lld (T=%d)\n",
+                                 (long long) case_index, nq);
+                    return 1;
+                }
+            } else {
+                k::qsa_block_scores(d_pooled, d_dead, d_q, d_steps, nq, mb, s, d_scores, nullptr);
+            }
             const long long rows1 = k::qsa_rows_launches(), halve1 = k::qsa_halve_launches();
             const long long multi1 = k::qsa_multi_launches();
             // exactly one scorer per case, and the arm's own one: the three are bit-identical by design, so a dispatch
             // that silently fell back would still match byte for byte - these counters are the only evidence.
             const bool rows_arm = rows_path;
-            const bool want_halve = !rows_path && strata::sm75_default(prop.major, prop.minor) &&
-                                    std::getenv("STRATA_SCORES_HALVE") == nullptr;
+            const bool want_halve = !rows_path && strata::sm75_default(prop.major, prop.minor);
             const bool ok = rows_arm   ? (rows1 == rows0 + 1 && halve1 == halve0 && multi1 == multi0)
                           : want_halve ? (halve1 == halve0 + 1 && rows1 == rows0 && multi1 == multi0)
                                        : (multi1 == multi0 + 1 && rows1 == rows0 && halve1 == halve0);
             if (!ok) {
                 std::fprintf(stderr, "FAIL: %s case %lld took %lld rows / %lld halve / %lld multi launch(es); expected "
-                                     "%s\n", rows_path ? "STRATA_QSA_ROWS=1" : "default dispatch", (long long) case_index,
-                             rows1 - rows0, halve1 - halve0, multi1 - multi0,
+                                     "%s\n", rows_path ? "rows entry point" : "production dispatch",
+                             (long long) case_index, rows1 - rows0, halve1 - halve0, multi1 - multi0,
                              rows_arm ? "exactly one rows launch" : want_halve ? "exactly one halve launch"
                                                                               : "exactly one multi launch");
                 return 1;
@@ -663,7 +641,7 @@ bool check_ids(const Dump& d, size_t ci, std::string& why) {
 }
 
 int run_driver(int device, bool keep, const char* argv0) {
-    std::puts("qsa_select_rows_parity: default dispatch against STRATA_QSA_ROWS=1, scores and top-k ids bit for bit");
+    std::puts("qsa_select_rows_parity: production dispatch against the rows entry point, scores and top-k ids bit for bit");
     bool ok = shape_defense();
 
     int devices = 0;
@@ -754,7 +732,7 @@ int run_driver(int device, bool keep, const char* argv0) {
     }
     rc = spawn("rows", dump_rows);
     if (rc != 0) {
-        std::fprintf(stderr, "FAIL: the STRATA_QSA_ROWS=1 child exited %d\n", rc);
+        std::fprintf(stderr, "FAIL: the rows-entry-point child exited %d\n", rc);
         (void) rmdir(dir);
         return rc == 77 ? 77 : 2;
     }
@@ -902,7 +880,7 @@ int run_driver(int device, bool keep, const char* argv0) {
                              "dumps kept: %s %s\n", bad_cases, dump_default.c_str(), dump_rows.c_str());
         return 1;
     }
-    std::printf("qsa_select_rows_parity: PASS - default and STRATA_QSA_ROWS=1 are bit-identical on %d cases "
+    std::printf("qsa_select_rows_parity: PASS - production dispatch and the rows entry point are bit-identical on %d cases "
                 "(scores and top-k ids)\n", a.h.n_cases);
     if (!keep) {
         std::remove(dump_default.c_str());
@@ -941,7 +919,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(a, "--keep") == 0) keep = true;
         else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
             std::printf("usage: %s [--device N] [--keep]\n"
-                        "  default dispatch vs STRATA_QSA_ROWS=1: scores and top-k ids, memcmp'd.\n", argv[0]);
+                        "  production dispatch vs the rows entry point: scores and top-k ids, memcmp'd.\n", argv[0]);
             return 0;
         } else {
             std::fprintf(stderr, "usage: %s [--device N] [--keep]\n", argv[0]);

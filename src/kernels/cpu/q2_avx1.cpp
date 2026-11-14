@@ -6,8 +6,7 @@
 // scale and the chunk scale, minus the weight scale times the chunk's `hx`.  128-bit integer lanes (maddubs and
 // madd are SSSE3/SSE2), 256-bit float accumulation with mul+add (no FMA), fp16 scales converted in software (no
 // F16C).  The legacy row kernel keeps q2_avx2.cpp's lane pairing and reduction tree exactly, so the only
-// difference from an AVX2 CPU is its FMA becoming mul+add (last bits, unavoidable without FMA); the bit-plane
-// kernel's float summation order is its own (last bits, as documented for the AVX-2 one), and every token's
+// difference from an AVX2 CPU is its FMA becoming mul+add (last bits, unavoidable without FMA), and every token's
 // operations are the same whatever the window width (#152).
 //
 // Compiled with -msse4.2 -mavx -mno-avx2 -mno-fma -mno-f16c (CMakeLists.txt, the iq_avx1.cpp pattern) and called
@@ -122,96 +121,6 @@ void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
     }
 }
 
-// ---- the bit-plane row kernel (STRATA_Q2_BITPLANE=1), 128-bit lanes: one 64-value block at a time instead of
-// a pair per 256-bit register.  The integer part is exact; the float summation order is this kernel's own (the
-// same statement as for the AVX-2 one), and every row reduces with the same tree alone or in a group (#152).
-template <int NT>
-inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m128* acc) {
-    for (int t = 0; t < NT; ++t) { acc[2 * t] = _mm_setzero_ps(); acc[2 * t + 1] = _mm_setzero_ps(); }
-    const __m128i m3 = _mm_set1_epi8(3);
-    const __m128i ones = _mm_set1_epi16(1);
-    for (int p = 0; p < npairs; ++p) {
-        const uint8_t* blk = row + (size_t) p * 36;
-        for (int h = 0; h < 2; ++h) {
-            uint16_t dh;
-            std::memcpy(&dh, blk + h * 18, 2);          // the block's fp16 scale: bytes 0..1 (block 1 at +18)
-            const __m128 d = _mm_set1_ps(h2f(dh));
-            const __m128i c = _mm_loadu_si128((const __m128i*) (blk + 2 + h * 18));   // its 16 code bytes
-            const __m128i c0 = _mm_and_si128(c, m3);
-            const __m128i c1 = _mm_and_si128(_mm_srli_epi16(c, 2), m3);
-            const __m128i c2 = _mm_and_si128(_mm_srli_epi16(c, 4), m3);
-            const __m128i c3 = _mm_and_si128(_mm_srli_epi16(c, 6), m3);
-            for (int t = 0; t < NT; ++t) {
-                const int8_t* q = a[t]->qp + (size_t) p * 128 + h * 16;
-                __m128i s = _mm_maddubs_epi16(c0, _mm_load_si128((const __m128i*) q));
-                s = _mm_add_epi16(s, _mm_maddubs_epi16(c1, _mm_load_si128((const __m128i*) (q + 32))));
-                s = _mm_add_epi16(s, _mm_maddubs_epi16(c2, _mm_load_si128((const __m128i*) (q + 64))));
-                s = _mm_add_epi16(s, _mm_maddubs_epi16(c3, _mm_load_si128((const __m128i*) (q + 96))));
-                const __m128i i32 = _mm_sub_epi32(_mm_madd_epi16(s, ones),
-                                                  _mm_load_si128((const __m128i*) (a[t]->psum + p * 8 + h * 4)));
-                const __m128 v = _mm_mul_ps(_mm_cvtepi32_ps(i32),
-                                            _mm_load_ps(a[t]->pscale + p * 8 + h * 4));
-                __m128& x = acc[2 * t + h];
-                x = _mm_add_ps(x, _mm_mul_ps(d, v));
-            }
-        }
-    }
-}
-
-inline float reduce1(__m128 a, __m128 b) {   // ((v0+v1)+(v2+v3)) + ((v4+v5)+(v6+v7)), the AVX-2 kernel's tree
-    __m128 ha = _mm_hadd_ps(a, a);                        // [a0+a1, a2+a3, a0+a1, a2+a3]
-    ha = _mm_add_ss(ha, _mm_movehdup_ps(ha));             // (v0+v1)+(v2+v3)
-    __m128 hb = _mm_hadd_ps(b, b);
-    hb = _mm_add_ss(hb, _mm_movehdup_ps(hb));             // (v4+v5)+(v6+v7)
-    return _mm_cvtss_f32(_mm_add_ss(ha, hb));
-}
-
-template <int NT>
-void rows_bp(const uint8_t* w, size_t row_bytes, int npairs, const ActQ* const* a, float* const* out, int r0, int r1) {
-    for (int r = r0; r < r1; ++r) {
-        __m128 acc[2 * NT];
-        row_bp_acc<NT>(w + (size_t) r * row_bytes, a, npairs, acc);
-        for (int t = 0; t < NT; ++t) out[t][r] = reduce1(acc[2 * t], acc[2 * t + 1]);
-    }
-}
-
-const bool kBitplane = [] {
-    const char* e = std::getenv("STRATA_Q2_BITPLANE");
-    return e != nullptr && e[0] == '1';
-}();
-
-// ActQ::qp / psum / pscale from q and scale: q2_avx2.cpp's bitplane_image, which is already pure SSE2/SSSE3
-// (shuffle_epi8, sad, unpack) - copied rather than shared so q2_avx2.cpp stays untouched.
-void bitplane_image(ActQ& a) {
-    if (a.nchunks % 4 != 0) { a.bp_pairs = 0; return; }
-    const int nblk = a.nchunks / 2;
-    const __m128i shuf = _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
-    const __m128i bias = _mm_set1_epi8((char) 0x80);
-    for (int b = 0; b < nblk; ++b) {
-        const int8_t* q = a.q + b * 64;
-        __m128i s[4];
-        for (int g = 0; g < 4; ++g) {
-            const __m128i v = _mm_loadu_si128((const __m128i*) (q + 16 * g));
-            s[g] = _mm_shuffle_epi8(v, shuf);
-            const __m128i sad = _mm_sad_epu8(_mm_xor_si128(v, bias), _mm_setzero_si128());
-            a.psum[(b >> 1) * 8 + (b & 1) * 4 + g] =
-                _mm_cvtsi128_si32(sad) + _mm_extract_epi16(sad, 4) - 16 * 128;
-        }
-        const __m128i t0 = _mm_unpacklo_epi32(s[0], s[1]), t1 = _mm_unpacklo_epi32(s[2], s[3]);
-        const __m128i t2 = _mm_unpackhi_epi32(s[0], s[1]), t3 = _mm_unpackhi_epi32(s[2], s[3]);
-        int8_t* dst = a.qp + (b >> 1) * 128 + (b & 1) * 16;
-        _mm_store_si128((__m128i*) (dst), _mm_unpacklo_epi64(t0, t1));
-        _mm_store_si128((__m128i*) (dst + 32), _mm_unpackhi_epi64(t0, t1));
-        _mm_store_si128((__m128i*) (dst + 64), _mm_unpacklo_epi64(t2, t3));
-        _mm_store_si128((__m128i*) (dst + 96), _mm_unpackhi_epi64(t2, t3));
-    }
-    for (int c = 0; c < a.nchunks; ++c) {
-        a.pscale[2 * c] = a.scale[c];
-        a.pscale[2 * c + 1] = a.scale[c];
-    }
-    a.bp_pairs = nblk / 2;
-}
-
 }  // namespace
 
 void q2_0_gguf_rows_multi_avx1_legacy(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
@@ -231,24 +140,7 @@ void q2_0_gguf_rows_multi_avx1_legacy(const uint8_t* w, size_t row_bytes, int nb
 
 void q2_0_gguf_rows_multi_avx1(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
                                float* const* out, int r0, int r1) {
-    bool bp = kBitplane && nblocks % 2 == 0;
-    for (int t = 0; t < nt && bp; ++t) bp = a[t]->bp_pairs == nblocks / 2;
-    if (!bp) {
-        q2_0_gguf_rows_multi_avx1_legacy(w, row_bytes, nblocks, a, nt, out, r0, r1);
-        return;
-    }
-    const int np = nblocks / 2;
-    switch (nt) {
-        case 1: rows_bp<1>(w, row_bytes, np, a, out, r0, r1); break;
-        case 2: rows_bp<2>(w, row_bytes, np, a, out, r0, r1); break;
-        case 3: rows_bp<3>(w, row_bytes, np, a, out, r0, r1); break;
-        case 4: rows_bp<4>(w, row_bytes, np, a, out, r0, r1); break;
-        default:
-            for (int t0 = 0; t0 < nt; t0 += 4) {
-                const int k = nt - t0 < 4 ? nt - t0 : 4;
-                q2_0_gguf_rows_multi_avx1(w, row_bytes, nblocks, a + t0, k, out + t0, r0, r1);
-            }
-    }
+    q2_0_gguf_rows_multi_avx1_legacy(w, row_bytes, nblocks, a, nt, out, r0, r1);
 }
 
 void act_quant_q8_1_avx1(const float* x, int n, ActQ& a) {
@@ -287,8 +179,6 @@ void act_quant_q8_1_avx1(const float* x, int n, ActQ& a) {
         a.sum[k] = total;
         a.hx[k] = s * (float) total;
     }
-    if (kBitplane) bitplane_image(a);
-    else a.bp_pairs = 0;
 }
 
 }  // namespace strata::kernels::cpu

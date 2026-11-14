@@ -337,22 +337,7 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
         check(cudaMemcpy(s.mixed.data(), d_mixed, s.mixed.size() * sizeof(float), cudaMemcpyDeviceToHost), "multi read mixed");
         return s;
     };
-    // the split read (STRATA_GR_V3=1) sums in another order than the single-token kernel: equal within float
-    // rounding, not to the bit, so it is compared with a relative tolerance; the default kernels bit for bit
-    static const bool v3 = [] { const char* v = std::getenv("STRATA_GR_V3"); return v != nullptr && std::atoi(v) != 0; }();
-    auto close = [](const std::vector<float>& x, const std::vector<float>& y) {
-        double worst = 0.0, mag = 1e-30;
-        for (size_t i = 0; i < x.size(); ++i) {
-            worst = std::max(worst, (double) std::fabs(x[i] - y[i]));
-            mag = std::max(mag, (double) std::fabs(y[i]));
-        }
-        if (worst > 2e-6 * mag)
-            std::printf("    tolerance: worst %.3e of max |ref| %.3e (rel %.3e), n %zu\n", worst, mag, worst / mag, x.size());
-        return worst <= 2e-6 * mag;
-    };
     auto same = [&](const Snapshot& a, const Snapshot& b) {
-        if (v3)   // `lo` is the default kernels' workspace between down and up; the split read keeps it in shared memory
-            return close(a.r_out, b.r_out) && close(a.rs, b.rs) && close(a.inject, b.inject) && close(a.mixed, b.mixed);
         return std::memcmp(a.r_out.data(), b.r_out.data(), a.r_out.size() * sizeof(float)) == 0 &&
                std::memcmp(a.lo.data(), b.lo.data(), a.lo.size() * sizeof(float)) == 0 &&
                std::memcmp(a.rs.data(), b.rs.data(), a.rs.size() * sizeof(float)) == 0 &&
@@ -447,7 +432,6 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
                 strata::kernels::native_quantize_q8_1(d_mixed, d_ref, N, tt, stream);
                 check(cudaStreamSynchronize(stream), "qfuse sync");
                 if (qx) { cudaGraphExecDestroy(qx); cudaGraphDestroy(qg); }
-                if (v3) { std::printf("  QFUSE: the v3 read writes no q8_1 (%s)\n", wrote ? "WRONG: it says it did" : "ok"); qbad += wrote; break; }
                 check(cudaMemcpy(hq.data(), d_q, (size_t) tt * (N / 32) * 36, cudaMemcpyDeviceToHost), "qfuse read");
                 check(cudaMemcpy(hr.data(), d_ref, (size_t) tt * (N / 32) * 36, cudaMemcpyDeviceToHost), "qfuse ref read");
                 if (!wrote || std::memcmp(hq.data(), hr.data(), (size_t) tt * (N / 32) * 36) != 0) {

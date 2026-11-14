@@ -30,7 +30,7 @@ struct NativeFmt {
     size_t up_off = 0, down_off = 0;    ///< inside the blob
     size_t bytes = 0;                   ///< the whole blob
     size_t act_bytes = 0, h_bytes = 0;  ///< quantized activation sizes (n_embd of gu_act, n_ff of d_act)
-    int layer = -1;                     ///< the layer this format belongs to (set by expert_layout_load; STRATA_ACT_DUMP only)
+    int layer = -1;                     ///< the layer this format belongs to (set by expert_layout_load)
 };
 
 /// Whether this build has the ggml-cpu path.

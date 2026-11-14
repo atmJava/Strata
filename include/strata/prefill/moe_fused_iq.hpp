@@ -1,14 +1,7 @@
 // include/strata/prefill/moe_fused_iq.hpp - #136: the fused int8 prompt experts (moe_fused.hpp) for the native GGUF
 // packs (tools/iq_pack.py: an expert is its raw GGUF slices [gate rows | up rows | down rows], formats per layer in
-// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1. On an sm_75 card the kernels are set up only when the
-// fused path is asked for - STRATA_PF_FUSED=1, or
-// STRATA_PF_FUSED_SM75 set explicitly (their own switch, not the STRATA_SM75_PERF series, whose kernels live in
-// sm75_series.hpp) - and dev_info then sets them up per kernel and prints one banner; an unrequested 7.5 card makes no
-// cudaFuncSetAttribute call and prints nothing, so its default launch path is MMQ, exactly as before.  The switch is
-// read once, at the first dev_info() call.  With STRATA_PF_FUSED=1, the production pack's gate/up IQ3_XXS and down
-// IQ4_NL run where their shapes fit the card's shared memory.  STRATA_PF_FUSED_SM75=1 on its own does NOT enable the
-// fused path: the consumer still asks for STRATA_PF_FUSED.  (Checked per kernel in moe_fused_iq.cu; the pair runs at
-// 2 warps a row when the 4-warp shape does not fit.)  STRATA_PF_FUSED_SM75=0 keeps the MMQ path there.
+// expert_layout().fmt). 本 fork 不再有开关打开它：native 包保持 MMQ，native_supported() 恒为 false，下面的内核只为
+// 让这个译单元继续编译而留着。
 //
 // The grouping on the GPU (fused::group), the per-expert pointers (fused::Batch: a cache slot or a ring slot, no
 // gather) and the launch shape are the Q2_0 path's.  What differs is the load stage: the i-quant blocks are decoded to
@@ -33,7 +26,7 @@ struct NativeGeom {
     size_t up_off = 0, down_off = 0;  ///< inside the blob
 };
 
-/// enabled() (STRATA_PF_FUSED=1 on sm_75), and the kernels cover this gate/up and down pair on this device.
+/// 本 fork 恒为 false：native 包的融合内核没有开关打开，保持 MMQ。
 bool native_supported(int gu_type, int d_type);
 
 /// x [rows][cols] FP32 -> `xa` (act_bytes(rows, cols)): int8 per 32 values in natural order, the native kernels' form.

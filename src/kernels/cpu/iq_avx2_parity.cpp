@@ -6,14 +6,13 @@
 //         IQ3_XXS gate/up rows, IQ4_NL and Q2_0 down rows: every variant
 //         this CPU runs, 1..8 tokens, each token's rows bit for bit the scalar variant's rows for that token alone (so
 //         also the same at every width, #152); the scalar rows against ggml-cpu's vec_dot (Q2_0: a double
-//         reference), rel <= 1e-5; and where the engine's dispatch (native_gu_rows) takes the multi-token kernel from
-//         one token on (native_gu_mt_min), each token's rows the same alone and in a group.
+//         reference), rel <= 1e-5; and where the engine's dispatch (native_gu_rows) takes the multi-token kernel,
+//         each token's rows the same alone and in a group.
 //     iq_avx2_parity --bench [--cpu N] [--nt 1,2,3,4] [--mb 256] [--reps 5] [--pairs iq3_s/iq4_nl,...] [--dispatch]
 //         ms per expert on one thread: each variant, ggml-cpu's per-token dot, and the engine's dispatch
 //         (native_gu_rows, native_down_rows / q2_rows_any) over --mb MB of expert blobs - far more than an L3 holds, so
 //         the weights stream from DRAM as they do in decode.  --dispatch: only the kernels' own dispatch, ggml and the
-//         engine's (the env decides: STRATA_IQ256_GATHER, STRATA_NO_AVXVNNI, STRATA_IQ_MT_MIN), for A/B runs against
-//         another build.  --cpu pins the thread to that logical CPU.
+//         engine's, for A/B runs against another build.  --cpu pins the thread to that logical CPU.
 //
 // Built with -DSTRATA_IQ_PARITY_DISPATCH_ONLY=1 it calls only the kernels' public entry points, so the same program
 // builds on an engine from before the variants (--bench --dispatch against it).
@@ -336,8 +335,8 @@ int check_down(int d_type) {
 }
 
 #if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
-// #152 through the engine's dispatch: where native_gu_rows gives a format the multi-token kernel from one token on
-// (native_gu_mt_min 1: IQ3_XXS under STRATA_IQ_MT_MIN=1), each token's
+// #152 through the engine's dispatch: where native_gu_rows gives a format the multi-token kernel from two tokens on,
+// each token's
 // gate/up rows must be the same alone and in any group.
 int check_engine_width(int type) {
     const int mt = cpu::native_gu_mt_min(type);
@@ -536,11 +535,8 @@ int main(int argc, char** argv) {
     }
     if (pin >= 0 && !pin_to(pin)) std::printf("iq_avx2_parity: could not pin to CPU %d\n", pin);
     ggml_cpu_init();
-    auto env = [](const char* k) { const char* v = std::getenv(k); return v ? v : "-"; };
     std::printf("iq_avx2_parity: %s (avx2 %d, avx512 %d), CPU %d, core type %02Xh\n", cpu::cpu_name().c_str(),
                 (int) cpu::cpu_avx2_ok(), (int) cpu::cpu_avx512_ok(), pin, core_type());
-    std::printf("  STRATA_IQ256_GATHER %s, STRATA_NO_AVXVNNI %s, STRATA_IQ_MT_MIN %s, STRATA_IQ_PREFETCH %s\n",
-                env("STRATA_IQ256_GATHER"), env("STRATA_NO_AVXVNNI"), env("STRATA_IQ_MT_MIN"), env("STRATA_IQ_PREFETCH"));
     if (!cpu::cpu_avx2_ok()) {
         std::printf("iq_avx2_parity: no AVX2 here, nothing to check (the engine takes ggml-cpu's dot)\n");
         return 0;

@@ -376,7 +376,7 @@ class AdmitOrderTest(unittest.TestCase):
             self.assertTrue(self.e.ctl.acquire(timeout=1))
             self.take("agent", 120000, new=True)
             self.until(lambda: self.e.waiting == 1)
-            time.sleep(0.4)                         # past STRATA_ADMIT_MAX_WAIT_S
+            time.sleep(0.4)                         # past the patched ADMIT_MAX_WAIT_S (0.2 s)
             self.take("chat", 500, new=True)
             self.until(lambda: self.e.waiting == 2)
             self.e.ctl.release()

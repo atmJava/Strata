@@ -3,7 +3,7 @@
 // rows of random, scaled, sparse and degenerate values; then the same through native_quant_act with the production
 // IQ3_XXS gate/up format, which is what the engine calls.  No GPU, no model.
 //
-//     q8k_quant_parity            (STRATA_FORCE_ISA=avx: the AVX-2 copy is skipped, native_quant_* must equal ggml's)
+//     q8k_quant_parity            (AVX-only CPUs: the AVX-2 copy is skipped, native_quant_* must equal ggml's)
 //     q8k_quant_parity --bench    ns per 2560-value row, ggml-cpu's and the AVX-2 copy
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/iq_avx2.hpp"
@@ -116,8 +116,8 @@ int main(int argc, char** argv) {
     for (const auto& x : cases(2560))
         failures += !same("native_quant_act", 2560, 0, ref, via_act, x, ggml_row_size(GGML_TYPE_Q8_K, 2560));
     std::printf("q8k_quant_parity: %d rows x 4 sizes, AVX-2 copy %s, AVX1 copy %s: %s\n", checked / 4,
-                avx2 ? "checked" : "skipped (no AVX2, or STRATA_FORCE_ISA)",
-                avx1 ? "checked" : "skipped (AVX2 present, no AVX, or STRATA_FORCE_ISA)", failures ? "FAILED" : "identical");
+                avx2 ? "checked" : "skipped (no AVX2)",
+                avx1 ? "checked" : "skipped (AVX2 present, no AVX)", failures ? "FAILED" : "identical");
     if (bench && (avx2 || avx1)) {
         std::mt19937 rng(3);
         std::normal_distribution<float> nd(0.f, 1.f);

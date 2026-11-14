@@ -120,7 +120,7 @@ __global__ void quant_act_nat_kernel(const float* __restrict__ x, int64_t nblk, 
     if (lane == 0) *(float4*) (out + 64) = make_float4(a0 / 127.0f, a1 / 127.0f, (float) s0, (float) s1);
 }
 
-// Turing (STRATA_PF_FUSED_SM75): plain copies instead of cp.async (the same bytes; the barriers around them stay), and
+// Turing (sm_75): plain copies instead of cp.async (the same bytes; the barriers around them stay), and
 // the s8 MMAs as m8n8k16 - m16n8k32 is four (rows g / g + 8 by k 0-15 / 16-31), m16n8k16 two (rows g / g + 8), each
 // pair starting from MAGIC.  The int32 sums are exact in any order: the same d as the sm_80 instructions.
 __device__ __forceinline__ void cp16(void* dst, const void* src) { *(uint4*) dst = __ldg((const uint4*) src); }
@@ -473,7 +473,7 @@ unsigned blocks(int64_t n, int per) { return (unsigned) ((n + per - 1) / per); }
 // Per device: whether every sm75 kernel fits, and its occupancy.
 struct DevInfo {
     bool done = false, ok = false;
-    bool t75 = false;             // Turing (STRATA_PF_FUSED_SM75): the production kernels were checked
+    bool t75 = false;             // Turing (sm_75): the production kernels were checked
     bool t75_iq_ww4 = false;      // ... at the wide WW=4 shape too; else experts_native runs at WW=2 only
     int sms = 0, occ = 1;
 };
@@ -508,43 +508,7 @@ const DevInfo& dev_info() {
     DevInfo& d = g_dev[dev & 31];
     if (d.done) return d;
     d.done = true;
-    int major = 0, minor = 0;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-    major = strata::cc_major_of(major);   // STRATA_EMULATE_CC counts (tests)
-    minor = strata::cc_minor_of(minor);
     cudaDeviceGetAttribute(&d.sms, cudaDevAttrMultiProcessorCount, dev);
-    // The kernels use plain copies and m8n8k16 MMAs. Set them up only when the fused path is asked for
-    // (STRATA_PF_FUSED=1) or the explicit switch is on.
-    static const int sm75_env = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED_SM75");
-        return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1;
-    }();
-    // (the same reading as requested() and native_supported: only a leading '1' asks for it, so "true"/"2" cannot
-    // set the kernels up while the consumer still answers false)
-    static const bool fused_asked = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED");
-        return v != nullptr && v[0] == '1';
-    }();
-    if (!strata::is_sm75(major, minor)) return d;
-    const bool sm75 = sm75_env > 0 || (sm75_env < 0 && fused_asked);
-    if (!sm75) return d;
-    int occ = 1 << 20;
-    // The production pack's IQ3_XXS gate/up and IQ4_NL down where their shared-memory shapes fit.
-    d.t75 = true;
-    bool w4gu = false, w4d = false;
-    d.ok = setup_t75<T_IQ3_XXS, true>(occ, w4gu) && setup_t75<T_IQ4_NL, false>(occ, w4d);
-    d.t75_iq_ww4 = d.ok && w4gu && w4d;
-    static bool said = false;
-    if (!said) {
-        said = true;
-        std::fprintf(stderr, "strata: prompt fused experts (sm_75): IQ3_XXS / IQ4_NL %s"
-                             " (WW=2 %d B, WW=4 %d B %s)\n", d.ok ? "set up" : "does not fit",
-                     (int) smem_bytes(T_IQ3_XXS, 2), (int) smem_bytes(T_IQ3_XXS, 4),
-                     (w4gu && w4d) ? "fits" : "does not fit");
-    }
-    d.occ = d.ok ? occ : 1;
-    cudaGetLastError();
     return d;
 }
 
@@ -567,14 +531,8 @@ void launch(int ww, unsigned grid, const Batch& b, const NativeGeom& g, const Ta
 // The work item's shape for a layer of `n` routed rows over `n_expert` experts: 128 routed rows when an expert has
 // about one such tile (56 to 112 rows on average), else 64.  Measured on the RTX 5070 (tests/cuda/prefill_fused_iq_test,
 // a layer of 2048 / 3584 / 8192 tokens, ms, 64 -> 128): IQ3_XXS 5.1 -> 6.3, 9.1 -> 8.3, 16.5 -> 17.5 (256 rows was
-// slower still).  STRATA_PF_FUSED_TILE=64|128 forces one.
+// slower still).
 int pick_ww(int64_t n, int n_expert) {
-    static const int forced = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED_TILE");
-        const int t = v ? std::atoi(v) : 0;
-        return t == 64 ? 4 : t == 128 ? 2 : 0;
-    }();
-    if (forced) return forced;
     const double avg = (double) n / std::max(n_expert, 1);
     return avg > 56.0 && avg <= 112.0 ? 2 : 4;
 }
@@ -582,25 +540,9 @@ int pick_ww(int64_t n, int n_expert) {
 }  // namespace
 
 bool native_supported(int gu_type, int d_type) {
-    static const bool off = [] {   // STRATA_PF_FUSED_NATIVE=0: the native packs keep MMQ under STRATA_PF_FUSED=1 (A/B)
-        const char* v = std::getenv("STRATA_PF_FUSED_NATIVE");
-        return v != nullptr && v[0] == '0';
-    }();
-    // The fused expert path is opt-in on sm_75 with STRATA_PF_FUSED=1. STRATA_PF_FUSED=0 disables it.
-    static const int env = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED");
-        return v == nullptr || v[0] == '\0' ? -1 : (v[0] == '1' ? 1 : 0);
-    }();
-    if (off || env == 0 || !gu_covered(gu_type)) return false;
-    if (env < 0) return false;
-    const DevInfo& d = dev_info();
-    if (!d.ok || !d_covered(d_type)) return false;
-    // Turing: the production IQ3_XXS / IQ4_NL pair that dev_info set up.
-    if (d.t75 && !(gu_type == T_IQ3_XXS && d_type == T_IQ4_NL)) return false;
-    // The native kernels have their own setup and coverage checks.  Do not route this through requested(): that asks
-    // the Q2_0 kernels' available(), which on sm_75 also requires STRATA_PF_FUSED_SM75 and would reject the native IQ
-    // pair even though STRATA_PF_FUSED=1 set it up here.
-    return env == 1;
+    // 原生包的融合内核在本 fork 没有开关打开：这张卡（以及所有卡）上保持 MMQ。
+    (void) gu_type; (void) d_type;
+    return false;
 }
 
 void quantize_act_native(const float* x, int64_t rows, int64_t cols, void* xa, void* stream) {

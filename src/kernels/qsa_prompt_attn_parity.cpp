@@ -40,7 +40,7 @@ float h2f(uint16_t b) { __half h; *reinterpret_cast<uint16_t*>(&h) = b; return _
 uint16_t f2h(float f) { __half h = __float2half(f); return *reinterpret_cast<uint16_t*>(&h); }
 
 int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2 q4_0
-    if (fmt == 2) setenv("STRATA_PROMPT_ATTN_Q4_TC", "1", 1);
+    if (fmt == 2) return 0;   // the Q4_0 tensor-core prompt kernel is not part of the engine
     const k::QsaShapes s = k::qsa_real_shapes();
     const int64_t HD = s.head_dim, NKV = s.n_head_kv, NH = s.n_head, PS = s.page_size;
     const int64_t pages = (ctx + PS - 1) / PS, rows = pages * NKV * PS;

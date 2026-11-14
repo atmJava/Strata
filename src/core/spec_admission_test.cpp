@@ -60,15 +60,12 @@ Dist proposal_contract(const Dist& p,const std::array<float,2>& q,float threshol
     }
     return result;
 }
-int main(int argc,char** argv) {
-    const bool expect_pick=!(argc>1 && std::strcmp(argv[1],"top")==0);
-    check(spec_gate_pick()==expect_pick,"pick is default; only explicit lowercase top selects Top compatibility");
+int main() {
     const Dist p{0.5,0.5};const std::array<float,2> q{0.875f,0.125f};
     check(equal(legacy_raw_q_plain_p(p,q,true,0.5f),Dist{0.5625,0.4375}),
           "LEGACY negative control: own-draw gate with full-q verifier/plain-p failure is biased");
     check(equal(proposal_contract(p,q,0.5f),p),"new pick mu/NULL mixture preserves p");
-    check(equal(spec_gate_pick()?proposal_contract(p,q,0.5f):legacy_raw_q_plain_p(p,q,false,0.5f),p),
-          "configured repaired pick or Top compatibility preserves p");
+    check(equal(proposal_contract(p,q,0.5f),p),"the pick gate preserves p");
     int top_cases=0,proposal_cases=0;
     for(int a=1;a<16;++a)for(int b=1;b<16;++b) {
         const Dist P{a/16.0,1-a/16.0};const std::array<float,2> Q{b/16.0f,1-b/16.0f};

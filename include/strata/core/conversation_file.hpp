@@ -73,7 +73,6 @@ struct SessionConfig {
     std::string backend;            // "cuda" or "hip": no cross-backend restore
     std::string kv;                 // --kv
     int64_t max_context = 0, kv_resident = 0, mtp_window = 0;
-    bool kv_rot = false;            // STRATA_KV_ROT
     SessionRope rope;
     // the control vectors as loaded: a digest of the tables the engine uploaded (every file's content x its exact
     // scale, summed), the mode, the layer range and the direction; 0 when none is loaded

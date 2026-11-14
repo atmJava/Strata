@@ -77,7 +77,7 @@ inline bool file_tier_prefers_direct(double held_fraction, double direct_bps, do
     return held_fraction < 0.3 ? ratio >= 1.3 : ratio >= 1.5;
 }
 
-/// Whether `advise_willneed` asks the OS for anything: not on Windows, nor with STRATA_READ_AHEAD=0.
+/// Whether `advise_willneed` asks the OS for anything: not on Windows.
 bool read_ahead_enabled();
 /// Asks the OS to start reading [p, p + bytes) of a file mapping, without waiting.  Linux reads at most one
 /// readahead window per request, so the range is asked for in 128 KiB steps.

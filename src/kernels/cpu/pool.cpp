@@ -32,13 +32,6 @@ constexpr uint64_t pack_head(uint32_t epoch, uint32_t n, uint32_t i) {
 
 namespace {
 std::atomic<int> g_host_core{(int) HostCore::First};
-bool pool_guard_debug() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_DBG_POOL_GUARD");
-        return v != nullptr && std::atoi(v) != 0;
-    }();
-    return on;
-}
 }  // namespace
 
 void set_host_core(HostCore where) { g_host_core.store((int) where); }
@@ -420,9 +413,7 @@ int numa_node_count() {
 NumaSplitDecision decide_real_numa_split([[maybe_unused]] const std::vector<int>& thread_core, [[maybe_unused]] int n_workers,
                                          [[maybe_unused]] bool pinned) {
 #if defined(__linux__)
-    // the expert source's own reading of it (expert_source.cpp): exactly "1"
-    const char* rotate = std::getenv("STRATA_EXCHANGE_ROTATE");
-    return decide_numa_split(thread_core, n_workers, pinned, rotate != nullptr && std::strcmp(rotate, "1") == 0, cpu_numa_node);
+    return decide_numa_split(thread_core, n_workers, pinned, cpu_numa_node);
 #else
     NumaSplitDecision d;
     d.why = "the split needs Linux";
@@ -514,19 +505,13 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     if (tasks < 0 || tasks > kMaxTasks) throw std::invalid_argument("expert pool tasks must be in 0..4096");
     pinned_ = pin;
     layout_ = logical_cpu_layout();   // now, before anything pins the caller (Linux reads the calling thread's allowed CPUs)
-    if (const char* e = std::getenv("STRATA_POOL_SPIN_US"))   // a test knob; see kSpinBeforeSleep
-        spin_before_sleep_ = std::chrono::microseconds((std::max)(0, std::atoi(e)));
-    // STRATA_NUMA_SPLIT, read here for the worker count (the split itself is decided below, once the count is known).
-    // 0.2.2: with 2 or more NUMA nodes and neither variable set the split is tried by itself, and STRATA_NUMA_POOL=0 turns that
-    // off (numa_pool.hpp).  One node: pick_numa_pool says Unchanged and nothing below differs from the pool before the split.
-    const char* env = std::getenv("STRATA_NUMA_SPLIT");
+    // With 2 or more NUMA nodes the split is tried by itself (numa_pool.hpp).  One node: pick_numa_pool says Unchanged
+    // and nothing below differs from the pool before the split.
     const int numa_nodes = numa_node_count();
-    const NumaPoolPick pool_pick = pick_numa_pool(std::getenv("STRATA_NUMA_POOL"), env, numa_nodes);
-    if (!pool_pick.log.empty()) std::fprintf(stderr, "%s\n", pool_pick.log.c_str());
-    if (pool_pick.choice == NumaPoolChoice::Off) env = nullptr;
-    bool auto_pool = pool_pick.choice == NumaPoolChoice::Auto;   // the split without STRATA_NUMA_SPLIT: only if it can run
-    bool env_off = !auto_pool && (env == nullptr || *env == '\0' || std::strcmp(env, "0") == 0);
-    bool env_known = auto_pool || (!env_off && (std::strcmp(env, "1") == 0 || std::strcmp(env, "test") == 0));
+    const NumaPoolPick pool_pick = pick_numa_pool(numa_nodes);
+    bool auto_pool = pool_pick.choice == NumaPoolChoice::Auto;
+    bool env_off = !auto_pool;
+    bool env_known = auto_pool;
     const PoolPlanInput plan_in = pool_plan_input(topo_);
     const PoolPlan wplan = plan_pool_workers(plan_in);
     // --pool-cores (experimental, off by default): the person's own list of logical processors for the workers.  The plan above
@@ -620,14 +605,10 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     hstate_ms_.store(now_ms());
     split_.resize((size_t) kMaxSplit);
     split_multi_.resize((size_t) kMaxSplitMulti);
-    // STRATA_NUMA_SPLIT: decided here, before any worker starts (a worker counts into its slice's `parked` from its
-    // first instruction), and never revised.  Unset: the plan stays empty and nothing below runs.
+    // The split is decided here, before any worker starts (a worker counts into its slice's `parked` from its first
+    // instruction), and never revised.  Without two nodes the plan stays empty and nothing below runs.
     NumaSplitPlan plan;
-    if (!env_off && !env_known) {
-        plan.why = std::string("unknown STRATA_NUMA_SPLIT value '") + env + "' (use 1 or test)";
-        std::fprintf(stderr, "strata cpu pool: NUMA split off: %s\n", plan.why.c_str());
-    } else if (env_known) {
-        plan.test = !auto_pool && std::strcmp(env, "test") == 0;
+    if (env_known) {
         const int threads = n_ + (host_works_ ? 1 : 0);   // thread j < n_: worker j; j == n_: the host
         std::vector<int> slice((size_t) threads, 0);
         std::string why;
@@ -664,8 +645,8 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
             slice_threads_.assign(2, 0);
             for (int k : slice) ++slice_threads_[(size_t) k];
             if (auto_pool)
-                std::fprintf(stderr, "strata cpu pool: NUMA pool on: %d NUMA nodes found, one slice of the pool per node "
-                                     "(STRATA_NUMA_POOL=0 turns it off)\n", numa_nodes);
+                std::fprintf(stderr, "strata cpu pool: NUMA pool on: %d NUMA nodes found, one slice of the pool per node\n",
+                             numa_nodes);
             if (plan.test)
                 std::fprintf(stderr, "strata cpu pool: NUMA split on (test, no real nodes): slice 0 = %d threads, "
                                      "slice 1 = %d threads\n", slice_threads_[0], slice_threads_[1]);
@@ -678,7 +659,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     }
     if (n_workers > 0) {
         // recommend, never force: a count above what this CPU uses well runs as configured, with a plain warning
-        // (STRATA_NUMA_SPLIT on: workers on the other socket are the point, that case is not warned about)
+        // (NUMA split on: workers on the other socket are the point, that case is not warned about)
         PoolPlanInput warn_in = plan_in;
         warn_in.span_packages = plan.on;
         static std::atomic<bool> warned{false};
@@ -799,14 +780,10 @@ ExpertPool::PrefillLease ExpertPool::try_prefill() {
     bool expected = false;
     if (!prefill_leased_.compare_exchange_strong(
             expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
-        if (pool_guard_debug())
-            std::fprintf(stderr, "pool guard: prefill lease refused; another prefill lease is active\n");
         return PrefillLease{};
     }
     if (decode_windows_.load(std::memory_order_acquire) != 0) {
         prefill_leased_.store(false, std::memory_order_release);
-        if (pool_guard_debug())
-            std::fprintf(stderr, "pool guard: prefill lease refused; a batch decode window is active\n");
         return PrefillLease{};
     }
     return PrefillLease(this);
@@ -814,11 +791,7 @@ ExpertPool::PrefillLease ExpertPool::try_prefill() {
 
 void ExpertPool::lock_guarded_runs(std::unique_lock<std::recursive_mutex>& lock) {
     if (!batch_prefill_guard()) return;
-    const auto t0 = std::chrono::steady_clock::now();
     lock.lock();
-    if (!pool_guard_debug()) return;
-    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    if (ms >= 1.0) std::fprintf(stderr, "pool guard: run dispatch waited %.3f ms\n", ms);
 }
 
 void ExpertPool::stop_workers() {
@@ -1030,7 +1003,7 @@ void ExpertPool::wait_done(int n) {
 void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
     const int s = numa_n_ == 0 ? 0 : id >= 0 ? wslice_[(size_t) id] : hslice_;
     for (;;) {
-        // STRATA_NUMA_SPLIT: a mode-5/6 batch lives on the slice heads, any other on `head_`; the epoch tag makes the
+        // With the NUMA split a mode-5/6 batch lives on the slice heads, any other on `head_`; the epoch tag makes the
         // other family's claim fail, so `mode_` is never read before a claim has succeeded (pool.hpp)
         int ci = numa_n_ > 0 ? claim_slice(epoch, s) : -1;
         const bool sliced = ci >= 0;

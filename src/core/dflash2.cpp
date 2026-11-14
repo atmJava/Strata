@@ -48,8 +48,6 @@ using CudaPtr = std::shared_ptr<void>;
 
 void Dflash2Drafter::release() {
     if (device_ < 0) return;      // already released (or never loaded): the destructor calls this
-    prof_report();
-    prof_free();
     const OnDevice on_device(device_);
     if (cs_) cudaStreamSynchronize(cs_);
     for (cudaGraphExec_t& e : exec_)
@@ -70,8 +68,6 @@ void Dflash2Drafter::release() {
     if (ev_fork_) cudaEventDestroy(ev_fork_);
     if (ev_join_) cudaEventDestroy(ev_join_);
     for (cudaEvent_t e : ev_ctx_) if (e) cudaEventDestroy(e);
-    if (ev_a_) cudaEventDestroy(ev_a_);
-    if (ev_b_) cudaEventDestroy(ev_b_);
     // every handle is gone: null it and mark the instance released, so a second call (or the destructor) does nothing.
     // A fallback to the MTP calls this, because a drafter that failed to bind still holds the pack and its ring.
     auto z = [](auto*& p) { p = nullptr; };
@@ -82,7 +78,7 @@ void Dflash2Drafter::release() {
     logits_cap_ = 0;
     z(h_meta_); z(h_out_);
     z(cs_); z(cs2_);
-    z(ev_fork_); z(ev_join_); z(ev_a_); z(ev_b_);
+    z(ev_fork_); z(ev_join_);
     for (cudaEvent_t& e : ev_ctx_) e = nullptr;
     for (cudaGraphExec_t& e : exec_) e = nullptr;
     // nothing is bound or shared any more: context()/draft() report "released" instead of writing freed buffers
@@ -105,58 +101,6 @@ void Dflash2Drafter::release() {
 
 Dflash2Drafter::~Dflash2Drafter() {
     release();
-}
-
-// STRATA_DF2_PROFILE=1 (measurement only): the round runs without its graph and an event follows every stage; the per-stage averages print at exit
-struct Dflash2Drafter::Prof {
-    std::vector<cudaEvent_t> ev;
-    std::vector<std::string> name;
-    std::vector<std::pair<std::string, double>> total;
-    int64_t rounds = 0;
-};
-
-void Dflash2Drafter::prof_free() {
-    delete prof_;
-    prof_ = nullptr;
-}
-
-// STRATA_DF2_SKIP=attn,head,ctx,mlp,qkvo (measurement only): leaves those parts out of the round, so the graph's GPU time without them can be read
-static bool skip_part(const char* what) {
-    static const std::string list = [] { const char* e = std::getenv("STRATA_DF2_SKIP"); return std::string(e ? e : ""); }();
-    return !list.empty() && list.find(what) != std::string::npos;
-}
-
-void Dflash2Drafter::stamp(const char* name) {
-    if (!prof_) return;
-    cudaEvent_t e;
-    cudaEventCreate(&e);
-    cudaEventRecord(e, cs_);
-    prof_->ev.push_back(e);
-    prof_->name.push_back(name);
-}
-
-void Dflash2Drafter::prof_collect() {
-    if (!prof_ || prof_->ev.size() < 2) return;
-    cudaStreamSynchronize(cs_);
-    for (size_t i = 1; i < prof_->ev.size(); ++i) {
-        float ms = 0;
-        cudaEventElapsedTime(&ms, prof_->ev[i - 1], prof_->ev[i]);
-        auto it = std::find_if(prof_->total.begin(), prof_->total.end(), [&](const auto& t) { return t.first == prof_->name[i]; });
-        if (it == prof_->total.end()) prof_->total.emplace_back(prof_->name[i], ms); else it->second += ms;
-    }
-    for (cudaEvent_t e : prof_->ev) cudaEventDestroy(e);
-    prof_->ev.clear();
-    prof_->name.clear();
-    ++prof_->rounds;
-}
-
-void Dflash2Drafter::prof_report() const {
-    if (!prof_ || prof_->rounds == 0) return;
-    double sum = 0;
-    for (const auto& t : prof_->total) sum += t.second;
-    std::fprintf(stderr, "strata dflash2 profile (%lld rounds, ms per round, total %.3f):", (long long) prof_->rounds, sum / (double) prof_->rounds);
-    for (const auto& t : prof_->total) std::fprintf(stderr, " %s %.3f", t.first.c_str(), t.second / (double) prof_->rounds);
-    std::fputc(10, stderr);
 }
 
 const Dflash2Drafter::Tensor& Dflash2Drafter::find(const std::string& name) const {
@@ -287,12 +231,10 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
         }
     }
     // the draft round runs while the verifier's async commit still has work on the card: a high-priority stream keeps it from queueing behind that
-    // (CUDA by default; on HIP only with STRATA_DF2_PRIO=1, where the engine's other streams keep the default priority)
     int prio_lo = 0, prio_hi = 0;
-    static const bool hi_prio = [] { const char* e = std::getenv("STRATA_DF2_PRIO"); return !(e && e[0] == '0'); }();
     cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
-    if (cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess ||
-        cudaStreamCreateWithPriority(&cs2_, cudaStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess) {
+    if (cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio_hi) != cudaSuccess ||
+        cudaStreamCreateWithPriority(&cs2_, cudaStreamNonBlocking, prio_hi) != cudaSuccess) {
         err = "dflash2: stream";
         return false;
     }
@@ -302,12 +244,6 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err,
     }
     for (int l = 0; l < 8; ++l)
         if (cudaEventCreateWithFlags(&ev_ctx_[l], cudaEventDisableTiming) != cudaSuccess) { err = "dflash2: events"; return false; }
-    if (const char* e = std::getenv("STRATA_DF2_PROFILE"); e && e[0] == '1') prof_ = new Prof();
-    if (const char* e = std::getenv("STRATA_DF2_TIMING"); e && e[0] == '1') {
-        timing_ = true;
-        cudaEventCreate(&ev_a_);
-        cudaEventCreate(&ev_b_);
-    }
     if (!alloc(err)) return false;
     if (shared != nullptr)
         std::fprintf(stderr, "strata dflash2: shared pack weights, %.0f MiB of private buffers (ring, logits and graphs stay this slot's)\n",
@@ -483,24 +419,17 @@ void Dflash2Drafter::gemm(std::initializer_list<const char*> names, std::initial
 
 bool Dflash2Drafter::record_context(const float* taps, int n, cudaStream_t cs, std::string& err) {
     using namespace kernels;
-    if (skip_part("ctx")) return true;
     try {
         const int tap_n = (int) taps_.size() * N_;
         df2_rope_table(d_meta_ + 0, n, theta_, rt_ctx_, cs);
-        stamp("df2_rope_table");
         df2_quant_rows(taps, tap_n, n, xqc_, xdc_, cs);
-        stamp("df2_quant_rows");
         gemm({"fc.weight"}, {fcy_}, n, cs, xqc_, xdc_);
-        stamp("gemm:fc");
         df2_rms_quant(fcy_, f32("hidden_norm.weight"), nullptr, n, N_, eps_, xqc_, xdc_, cs);
-        stamp("df2_rms_quant");
         for (int l = 0; l < L_; ++l) {
             const std::string p = "layers." + std::to_string(l) + ".";
             const std::string kp = p + "self_attn.k_proj.weight", vp = p + "self_attn.v_proj.weight";
             gemm({kp.c_str(), vp.c_str()}, {kc_, vc_}, n, cs, xqc_, xdc_);
-            stamp("gemm:kp");
             df2_kv_ring(kc_, vc_, f32(p + "self_attn.k_norm.weight"), d_meta_ + 0, rt_ctx_, kring_[l], vring_[l], kRing, n, NKV_, eps_, cs);
-            stamp("df2_kv_ring");
             if (fork_) cudaEventRecord(ev_ctx_[l], cs);   // layer l's keys and values are in the ring
         }
     } catch (const std::exception& e) {
@@ -515,11 +444,8 @@ bool Dflash2Drafter::record_block(cudaStream_t cs, std::string& err) {
     try {
         const int B = kRows;
         df2_rope_table(d_meta_ + 8, B, theta_, rt_blk_, cs);
-        stamp("df2_rope_table");
         embed_(d_meta_ + 24, B, h_, cs);
-        stamp("embed_");
         df2_rms_quant(h_, f32("layers.0.input_layernorm.weight"), xn_, B, N_, eps_, xqp_, xdp_, cs);
-        stamp("df2_rms_quant");
         for (int l = 0; l < L_; ++l) {
             const std::string p = "layers." + std::to_string(l) + ".";
             const float* base_a = f32(p + "attention_conv.base_kernel");
@@ -527,44 +453,28 @@ bool Dflash2Drafter::record_block(cudaStream_t cs, std::string& err) {
             const std::string akp = p + "attention_conv.kernel_projection.weight", mkp = p + "mlp_conv.kernel_projection.weight";
             const std::string qp = p + "self_attn.q_proj.weight", kp = p + "self_attn.k_proj.weight", vp = p + "self_attn.v_proj.weight";
             const std::string gp = p + "mlp.gate_proj.weight", up = p + "mlp.up_proj.weight";
-            if (!skip_part("tiny")) gemm({akp.c_str()}, {dyn_}, B, cs, xqp_, xdp_);
-            stamp("gemm:akp");
-            if (!skip_part("small")) df2_conv_quant(xn_, dyn_, 640, base_a, B, N_, group_, xqp_, xdp_, cs);
-            stamp("df2_conv_quant");
-            if (!skip_part("qkvo")) gemm({qp.c_str(), kp.c_str(), vp.c_str()}, {q_, k_, v_}, B, cs, xqp_, xdp_);
-            stamp("gemm:qp");
-            if (!skip_part("small")) df2_norm_rope_qk(q_, k_, f32(p + "self_attn.q_norm.weight"), f32(p + "self_attn.k_norm.weight"), rt_blk_, qn_, kblk_, B, NH_, NKV_, eps_, cs);
-            stamp("df2_norm_rope_qk");
+            gemm({akp.c_str()}, {dyn_}, B, cs, xqp_, xdp_);
+            df2_conv_quant(xn_, dyn_, 640, base_a, B, N_, group_, xqp_, xdp_, cs);
+            gemm({qp.c_str(), kp.c_str(), vp.c_str()}, {q_, k_, v_}, B, cs, xqp_, xdp_);
+            df2_norm_rope_qk(q_, k_, f32(p + "self_attn.q_norm.weight"), f32(p + "self_attn.k_norm.weight"), rt_blk_, qn_, kblk_, B, NH_, NKV_, eps_, cs);
             if (fork_) cudaStreamWaitEvent(cs, ev_ctx_[l], 0);   // the context update has written this layer's ring
-            if (!skip_part("attn")) df2_attention(qn_, kring_[l], vring_[l], kblk_, v_, d_meta_ + 17, kRing, window_, part_, xqp_, xdp_, cs);
-            stamp("df2_attention");
-            if (!skip_part("qkvo")) gemm({(p + "self_attn.o_proj.weight").c_str()}, {o_}, B, cs, xqp_, xdp_);
-            stamp("gemm:o_proj");
-            if (!skip_part("small")) df2_conv_rms_quant(o_, dyn_ + 320, 640, base_a + 2 * N_, h_, f32(p + "post_attention_layernorm.weight"), xn_, B, N_, group_, eps_, xqp_, xdp_, cs);
-            stamp("df2_conv_rms_quant");
-            if (!skip_part("tiny")) gemm({mkp.c_str()}, {dyn_}, B, cs, xqp_, xdp_);
-            stamp("gemm:mkp");
-            if (!skip_part("small")) df2_conv_quant(xn_, dyn_, 640, base_m, B, N_, group_, xqp_, xdp_, cs);
-            stamp("df2_conv_quant");
-            if (!skip_part("mlp")) gemm({gp.c_str(), up.c_str()}, {gate_, up_}, B, cs, xqp_, xdp_);
-            stamp("gemm:gp");
-            if (!skip_part("small")) df2_swiglu_quant(gate_, up_, B, I_, xqp_, xdp_, cs);
-            stamp("df2_swiglu_quant");
-            if (!skip_part("mlp")) gemm({(p + "mlp.down_proj.weight").c_str()}, {mlp_}, B, cs, xqp_, xdp_);
-            stamp("gemm:mlp.down_proj");
+            df2_attention(qn_, kring_[l], vring_[l], kblk_, v_, d_meta_ + 17, kRing, window_, part_, xqp_, xdp_, cs);
+            gemm({(p + "self_attn.o_proj.weight").c_str()}, {o_}, B, cs, xqp_, xdp_);
+            df2_conv_rms_quant(o_, dyn_ + 320, 640, base_a + 2 * N_, h_, f32(p + "post_attention_layernorm.weight"), xn_, B, N_, group_, eps_, xqp_, xdp_, cs);
+            gemm({mkp.c_str()}, {dyn_}, B, cs, xqp_, xdp_);
+            df2_conv_quant(xn_, dyn_, 640, base_m, B, N_, group_, xqp_, xdp_, cs);
+            gemm({gp.c_str(), up.c_str()}, {gate_, up_}, B, cs, xqp_, xdp_);
+            df2_swiglu_quant(gate_, up_, B, I_, xqp_, xdp_, cs);
+            gemm({(p + "mlp.down_proj.weight").c_str()}, {mlp_}, B, cs, xqp_, xdp_);
             // the next layer's input norm, or after the last layer the final norm (-> fn_, the rows the head and the selector read)
             const std::string next_gamma = l + 1 < L_ ? "layers." + std::to_string(l + 1) + ".input_layernorm.weight" : std::string("norm.weight");
-            if (!skip_part("small")) df2_conv_rms_quant(mlp_, dyn_ + 320, 640, base_m + 2 * N_, h_, f32(next_gamma), l + 1 < L_ ? xn_ : fn_, B, N_, group_, eps_, xqp_, xdp_, cs);
-            stamp("df2_conv_rms_quant");
+            df2_conv_rms_quant(mlp_, dyn_ + 320, 640, base_m + 2 * N_, h_, f32(next_gamma), l + 1 < L_ ? xn_ : fn_, B, N_, group_, eps_, xqp_, xdp_, cs);
         }
         native_quantize_q8_1(fn_ + N_, xq_, N_, kDrafts, cs);   // rows 1..7, the head's format
         df2_quant_rows(fn_ + N_, N_, kDrafts, xqp_, xdp_, cs);   // and the selector projection's
-        if (!skip_part("head")) native_mmvq(head_type_, head_w_, xq_, logits_, N_, (int) n_dvocab_, kDrafts, cs);
-        stamp("native_mmvq");
+        native_mmvq(head_type_, head_w_, xq_, logits_, N_, (int) n_dvocab_, kDrafts, cs);
         df2_topk(logits_, (int) n_dvocab_, dvocab_, kDrafts, topscratch_, topval_, toptok_, cs);
-        stamp("df2_topk");
         gemm({"candidate_selector.hidden_projection.weight"}, {hsel_}, kDrafts, cs, xqp_, xdp_);
-        stamp("gemm:candidate_selector.hidden_projection");
         df2_select(hsel_, topval_, toptok_, reinterpret_cast<const uint16_t*>(blob_ + find("candidate_selector.predecessor_codebook").off),
                    reinterpret_cast<const uint16_t*>(blob_ + find("candidate_selector.successor_codebook").off), rank_, kDrafts, d_meta_ + 16, out_tok_,
                    out_prob_, cs);
@@ -580,10 +490,8 @@ bool Dflash2Drafter::capture(int n, const float* taps, std::string& err) {
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "dflash2: begin capture"; return false; }
     kernels::copy_i32_from_mapped(d_meta_, m_meta_, 32, cs_);
     // the context update (fc, the keys and values) and the block's front run side by side: they meet before each layer's attention
-    // measured: -0.3 ms a round on an RTX 3060, +0.0..0.7 on a Strix Halo (gfx1151), so the HIP builds keep one stream (STRATA_DF2_FORK=1 / 0 overrides)
-    static const bool fork_default = true;
-    static const bool fork_on = [] { const char* e = std::getenv("STRATA_DF2_FORK"); return e && e[0] ? e[0] == '1' : fork_default; }();
-    fork_ = fork_on && prof_ == nullptr && cs2_ != nullptr;
+    // measured: -0.3 ms a round on an RTX 3060, +0.0..0.7 on a Strix Halo (gfx1151), so the HIP builds keep one stream
+    fork_ = cs2_ != nullptr;
     if (fork_) {
         cudaEventRecord(ev_fork_, cs_);
         cudaStreamWaitEvent(cs2_, ev_fork_, 0);
@@ -609,7 +517,6 @@ bool Dflash2Drafter::capture(int n, const float* taps, std::string& err) {
 
 bool Dflash2Drafter::prepare(const float* taps, std::string& err) {
     if (!bound_) { err = "dflash2: not bound"; return false; }
-    if (prof_ != nullptr) return true;   // the profile runs without graphs
     const OnDevice on_device(device_);
     const Clock::time_point t0 = Clock::now();
     for (int i = 0; i < 8; ++i) h_meta_[i] = i;
@@ -649,7 +556,7 @@ bool Dflash2Drafter::draft_launch(const float* taps, int n_new, int64_t pos0, in
     const OnDevice on_device(device_);
     const Clock::time_point t0 = Clock::now();
     if (graph_taps_ != nullptr && graph_taps_ != taps) { err = "dflash2: the taps buffer moved after capture"; return false; }
-    if (!prof_ && !exec_[n_new]) {
+    if (!exec_[n_new]) {
         if (!lazy_capture_) {
             err = "dflash2: no round graph for " + std::to_string(n_new) + " rows and lazy capture is off (prepare(taps_dev) first)";
             return false;
@@ -667,23 +574,10 @@ bool Dflash2Drafter::draft_launch(const float* taps, int n_new, int64_t pos0, in
     for (int i = 1; i < 8; ++i) h_meta_[24 + i] = mask_token_;
     for (int i = 0; i < kDrafts; ++i) { ((volatile int32_t*) h_out_)[i] = -1; }
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (timing_) cudaEventRecord(ev_a_, cs_);
-    if (prof_) {   // the same round without its graph, an event after every stage; this mode synchronizes here
-        cudaStreamSynchronize(cs_);
-        for (cudaEvent_t e : prof_->ev) cudaEventDestroy(e);   // the stamps of context() calls are not a round
-        prof_->ev.clear();
-        prof_->name.clear();
-        kernels::copy_i32_from_mapped(d_meta_, m_meta_, 32, cs_);
-        stamp("start");
-        if (!record_context(taps, n_new, cs_, err) || !record_block(cs_, err)) return false;
-        prof_collect();
-    } else
     if (cudaGraphLaunch(exec_[n_new], cs_) != cudaSuccess) { err = std::string("dflash2 draft: ") + cudaGetErrorString(cudaGetLastError()); return false; }
-    if (timing_) cudaEventRecord(ev_b_, cs_);
     (void) cudaStreamQuery(cs_);
     pending_ = true;
     pending_pos1_ = s;
-    pending_timing_ = timing_;
     pending_t0_ = t0;
     return true;
 }
@@ -700,10 +594,6 @@ bool Dflash2Drafter::draft_collect(int32_t* drafts, float* probs, std::string& e
     for (int i = 0; i < kDrafts; ++i) {
         drafts[i] = ((volatile int32_t*) h_out_)[i];
         if (probs) probs[i] = ((volatile float*) h_out_)[16 + i];
-    }
-    if (pending_timing_) {
-        float ms = 0;
-        if (cudaEventElapsedTime(&ms, ev_a_, ev_b_) == cudaSuccess) ms_gpu += ms;
     }
     have_ctx_ = std::max<int64_t>(have_ctx_, pending_pos1_);
     ms_draft += ms_since(pending_t0_);

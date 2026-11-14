@@ -719,7 +719,7 @@ class ParallelService(FakeEngineCase):
 
     def test_a_burst_of_connections_is_not_reset(self):
         """30-40 clients at once got "connection reset by peer" with the listen backlog of 5 (4 x R9700 burst): the
-        server listens with a deep backlog (STRATA_HTTP_BACKLOG, 256), so 60 simultaneous requests all get answers."""
+        server listens with a deep backlog (256), so 60 simultaneous requests all get answers."""
         import serve.server as server
         self.assertGreaterEqual(server.Server.request_queue_size, 64)
         self.start(2)

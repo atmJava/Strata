@@ -23,10 +23,10 @@ unchanged. Numbers are the reporters' own, on one machine each, unless the text 
 
 | Cards | Compute capability | How it runs | What is different on it |
 | --- | --- | --- | --- |
-| Tesla P100 | 6.0 | the CUDA 12 engine | `__dp4a` emulated (bit-exact); BF16 projections through fp32; seven scheduling switches on by default ([below](#tesla-p100-sm_60)); opt-in `STRATA_Q8_SM60=1` ([below](#pascal-gp100-a-q8_0-decode-kernel-opt-in)) |
-| Tesla P40 / P4, GTX 10 series | 6.1 | the CUDA 12 engine | BF16 projections through fp32 (cuBLAS has no BF16 GEMM there); dense weights dequantized by a wide kernel; expert mode 8 and its own interleaved-matvec table; opt-in `STRATA_DENSE_F32=1` ([below](#tesla-p40-sm_61-what-was-measured-and-changed)) |
+| Tesla P100 | 6.0 | the CUDA 12 engine | `__dp4a` emulated (bit-exact); BF16 projections through fp32; seven scheduling changes on by default ([below](#tesla-p100-sm_60)); the GP100 Q8_0 decode kernel ([below](#pascal-gp100-a-q8_0-decode-kernel-opt-in)) |
+| Tesla P40 / P4, GTX 10 series | 6.1 | the CUDA 12 engine | BF16 projections through fp32 (cuBLAS has no BF16 GEMM there); dense weights dequantized by a wide kernel; expert mode 8 and its own interleaved-matvec table; large dense GEMMs as `cublasSgemm` ([below](#tesla-p40-sm_61-what-was-measured-and-changed)) |
 | Tesla V100, Titan V | 7.0 | the CUDA 12 engine | BF16 projections on the FP16 tensor cores; prompt attention on `mma.m8n8k4`; a leaner attention kernel. See [NVIDIA_V100.md](NVIDIA_V100.md) |
-| RTX 20 (Turing) | 7.5 | **supported**, the ready-made engine | opt-in `STRATA_BF16_TC=1` runs the BF16 projections on the FP16 tensor cores |
+| RTX 20 (Turing) | 7.5 | **supported**, the ready-made engine | BF16 projections on the FP16 tensor cores |
 
 A card needs enough VRAM to be useful. 12 GB or more is recommended, as for every card. A 2 GB GT 1030 is compute capability 6.1
 too and cannot hold any of the model.
@@ -35,7 +35,7 @@ too and cannot hold any of the model.
 
 | Cards | Architecture | How it runs |
 | --- | --- | --- |
-| RX 6800 / 6900 series | gfx1030 | setup (`--backend hip`), unvalidated. The #540 attention kernel is the default there (`STRATA_ATTN_PRE75=0` runs the standard kernel). See [AMD_HIP.md](AMD_HIP.md#rdna2-gfx1030) |
+| RX 6800 / 6900 series | gfx1030 | setup (`--backend hip`), unvalidated. The #540 attention kernel is the default there. See [AMD_HIP.md](AMD_HIP.md#rdna2-gfx1030) |
 | RX 6700 XT | gfx1031 | setup (`--backend hip`), unvalidated; used daily by its reporter on one card |
 | RX 5500 XT (RDNA1) | gfx1012 | built by hand: `-DCMAKE_HIP_ARCHITECTURES=gfx1012` (HIP 5.7 or 7) |
 | RX 5700 XT (RDNA1) | gfx1010 | built by hand: `-DCMAKE_HIP_ARCHITECTURES=gfx1010` on ROCm 7.14's `gfx101X-dgpu` wheels; needs `ROCR_VISIBLE_DEVICES=0` on a PC that also has an AMD iGPU |
@@ -58,6 +58,10 @@ a CUDA 12.x toolkit ([source installation](SOURCE_INSTALL.md)).
 ### Opting in
 
 An older card is used only when you choose it. A PC with a newer card keeps recommending the newer one.
+
+The per-switch tables below are history. Their switches are no longer read: the CUDA 12 build picks these kernels
+from the card's architecture, and this checkout builds sm_75 only. The tables stay because each number was measured
+with the switch named beside it.
 
 | You | Setup |
 | --- | --- |
@@ -100,9 +104,9 @@ needed `-D_BITS_OPT_RANDOM_H` added to the host flags (#1074, not reproduced her
 that build only: the Volta prompt attention, the #540 attention kernel (used below sm_75), and the Pascal BF16 path. The
 ready-made CUDA 13 engine has none of them, so its kernels and output are unchanged.
 
-The FP16 path for BF16 projections is in every build but runs by default only below sm_75. RTX 20 owners can try it with
-`STRATA_BF16_TC=1` (`=0` turns it off on a V100). It is not bitwise the same as cuBLAS's BF16 kernel, because FP16 tensor-core
-sums round differently.
+The FP16 path for BF16 projections is in every build but runs by default only below sm_75; a V100 keeps the cuBLAS BF16
+path. The switch that forced either way is gone. It is not bitwise the same as cuBLAS's BF16 kernel, because FP16
+tensor-core sums round differently.
 
 ### Switches by card
 
@@ -122,11 +126,10 @@ sums round differently.
 
 ## Tesla P100 (sm_60)
 
-On a Tesla P100 the engine turns on seven switches that change only how the work is scheduled, so answers stay bit for bit the
-same: `STRATA_ADAPT_NOWAIT=1`, `STRATA_ADAPT_LAG=2`, `STRATA_SIDE_MIXER=2`, `STRATA_FUSE_WAIT=2`, `STRATA_B6_MMVQ_ROWS=1`,
-`STRATA_FUSE_DECODE=1` and `STRATA_GR_UP75=1`. `STRATA_SM60_PERF=0` turns the whole set off, and a switch you set yourself, to
-any value, is kept. The set is used when every visible card has compute capability 6.0. The full list and per-switch results are
-in [DETAILS.md](DETAILS.md#rtx-30-series-sm_86-and-tesla-p100-sm_60-bitwise-decode-switches-on-by-default).
+On a Tesla P100 the engine turns on seven changes that alter only how the work is scheduled, so answers stay bit for bit the
+same: the adaptation, side-mixer, folded-wait, B6, fused-decode and up-projection defaults in
+[DETAILS.md](DETAILS.md#rtx-30-series-sm_86-and-tesla-p100-sm_60-bitwise-decode-switches-on-by-default). The set is used when
+every visible card has compute capability 6.0; the code chooses it from the compute capability.
 
 ## Pascal GP100: a Q8_0 decode kernel (opt-in)
 
@@ -167,45 +170,31 @@ The GEMM route is opt-in because its equality is a property of the cuBLAS build,
 12.4.5.8 only. Run `gemm_f32_parity` (a build with `-DSTRATA_BUILD_TESTS=ON`; exit 0 = every size bitwise) with your toolkit's
 library before you set it.
 
-`STRATA_GR_FAST=1` is slower on the P40 below 5 tokens, and `STRATA_PREFILL_CPU_SHARE=auto` and `STRATA_ADAPT_OVERLAP=1` gave
-nothing there.
+The fast GR path was slower on the P40 below 5 tokens, and the CPU share and the overlapped adaptation gave nothing there.
 
 Two things to know when measuring on such a card:
 
 - **Temperature.** A P40 has no fan of its own. At 89 C the driver reports `SW Thermal Slowdown: Active` and the clock falls from
   1,531 to about 1,300 MHz (`nvidia-smi -q -d PERFORMANCE`). Start every arm of an A/B at the same temperature, or the later arm loses.
 - **Greedy answers are not identical run to run on a CPU without AVX-512**, even with `--prompt-cache 0 --adapt-swaps 0
-  --pcie-frac 0`. Add `STRATA_IQ_MT_MIN=1` (and `STRATA_PREFILL_CPU_SHARE=0`, `STRATA_ROUTE_TAIL_SKIP=0`) to compare two builds'
-  answers byte for byte.
+  --pcie-frac 0`. Compare two builds with fixed seeds at the same settings, and pin the kernel choice before comparing.
 
-Profiling switches: `STRATA_PREFILL_TIMING=1`, `STRATA_DECODE_TIMING=1`, `STRATA_VERIFY_PROFILE=1`.
+The engine prints no per-stage timing lines by default; the numbers above came from removed profiling switches.
 
 ## Quadro RTX 8000 and other Turing cards
 
-Turing (sm_75) has FP16 tensor cores but no native BF16 or TF32 tensor cores. Two existing, opt-in switches are worth comparing
-on your own workload:
+Turing (sm_75) has FP16 tensor cores but no native BF16 or TF32 tensor cores. Two code decisions are worth knowing:
 
-- `STRATA_BF16_TC=1` converts BF16 projection operands to FP16 and uses FP16 tensor cores with FP32 accumulation. Default on sm_75
-  is off; `=0` restores the cuBLAS BF16 path. Values outside FP16 range clamp to +-65504, and differently ordered sums can round
-  differently.
-- `STRATA_SELECT_SIMT=1` uses the tiled FP32 QSA block scorer on the pre-sm_80 CUDA path instead of the warp scorer. `=0` keeps
-  the warp scorer. It does not enable TF32 and its summation order differs.
+- BF16 projection operands can be converted to FP16 and run on the FP16 tensor cores with FP32 accumulation. Values outside FP16
+  range clamp to +-65504, and differently ordered sums can round differently. On sm_75 the conversion is off, and the cuBLAS BF16
+  path runs.
+- The tiled FP32 QSA block scorer can replace the warp scorer on the pre-sm_80 CUDA path. It does not enable TF32 and its
+  summation order differs.
 
-Set the variables before starting the engine, or in the model config's `env` object, then restart. Merge these fields into the
-existing config; this is not a complete run config:
-
-```json
-{
-  "env": {
-    "STRATA_BF16_TC": "1",
-    "STRATA_SELECT_SIMT": "1"
-  }
-}
-```
-
-`STRATA_BF16_TC=1` improved prompt throughput by 20-34% on one Quadro RTX 8000 and changed replies in 3 of 9 paired requests, so
-use it only if different rounding is acceptable. It did not improve decode. Numbers are in the history section. These switches are
-existing code ([gemm.cu](../src/prefill/gemm.cu), [qsa_select.cu](../src/kernels/cuda/qsa_select.cu)), not new kernels.
+Measured when they were switches: the FP16 conversion improved prompt throughput by 20-34% on one Quadro RTX 8000 and changed
+replies in 3 of 9 paired requests, so it is worth having only if different rounding is acceptable. It did not improve decode.
+Numbers are in the history section. Both are existing code ([gemm.cu](../src/prefill/gemm.cu),
+[qsa_select.cu](../src/kernels/cuda/qsa_select.cu)), not new kernels.
 
 ## AMD: building gfx906 and gfx1012
 

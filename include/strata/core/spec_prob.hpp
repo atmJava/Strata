@@ -1,4 +1,4 @@
-// include/strata/core/spec_prob.hpp - PROBABILISTIC DRAFT ACCEPTANCE (STRATA_SPEC_PROB=1, off by default).
+// include/strata/core/spec_prob.hpp - PROBABILISTIC DRAFT ACCEPTANCE (rejection sampling of the MTP drafts).
 //
 // Speculative rejection sampling (Leviathan et al. / Chen et al.) for the MTP drafts of a SAMPLED request.  Under
 // sampling the verify window used to accept a draft only when it EQUALS the token the target sampled for that row
@@ -34,43 +34,12 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 
 namespace strata::core {
 
-/// The default confidence gate tests the drawn token. gated_proposal.hpp carries its admitted
-/// mass and a NULL outcome to the verifier; a failed gate is still a proposal attempt.
-/// Explicit `top` tests q's largest probability before the draw and uses the normalized-q path.
-inline bool spec_gate_pick() {
-    static const bool on = [] {
-        const char* e = std::getenv("STRATA_SPEC_PROB_GATE");
-        return e == nullptr || std::strcmp(e, "top") != 0;
-    }();
-    return on;
-}
-
-/// STRATA_SPEC_PROB_DT=x: the drafter's chain runs at x * the request's temperature (default 1).  Any q is valid for
-/// rejection sampling; the acceptance sum min(p, q) is what it changes.
-inline float spec_draft_temp_scale() {
-    static const float s = [] {
-        const char* e = std::getenv("STRATA_SPEC_PROB_DT");
-        const float v = e != nullptr ? (float) std::atof(e) : 1.0f;
-        return v > 0.0f ? v : 1.0f;
-    }();
-    return s;
-}
-
-/// STRATA_SPEC_MIN_TEMP=x: coupled / probabilistic drafting only for requests with temperature >= x (default 0: every
-/// sampled request).  Measured on the RTX 3060 and 5070: sampled drafting gains at temperature 1.0 and loses below
-/// about 0.7, where the draft head's argmax is the better guess; below x the drafter keeps its argmax drafts.
-inline float spec_min_temp() {
-    static const float s = [] {
-        const char* e = std::getenv("STRATA_SPEC_MIN_TEMP");
-        return e != nullptr ? (float) std::atof(e) : 0.0f;
-    }();
-    return s;
-}
+/// The pick gate is the accepted contract; generate.cpp still asks which gate it is.
+inline bool spec_gate_pick() { return true; }
 
 /// One q row = 128 int32 slots: 64 token ids (-1 ends the list), then the 64 probabilities as float bits.
 inline constexpr int kSpecQEntries = 64;

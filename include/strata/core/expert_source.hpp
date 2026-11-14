@@ -188,11 +188,6 @@ public:
     /// A blob pointer that stays valid (not recycled) for as long as the source is open: for a copy that runs
     /// asynchronously long after the call (the adaptive tier's swap-ins).  Defaults to `blob`.
     virtual const uint8_t* blob_stable(int64_t layer, int64_t expert) { return blob(layer, expert); }
-    /// The pieces (up to 3) a blob consists of when the source can hand them out where they already are - the GGUF
-    /// mapped in place keeps an expert's gate, up and down in three tensors - so the caller can copy each straight to
-    /// its destination instead of `blob_stable` assembling a staging copy first.  0: not available for this
-    /// (layer, expert) - take `blob_stable`.  The pointers stay valid as long as the source is open.
-    virtual int blob_parts(int64_t layer, int64_t expert, BlobPart* out) { (void) layer; (void) expert; (void) out; return 0; }
     /// The caller has queued an asynchronous copy out of `blob` (a pointer this source handed out) on `stream` (a
     /// cudaStream_t): the source must not overwrite or recycle that memory until the copy has finished.  A source whose
     /// pointers are never recycled ignores it.  (#1237: a page-locked stage buffer is read by the DMA after the copy call
@@ -361,7 +356,7 @@ struct GpuPlanSink {
     int32_t cpu_jobs = 0;   ///< host only: the distinct experts the pool computes for the layer just published
 };
 
-/// Verifier::set_pcie_balance: a verify window's costs, fitted to each layer's measured times (ms, least squares with
+/// A verify window's costs, fitted to each layer's measured times (ms, least squares with
 /// forgetting): the CPU pool's time with n_c CPU and n_p PCIe experts, a + c n_c + d n_p (none: p0) - d is the PCIe
 /// copies' DRAM reads slowing the pool, as the pool and the link read the same RAM - and the GPU's, g0 + g n_p.  A
 /// layer then reads over PCIe the m of its nmiss misses that minimizes max(GPU, CPU). Measured: an RTX 5090 + 9950X3D
@@ -571,7 +566,7 @@ struct ExpertDispatch {
     /// each layer's distinct missed experts (the last ones in routing order) are read by the GPU over PCIe.
     GpuPlanSink* plan = nullptr;
     int pcie_num = 0;
-    PcieModel pcie_model;          ///< Verifier::set_pcie_balance: the PCIe count from measured costs
+    PcieModel pcie_model;          ///< the PCIe count from measured costs
     int64_t pcie_experts = 0;      ///< distinct experts the GPU read over PCIe in verify windows
     /// #588: routed (token, expert) entries the GPU computed from outside its cache in verify windows: read over PCIe
     /// (--pcie-frac, kind 1) or on another GPU (kind 2).  In neither cache_hits nor cache_refused.
@@ -822,7 +817,6 @@ public:
     const uint8_t* blob(int64_t layer, int64_t expert) override;
     /// With io prefetch in the experts.bin tier, the mapping itself (blob() may hand out a recycled staging buffer).
     const uint8_t* blob_stable(int64_t layer, int64_t expert) override;
-    int blob_parts(int64_t layer, int64_t expert, BlobPart* out) override;
     void note_async_read(const uint8_t* blob, void* stream) override;
     /// Windows, opt-in with STRATA_FILE_RELEASE=1: trim the file mapping's full pages after their expert reaches
     /// VRAM. Never touches the resident complement or staging buffers. Disabled by default.

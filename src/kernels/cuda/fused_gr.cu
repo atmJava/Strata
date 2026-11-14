@@ -28,8 +28,8 @@ constexpr int N = 2560;         // n_embd
 constexpr int HC = 4;           // streams
 constexpr int D = N * HC;       // 10240
 constexpr int LR = 320;         // hc_lr
-// the latency-hidden norm/up (gr_norm_fast_kernel / gr_up_fast_kernel, STRATA_GR_FAST): gfx906's, built for CUDA too
-#define STRATA_GR_FAST_BUILD 1
+// the latency-hidden norm/up (gr_norm_fast_kernel / gr_up_fast_kernel): gfx906's, built for CUDA too
+#define STRATA_FUSED_GR_FAST_BUILD 1
 static_assert(N == strata::core::kCompiledGeometry.n_embd && HC == strata::core::kCompiledGeometry.hc && LR == strata::core::kCompiledGeometry.hc_lr, "fused_gr is compiled for core/geometry.hpp");
 constexpr int THREADS = 256;
 constexpr int WARPS = THREADS / 32;
@@ -431,7 +431,7 @@ __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
 // instead of one chain of 5 per row).  A row's last 8 chunks (lanes 0-7 of gr_up_multi_kernel) are held 4 rows to a
 // uint4 - lane 8 i + j holds chunk 32 + j of row i - and their dot is shuffled to lane j before it is added, so lane j
 // still sums its two dots in gr_up_multi_kernel's order.  Every row's lane sums, xor tree and epilogue are
-// gr_up_multi_kernel's: the same bits.  STRATA_GR_UP75=0 keeps gr_up_multi_kernel.
+// gr_up_multi_kernel's: the same bits.
 template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false>
 __global__ void __launch_bounds__(THREADS, 4) gr_up75_kernel(GrMulti m) {
     constexpr int RPW = HC * UPM_COLS / WARPS;    // 8 rows per warp: row r = warp + WARPS i -> stream i / 2
@@ -599,7 +599,7 @@ __global__ void __launch_bounds__(Q32_THREADS) gr_up_q32_kernel(GrMulti m) {
 
 
 
-// ================================ hc read v3 (opt-in: STRATA_GR_V3=1) - two kernels, stream-split ================
+// ================================ hc read v3 (off: two kernels, stream-split) ================================
 // The norm kernel runs on only T blocks (~16 us of pure latency per call) and `down` on 41 blocks (~280 GB/s).
 // v3: `down` is split over (row group, stream[, column half]) = 164 or 328 blocks; each block stages its slice of
 // R' * w_norm for the T tokens, reduces that slice's sum of squares itself, and writes UNSCALED partial dots.  The
@@ -781,7 +781,7 @@ __global__ void __launch_bounds__(THREADS) gr_up_v3_kernel(GrMulti m, const floa
     }
 }
 // ================================ #315: split / staged - the same arithmetic, split differently ==================
-// The multi read's variants beside the plain read (0.1.31's default; not main's opt-in STRATA_GR_V3 read, which sums
+// The multi read's variants beside the plain read (0.1.31's default; not the v3 read, which sums
 // in another order).  Every variant computes each output with exactly the plain read's operations in its order (so
 // bitwise the plain read and the single-token read); only who does what, and when, changes.  `fused_gr_check`
 // compares them on the card before a verify window uses them (STRATA_HC_SPLIT below).
@@ -1086,44 +1086,23 @@ int down_chunk(bool staged, int* tile_out) {
 
 // The multi read as `variant` (kHcPlain, kHcSplit or kHcStaged): the norm, the down projection in launches of as
 // many tokens as fit the card, the up projection; the profile's stamps after the norm and after the down projection.
-// kHcPlain is the default read exactly as before (never main's opt-in STRATA_GR_V3 path, which fused_gr_read_multi
+// kHcPlain is the default read exactly as before (never the v3 path, which fused_gr_read_multi
 // takes first).
-#if STRATA_GR_FAST_BUILD
+#if STRATA_FUSED_GR_FAST_BUILD
 __global__ void __launch_bounds__(THREADS) gr_norm_fast_kernel(GrMulti m);   // below, with the AMD fast path
 __global__ void __launch_bounds__(THREADS) gr_up_fast_kernel(GrMulti m);
 }  // namespace
 static bool gr_fast();
 namespace {
 #endif
-// STRATA_GR_DOWN_MAX4=1 (opt-in): launches of up to 4 tokens hold 4 tokens' sums per thread instead of kFusedGrMaxT (the
-// same bits; checked bitwise on the 5070 for 0.1.40). Default off: a 10-pair interleaved decode A/B on the RTX 5070 (Q2_0,
-// default config) did not show the +2.8-3.5% of bench #832 (medians 0.97-0.99 of the off arm).
-bool gr_down_max4() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_GR_DOWN_MAX4");
-        return v != nullptr && std::atoi(v) != 0;
-    }();
-    return on;
-}
+// The split norm on CUDA uses the register form, which measured no gain on sm_70: the plain split kernel runs.
+bool norm_fast_on() { return false; }
 
-// the split norm with registers (gr_norm_split_fast_kernel): on by default on gfx12; CUDA opt-in (measured on sm_70 only);
-// STRATA_GR_NORM_FAST=0 / 1 forces it off / on
-bool norm_fast_on() {
-    // CUDA: opt-in with STRATA_GR_NORM_FAST=1 (measured on sm_70 only)
-    static const bool on = [] { const char* e = std::getenv("STRATA_GR_NORM_FAST"); return e != nullptr && std::atoi(e) != 0; }();
-    return on;
-}
-
-// STRATA_QFUSE_HC_LOCAL=0 puts the atomic-tail up kernel back under STRATA_QFUSE_HC (default: the 32-column kernel)
-bool qfuse_hc_local() {
-    static const bool on = [] { const char* e = std::getenv("STRATA_QFUSE_HC_LOCAL"); return e == nullptr || std::atoi(e) != 0; }();
-    return on;
-}
+// The 32-column up kernel runs under STRATA_QFUSE_HC.
+bool qfuse_hc_local() { return true; }
 // Turing: gr_up75_kernel for 3+ tokens (bitwise gr_up_multi_kernel; fused_gr_bench cold on an RTX 2080 Ti, up incl. a
-// stamp: T 3 27.3 -> 24.6 us, T 4 33.2 -> 28.7, T 6 46.6 -> 36.6); STRATA_GR_UP75=0 / 1 forces it off / on
+// stamp: T 3 27.3 -> 24.6 us, T 4 33.2 -> 28.7, T 6 46.6 -> 36.6).
 bool up75_on() {
-    static const int env = [] { const char* v = std::getenv("STRATA_GR_UP75"); return v ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
-    if (env >= 0) return env != 0;
     static int per_dev[64];   // 0 unknown, 1 no, 2 yes
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) return false;
@@ -1136,11 +1115,8 @@ bool up75_on() {
     return per_dev[dev] == 2;
 }
 // sm_75: the staged down kernel's tokens per block (gridDim.y = ct / tg), 0 = one block row for all of them.
-// STRATA_GR_DOWN_TG=n forces n where it divides the launch (0 = off).
 int down_tg(int ct) {
-    static const int env = [] { const char* v = std::getenv("STRATA_GR_DOWN_TG"); return v ? std::atoi(v) : -1; }();
     if (ct < 2) return 0;
-    if (env >= 0) return env > 0 && env <= 3 && ct % env == 0 ? env : 0;
     // fused_gr_bench cold on an RTX 2080 Ti (down incl. a stamp): T 4 29.1 -> 27.3 us, T 6 38.5 -> 32.2 with pairs;
     // one token per block is slower at every T (the weights are read from L2 once per group)
     static int per_dev[64];   // 0 unknown, 1 no, 2 sm_75
@@ -1157,8 +1133,8 @@ int down_tg(int ct) {
 void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0) {
     const int n_tok = m.T;
     const bool q8w = m.a[0].s_down != nullptr;   // STRATA_HC_REQ8: w_down / w_up hold int8 codes
-#if STRATA_GR_FAST_BUILD
-    // gfx906: the latency-hidden norm/up (STRATA_GR_FAST=0: off) - the same sums in the same order as the kernels
+#if STRATA_FUSED_GR_FAST_BUILD
+    // gfx906: the latency-hidden norm/up - the same sums in the same order as the kernels
     // they replace (gr_parity checks the multi-token read against single-token calls bitwise)
     const bool fast = gr_fast();
     if (variant >= kHcSplit) {
@@ -1178,11 +1154,7 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
     int tv = 2560;
     const int chunk_tok = down_chunk(staged, &tv);
     const size_t per_tok = (staged ? (size_t) 2 * H_TILE : (size_t) tv) * sizeof(float);
-    static const bool no_multi_gr = [] {
-        const char* no = std::getenv("STRATA_NO_MULTI_GR");
-        return no != nullptr && no[0] != '\0' && no[0] != '0';
-    }();
-    const bool exact_t = !no_multi_gr;
+    const bool exact_t = true;
     for (int c0 = 0; c0 < n_tok; c0 += chunk_tok) {
         const int ct = n_tok - c0 < chunk_tok ? n_tok - c0 : chunk_tok;
         GrMulti c{};
@@ -1194,13 +1166,12 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
             for (int k = 0; k < ct; ++k) c.a[k] = m.a[c0 + k];
         }
         const size_t smem = (size_t) ct * per_tok;
-        // #443, STRATA_GR_DOWN_MAX4: launches of up to 4 tokens hold 4 tokens' sums per thread instead of
-        // kFusedGrMaxT - the same tile, block size, accumulation order and plain/split/staged path, so the same bits
-        // (decided once per device: this runs per layer when decode is not captured)
-        const bool max4 = ct <= 4 && gr_down_max4();
+        // launches of up to kFusedGrMaxT tokens hold their sums per thread (decided once per device: this runs per
+        // layer when decode is not captured)
+        const bool max4 = false;
         if (staged) {
             // #783 PR-g (stuchapin909): a launch of exactly ct <= 6 tokens is its own instantiation, the loop bounds
-            // are compile-time (the same sums in the same order); STRATA_NO_MULTI_GR=1 keeps the generic kernels
+            // are compile-time (the same sums in the same order)
             const int tg = down_tg(ct);
             if (exact_t && tg > 0 && tg < ct) {
                 const dim3 grid(DOWN_BLOCKS + 1, (unsigned) (ct / tg));
@@ -1232,11 +1203,11 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         }
     }
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
-#if STRATA_GR_FAST_BUILD
+#if STRATA_FUSED_GR_FAST_BUILD
     if (fast && !q8w) gr_up_fast_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
     else
 #endif
-#if !STRATA_GR_FAST_BUILD
+#if !STRATA_FUSED_GR_FAST_BUILD
     if (!q8w && m.a[0].q8_mixed != nullptr && qfuse_hc_local()) {
         switch (no_multi_gr ? kFusedGrMaxT : n_tok) {
             case 1: gr_up_q32_kernel<1, true><<<Q32_BLOCKS, Q32_THREADS, 0, st>>>(m); break;
@@ -1290,8 +1261,8 @@ int preferred_variant() { return kHcSplit; }
 std::atomic<int> g_variant[64];
 
 
-#if STRATA_GR_FAST_BUILD
-// ---- AMD fast path (STRATA_GR_FAST, default 1; 0 = the old kernels): the same arithmetic per value in the same order, latency
+#if STRATA_FUSED_GR_FAST_BUILD
+// ---- AMD fast path (default 1; 0 = the old kernels): the same arithmetic per value in the same order, latency
 // hidden.  gr_norm: one block per token (as before) but a thread's 10 float4 of R / bo / w_norm are loaded
 // before any is used, and xn stays in registers until rs is known (was: store, then re-read the 40 KB).
 // gr_up: a warp's 8 rows of w_up and their epilogue inputs are loaded before the dots (was: one row's load chain
@@ -1754,7 +1725,7 @@ __global__ void __launch_bounds__(Q32_THREADS) gr_up_q8_q32_kernel(GrMulti m, co
 
 
 
-// S26 STRATA_TSUM=1: gr_down_q8_kernel / gr_up_q8_kernel with each row's T per-token warp sums (and the sums of
+// S26: gr_down_q8_kernel / gr_up_q8_kernel with each row's T per-token warp sums (and the sums of
 // squares) as one transposed butterfly (s26_tsum.cuh): bitwise the same values (S26 ws4 harness, every output equal,
 // T 1-4: 1.00 / 1.03 / 1.03 / 1.15x per read). PF (all rows' weights in registers before the part / lo phase) was
 // slower (0.92-1.03x) and is off.
@@ -1981,19 +1952,16 @@ __global__ void __launch_bounds__(THREADS) gr_up_q8_fast_kernel(GrMulti m, const
 
 template <int T> void launch_q8_t(const GrMulti& m, float* part, float* ssg, cudaStream_t st, unsigned long long* stamp_buf,
                                   int stamp_i0) {
-    static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, (void*) st);
-    if (ts) gr_down_q8_fast_kernel<T, 4><<<dim3(LR / (WARPS * 4) + 1, Q8_NKC), THREADS, 0, st>>>(m, part, ssg);
-    else gr_down_q8_kernel<T><<<dim3(Q8_RG + 1, Q8_NKC), THREADS, 0, st>>>(m, part, ssg);
+    gr_down_q8_kernel<T><<<dim3(Q8_RG + 1, Q8_NKC), THREADS, 0, st>>>(m, part, ssg);
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
-#if !STRATA_GR_FAST_BUILD
+#if !STRATA_FUSED_GR_FAST_BUILD
     if (m.a[0].q8_mixed != nullptr && qfuse_hc_local()) {   // HIP (not gfx906): the block owns a q8_1 group
         gr_up_q8_q32_kernel<T><<<Q32_BLOCKS, Q32_THREADS, 0, st>>>(m, part, ssg);
         return;
     }
 #endif
-    if (ts) gr_up_q8_fast_kernel<T, false><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
-    else gr_up_q8_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
+    gr_up_q8_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
 }
 void launch_q8(const GrMulti& m, float* scratch, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0) {
     float* part = scratch;
@@ -2012,13 +1980,11 @@ void launch_q8(const GrMulti& m, float* scratch, cudaStream_t st, unsigned long 
 
 }  // namespace
 
-#if STRATA_GR_FAST_BUILD
-int g_gr_fast = -1;   // fused_gr_set_fast (the bench); -1 = STRATA_GR_FAST, else the card's default
+#if STRATA_FUSED_GR_FAST_BUILD
+int g_gr_fast = -1;   // fused_gr_set_fast (the bench); the fast norm/up default is not part of this build
 static bool gr_fast() {
-    static const int env = [] { const char* v = std::getenv("STRATA_GR_FAST"); return v ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
     if (g_gr_fast >= 0) return g_gr_fast != 0;
-    if (env >= 0) return env != 0;
-    return false;   // the Volta-only fast norm/up default is not part of this build
+    return false;
 }
 #else
 int g_gr_fast = -1;
@@ -2060,8 +2026,8 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         }
         return q8;
     }
-    // STRATA_GR_V3=1: the two-kernel read above (another summation order - opt-in)
-    static const bool v3 = [] { const char* v = std::getenv("STRATA_GR_V3"); return v != nullptr && std::atoi(v) != 0; }();
+    // the two-kernel read above (another summation order): off
+    static const bool v3 = false;
     static int split3[64] = {};   // per device: 0 = not decided yet, 1 / 2 = column halves S, -1 = does not fit
     int dev3 = 0;
     if (v3) {
@@ -2089,7 +2055,7 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             } else if (need2 <= limit)
                 // #375 (kenh0u): the S = 2 split (a 64 KB opt-in card: Turing) disagrees with itself in gr_parity
                 // (graph replay vs direct call) - such a card keeps the default read until that split is fixed
-                std::fprintf(stderr, "strata: STRATA_GR_V3=1 needs the two-half split on this card, which fails its "
+                std::fprintf(stderr, "strata: the v3 read needs the two-half split on this card, which fails its "
                                      "checks (#375): the default read is used\n");
             cudaGetLastError();   // drop any error the attempts left behind
             split3[dev3] = split;
@@ -2125,7 +2091,7 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         }
         return false;   // the v3 read: no q8_1 (the caller quantizes)
     }
-    // the default read (STRATA_GR_V3 unset): v1, or the bitwise-equal v2 / v3 this card's check accepted
+    // the default read: v1, or the bitwise-equal v2 / v3 this card's check accepted
     launch_multi(m, fused_gr_variant(), st, stamp_buf, stamp_i0);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {

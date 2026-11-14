@@ -267,7 +267,6 @@ int main(int argc, char** argv) {
                      "       native_expert_parity <shard.gguf> [layer ...]\n");
         return 2;
     }
-    if (std::getenv("STRATA_IQ_MT_MIN") == nullptr) setenv("STRATA_IQ_MT_MIN", "1", 1);
 
     cudaStream_t stream;
     cuda_ok(cudaStreamCreate(&stream), "cudaStreamCreate");

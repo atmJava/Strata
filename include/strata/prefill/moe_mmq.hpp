@@ -29,8 +29,7 @@ void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64
               void* stream);
 /// The rows quantize(x, src, ...) writes for tokens x k_used rows in expert order, written token by token: token t's
 /// row of x is quantized once and stored at rows slot[t * k_used + k] (`slot` the inverse of `src`) - the same bytes,
-/// a k_used-th of the quantizations (llama.cpp's quantize_scatter_mmq_q8_1_cuda).  STRATA_QUANT_GATHER=1: quantize()
-/// over `src`, as before.
+/// a k_used-th of the quantizations (llama.cpp's quantize_scatter_mmq_q8_1_cuda).
 void quantize_scatter(const float* x, const int32_t* slot, const int32_t* src, void* xq, int ggml_type, int64_t cols,
                       int64_t ld, int64_t tokens, int k_used, void* stream);
 
@@ -105,7 +104,7 @@ void iota(int32_t* dst, int64_t n, void* stream);
 
 /// Every launch of `n_experts` experts of [w_rows, *] `ggml_type` weights computes each output tile in one block
 /// with no stream-k K split, and every tile width has the same I/K tiles and SRAM layout, on every visible GPU - so an
-/// expert's rows get the same bits in any such launch, whatever its group-mates and max_rows (STRATA_MMQ_GROUP_SORT).
+/// expert's rows get the same bits in any such launch, whatever its group-mates and max_rows.
 /// 160 or 320 tiles per column tile on 82 SMs: yes; 108 or 128 SMs: no (stream-k splits the few-tile launches).
 bool whole_tiles(int ggml_type, int64_t w_rows, int n_experts);
 }  // namespace strata::prefill::mmq

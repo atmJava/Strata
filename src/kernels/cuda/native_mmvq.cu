@@ -1144,17 +1144,6 @@ struct SmallTraits<IQ4NLBlock, 4> {
 // llama.cpp's generic multi-column table (ncols 2-4: 4 warps; 5-8: 2 warps; always 2 rows per block): faster,
 // equal to ncols = 1 only to float rounding (the cross-warp reduction groups partial sums differently).
 bool g_multi_exact = true;   // until the upstream layout is timed on an idle GPU (plan rule: default only what is measured)
-// B6 STRATA_B6_MMVQ_ROWS (lab, default 0 = off): see native_mmvq_set_b6_rows
-// Read at first use so the environment can select it before the first multi-column call.
-int g_b6_rows = -1;
-int b6_rows_mode() { if (g_b6_rows < 0) { const char* v = std::getenv("STRATA_B6_MMVQ_ROWS"); g_b6_rows = v ? std::atoi(v) : 0; } return g_b6_rows; }
-
-// S26 STRATA_TSUM=1 (TS): warp 0's NCOLS x ROWS sums as one transposed butterfly (s26_tsum.cuh), bitwise the same
-static bool s26_tsum_on() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
-    return on;
-}
-
 // S26 STRATA_LFUSE (PAIR): blocks n_out.. compute the same rows of w2 into y2 (two matrices of one shape on one
 // input in one launch; each output's code is the single matrix's)
 template<typename F, int NCOLS, int NW, int ROWS, bool TS = false, bool PAIR = false>
@@ -1251,7 +1240,7 @@ __global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w
     }
 }
 
-// ---- B6 STRATA_B6_MMVQ_ROWS (lab, opt-in): the exact multi-column layout with each column's activation fragment
+// ---- B6 (lab, off): the exact multi-column layout with each column's activation fragment
 // loaded ONCE per weight block and reused across ROWS rows of the block (the default kernel reloads it for every row
 // it applies it to, and the K-quant scales once per column).  A thread keeps the same blocks (kbx = tid / T, stride
 // BPI with WARPS warps), each (row, column) sum adds the same per-block values in the same order, and the cross-warp
@@ -1394,31 +1383,10 @@ __global__ void b6_mmvq_rows_kernel(const typename F::Block* __restrict__ w, con
     }
 }
 
-// the B6 launch for a format that has a B6X: true when it ran.  g_b6_rows: 1 = 2 rows per block (the fastest on both
-// cards in b6_mmvq_bench), else 2 / 4 / 8 rows.
-template<typename F, int NCOLS>
-bool b6_launch(const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s) {
-    if constexpr (!B6X<F>::ok) {
-        return false;
-    } else {
-        if (b6_rows_mode() <= 0 || !g_multi_exact || s26_tsum_on() || n_in / F::DIV < 1) return false;
-        const int rows = b6_rows_mode() == 1 ? 2 : b6_rows_mode();
-        const dim3 threads(WARP, WARPS);
-        if (rows == 2)
-            b6_mmvq_rows_kernel<F, NCOLS, 2><<<unsigned((n_out + 1) / 2), threads, 0, s>>>(w, x, y, n_in, n_out);
-        else if (rows == 8)
-            b6_mmvq_rows_kernel<F, NCOLS, 8><<<unsigned((n_out + 7) / 8), threads, 0, s>>>(w, x, y, n_in, n_out);
-        else
-            b6_mmvq_rows_kernel<F, NCOLS, 4><<<unsigned((n_out + 3) / 4), threads, 0, s>>>(w, x, y, n_in, n_out);
-        return true;
-    }
-}
-
 template<typename F, int NCOLS>
 void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
-    if (b6_launch<F, NCOLS>(w, x, y, n_in, n_out, s)) return;   // STRATA_B6_MMVQ_ROWS
     if (!g_multi_exact) {
         constexpr int NW = NCOLS <= 4 ? 4 : 2;
         const unsigned blocks = unsigned((std::size_t(n_out) + 1) / 2);
@@ -1431,20 +1399,10 @@ void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in,
     const typename F::Block* const no_w2 = nullptr;
     float* const no_y2 = nullptr;
     // #783 PR-h (stuchapin909): two rows per block for every K, not only small K - each row keeps its own partial sums and
-    // reduction, so a row's result does not depend on its neighbour; STRATA_NO_MMVQ_ROWS2=1 keeps one row for large K
-    static const bool rows1 = [] {
-        const char* v = std::getenv("STRATA_NO_MMVQ_ROWS2");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
-    if (rows1 && n_in / F::DIV >= F::BPI) {
-        if (s26_tsum_on()) launch_kernel(native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, true, false>, dim3(unsigned(n_out)), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
-        else launch_kernel(native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, false, false>, dim3(unsigned(n_out)), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
-        return;
-    }
+    // reduction, so a row's result does not depend on its neighbour
     constexpr int ROWS = 2;
     const unsigned blocks = unsigned((std::size_t(n_out) + ROWS - 1) / ROWS);
-    if (s26_tsum_on()) launch_kernel(native_mmvq_multi_kernel<F, NCOLS, WARPS, ROWS, true, false>, dim3(blocks), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
-    else launch_kernel(native_mmvq_multi_kernel<F, NCOLS, WARPS, ROWS, false, false>, dim3(blocks), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
+    launch_kernel(native_mmvq_multi_kernel<F, NCOLS, WARPS, ROWS, false, false>, dim3(blocks), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
 }
 
 template<typename F>
@@ -1790,7 +1748,7 @@ void small_f32(const void* weights, const float* x, void* scratch_q8_1,
     small_mmvq<Weight, Qi>(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
 }
 
-// ============================ STRATA_Q8_PACKED=1: the packed Q8_0 decode layout (opt-in) ============================
+// ============================ the packed Q8_0 decode layout (off) ============================
 //
 // A lossless load-time repack of a Q8_0 matrix: the SAME int8 values in a qs plane (row-major, n_in bytes per row)
 // followed by the SAME fp16 scales in a d plane (row-major, n_in / 32 per row) - no requantization, same bytes.
@@ -1841,7 +1799,7 @@ __global__ void native_q8_0_packed_kernel(const int8_t* __restrict__ qs, const h
             for (int j = 0; j < NCOLS; ++j) partial[buf][threadIdx.y - 1][j][threadIdx.x] = tmp[j];
         }
         __syncthreads();
-        if (TS && threadIdx.y == 0) {   // S26 STRATA_TSUM=1: one transposed butterfly, bitwise the same sums
+        if (TS && threadIdx.y == 0) {   // S26: one transposed butterfly, bitwise the same sums
             constexpr int P = s26ts::pow2_ceil(NCOLS);
             float v[P];
 #pragma unroll
@@ -1877,7 +1835,7 @@ template<int NCOLS>
 void q8_packed_launch(const Q8Packed& w, const Q81Block* x, float* y, cudaStream_t s) {
     const bool persist = w.n_in <= Q8P_PERSIST_MAX_IN;
     const int grid = persist ? (std::min)(w.n_out, Q8P_PERSIST_GRID) : w.n_out;
-    if (s26_tsum_on())
+    if (false)
         native_q8_0_packed_kernel<NCOLS, true><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.qs, w.d, x, y, w.n_in, w.n_out,
                                                                                           persist ? grid : w.n_out);
     else
@@ -1917,7 +1875,7 @@ bool q8_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 }
 
 
-// ============================ STRATA_Q6_PACKED=1: the packed Q6_K head layout (opt-in) ============================
+// ============================ the packed Q6_K head layout (off) ============================
 //
 // The output heads (the main head, 248320 rows, and the MTP draft head's row subset) are Q6_K matrices of 2560-wide
 // rows: 10 blocks of 210 bytes each, so every int load is 2-byte aligned and a row is 2100 bytes. The packed copy
@@ -1925,16 +1883,7 @@ bool q8_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 // two words are aligned dword loads (non-temporal). Thread ownership (block tid / 32 + 4 i, word tid % 32), the
 // q6_q8_dot_impl expression, the per-thread order and the reduction are those of native_q6_k_mmvq_kernel<false> /
 // native_mmvq_multi_kernel<Q6KTraits, NC, 4, 1>: every output is bitwise equal. Persistent workgroups.
-int g_q6p_grid_override = 0;   // the self-test's grid sweep (STRATA_Q6P_SELFTEST=2)
-int q6p_grid() {
-    if (g_q6p_grid_override > 0) return g_q6p_grid_override;
-    static const int grid = [] {
-        const char* v = std::getenv("STRATA_Q6P_GRID");
-        const int g = v ? std::atoi(v) : 0;
-        return g > 0 ? g : 640;
-    }();
-    return grid;
-}
+int q6p_grid() { return 640; }
 
 template<int NCOLS, bool TS = false>
 __launch_bounds__(WARPS * WARP, 1)
@@ -1979,7 +1928,7 @@ __global__ void native_q6_k_packed_kernel(const int* __restrict__ ql, const int*
             for (int j = 0; j < NCOLS; ++j) partial[buf][threadIdx.y - 1][j][threadIdx.x] = tmp[j];
         }
         __syncthreads();
-        if (TS && threadIdx.y == 0) {   // S26 STRATA_TSUM=1: one transposed butterfly, bitwise the same sums
+        if (TS && threadIdx.y == 0) {   // S26: one transposed butterfly, bitwise the same sums
             constexpr int P = s26ts::pow2_ceil(NCOLS);
             float v[P];
 #pragma unroll
@@ -2017,7 +1966,7 @@ std::unordered_map<const void*, Q6Packed>& q6_packed_registry() {
 template<int NCOLS>
 void q6_packed_launch(const Q6Packed& w, const Q81Block* x, float* y, cudaStream_t s) {
     const int grid = (std::min)(w.n_out, q6p_grid());
-    if (s26_tsum_on())
+    if (false)
         native_q6_k_packed_kernel<NCOLS, true><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.ql, w.qh, w.sc, w.d, x, y, w.n_in,
                                                                                           w.n_out, grid);
     else
@@ -2052,13 +2001,7 @@ bool q6_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 }
 } // namespace
 
-bool native_q8_0_packed_enabled() {
-    static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_Q8_PACKED");
-        return v && v[0] == '1' && v[1] == '\0';
-    }();
-    return enabled;
-}
+bool native_q8_0_packed_enabled() { return false; }
 
 bool native_q8_0_packed_eligible(int n_in, int n_out) {
     return q8_packed_shape(n_in, n_out);
@@ -2086,123 +2029,14 @@ void native_q8_0_packed_register(const void* gguf_weights, const void* packed, i
 
 void native_q8_0_packed_unregister(const void* gguf_weights) { q8_packed_registry().erase(gguf_weights); }
 
-bool native_q6_k_packed_enabled() {
-    static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_Q6_PACKED");
-        return v && v[0] == '1' && v[1] == '\0';
-    }();
-    return enabled;
-}
+bool native_q6_k_packed_enabled() { return false; }
 
 bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what) {
-    if (!weights || n_in <= 0 || n_in % 256 || n_in / 256 < WARPS * WARP / 32 || n_out < 2048) return false;
-    if (q6_packed_registry().count(weights)) return true;
-    const std::size_t nb = std::size_t(n_in / 256) * std::size_t(n_out);
-    const std::size_t bytes = nb * sizeof(Q6KBlock);
-    std::vector<Q6KBlock> host(nb);
-    if (cudaMemcpy(host.data(), weights, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) { cudaGetLastError(); return false; }
-    // planes: ql | qh | scales | d, each 256-byte aligned
-    const std::size_t o_qh = (nb * 128 + 255) & ~std::size_t(255);
-    const std::size_t o_sc = (o_qh + nb * 64 + 255) & ~std::size_t(255);
-    const std::size_t o_d = (o_sc + nb * 16 + 255) & ~std::size_t(255);
-    const std::size_t total = o_d + nb * 2;
-    std::vector<uint8_t> packed(total, 0);
-    for (std::size_t b = 0; b < nb; ++b) {
-        std::memcpy(packed.data() + b * 128, host[b].ql, 128);
-        std::memcpy(packed.data() + o_qh + b * 64, host[b].qh, 64);
-        std::memcpy(packed.data() + o_sc + b * 16, host[b].scales, 16);
-        std::memcpy(packed.data() + o_d + b * 2, &host[b].d, 2);
-    }
-    void* dev = nullptr;
-    if (cudaMalloc(&dev, total) != cudaSuccess) { cudaGetLastError(); return false; }
-    if (cudaMemcpy(dev, packed.data(), total, cudaMemcpyHostToDevice) != cudaSuccess) {
-        cudaFree(dev); cudaGetLastError(); return false;
-    }
-    auto* base = static_cast<uint8_t*>(dev);
-    q6_packed_registry()[weights] = Q6Packed{dev, reinterpret_cast<const int*>(base),
-                                             reinterpret_cast<const int*>(base + o_qh),
-                                             reinterpret_cast<const int8_t*>(base + o_sc),
-                                             reinterpret_cast<const half*>(base + o_d), n_in, n_out};
-    std::fprintf(stderr, "strata: STRATA_Q6_PACKED=1 packed the %s (%d x %d, +%.1f MiB)\n", what, n_out, n_in,
-                 total / 1048576.0);
-    // STRATA_Q6P_SELFTEST=1: bitwise check against the GGUF-layout kernels (1..4 columns) and paired timings
-    if (const char* v = std::getenv("STRATA_Q6P_SELFTEST"); v && (v[0] == '1' || v[0] == '2')) {
-        cudaStream_t s = nullptr;
-        cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
-        const int nq = n_in / Q8K;
-        std::vector<Q81Block> hx(std::size_t(4) * nq);
-        uint32_t r = 12345u;
-        for (auto& blk : hx) {
-            for (auto& q : blk.qs) { r = r * 1664525u + 1013904223u; q = int8_t(int((r >> 24) & 255u) - 128); }
-            r = r * 1664525u + 1013904223u;
-            blk.ds = __floats2half2_rn(0.001f + float(r >> 8) * 1e-9f, 0.0f);
-        }
-        void *dx = nullptr, *ya = nullptr, *yb = nullptr;
-        cudaMalloc(&dx, hx.size() * sizeof(Q81Block));
-        cudaMalloc(&ya, std::size_t(4) * n_out * 4);
-        cudaMalloc(&yb, std::size_t(4) * n_out * 4);
-        cudaMemcpy(dx, hx.data(), hx.size() * sizeof(Q81Block), cudaMemcpyHostToDevice);
-        std::vector<float> a(std::size_t(4) * n_out), c(std::size_t(4) * n_out);
-        bool same = true;
-        for (int nc = 1; nc <= 4; ++nc) {
-            g_q6_bypass = true;
-            native_q6_k_mmvq(weights, dx, (float*) ya, n_in, n_out, nc, s);
-            g_q6_bypass = false;
-            native_q6_k_mmvq(weights, dx, (float*) yb, n_in, n_out, nc, s);
-            cudaStreamSynchronize(s);
-            cudaMemcpy(a.data(), ya, std::size_t(nc) * n_out * 4, cudaMemcpyDeviceToHost);
-            cudaMemcpy(c.data(), yb, std::size_t(nc) * n_out * 4, cudaMemcpyDeviceToHost);
-            same = same && std::memcmp(a.data(), c.data(), std::size_t(nc) * n_out * 4) == 0;
-        }
-        cudaEvent_t e0, e1;
-        cudaEventCreate(&e0); cudaEventCreate(&e1);
-        for (int nc : {1, 2, 4}) {
-            std::vector<float> tb, tc;
-            for (int k = 0; k < 11; ++k) {
-                for (int pass = 0; pass < 2; ++pass) {
-                    const bool cand = (pass == 0) == (k % 2 == 1);
-                    g_q6_bypass = !cand;
-                    cudaEventRecord(e0, s);
-                    for (int it = 0; it < 5; ++it) native_q6_k_mmvq(weights, dx, (float*) (cand ? yb : ya), n_in, n_out, nc, s);
-                    cudaEventRecord(e1, s);
-                    cudaEventSynchronize(e1);
-                    float ms = 0; cudaEventElapsedTime(&ms, e0, e1);
-                    (cand ? tc : tb).push_back(ms * 1000.0f / 5);
-                }
-            }
-            g_q6_bypass = false;
-            std::sort(tb.begin(), tb.end()); std::sort(tc.begin(), tc.end());
-            std::fprintf(stderr, "strata: Q6_K packed self-test %s ncols %d: GGUF %.1f us (%.1f-%.1f), packed %.1f us "
-                         "(%.1f-%.1f), 11 paired samples\n", what, nc, tb[5], tb[0], tb[10], tc[5], tc[0], tc[10]);
-        }
-        std::fprintf(stderr, "strata: Q6_K packed self-test %s: outputs %s (1-4 columns)\n", what,
-                     same ? "BITWISE EQUAL" : "DIFFER");
-        if (v[0] == '2') {   // grid sweep of the packed kernel
-            for (int grid : {160, 320, 640, 1280, 2560, 5120, 20480}) {
-                g_q6p_grid_override = grid;
-                for (int nc : {1, 2, 4}) {
-                    std::vector<float> tc;
-                    for (int k = 0; k < 7; ++k) {
-                        cudaEventRecord(e0, s);
-                        for (int it = 0; it < 5; ++it) native_q6_k_mmvq(weights, dx, (float*) yb, n_in, n_out, nc, s);
-                        cudaEventRecord(e1, s);
-                        cudaEventSynchronize(e1);
-                        float ms = 0; cudaEventElapsedTime(&ms, e0, e1);
-                        tc.push_back(ms * 1000.0f / 5);
-                    }
-                    std::sort(tc.begin(), tc.end());
-                    std::fprintf(stderr, "strata: Q6_K packed grid sweep %s grid %d ncols %d: %.1f us (%.1f-%.1f)\n",
-                                 what, grid, nc, tc[3], tc[0], tc[6]);
-                }
-            }
-            g_q6p_grid_override = 0;
-        }
-        cudaEventDestroy(e0); cudaEventDestroy(e1);
-        cudaFree(dx); cudaFree(ya); cudaFree(yb);
-        cudaStreamDestroy(s);
-        if (!same) { native_q6_k_unpack(weights); return false; }
-    }
-    return true;
+    (void) weights;
+    (void) n_in;
+    (void) n_out;
+    (void) what;
+    return false;
 }
 
 void native_q6_k_unpack(const void* weights) {
@@ -2215,8 +2049,6 @@ void native_q6_k_unpack(const void* weights) {
 
 void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
 bool native_mmvq_multi_exact() { return g_multi_exact; }
-void native_mmvq_set_b6_rows(int mode) { g_b6_rows = mode; }
-int native_mmvq_b6_rows() { return b6_rows_mode(); }
 
 std::size_t native_q8_1_bytes(int n_in, int ncols) {
     validate_shape(n_in, ncols);
@@ -2300,7 +2132,7 @@ namespace {
 // an RTX 2080 Ti).  Here lane l runs the chunks of the exact kernel's threads l, 32+l, 64+l and 96+l in their loop
 // order, adds the four sums as warp 0 adds the other warps' partials, then the same warp_sum: every output is bit for
 // bit native_q2_0_mmvq_kernel's (one column) and launch_multi's exact layout (two to four).  80 -> 31 us at three
-// columns, 37 -> 25 us at one.  STRATA_Q2_WARP=0 keeps the old kernels; =1 takes this one on any CUDA card.
+// columns, 37 -> 25 us at one.
 constexpr int kQ20WarpRows = 4;
 template <int NCOLS>
 __global__ void __launch_bounds__(WARPS * WARP) q2_0_warp_rows_kernel(const Q20Block* __restrict__ w,
@@ -2345,8 +2177,6 @@ __global__ void __launch_bounds__(WARPS * WARP) q2_0_warp_rows_kernel(const Q20B
 }
 bool q2_0_warp_rows_on() {
     static int on[16] = {};   // by device ordinal: 0 unknown, 1 yes, -1 no
-    static const int env = [] { const char* v = std::getenv("STRATA_Q2_WARP"); return v ? (v[0] == '0' ? 0 : 1) : -1; }();
-    if (env >= 0) return env == 1;
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return false;
     if (on[dev] == 0) {
@@ -2538,7 +2368,7 @@ void native_q4_k_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
-    if (q6_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q6_PACKED=1 heads
+    if (q6_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;
     validate_shape(n_in, ncols, 256);
     if (n_out <= 0) throw std::invalid_argument("native MMVQ requires n_out > 0");
     validate_pointer(weights);
@@ -2602,7 +2432,7 @@ void q8_0_pair_launch(const Q80Block* w1, const Q80Block* w2, const Q81Block* x,
                       cudaStream_t s) {
     using F = SmallTraits<Q80Block, 8>;
     const dim3 threads(WARP, WARPS);
-    if (s26_tsum_on())
+    if (false)
         native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, true, true><<<unsigned(2 * n_out), threads, 0, s>>>(w1, x, y1, n_in, n_out, w2, y2);
     else
         native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, false, true><<<unsigned(2 * n_out), threads, 0, s>>>(w1, x, y1, n_in, n_out, w2, y2);
@@ -2636,7 +2466,7 @@ bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void*
 
 void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
-    if (q8_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q8_PACKED=1 tensors
+    if (q8_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;
     small_mmvq<Q80Block, 8>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
 }
 
@@ -2762,51 +2592,11 @@ constexpr IlRows kIlRows_75[] = {
     {14, {{0, 0, 1, 2, 1}, {0, 2, 2, 4, 4}, {0, 4, 4, 4, 4}}},   // Q6_K
     {11, {{1, 2, 4, 4, 4}, {1, 2, 4, 4, 4}, {1, 2, 2, 2, 2}}},   // Q3_K
 };
-// Q3_K's IL kernels stay on unless STRATA_MMVQ_IL_Q3K=0 turns them off (the 331f30bf cleanup deleted this helper
-// and left its consumer below behind; the same leading-'0' reading as the rows override).
-bool il_q3k_on() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_IL_Q3K"); return v == nullptr || v[0] != '0'; }();
-    return on;
-}
-// STRATA_MMVQ_IL_ROWS="type:ncols:r0,r1,r2,r3,r4;..." overrides single rows of the table (type = ggml
-// type 23/12/13/14, ncols 2-4, r* = rows a warp 0/1/2/4 for the five n_out classes).  Parsed once.
-struct IlEnvRow { int type, ncols; uint8_t r[5]; };
-const std::vector<IlEnvRow>& il_env_rows() {
-    static const std::vector<IlEnvRow> v = [] {
-        std::vector<IlEnvRow> out;
-        const char* e = std::getenv("STRATA_MMVQ_IL_ROWS");
-        if (!e) return out;
-        std::string str(e);
-        size_t pos = 0;
-        while (pos < str.size()) {
-            size_t end = str.find(';', pos);
-            if (end == std::string::npos) end = str.size();
-            int t = 0, n = 0, r[5] = {0, 0, 0, 0, 0}, used = 0;
-            if (std::sscanf(str.substr(pos, end - pos).c_str(), "%d:%d:%d,%d,%d,%d,%d%n", &t, &n, &r[0], &r[1], &r[2], &r[3],
-                            &r[4], &used) >= 7 && n >= 2 && n <= 4) {
-                IlEnvRow x{t, n, {}};
-                bool ok = true;
-                for (int i = 0; i < 5; ++i) { ok = ok && (r[i] == 0 || r[i] == 1 || r[i] == 2 || r[i] == 4); x.r[i] = (uint8_t) r[i]; }
-                if (ok) out.push_back(x);
-                else std::fprintf(stderr, "strata: STRATA_MMVQ_IL_ROWS: rows must be 0/1/2/4 - entry ignored\n");
-            } else {
-                std::fprintf(stderr, "strata: STRATA_MMVQ_IL_ROWS: cannot read '%s' (type:ncols:r0,r1,r2,r3,r4) - ignored\n",
-                             str.substr(pos, end - pos).c_str());
-            }
-            pos = end + 1;
-        }
-        return out;
-    }();
-    return v;
-}
-}  // namespace
-// The rows a warp for compute capability `cc`; 0 selects native_mmvq's kernels. Pure, so tests need no GPU.
+// Q3_K's IL kernels are on.
+bool il_q3k_on() { return true; }
 int native_mmvq_il_rows_for(int cc, int type, int ncols, int n_out) {
     if (cc != 75 || ncols < 2 || ncols > 4) return 0;
     const int cls = n_out < 2048 ? 0 : n_out < 4096 ? 1 : n_out < 8192 ? 2 : n_out < 12288 ? 3 : 4;
-    for (const IlEnvRow& e : il_env_rows())
-        if (e.type == type && e.ncols == ncols) return e.r[cls];
-    if (type == 11 && !il_q3k_on()) return 0;   // STRATA_MMVQ_IL_Q3K=0: Q3_K keeps native_mmvq's kernels
     for (const IlRows& row : kIlRows_75)
         if (row.type == type) return row.r[ncols - 2][cls];
     return 0;
@@ -2830,8 +2620,8 @@ int g_tune_rows = 0;   // native_mmvq_il_tune (tests, benchmarks): rows a warp f
 void native_mmvq_il_tune(int rows) { g_tune_rows = rows; }
 
 namespace {
-// STRATA_SM75_IL=0 / 1 forces the table off / on; unset it follows STRATA_SM75_PERF=1 (Turing only)
-bool sm75_il_on(int major, int minor) { return strata::sm75_switch("STRATA_SM75_IL", major, minor); }
+// The table follows STRATA_SM75_PERF (Turing only).
+bool sm75_il_on(int major, int minor) { return strata::sm75_default(major, minor); }
 bool il_arch_ok() {
     static int ok[16] = {};   // 0 unknown, 1 yes, -1 no, by device ordinal
     int dev = 0;

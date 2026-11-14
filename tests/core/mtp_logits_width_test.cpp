@@ -40,7 +40,7 @@
 #if defined(STRATA_TEST_REAL_ENGINE)
 // Everything mtp.hpp includes, taken first with normal access - then the access-specifier change touches only
 // MtpDrafter's own body (the include guards make these includes no-ops inside mtp.hpp).
-#include "strata/core/coupled_draft.hpp"   // kCoupledHistCap, coupled_draft_env
+#include "strata/core/coupled_draft.hpp"   // mtp.hpp includes it: taken here, outside `#define private public`
 #include "strata/core/pinned_ring.hpp"
 #include "strata/core/session.hpp"
 #include <functional>
@@ -71,28 +71,11 @@ void unset(const char* name) {
 #endif
 }
 
-void put(const char* name, const char* value) {
-#if defined(_WIN32)
-    _putenv_s(name, value);
-#else
-    setenv(name, value, 1);
-#endif
-}
-
-#if defined(STRATA_TEST_REAL_ENGINE)
-using strata::core::kCoupledHistCap;
-#else
-// The CPU-only build cannot include coupled_draft.hpp (it pulls kernels/sampler.hpp -> <cuda_runtime.h>), so
-// this is the one constant taken by value.  include/strata/core/coupled_draft.hpp:55.
-constexpr int kCoupledHistCap = 4096;
-#endif
-
 // ================================ the transcription of bind_bytes ================================
 //
-// src/core/mtp.cpp:545-572.  `vocab_file_bytes` is the size `bind_bytes` would see in vocab_file(): 0 when the
+// src/core/mtp.cpp:545-570.  `vocab_file_bytes` is the size `bind_bytes` would see in vocab_file(): 0 when the
 // file is absent, and the source ignores a file smaller than 4 bytes or not a whole number of int32 tokens
-// (:555-558).  `coupled_env` / `cparams` are the coupled-sampler terms (:570-571), included so the few bytes
-// that only exist under STRATA_SPEC_COUPLED are not silently missing from the oracle.
+// (:555-558).
 struct BindWidths {
     int64_t max_t = 0;
     int64_t n_vocab = 0;
@@ -100,11 +83,8 @@ struct BindWidths {
     int64_t vocab_file_bytes = 0;
     bool dhead = false;              ///< dhead_ != nullptr (a bound draft head)
     bool owns_draft_head = true;
-    bool full_head = false;          ///< full_head_env()
     bool bound_logits = false;       ///< head_logits_ != nullptr
     int64_t head_logits_cap = 0;
-    bool coupled_env = false;
-    bool cparams = false;
 };
 
 int64_t n_subset_from_file(int64_t bytes) {
@@ -115,8 +95,8 @@ uint64_t bind_bytes_transcription(const BindWidths& w, uint64_t head_row_bytes) 
     int64_t n_subset = 0;                                                              // :549
     if (w.dhead)                                                                       // :550
         n_subset = w.n_dvocab > 0 && w.n_dvocab < w.n_vocab ? w.n_dvocab : 0;          // :551
-    else if (!w.full_head)                                                             // :552
-        n_subset = n_subset_from_file(w.vocab_file_bytes);                             // :553-558
+    else                                                                               // :552-558
+        n_subset = n_subset_from_file(w.vocab_file_bytes);
     const int64_t n_logits = n_subset > 0 ? n_subset : w.n_vocab;                      // :560
     const int64_t want = w.max_t * n_logits;                                           // :563
     const uint64_t have = w.bound_logits ? (uint64_t) w.head_logits_cap : 0;           // :564
@@ -124,9 +104,6 @@ uint64_t bind_bytes_transcription(const BindWidths& w, uint64_t head_row_bytes) 
                          ? ((uint64_t) want - have) * sizeof(float) : 0;               // :565
     if (n_subset > 0 && !w.dhead && w.owns_draft_head)                                 // :566
         bytes += (uint64_t) n_subset * head_row_bytes + (uint64_t) n_subset * 4;       // :567
-    if (w.coupled_env && !w.cparams)                                                   // :570
-        bytes += (uint64_t) w.n_vocab * 4 + (uint64_t) (kCoupledHistCap + w.max_t) * 4 +
-                 64ull * 64ull * 8ull + 4096;                                          // :571
     return bytes;
 }
 
@@ -301,9 +278,9 @@ void run_logits_width() {
         }
     }
 
-    // 4. WHEN A SUBSET DOES NOT APPLY.  n_dvocab >= n_vocab is what a full-head bind() stores (:759), a
-    //    file shorter than one int32 or not a whole number of tokens is ignored (:555-558), and
-    //    STRATA_MTP_FULL_HEAD suppresses the file entirely (:552).  All four must price the whole vocabulary.
+    // 4. WHEN A SUBSET DOES NOT APPLY.  n_dvocab >= n_vocab is what a full-head bind() stores (:759), and a
+    //    file shorter than one int32 or not a whole number of tokens is ignored (:555-558).  Each must price
+    //    the whole vocabulary.
     {
         BindWidths base;
         base.max_t = 8;
@@ -324,8 +301,6 @@ void run_logits_width() {
         CHECK(bind_bytes_transcription(w, kRowBytes) == full, "file < 4 bytes: ignored");
         w = base; w.vocab_file_bytes = 6;
         CHECK(bind_bytes_transcription(w, kRowBytes) == full, "file not a multiple of 4: ignored");
-        w = base; w.vocab_file_bytes = 40000 * 4; w.full_head = true;
-        CHECK(bind_bytes_transcription(w, kRowBytes) == full, "STRATA_MTP_FULL_HEAD: file ignored");
 
 #if defined(STRATA_TEST_REAL_ENGINE)
         w = base; w.dhead = true; w.n_dvocab = n_vocab;
@@ -341,8 +316,7 @@ void run_logits_width() {
 #endif
     }
 
-    // 5. ZERO ROWS / the coupled upper bound.  max_t == 0 prices nothing at all (no call can happen before
-    //    load() sets it), and the coupled-sampling reservation is bind_bytes' documented upper bound (:570-571).
+    // 5. ZERO ROWS.  max_t == 0 prices nothing at all (no call can happen before load() sets it).
     {
         BindWidths w;
         w.max_t = 0;
@@ -350,24 +324,7 @@ void run_logits_width() {
         w.dhead = true;
         w.n_dvocab = 40000;
         CHECK(bind_bytes_transcription(w, kRowBytes) == 0, "max_t == 0: nothing to reserve");
-
-        BindWidths c = w;
-        c.max_t = 8;
-        c.coupled_env = true;
-        const uint64_t expected = logits_bytes(8, 40000) + (uint64_t) n_vocab * 4 +
-                                 (uint64_t) (kCoupledHistCap + 8) * 4 + 64ull * 64ull * 8ull + 4096;
-        CHECK(bind_bytes_transcription(c, kRowBytes) == expected,
-              "coupled sampling adds its documented upper bound");
-        c.cparams = true;
-        CHECK(bind_bytes_transcription(c, kRowBytes) == logits_bytes(8, 40000),
-              "coupled buffers already set up: no second reservation");
     }
-
-#if defined(STRATA_TEST_REAL_ENGINE)
-    // The real environment must let the 0-increment cases above mean what they say: with the coupled switch
-    // off, bind_bytes adds no coupled term.
-    CHECK(!strata::core::coupled_draft_env(), "STRATA_SPEC_COUPLED / STRATA_SPEC_PROB unset for this test");
-#endif
 }
 
 // ================================ the card-class constants ================================
@@ -405,28 +362,18 @@ void run_turing_series() {
     CHECK(!s::is_sm75(8, 6), "sm_86 is not Turing");
     CHECK(!s::is_sm75(12, 0), "sm_120 is not Turing");
 
-    // The default: the series is OFF unless STRATA_SM75_PERF=1 (sm75_series.hpp:24, :40 - the repo changes a default
-    // only where it measured it faster, and this branch's Turing default-on was measured nowhere).  main() unsets
-    // STRATA_SM75_PERF before this runs, so this is the documented default and not the caller's environment.
-    CHECK(s::sm75_series_setting() == -1, "STRATA_SM75_PERF is unset for this test");
-    CHECK(!s::sm75_series(), "the series is off by default");
-    CHECK(!s::sm75_default(7, 5), "Turing: off until asked for");
+    // The series is the default here: this deployment's cards are 7.5 (sm75_series.hpp:20-22 - the series-wide
+    // switch is gone with the per-kernel ones).
+    CHECK(s::sm75_series(), "the series is on");
+    CHECK(s::sm75_default(7, 5), "Turing: on");
     CHECK(!s::sm75_default(8, 0), "Ampere: never on");
     CHECK(!s::sm75_default(12, 0), "sm_120: never on");
-    // (STRATA_SM75_PERF=1 cannot be exercised here: the value is read once per process, and the checks above already
-    // read it - a second process would be needed, like the emulated-CC cases below.  The =1 path is covered by the
-    // data path: every Turing kernel switch calls sm75_default, whose env branch is the one line above.)
 
-    // tc_sm75.hpp:29-31: its own switch wins, but only on a 7.5 card.
-    CHECK(!s::core::tc_sm75_enabled(7, 5), "STRATA_TC_SM75 unset on a 7.5: follows the series (off)");
+    // tc_sm75.hpp:28-30: the tensor-core paths are the default on a 7.5 card and reach no other.
+    CHECK(s::core::tc_sm75_enabled(7, 5), "7.5: on");
     CHECK(!s::core::tc_sm75_enabled(8, 6), "sm_86: off whatever the series says");
-    put("STRATA_TC_SM75", "0");
-    CHECK(!s::core::tc_sm75_enabled(7, 5), "STRATA_TC_SM75=0 turns it off on a 7.5");
-    put("STRATA_TC_SM75", "1");
-    CHECK(s::core::tc_sm75_enabled(7, 5), "STRATA_TC_SM75=1 turns it on on a 7.5");
-    CHECK(!s::core::tc_sm75_enabled(8, 0), "STRATA_TC_SM75=1 cannot touch an 8.0 card");
-    CHECK(!s::core::tc_sm75_enabled(12, 0), "STRATA_TC_SM75=1 cannot touch sm_120");
-    unset("STRATA_TC_SM75");
+    CHECK(!s::core::tc_sm75_enabled(8, 0), "8.0: never on");
+    CHECK(!s::core::tc_sm75_enabled(12, 0), "sm_120: never on");
 
     // emulate.hpp: with no STRATA_EMULATE_CC the queries pass the real card through.  (The emulated values
     // cache the environment once, so testing them needs a second process - noted in docs/PORT_AUDIT_TESTS_CPU.md.)
@@ -438,14 +385,7 @@ void run_turing_series() {
 }  // namespace
 
 int main() {
-    // The environment first: three of these switches cache their value on the first call (full_head_env,
-    // coupled_draft_env, sm75_series, emulated_cc), so it has to be clean before any of them is asked.
-    unset("STRATA_MTP_FULL_HEAD");
-    unset("STRATA_SPEC_COUPLED");
-    unset("STRATA_SPEC_PROB");
-    unset("STRATA_MTP_TOP2");
-    unset("STRATA_SM75_PERF");
-    unset("STRATA_TC_SM75");
+    // emulated_cc caches its value on the first call: a clean environment keeps the checks below meaningful.
     unset("STRATA_EMULATE_CC");
 
 #if defined(STRATA_TEST_REAL_ENGINE)

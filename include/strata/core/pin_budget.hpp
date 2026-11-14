@@ -14,8 +14,8 @@
 // A reserve that cannot be had is shrunk, then skipped: this never fails a start.
 //
 // Defaults: Windows CUDA 640 + 160 MiB (not the HIP build); Linux off (the NVIDIA driver there pins past RLIMIT_MEMLOCK and has no such
-// ceiling; checked with a 4 GiB cudaHostRegister under `ulimit -l 1 GiB`).  STRATA_PIN_RESERVE_MIB=N sets the soft
-// reserve (0 = off) on any OS; the hard one is a quarter of it, at least 64 MiB.
+// ceiling; checked with a 4 GiB cudaHostRegister under `ulimit -l 1 GiB`).  The reserves are off on this Linux
+// deployment; the hard one is a quarter of the soft one, at least 64 MiB.
 //
 // STRATA_TEST_PIN_BUDGET_MIB=N is a TEST knob: it makes the engine's own pinned allocations and registrations that go
 // through these wrappers (the arena's, the verify window's, the session's, the KV copy's) fail once N MiB are
@@ -87,8 +87,6 @@ inline void free_locked(State& s, void* p) {
 }
 
 inline uint64_t soft_reserve_default_mib() {
-    if (const char* e = std::getenv("STRATA_PIN_RESERVE_MIB"); e != nullptr && *e != '\0')
-        return (uint64_t) std::strtoull(e, nullptr, 10);
     return st().sim_budget != 0 ? 640 : 0;   // Linux: only when the test ceiling is on
 }
 }  // namespace pin_detail
@@ -136,7 +134,7 @@ inline void pin_reserve_take() {
     take(s.hard, s.hard_bytes, hard_mib);
     take(s.soft, s.soft_bytes, soft_mib);
     std::fprintf(stderr, "strata: pinned-memory headroom: holding %llu MiB for the buffers allocated after the expert arena "
-                         "(released after it: %llu MiB; kept until needed: %llu MiB; STRATA_PIN_RESERVE_MIB changes it)\n",
+                         "(released after it: %llu MiB; kept until needed: %llu MiB)\n",
                  (unsigned long long) ((s.soft_bytes + s.hard_bytes) >> 20), (unsigned long long) (s.soft_bytes >> 20),
                  (unsigned long long) (s.hard_bytes >> 20));
     if (s.soft_bytes + s.hard_bytes < ((soft_mib + hard_mib) << 20))
@@ -210,7 +208,7 @@ inline std::string pin_exhausted_hint() {
     auto& s = pin_detail::st();
     const uint64_t gib = s.arena_pinned >> 30;
     std::string t = "[pinned-memory-exhausted] the OS gave no more page-locked memory";
-    if (gib > 2) t += "; start again with STRATA_ARENA_PIN_GIB=" + std::to_string(gib - 2) + " (pin less of the expert arena) or with the low-RAM option";
+    if (gib > 2) t += "; pin less of the expert arena or use the low-RAM option";
     return t;
 }
 

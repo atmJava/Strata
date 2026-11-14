@@ -139,7 +139,6 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
         int a = 0, b = 0;
         cudaDeviceCanAccessPeer(&a, primary_device(), device);
         cudaDeviceCanAccessPeer(&b, device, primary_device());
-        if (const char* np = std::getenv("STRATA_PEER_NO_P2P"); np != nullptr && std::atoi(np) != 0) a = 0;   // test knob: pretend the pair has no P2P
         p2p_ = a && b;
         if (p2p_) {
             On on0(primary_device());
@@ -152,8 +151,7 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
             // recommend, never force: the direct path is used only if a test copy each way arrives exact (#2666)
             if (p2p_ && !p2p_copies_data(device)) {
                 std::fprintf(stderr, "strata: peer GPU %d: peer access is enabled but a test copy between the two GPUs arrived wrong "
-                                     "(a host bridge between them, no real P2P): the prompt path takes the host route instead "
-                                     "(STRATA_PEER_NO_P2P=1 does that by hand)\n", device);
+                                     "(a host bridge between them, no real P2P): the prompt path takes the host route instead\n", device);
                 { On q0(0); cudaDeviceDisablePeerAccess(device); cudaGetLastError(); }
                 { On q1(device); cudaDeviceDisablePeerAccess(0); cudaGetLastError(); }
                 p2p_ = false;
@@ -236,8 +234,7 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
 
 bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int64_t n_tok, int64_t k,
                          const int32_t* kind, std::string& err, float* out) {
-    static const bool direct_env = [] { const char* v = std::getenv("STRATA_PEER_DIRECT"); return v == nullptr || std::atoi(v) != 0; }();
-    const bool direct = direct_env && out != nullptr;
+    const bool direct = out != nullptr;
     launched_direct_ = false;
     launched_rows_ = 0;
     row_of_.clear();

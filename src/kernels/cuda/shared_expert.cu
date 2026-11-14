@@ -202,13 +202,7 @@ void launch_sigmoid_scale_rows(float* out, const float* g, int n_embd, int n_tok
     }
 }
 
-bool fused_swiglu_q81_enabled() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_FUSED_SWIGLU_Q81");
-        return v == nullptr || std::atoi(v) != 0;
-    }();
-    return on;
-}
+bool fused_swiglu_q81_enabled() { return true; }
 }  // namespace
 
 void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, const NativeSharedWeights& nw,
@@ -243,8 +237,7 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
         if (e != cudaSuccess) throw std::runtime_error(std::string("shared_expert_multi: ") + cudaGetErrorString(e));
         return;
     }
-    static const bool batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
-    if (native_bf16 && batch && n_tok > 1) {   // one gemv for all rows (outputs identical), fused sigmoid+scale
+    if (native_bf16 && n_tok > 1) {   // one gemv for all rows (outputs identical), fused sigmoid+scale
         bf16_gemv_fp32_mmvf_multi(x, n_embd, gate_inp_bf16, g, 1, n_embd, 1, n_tok, stream);
         launch_sigmoid_scale_rows(out, g, (int) n_embd, n_tok, cs);
     } else if (native_bf16 && n_tok == 1) {

@@ -20,7 +20,7 @@ constexpr int64_t kWinHipAutoChunkCap = 6144;
 constexpr int64_t kWinHipCrashChunk = 8192;   // the smallest chunk reported to crash
 
 /// The ceiling a bare `--prefill auto` takes on this build; 0 = none (keep the usual 8192).
-/// win_hip: a Windows HIP build; bare_auto: "auto" without ":N" and no STRATA_PREFILL_AUTO_MAX.
+/// win_hip: a Windows HIP build; bare_auto: "auto" without ":N".
 constexpr int64_t auto_chunk_cap(bool win_hip, bool bare_auto) {
     return win_hip && bare_auto ? kWinHipAutoChunkCap : 0;
 }

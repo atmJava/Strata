@@ -24,7 +24,7 @@ void iq256_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const 
                 float* const* out, int r0, int r1);
 
 /// The kernels' variants, a mask.  Every variant computes the same bits; they differ in speed from core to core.
-/// kIq256Gather: IQ3_XXS reads its grid entries with one gather (STRATA_IQ256_GATHER).
+/// kIq256Gather: IQ3_XXS reads its grid entries with one gather where the core gathers fast.
 /// kIq256Vnni: AVX-VNNI's vpdpwssd / vpdpbusd, every format and iq4nl256_down_rows (cpu_avxvnni_ok).
 inline constexpr int kIq256Gather = 1;
 inline constexpr int kIq256Vnni = 2;

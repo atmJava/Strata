@@ -1,4 +1,4 @@
-// tests/core/tap_dump_plan_test.cpp - keep unreachable STRATA_TAP_FILE work out of a layer-split stage.
+// tests/core/tap_dump_plan_test.cpp - keep unreachable tap-dump work out of a layer-split stage.
 #include "strata/core/tap_dump_plan.hpp"
 
 #include <cstdio>

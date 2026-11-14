@@ -45,9 +45,9 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
     // Include the moving spare row, not only completed blocks. The checkpoint
     // restore reconstructs that row when rewinding to an earlier prefix.
     const int64_t pooled = index && upto > 0 ? upto / s.idx_block + 1 : 0;
-    // Format 3 identifies snapshot K8V4 only; never pass it to the block movers.  Rotated INT8 K/V (#293,
-    // STRATA_KV_ROT=1) is another format too (+16): its bytes mean nothing to a state that does not rotate, so a
-    // snapshot or prompt checkpoint taken with the rotation never restores into one without it, nor the reverse.
+    // Format 3 identifies snapshot K8V4 only; never pass it to the block movers.  Rotated INT8 K/V (#293) is
+    // another format too (+16): its bytes mean nothing to a state that does not rotate, so a snapshot or prompt
+    // checkpoint taken with the rotation never restores into one without it, nor the reverse.
     // (Q4_0 is always rotated: nothing to tell apart; without the rotation the format is the one it always was.)
     const int rotated = st.kv_rot && !st.kv_q4 && !st.kv_hybrid ? 16 : 0;
     l = {(st.kv_hybrid ? 3 : qsa_kv_format(st)) + rotated, cells, pooled, s.page_size, 0, 0, 0, 0, 0};
@@ -309,49 +309,6 @@ bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const Mode
     };
     s.error = [why] { return *why; };
     out = std::move(s);
-    return true;
-}
-
-bool conversation_kv_verify(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
-                            int64_t upto, bool index, uint64_t& fingerprint, std::string& error) {
-    if (!conversation_kv_validate(image, st, g, upto, index, error)) return false;
-    std::array<uint8_t, 65536> buffer;
-    uint64_t hash = 1469598103934665603ull;
-    auto compare = [&](const void* device, const uint8_t* expected, size_t bytes, bool include_hash) {
-        for (size_t offset = 0; offset < bytes;) {
-            const size_t n = std::min(buffer.size(), bytes - offset);
-            if (!transfer(buffer.data(), static_cast<const uint8_t*>(device) + offset, n, error)) return false;
-            if (std::memcmp(buffer.data(), expected + offset, n) != 0) {
-                error = "conversation snapshot: restored K/V bytes differ";
-                return false;
-            }
-            if (include_hash) for (size_t i = 0; i < n; ++i) { hash ^= buffer[i]; hash *= 1099511628211ull; }
-            offset += n;
-        }
-        return true;
-    };
-    const std::array<const ConversationBuffer*, 5> saved = {&image.k, &image.v, &image.k_scale, &image.v_scale, &image.pooled};
-    const auto authoritative = pools(st);
-    for (size_t i = 0; i < saved.size(); ++i)
-        if (!saved[i]->visit(0, saved[i]->size(), [&](const uint8_t* p, size_t n, size_t at) {
-                return compare(static_cast<const uint8_t*>(authoritative[i]) + at, p, n, true);
-            })) return false;
-    if (st.kv_mode == 2 && image.cells > 0) {
-        const auto resident = pools(st, true);
-        const int64_t end = image.cells / image.page_size;
-        const int64_t begin = std::max<int64_t>(0, end - st.n_slots);
-        for (size_t i = 0; i < 4; ++i) {
-            if (saved[i]->empty()) continue;
-            const size_t page_bytes = saved[i]->size() / size_t(end);
-            for (int64_t page = begin; page < end; ++page)
-                if (!saved[i]->visit(size_t(page) * page_bytes, page_bytes,
-                        [&](const uint8_t* p, size_t n, size_t at) {
-                            const size_t offset = size_t(page % st.n_slots) * page_bytes + at - size_t(page) * page_bytes;
-                            return compare(static_cast<const uint8_t*>(resident[i]) + offset, p, n, false);
-                        })) return false;
-        }
-    }
-    fingerprint = hash;
     return true;
 }
 

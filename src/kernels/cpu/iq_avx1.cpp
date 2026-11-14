@@ -93,14 +93,8 @@ inline float hsum4(__m128 v) {
     return _mm_cvtss_f32(s);
 }
 
-// E-2 prefetching, the same knob as the AVX-2/512 kernels: STRATA_IQ_PREFETCH is the distance in bytes.
-int prefetch_distance() {
-    static const int d = [] {
-        const char* v = std::getenv("STRATA_IQ_PREFETCH");
-        return v ? std::atoi(v) : 2048;
-    }();
-    return d;
-}
+// E-2 prefetching, the same distance as the AVX-2/512 kernels, in bytes.
+constexpr int prefetch_distance() { return 2048; }
 
 inline void rows_ahead(const uint8_t* blk, int pf) {
     if (pf <= 0) return;

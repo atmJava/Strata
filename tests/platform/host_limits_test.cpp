@@ -13,7 +13,7 @@ int main() {
     CHECK(auto_chunk_cap(true, true) == 6144);
     CHECK(auto_chunk_cap(true, true) < 8192);
     CHECK(auto_chunk_cap(false, true) == 0);
-    CHECK(auto_chunk_cap(true, false) == 0);    // auto:N / STRATA_PREFILL_AUTO_MAX: the operator's pick
+    CHECK(auto_chunk_cap(true, false) == 0);    // auto:N: the operator's pick
     CHECK(auto_chunk_cap(false, false) == 0);
     // a chunk the user names stays, with a warning from 8192 up (7500 was stable)
     CHECK(warn_user_chunk(true, false, 8192));

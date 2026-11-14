@@ -68,8 +68,6 @@ public:
     /// rt/draft_vocab.bin (e.g. data/draft_vocab_en.bin, 40K tokens)
     void set_draft_vocab(const std::string& path) { dvocab_path_ = path; }
     /// STRATA_MTP_TOP2=1 (diagnostic): draft j's runner-up token in the last draft() (-1 = unknown)
-    static bool top2_env();
-    int32_t top2(int j) const { return j >= 0 && j < (int) top2_.size() ? top2_[(size_t) j] : -1; }
     int max_t() const { return max_t_; }
     uint64_t vram_bytes() const { return vram_; }
     /// The draft layer's K/V state (read-only: --serve's STRATA_STATE_HASH check hashes it)
@@ -114,7 +112,6 @@ public:
     /// The first round: one cell (`cell`) from `R_row` (device) and `token` -> T-1 drafts.
     /// STRATA_SPEC_COST: called after each draft step with (index, probability) instead of the `min_p` test; false ends the chain.
     /// Also called once for the last step of a chain that reached its length (so the rule sees every draft). Empty: min_p decides.
-    void set_chain_rule(std::function<bool(int, float)> f) { chain_rule_ = std::move(f); }
 
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                      float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr, DraftResult* result = nullptr);
@@ -128,7 +125,6 @@ public:
     /// window's commit (`tail`) and the window's pick at its last accepted row (`next`, the next window's row 0).
     void set_draft_history(const int32_t* tail, int64_t n_tail, int32_t next);
     void set_ple_session(SessionState* s) { ple_ss_ = s; }
-    std::function<bool(int, float)> chain_rule_;
     bool coupled() const { return coupled_active_; }
     /// PROBABILISTIC DRAFT ACCEPTANCE (core/spec_prob.hpp, STRATA_SPEC_PROB=1): this request's drafts are SAMPLED from
     /// q and each draft j's distribution is in spec_q() + j * kSpecQStride (ids, -1 terminated; then float bits),
@@ -195,7 +191,6 @@ private:
     cudaGraphExec_t step_exec_[9] = {};
     // coupled draft sampling: its own round/step graphs (the argmax ones stay as they were), the request's
     // parameters and the penalty ring (mapped staging + device copies), the split scratch, token id -> subset index
-    bool setup_coupled(std::string& err);
     cudaGraphExec_t round_exec_c_[9] = {};
     cudaGraphExec_t step_exec_c_[9] = {};
     bool coupled_ok_ = false, coupled_active_ = false;
@@ -229,8 +224,6 @@ private:
     const void* wq(const char* name, int& type) const;
     bool make_q4_dense(const std::vector<uint8_t>& blob, std::string& err);
     bool make_q4_head(std::string& err);
-    void record_top2(int j);
-    std::vector<int32_t> top2_, dvocab_host_;
     std::vector<float> lg_host_;
     // --pipeline-windows 2 (chain_launch)
     bool stage_source_R(int T, std::string& err);   ///< set_source_R's rows into the bound buffer

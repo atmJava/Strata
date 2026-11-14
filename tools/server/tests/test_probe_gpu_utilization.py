@@ -105,7 +105,7 @@ def test_running_stamp_accepts_an_arbitrary_engine_build_directory(monkeypatch):
     def fake_read_bytes(path):
         values = {
             "/proc/101/cmdline": b"/opt/ai/src/new-tree/build75-027/strata\0--serve\0",
-            "/proc/101/environ": b"STRATA_HC_Q8=1\0",
+            "/proc/101/environ": b"STRATA_BATCH_TELEMETRY=1\0",
             "/proc/202/cmdline": (
                 b"python\0/opt/ai/src/new-tree/serve/server.py\0--config\0"
                 b"/opt/ai/src/new-tree/strata-live.json\0"

@@ -824,41 +824,15 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !ids || !steps || !pools.page_table)
         return false;
     cudaStream_t st = (cudaStream_t) stream;
-    if (pools.k_q4 != nullptr) {   // Q4_0 K and V (--kv q4_0): mode 4.  STRATA_PROMPT_ATTN_Q4=0: the old kernel (A/B)
-        static const bool q4_off = [] {
-            const char* v = std::getenv("STRATA_PROMPT_ATTN_Q4");
-            return v != nullptr && v[0] == '0';
-        }();
-        // Mode 4 uses pairs of m16n8k8 MMAs (another summation order than the FP32 kernel it replaces). It remains a
-        // manual opt-in on Turing: STRATA_PROMPT_ATTN_Q4_TC=1.
-        static const bool q4_tc = [] {
-            const char* v = std::getenv("STRATA_PROMPT_ATTN_Q4_TC");
-            return v != nullptr && v[0] == '1';
-        }();
-        if (q4_off || !q4_tc || pools.v_q4 == nullptr) return false;
-        return launch<4>(q, pools, ids, steps, cap, s, attn, n_q, st);
-    }
+    if (pools.k_q4 != nullptr) return false;   // Q4_0 K and V: the FP32 path handles it
     if (pools.k_q != nullptr && pools.v_q4 != nullptr) {   // hybrid K8V4: int8 K + dequantized-q4 V
         if (!pools.k_scale) return false;
         return launch<3>(q, pools, ids, steps, cap, s, attn, n_q, st);
     }
     if (pools.k_q != nullptr) {
         if (!pools.v_q || !pools.k_scale || !pools.v_scale) return false;
-        // v2's register staging is the default: it is faster and passes parity (32K, 7424 queries: 8.38 vs 14.17 ms
-        // a chunk on an RTX 2080 Ti). STRATA_PA_V2T=0 or STRATA_PROMPT_ATTN_V1=1 selects the first layout.
-        static const bool v1 = std::getenv("STRATA_PROMPT_ATTN_V1") != nullptr;
-        static const bool v2_off = [] {
-            const char* e = std::getenv("STRATA_PA_V2T");
-            return e != nullptr && std::atoi(e) == 0;
-        }();
-        if (v1 || v2_off) {
-            // #1821 (xrip): v1 with the next chunk's rows prefetched in registers and K/V sharing one buffer (two blocks an
-            // SM), the same bits. STRATA_PA_V1_PREFETCH=0 / 1 forces it off / on; unset follows STRATA_SM75_PERF.
-            static const int pf_env = [] { const char* e = std::getenv("STRATA_PA_V1_PREFETCH"); return e ? (std::atoi(e) != 0 ? 1 : 0) : -1; }();
-            if (pf_env == 1 || (pf_env < 0 && strata::sm75_series()))
-                return launch<1, true>(q, pools, ids, steps, cap, s, attn, n_q, st);
-            return launch<1>(q, pools, ids, steps, cap, s, attn, n_q, st);
-        }
+        // v2's register staging: faster and passes parity (32K, 7424 queries: 8.38 vs 14.17 ms a chunk on an RTX
+        // 2080 Ti).
         return launch_i8(q, pools, ids, steps, cap, s, attn, n_q, st);
     }
     if (!pools.k_pool || !pools.v_pool) return false;

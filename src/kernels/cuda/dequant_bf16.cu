@@ -200,7 +200,7 @@ __global__ void dequant_kernel(const uint8_t* __restrict__ blocks, int64_t row_b
 // the same expression on the same operands - so the output is bitwise the same (dequant_wide_parity).  On the P40:
 // Q6_K 7.2 -> 0.33 ms (227 GB/s), Q4_K 1.67 -> 0.32 ms, Q5_K 1.24 -> 0.33 ms, IQ4_XS 1.21 -> 0.34 ms for that shape.
 // Q4_K, Q5_K, Q6_K and IQ4_XS.  On by default on compute capability 6.1, where it was measured;
-// STRATA_DEQUANT_WIDE=0 / =1 turns it off / on for every card.
+// The card's default is sm_61 and sm_86.
 __device__ __forceinline__ uint64_t ld8(const uint8_t* p) {   // 8 bytes at a 2-byte aligned address
     const uint16_t* q = reinterpret_cast<const uint16_t*>(p);
     return (uint64_t) q[0] | ((uint64_t) q[1] << 16) | ((uint64_t) q[2] << 32) | ((uint64_t) q[3] << 48);
@@ -280,11 +280,9 @@ __global__ void dequant_wide_kernel(const uint8_t* __restrict__ blocks, int64_t 
     for (int k = 0; k < (int) (8 * sizeof(T) / 16); ++k) o[k] = ((const uint4*) v)[k];
 }
 bool wide_type(int type) { return type == 12 || type == 13 || type == 14 || type == 23; }
-int g_dequant_wide = -1;   // dequant_set_wide (the parity test); -1 = STRATA_DEQUANT_WIDE, else the card's default
+int g_dequant_wide = -1;   // dequant_set_wide (the parity test); else the card's default
 bool dequant_wide_on() {
-    static const int env = [] { const char* v = std::getenv("STRATA_DEQUANT_WIDE"); return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
     if (g_dequant_wide >= 0) return g_dequant_wide != 0;
-    if (env >= 0) return env != 0;
     static int per_dev[64];   // 0 unknown, 1 no, 2 yes: sm_61 (measured on a Tesla P40) and sm_86 (RTX 3060 / A4000, 0.1.45: short-prompt TTFT -12..-17%, bitwise)
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { (void) cudaGetLastError(); return false; }

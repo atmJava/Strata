@@ -1,6 +1,6 @@
-// pa_bench - the prompt path's sparse attention (qsa_prompt_attn_batch) on a recorded selection: a STRATA_QSA_DUMP
-// record of one QSA layer and chunk (int32 {layer, p0, T, cap}, T * cap cells, then T * kStepCount steps, written
-// with STRATA_QSA_DUMP_STEPS=1), random q and int8 K/V (the values do not change the work), one page per 4 cells.
+// pa_bench - the prompt path's sparse attention (qsa_prompt_attn_batch) on a recorded selection: a dump record of
+// one QSA layer and chunk (int32 {layer, p0, T, cap}, T * cap cells, then T * kStepCount steps), random q and int8
+// K/V (the values do not change the work), one page per 4 cells.
 // usage: pa_bench DUMP [reps]   - prints the median time and a hash of the output (for A/B of kernel variants)
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
     const int64_t p0 = hdr[1], T = hdr[2], cap = hdr[3];
     std::vector<int32_t> ids((size_t) (T * cap)), steps((size_t) (T * strata::kernels::kStepCount));
     if (std::fread(ids.data(), 4, ids.size(), f) != ids.size() || std::fread(steps.data(), 4, steps.size(), f) != steps.size()) {
-        std::fprintf(stderr, "short dump (written without STRATA_QSA_DUMP_STEPS?)\n");
+        std::fprintf(stderr, "short dump (a short dump?)\n");
         return 1;
     }
     std::fclose(f);

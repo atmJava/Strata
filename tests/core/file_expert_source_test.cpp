@@ -119,17 +119,13 @@ void check_mapped_release(strata::core::FileExpertSource& source, int64_t layer,
                 "QueryWorkingSetEx failed for the release fixture");
         return state.VirtualAttributes.Valid != 0;
     };
-    const char* setting = std::getenv("STRATA_FILE_RELEASE");
-    const bool enabled = setting != nullptr && std::strcmp(setting, "1") == 0;
     for (int round = 0; round < 3; ++round) {
         require(std::memcmp(p, saved.data(), saved.size()) == 0, "release changed the mapped expert bytes");
         require(resident(first), "reading the expert did not bring its interior page into the working set");
         const uint64_t released = source.release(layer, expert);
-        require(released == (enabled ? end - first : 0), "release did not honor full pages or its opt-in switch");
-        // Off: the page stays.  On: Windows may keep a trimmed page on its standby list and map it back at once, so a
-        // page that is still valid is reported, not failed (the byte count above is the contract).
-        if (!enabled) require(resident(first), "release trimmed pages with the switch off");
-        else if (resident(first)) std::fprintf(stderr, "note: the trimmed page is already back in the working set\n");
+        // release() has no switch and no page trimming any more: it reports no bytes and leaves the pages mapped.
+        require(released == 0, "release reported bytes with no trimming");
+        require(resident(first), "release trimmed pages without a switch");
         if ((uintptr_t) p < first)
             require(resident((uintptr_t) p), "release trimmed the expert's shared first page");
         if (end < (uintptr_t) p + bytes)
@@ -212,10 +208,8 @@ void test_fill_thread_fallback() {
     }
     FileExpertSource source;
     require(source.open(dir.path.string(), layers, experts, err), "could not open the fill-thread pack: " + err);
-    set_env("STRATA_UNBUFFERED_LOAD", "1");
     std::string why;
     const bool unbuffered = source.set_unbuffered(0, why);
-    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
     if (!unbuffered) {
         std::cout << "file_expert_source_test: fill-thread test skipped (" << why << ")\n";
         return;
@@ -638,10 +632,10 @@ void test_unbuffered_reads() {
     }
     FileExpertSource source;
     require(source.open(dir.path.string(), layers, experts, err), "could not map the synthetic pack: " + err);
-    set_env("STRATA_UNBUFFERED_LOAD", "1");
+    // set_unbuffered decides from the platform and the RAM left (no switch): it returns false, with `why`, where
+    // the file cache is the better read, and the test says so and skips.
     std::string why;
     const bool unbuffered = source.set_unbuffered(0, why);
-    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
 #if defined(_WIN32) || defined(__linux__)
     if (!unbuffered) {
         std::cout << "file_expert_source_test: unbuffered reads skipped (" << why << ")\n";
@@ -671,9 +665,7 @@ void test_unbuffered_reads() {
     require(source.direct_fallbacks() == 0, "an unbuffered read fell back to the mapping");
     FileExpertSource cold_source;
     require(cold_source.open(dir.path.string(), layers, experts, err), "could not reopen the synthetic pack: " + err);
-    set_env("STRATA_UNBUFFERED_LOAD", "1");
     require(cold_source.set_unbuffered(0, why), "could not reopen the synthetic pack unbuffered: " + why);
-    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
     const int64_t cold_ids[experts] = {0, 1, 2};
     uint8_t pending[experts] = {0, 0, 0};
     set_env("STRATA_TEST_COLD_THREAD_FAIL", "1");
@@ -777,7 +769,7 @@ void test_host_memory() {
 #endif
 }
 
-// STRATA_IO_PREFETCH: the experts.bin file tier hands out the same bytes with the Linux I/O path on (whole-blob
+// the io-prefetch file tier: the experts.bin file tier hands out the same bytes with the Linux I/O path on (whole-blob
 // preads, the read-ahead workers, the mapping for cached blobs), however the reads and the predictions interleave.
 void test_io_prefetch() {
     using namespace strata::core;
@@ -864,14 +856,9 @@ void test_foresight_init_validation() {
     std::cout << "foresight init validation: PASS\n";
 }
 
-void test_rotating_source(bool rotate, bool pin) {
+void test_exchange_source(bool pin) {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
-#if defined(_WIN32)
-    _putenv_s("STRATA_EXCHANGE_ROTATE", rotate ? "1" : "0");
-#else
-    setenv("STRATA_EXCHANGE_ROTATE", rotate ? "1" : "0", 1);
-#endif
     TempDirectory dir;
     std::string err;
     require(expert_layout_load(dir.path.string(), 1, 5, err), err);
@@ -894,12 +881,11 @@ void test_rotating_source(bool rotate, bool pin) {
         require(slot >= 0 && cache.fill_slot_blocking(slot, truth[e].data(), err), err);
     }
     const std::vector<std::pair<int32_t, int32_t>> rank{{0,0},{0,1},{0,2},{0,3},{0,4}};
-    // Keep expert 4 on the file tier to check that the fallback survives rotation.
+    // Keep expert 4 on the file tier to check that the fallback survives an exchange.
     require(src.pin_cache_complement(cache, err, pin, {}, -1, 0, 2 * bytes, &rank), err);
     require(src.reserve_exchanges(2, err), err);
-    require(src.exchange_rotation() == (rotate && pin), "rotation activation/fallback wrong");
+    require(!src.exchange_rotation(), "exchange rotation has no switch and no initializer");
     require(src.reserve_exchanges(1, err), "smaller capacity rejected");
-    if (rotate && pin) require(!src.reserve_exchanges(3, err), "live arena growth accepted");
     int incoming[2] = {0, 1}, outgoing[2] = {2, 3};
     std::vector<uint8_t> actual(bytes);
     double commit_ms = 0;
@@ -925,8 +911,7 @@ void test_rotating_source(bool rotate, bool pin) {
             require(!src.has_resident(0, incoming[q]) && src.has_resident(0, outgoing[q]), "residency wrong");
             const uint8_t* held = src.blob(0, outgoing[q]);
             require(!std::memcmp(held, truth[outgoing[q]].data(), bytes), "evicted bytes corrupted");
-            require(held == ((rotate && pin) ? eviction[q] : prior[q]), "wrong storage selected");
-            if (rotate && pin) require(src.exchange_buffer(q) == prior[q], "old input not recycled");
+            require(held == prior[q], "wrong storage selected");
             require(src.copy_blob(0, outgoing[q], actual.data()) && actual == truth[outgoing[q]], "copy_blob mismatch");
             require(!src.transient(0, outgoing[q]), "resident became transient");
             if (pin) {
@@ -941,9 +926,9 @@ void test_rotating_source(bool rotate, bool pin) {
         require(!src.has_resident(0, 4) && src.copy_blob(0, 4, actual.data()) && actual == truth[4], "file fallback changed");
     }
     require(src.exchanges() == 64, "exchange accounting wrong");
-    require(src.rotated_exchanges() == ((rotate && pin) ? 64u : 0u), "rotation accounting wrong");
-    require(src.avoided_exchange_copy_bytes() == ((rotate && pin) ? 64 * bytes : 0u), "avoided bytes wrong");
-    std::cout << "rotation integration: rotate=" << rotate << " pinned=" << pin
+    require(src.rotated_exchanges() == 0u, "rotation accounting wrong");
+    require(src.avoided_exchange_copy_bytes() == 0u, "avoided bytes wrong");
+    std::cout << "exchange integration: pinned=" << pin
               << " exchanges=64 commit_ms=" << commit_ms << " exact_bytes=PASS\n";
     src.close();
     require(!src.exchange_rotation() && !src.exchange_buffer(0), "close retained storage");
@@ -957,11 +942,6 @@ void test_rotating_source(bool rotate, bool pin) {
 void test_foresight_exchange(bool two_phase) {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
-#if defined(_WIN32)
-    _putenv_s("STRATA_EXCHANGE_ROTATE", "0");
-#else
-    setenv("STRATA_EXCHANGE_ROTATE", "0", 1);
-#endif
     TempDirectory dir;
     std::string err;
     require(expert_layout_load(dir.path.string(), 1, 5, err), err);
@@ -1042,15 +1022,10 @@ void test_foresight_exchange(bool two_phase) {
     src.close();
 }
 
-// STRATA_RAM_ADAPT: an expert read from the file takes the RAM place of another of its layer.
+// replace_resident: an expert read from the file takes the RAM place of another of its layer.
 void test_replace_resident(bool pin) {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
-#if defined(_WIN32)
-    _putenv_s("STRATA_EXCHANGE_ROTATE", "0");
-#else
-    setenv("STRATA_EXCHANGE_ROTATE", "0", 1);
-#endif
     TempDirectory dir;
     std::string err;
     require(expert_layout_load(dir.path.string(), 1, 5, err), err);
@@ -1144,9 +1119,8 @@ int main(int argc, char** argv) {
         test_native_variable_layout();
 #endif
         if (argc == 2 && std::string(argv[1]) == "--rotation-gpu") {
-            test_rotating_source(false, true);
-            test_rotating_source(true, true);
-            test_rotating_source(true, false);
+            test_exchange_source(true);
+            test_exchange_source(false);
             test_foresight_exchange(false);
             test_foresight_exchange(true);
             test_replace_resident(true);

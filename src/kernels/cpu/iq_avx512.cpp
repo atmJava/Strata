@@ -34,20 +34,13 @@ inline uint32_t u32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, 4); retur
 inline uint16_t u16(const uint8_t* p) { uint16_t v; std::memcpy(&v, p, 2); return v; }
 inline uint64_t u64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
 
-// E-2: the IQ3 grids by one AVX-512 gather (the same words, the same results) - measured 3-5% SLOWER than the scalar
-// lookups on a Ryzen 5 7600 (Zen 4 gathers are microcoded), so opt-in: STRATA_IQ_GATHER=1
-// 0.2.5: DEFAULT on where gathers are fast (Intel server and HEDT cores with AVX-512: cpu_gather_fast), off on Zen 4 (microcoded);
-// STRATA_IQ_GATHER=1 / 0 force it either way.  The same words are loaded, so the results are bit for bit the scalar decode's.
-const bool gather = [] {
-    const char* v = std::getenv("STRATA_IQ_GATHER");
-    return v != nullptr && v[0] != '\0' ? std::atoi(v) != 0 : cpu_gather_fast();
-}();
-// E-2: software prefetch distance in bytes (STRATA_IQ_PREFETCH; 0 = off): -2-3% gate/up time on IQ3_XXS decode
-// (the rows are read at ~30 GB/s by 6 cores, near what DDR5 with 4 KB pages gives: the pool is memory-bound)
-const int prefetch_ahead = [] {
-    const char* v = std::getenv("STRATA_IQ_PREFETCH");
-    return v ? std::atoi(v) : 2048;
-}();
+// E-2: the IQ3 grids by one AVX-512 gather (the same words, the same results) on the CPUs where gathers are fast
+// (Intel server and HEDT cores with AVX-512: cpu_gather_fast), scalar lookups on Zen 4 (microcoded gathers).  The
+// same words are loaded, so the results are bit for bit the scalar decode's.
+const bool gather = cpu_gather_fast();
+// E-2: software prefetch distance in bytes: -2-3% gate/up time on IQ3_XXS decode (the rows are read at ~30 GB/s by
+// 6 cores, near what DDR5 with 4 KB pages gives: the pool is memory-bound)
+constexpr int prefetch_ahead = 2048;
 
 // lanes 0-7 -> s0, 8-15 -> s1, 16-23 -> s2, 24-31 -> s3 (int16 lanes of a maddubs result: two values each)
 inline __m512i scales4(int s0, int s1, int s2, int s3) {

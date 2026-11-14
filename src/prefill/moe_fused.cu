@@ -174,7 +174,7 @@ __global__ void place_kernel(const int32_t* __restrict__ ids, int64_t n, int k, 
 
 // ---- the expert products
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 750
-// Turing (STRATA_PF_FUSED_SM75): no cp.async - the stages are filled by plain copies (the same bytes; the barriers
+// Turing (sm_75): no cp.async - the stages are filled by plain copies (the same bytes; the barriers
 // around them stay) - and no m16n8k32 with s8 operands: it is four m8n8k16, rows g / g + 8 by k 0-15 / 16-31 (the
 // m16n8k32 fragments: a[0] / a[1] rows g / g + 8 at k 4 tig.., a[2] / a[3] the same at k 16 + 4 tig.., b0 / b1 the
 // two k halves).  The int32 sums are exact in any order: the same d as the sm_80 instruction.
@@ -379,9 +379,7 @@ const DevInfo& dev_info() {
     cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
     cudaDeviceGetAttribute(&d.sms, cudaDevAttrMultiProcessorCount, dev);
     d.cc = 10 * strata::cc_major_of(major) + strata::cc_minor_of(minor);   // STRATA_EMULATE_CC counts (tests)
-    // Turing (sm_75): the same kernels with plain copies and m8n8k16 MMAs, opt-in (STRATA_PF_FUSED_SM75=1)
-    static const bool sm75 = [] { const char* v = std::getenv("STRATA_PF_FUSED_SM75"); return v != nullptr && v[0] == '1'; }();
-    if (d.cc < 75 || (d.cc < 80 && !sm75)) { d.cc = d.cc < 80 ? 0 : d.cc; return d; }
+    if (d.cc < 80) { d.cc = 0; return d; }
     // the device code of this card's arch must have the kernels (a build without an sm_75+ target has an empty body)
     cudaFuncAttributes fa{};
     if (cudaFuncGetAttributes(&fa, expert_kernel<true>) != cudaSuccess || fa.ptxVersion < (d.cc >= 80 ? 80 : 75)) {
@@ -404,23 +402,9 @@ const DevInfo& dev_info() {
 
 bool built() { return true; }
 bool available() { return dev_info().cc >= 75; }
-// 0.1.36: on by default for the Q2_0 pack (+13-23% prompts on an RTX 5070; teacher-forced against the FP16 path as
-// close as MMQ at 8K and closer at 32K: phaseA-tests s18-tf); STRATA_PF_FUSED=0 keeps MMQ.  The native packs' kernels
-// (moe_fused_iq) stay opt-in: STRATA_PF_FUSED=1 (requested()).
-bool enabled() {
-    static const bool env = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED");
-        return v == nullptr || v[0] != '0';
-    }();
-    return env && available();
-}
-bool requested() {
-    static const bool env = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED");
-        return v != nullptr && v[0] == '1';
-    }();
-    return env && available();
-}
+// 0.1.36: on for the Q2_0 pack wherever the kernels fit (+13-23% prompts on an RTX 5070; teacher-forced against the
+// FP16 path as close as MMQ at 8K and closer at 32K: phaseA-tests s18-tf).
+bool enabled() { return available(); }
 
 size_t act_bytes(int64_t rows, int64_t cols) { return (size_t) rows * (size_t) (cols / 64) * AB; }
 size_t group_bytes(int64_t n, int n_expert) {

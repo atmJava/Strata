@@ -112,9 +112,9 @@ int main(int argc, char** argv) {
     }
 
     const auto load_t0 = std::chrono::steady_clock::now();
-    // ask the OS for the projector file up front (128 KiB steps) so the loader's sequential reads find it cached;
-    // STRATA_READ_AHEAD=0 turns it off, as in the engine
-    if (const char* ra = std::getenv("STRATA_READ_AHEAD"); ra == nullptr || std::atoi(ra) != 0) {
+    // ask the OS for the projector file up front (128 KiB steps) so the loader's sequential reads find it cached,
+    // as the engine's file tier does
+    {
         const int fd = open(mmproj.c_str(), O_RDONLY);
         if (fd >= 0) {
             const off_t n = lseek(fd, 0, SEEK_END);

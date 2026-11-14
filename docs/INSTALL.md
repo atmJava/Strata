@@ -89,11 +89,9 @@ kv_resident=32768
 The model files, tokenizer, engine path, log path and runtime environment stay in the existing run config. This
 distribution does not create or download model files.
 
-The service environment must include:
-
-```text
-STRATA_ADMIT_SHORT_FIRST=2048
-```
+The service environment needs no tuning variables. Admission is decided in code: a new request with at most 2,048
+tokens left to read goes before more work, and one that has waited 30 seconds counts as short
+(`serve/server.py`).
 
 An `env` map inside the run config reaches the engine child, not the Python server.
 

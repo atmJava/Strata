@@ -636,7 +636,7 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_slots_kernel(Sc
                             QsaScoreRows{});
 }
 
-// QSAROWS (docs/QSAROWS.md, STRATA_QSA_ROWS=1): block_scores_multi_kernel's work for NQ <= 4 queries with less issue
+// QSAROWS (docs/QSAROWS.md): block_scores_multi_kernel's work for NQ <= 4 queries with less issue
 // pressure per (block, query).  nsys of a 131k decode window (RTX 2080 Ti + RTX 3060): the multi kernel costs ~20 us more a
 // call for every row of the window on both cards - per (block, query) it reads the four query slices from shared memory
 // (4 x LDS.128) and reduces each head's lane products with its own five shuffles (20 a block and query), and those two
@@ -795,15 +795,8 @@ __global__ void __launch_bounds__(256, 1) block_scores_thread_kernel(const float
     }
 }
 
-bool scores_multi_on() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_SCORES_MULTI"); return v == nullptr || std::atoi(v) != 0; }();
-    return on;
-}
-// STRATA_QSA_EARLY_EXIT=0 keeps the old staging (every CTA loads the queries first); the scores are the same bits
-bool scores_early_exit() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_QSA_EARLY_EXIT"); return v == nullptr || std::atoi(v) != 0; }();
-    return on;
-}
+// The multi-query scorer stages the queries once per CTA.
+bool scores_early_exit() { return true; }
 }  // namespace
 
 bool qsa_block_scores_slots(const float* const* pooled, const float* const* dead, const float* q_idx,
@@ -814,7 +807,7 @@ bool qsa_block_scores_slots(const float* const* pooled, const float* const* dead
         std::fprintf(stderr, "qsa_block_scores_slots: unsupported indexer geometry\n");
         std::exit(1);
     }
-    if (nq > MQ || !scores_multi_on()) return false;   // the single-query call would not run the multi kernel
+    if (nq > MQ) return false;   // the single-query call would not run the multi kernel
     ScoreSlotKeys keys{};
     for (int64_t z = 0; z < nq; ++z) {
         keys.pooled[z] = pooled[z];
@@ -835,7 +828,7 @@ bool qsa_block_scores_slots(const float* const* pooled, const float* const* dead
 // (lane l, lane l ^ o) the butterfly adds for that value at that offset, so every value's additions are the
 // butterfly's, operand for operand (float addition commutes): the same bits, with V - 1 shuffles plus the plain
 // butterfly's remaining stages instead of 5 V.  Lane l ends with value (l >> (5 - log2 V)); the query's 4 heads are
-// then gathered by its head-0 lane and summed in block_scores_multi_kernel's order.  STRATA_SCORES_HALVE=0: the old kernel.
+// then gathered by its head-0 lane and summed in block_scores_multi_kernel's order.
 template <int V>
 __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_halve_kernel(const float* __restrict__ pooled,
                                                                               const float* __restrict__ dead,
@@ -924,12 +917,9 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_halve_kernel(co
     }
 }
 
-// #1825: the prompt path's thread-per-head scorer (bitwise the warp kernel's scores).  Default: Turing with
-// STRATA_SM75_PERF=1 (the P100 gain measured here is +1..3% at 30-60K tokens, under the 3% bar for a new default);
-// STRATA_SCORES_THREAD=1 turns it on, =0 off, on any CUDA card
+// #1825: the prompt path's thread-per-head scorer (bitwise the warp kernel's scores), on Turing (STRATA_SM75_PERF=1;
+// the P100 gain measured here is +1..3% at 30-60K tokens).
 bool scores_thread_on() {
-    static const int env = [] { const char* v = std::getenv("STRATA_SCORES_THREAD"); return v ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
-    if (env >= 0) return env != 0;
     static int ok[64] = {};   // 0 unknown, 1 yes, 2 no
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
@@ -937,14 +927,12 @@ bool scores_thread_on() {
         int major = 0, minor = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-        ok[dev] = strata::sm75_default(major, minor) ? 1 : 2;   // Turing, STRATA_SM75_PERF=1
+        ok[dev] = strata::sm75_default(major, minor) ? 1 : 2;
     }
     return ok[dev] == 1;
 }
 
 bool scores_halve_on() {
-    static const int env = [] { const char* v = std::getenv("STRATA_SCORES_HALVE"); return v ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
-    if (env >= 0) return env != 0;
     static int ok[64] = {};   // 0 unknown, 1 yes, 2 no
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
@@ -952,7 +940,7 @@ bool scores_halve_on() {
         int major = 0, minor = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-        ok[dev] = strata::sm75_default(major, minor) ? 1 : 2;   // Turing, STRATA_SM75_PERF=1
+        ok[dev] = strata::sm75_default(major, minor) ? 1 : 2;
     }
     return ok[dev] == 1;
 }
@@ -975,10 +963,7 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
         std::exit(1);
     }
     // a block past a query's n_bid returns at once: the grid need only reach the batch's largest n_bid (C-1)
-    if (scores_multi_on() && nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
-        // QSAROWS: STRATA_QSA_ROWS=1 (exactly) takes block_scores_rows_kernel for calls of up to 4 queries - the same bits
-        static const bool rows_env = [] { const char* v = std::getenv("STRATA_QSA_ROWS"); return v != nullptr && v[0] == '1' && v[1] == '\0'; }();
-        if (rows_env && qsa_block_scores_rows(pooled, dead, q_idx, steps, nq, max_blocks, s, scores, stream)) return;
+    if (nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
         if (scores_halve_on()) {   // Turing: block_scores_halve_kernel, the same bits
             const cudaStream_t st = (cudaStream_t) stream;
             if (nq <= 1) block_scores_halve_kernel<4><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
@@ -1048,9 +1033,8 @@ void qsa_block_scores_rows(const QsaScoreRows& rows, const float* q_idx, const i
         std::fprintf(stderr, "qsa_block_scores_rows: unsupported geometry\n");
         std::exit(1);
     }
-    static const bool early = [] { const char* v = std::getenv("STRATA_QSA_EARLY_EXIT"); return v == nullptr || std::atoi(v) != 0; }();
     block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(nullptr, nullptr, q_idx, steps, (int) nq,
-                                                                                 max_blocks, scores, early, rows);
+                                                                                 max_blocks, scores, true, rows);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores_rows: %s\n", cudaGetErrorString(e)); std::exit(1); }
 }
@@ -1099,7 +1083,7 @@ static bool topk_active_turing_device() {
 // one), a count of each chunk's cells above / at the threshold, and the emit.  Each pass's CTAs take the previous
 // digit from the complete histogram with block_topk_kernel's rule (the largest digit whose cells at or above it reach
 // the width; 0 when none) - pure functions of integer counts, so every CTA finds the same digit, and the threshold,
-// `above` and the emitted cells are block_topk_kernel's: identical ids.  STRATA_TOPK_SPLIT=0 keeps the wide kernel.
+// `above` and the emitted cells are block_topk_kernel's: identical ids.
 constexpr int SP_T = 256, SP_W = SP_T / 32, SP_CH = 2048, SP_MAXQ = 16, SP_MAXCH = 512;
 __device__ int g_sp_hist[SP_MAXQ][4][256];
 __device__ int g_sp_state[5][SP_MAXQ][2];          // after p digits: prefix, above
@@ -1310,15 +1294,13 @@ __global__ void __launch_bounds__(SP_T) topk_split_emit_kernel(const float* __re
 
 bool topk_split_device() {
     static int ok[64] = {};   // 0 unknown, 1 yes, 2 no
-    static const int env = [] { const char* v = std::getenv("STRATA_TOPK_SPLIT"); return v ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
-    if (env == 0) return false;
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
     if (ok[dev] == 0) {
         int major = 0, minor = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-        ok[dev] = (env == 1 || strata::sm75_default(major, minor)) ? 1 : 2;   // Turing, STRATA_SM75_PERF=1
+        ok[dev] = strata::sm75_default(major, minor) ? 1 : 2;
     }
     return ok[dev] == 1;
 }
@@ -1354,7 +1336,7 @@ bool qsa_block_topk_split(const float* scores, const int32_t* steps, int64_t nq,
 // above the threshold is a candidate: the threshold, `above` and the tie budget computed over the candidates with
 // block_topk_kernel's rule are the reference's, and the candidates sorted by block emit the reference's cells in its
 // order.  Otherwise (too few cells above LB, or more than SM_CAP candidates) the query is flagged and
-// block_topk_wide_kernel<true> runs it.  STRATA_TOPK_SAMPLE=0 keeps the wide kernel alone.
+// block_topk_wide_kernel<true> runs it.
 constexpr int TS_STRIDE = 32, TS_CAP = 4096;
 
 __device__ __forceinline__ int ts_block_scan(int v, int* s_w) {   // exclusive scan over the CTA's TK_T threads
@@ -1536,12 +1518,9 @@ __global__ void __launch_bounds__(TK_T) block_topk_sample_kernel(const float* __
     }
 }
 
-// The prompt path's one-read top-k: STRATA_TOPK_SAMPLE=0 / 1 forces it off / on for any card; unset it is a Turing kernel
-// of the series (STRATA_SM75_PERF=1).  (As submitted in #2093 it was on for every CUDA card; same ids, but only measured
-// on an RTX 2080 Ti, so the other cards keep the wide kernel.)
+// The prompt path's one-read top-k: a Turing kernel of the series (STRATA_SM75_PERF=1).  (As submitted in #2093 it
+// was on for every CUDA card; same ids, but only measured on an RTX 2080 Ti, so the other cards keep the wide kernel.)
 bool topk_sample_on() {
-    static const int env = [] { const char* v = std::getenv("STRATA_TOPK_SAMPLE"); return v ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
-    if (env >= 0) return env != 0;
     static int ok[64] = {};   // 0 unknown, 1 yes, 2 no
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
@@ -1557,11 +1536,10 @@ bool topk_sample_on() {
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                     const QsaShapes& s, int32_t* ids, void* stream, int64_t active_blocks) {
     // keys in registers when every query's blocks fit (contexts up to ~135K cells), else (CUDA) the same threads
-    // reading them from memory; the same ids. STRATA_TOPK_OLD=1: the original kernel
-    static const bool old = std::getenv("STRATA_TOPK_OLD") != nullptr;
+    // reading them from memory; the same ids.
     if (nq <= 0) return;
     // Turing decode (a window's few queries, no block count): the split kernels above; the same ids
-    if (!old && active_blocks <= 0 && max_blocks >= 16384 && s.idx_block == R &&
+    if (active_blocks <= 0 && max_blocks >= 16384 && s.idx_block == R &&
         cap >= qsa_selection_width(kTopkMaxCells, s) && topk_split_device() &&
         qsa_block_topk_split(scores, steps, nq, max_blocks, cap, ids, (cudaStream_t) stream)) {
         const cudaError_t e = cudaGetLastError();
@@ -1574,17 +1552,12 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
     // TK_T * TK_PER registers. Use the prefill bound on sm_75, keeping max_blocks as the score-row stride.
     // Other CUDA devices keep 0.1.32's capacity rule: #337 was measured on RDNA4, and RTX 5070 64K prompts were
     // 1-3% slower. Decode/captured graphs omit the bound and never query the device here.
-    static const bool capacity_guard = std::getenv("STRATA_TOPK_CAPACITY_GUARD") != nullptr;
-    // STRATA_TOPK_ACTIVE_ANY=1 (tests): the Turing dispatch on any CUDA card, so qsa_topk_active_parity checks it
-    // on whatever card runs the tests (the kernels are the same on every architecture)
-    static const bool any_card = [] { const char* v = std::getenv("STRATA_TOPK_ACTIVE_ANY"); return v && v[0] == '1'; }();
-    const bool counted = !capacity_guard && active_blocks > 0 && active_blocks <= max_blocks &&
-                         (any_card || topk_active_turing_device());
+    const bool counted = active_blocks > 0 && active_blocks <= max_blocks && topk_active_turing_device();
     const int64_t reach = counted && active_blocks < max_blocks ? active_blocks : max_blocks;
     const int64_t fit = (int64_t) TK_T * (counted ? TK_PER_MAX : TK_PER);
     constexpr int64_t kWideMinBlocks = 4608;   // RTX 3060: a prompt batch below ~18K cells is faster on the ref
     const bool too_small = reach > fit && active_blocks > 0 && active_blocks < kWideMinBlocks;
-    if (old || too_small) {
+    if (too_small) {
         qsa_block_topk_ref(scores, steps, nq, max_blocks, cap, s, ids, stream);
         return;
     }
@@ -1594,13 +1567,10 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
     }
     // Turing prefill (the `counted` bound) above ~90K cells (22,528 blocks): the wide kernel, which reads the keys
     // coalesced, instead of the register kernel's uncoalesced per-thread runs (PR #743: 131K, 1.03 -> 0.75 ms); the
-    // same ids.  STRATA_TOPK_STREAM=0 restores the register kernel there.
+    // same ids.
     // campaign3: on HIP too (was CUDA-only; gfx11 has no sm_90 cluster path and fell to the ref radix past the
     // register kernel's reach - the deep-decode top-k cost).  Same ids as the ref kernel.
-    static const bool turing_wide = [] {
-        const char* v = std::getenv("STRATA_TOPK_STREAM");
-        return v == nullptr || v[0] != '0';
-    }();
+    constexpr bool turing_wide = true;
     if (reach > fit || (turing_wide && counted && reach > 22528)) {   // past the register kernel's reach, or Turing's band
         if (counted && nq <= TS_MAXQ && reach > 28672 && topk_sample_on()) {   // one read of the scores (below ~115K cells the wide kernel is as fast)
             block_topk_sample_kernel<<<(unsigned) nq, TK_T, 0, (cudaStream_t) stream>>>(scores, steps, max_blocks, cap, ids);

@@ -1,6 +1,5 @@
 // include/strata/prefill/moe_fused.hpp - #136 (prompt speed): the routed experts of a Q2_0 pack in the prompt path on
-// Strata's own int8 tensor-core kernels for sm_75, opt-in with STRATA_PF_FUSED=1 and
-// STRATA_PF_FUSED_SM75=1.
+// Strata's own int8 tensor-core kernels for sm_80+ cards.
 //
 // The MMQ path (moe_mmq.hpp) per MoE layer: a host sync to group the (token, k) pairs by expert, a gather of each
 // expert into a 16-expert group buffer, then per group the q8_1 activations of every routed slot, gate/up, SwiGLU,
@@ -29,12 +28,10 @@ constexpr int kMaxBatch = 128;
 
 /// This build has the kernels (the CUDA server build; a build without MMQ does not).
 bool built();
-/// built(), and the sm_75 fused path has been enabled on the current device.
+/// built(), and the kernels fit the current device (sm_80+).
 bool available();
-/// available(), unless STRATA_PF_FUSED=0 (read once): the Q2_0 pack's fused experts, on by default since 0.1.36.
+/// available(): the Q2_0 pack's fused experts, on since 0.1.36.
 bool enabled();
-/// STRATA_PF_FUSED=1 given explicitly, and available(): the native IQ packs' fused kernels (opt-in).
-bool requested();
 
 /// Bytes of `rows` activation rows of `cols` values (a multiple of 64) in the kernels' int8 form: per 64 values 64
 /// codes and {d, c} of each half (c = -(1.5 * 2^23 + the half's code sum), what the epilogue adds back).

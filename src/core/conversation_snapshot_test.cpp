@@ -264,8 +264,6 @@ void full_session(int fmt, int mode, int experts) {
             check(p==original,"growth never reallocates the retained payload");return true;
         });
         check(conversation_snapshot_restore(incremental,ss,g,draft.state,err)==ConversationRestore::restored,"restore segmented incremental snapshot");
-        uint64_t fingerprint=0;
-        check(conversation_kv_verify(incremental.kv.back(),draft.state,g,70,false,fingerprint,err),"incremental draft authoritative and ring read-back");
         ids.resize(65);
     }
     {
@@ -357,8 +355,6 @@ int main() {
             cuda_check(cudaDeviceSynchronize());
             check(conversation_kv_save(restored,f.state,f.g,upto,index,err),"read back restored A");
             check(equal(a,restored),"A/B/A byte-exact K/V and indexer state");
-            uint64_t fingerprint = 0;
-            check(conversation_kv_verify(a,f.state,f.g,upto,index,fingerprint,err),"verify restored authoritative and resident bytes without rewriting them");
             {
                 // disk save streams the same bytes as a captured image, without the host copy
                 SessionKvSource src;
@@ -401,8 +397,8 @@ int main() {
             auto bad=a; bad.head_dim++;
             check(!conversation_kv_restore(bad,f.state,f.g,upto,index,err),"reject incompatible geometry");
             if (fmt==kKvInt8) {
-                // #293: INT8 K/V saved through the Hadamard rotation (STRATA_KV_ROT=1) never restores into a state
-                // without it, nor the reverse
+                // #293: INT8 K/V saved through the Hadamard rotation never restores into a state without it, nor
+                // the reverse
                 f.state.kv_rot=true;
                 ConversationKv rotated;
                 check(conversation_kv_save(rotated,f.state,f.g,upto,index,err),"save rotated INT8");

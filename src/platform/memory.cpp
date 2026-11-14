@@ -52,16 +52,10 @@ namespace {
 constexpr uint64_t kAdviseStep = 128ull << 10;
 }
 
-bool read_ahead_enabled() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_READ_AHEAD");
-        return v == nullptr || std::atoi(v) != 0;
-    }();
-    return on;
-}
+bool read_ahead_enabled() { return true; }
 
 void advise_willneed(const void* p, uint64_t bytes) {
-    if (p == nullptr || bytes == 0 || !read_ahead_enabled()) return;
+    if (p == nullptr || bytes == 0) return;
     const long ps = sysconf(_SC_PAGE_SIZE);
     const uintptr_t pg = ps > 0 ? (uintptr_t) ps : 4096, end = (uintptr_t) p + bytes;
     for (uintptr_t a = (uintptr_t) p & ~(pg - 1); a < end; a += kAdviseStep)
@@ -69,7 +63,7 @@ void advise_willneed(const void* p, uint64_t bytes) {
 }
 
 void advise_willneed(int fd, uint64_t offset, uint64_t bytes) {
-    if (fd < 0 || !read_ahead_enabled()) return;
+    if (fd < 0) return;
     for (uint64_t at = 0; at < bytes; at += kAdviseStep)
         (void) posix_fadvise(fd, (off_t) (offset + at), (off_t) std::min(kAdviseStep, bytes - at), POSIX_FADV_WILLNEED);
 }

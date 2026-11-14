@@ -69,19 +69,19 @@ def test_probe_discovers_engine_independent_of_build_directory():
 
 def test_expected_env_accepts_exact_running_switches():
     stamp = _stamp("/run/strata", "/run/serve/server.py")
-    stamp["running"]["engine"]["env"] = ["STRATA_HC_Q8=1", "STRATA_EXP_MODE=8"]
-    assert probe.check_expected_env(stamp, {"STRATA_HC_Q8": "1", "STRATA_EXP_MODE": "8"}) == []
+    stamp["running"]["engine"]["env"] = ["STRATA_BATCH_TELEMETRY=1", "STRATA_EMULATE_CC=75"]
+    assert probe.check_expected_env(stamp, {"STRATA_BATCH_TELEMETRY": "1", "STRATA_EMULATE_CC": "75"}) == []
 
 
 def test_expected_env_rejects_a_dropped_switch():
     stamp = _stamp("/run/strata", "/run/serve/server.py")
-    stamp["running"]["engine"]["env"] = ["STRATA_EXP_MODE=8"]
-    problems = probe.check_expected_env(stamp, {"STRATA_HC_Q8": "1"})
-    assert problems == ["running engine env: missing STRATA_HC_Q8=1"]
+    stamp["running"]["engine"]["env"] = ["STRATA_EMULATE_CC=75"]
+    problems = probe.check_expected_env(stamp, {"STRATA_BATCH_TELEMETRY": "1"})
+    assert problems == ["running engine env: missing STRATA_BATCH_TELEMETRY=1"]
 
 
 def test_expected_env_rejects_a_different_value():
     stamp = _stamp("/run/strata", "/run/serve/server.py")
-    stamp["running"]["engine"]["env"] = ["STRATA_HC_Q8=0"]
-    problems = probe.check_expected_env(stamp, {"STRATA_HC_Q8": "1"})
-    assert problems == ["running engine env: STRATA_HC_Q8=0 != expected 1"]
+    stamp["running"]["engine"]["env"] = ["STRATA_BATCH_TELEMETRY=0"]
+    problems = probe.check_expected_env(stamp, {"STRATA_BATCH_TELEMETRY": "1"})
+    assert problems == ["running engine env: STRATA_BATCH_TELEMETRY=0 != expected 1"]

@@ -8,7 +8,7 @@
 namespace strata::kernels::cpu {
 
 bool iq512_supported(int ggml_type) noexcept;
-/// Whether the grid lookups of these rows are gathers (the default where cpu_gather_fast(), STRATA_IQ_GATHER=1 / 0 force it): the
+/// Whether the grid lookups of these rows are gathers (where cpu_gather_fast() says so): the
 /// same words, so the same bits as the scalar lookups, and 1.3-2x faster where a gather is cheap (Sapphire Rapids).
 bool iq512_gather_on() noexcept;
 /// ff[t][r] = silu(gate_r . a[t]) * (up_r . a[t]), rows [r0, r1); gate rows at blob, up rows at blob + up_off.

@@ -1,4 +1,4 @@
-// src/prefill/lm_kernels_parity.cu - the two kernels of the layer-major prompt path (STRATA_PREFILL_LAYER_MAJOR=1,
+// src/prefill/lm_kernels_parity.cu - the two kernels of the layer-major prompt path (a layer split,
 // #3976 / #1670) against a host reference, on synthetic data of the model's width (N = 2560): no model, a few MiB.
 //   moe_shared_init   acc[t, :] = shared[t, :] * sigmoid(sg[t])      (the device sigmoid is __expf: within 1e-5 relative)
 //   moe_scatter_add   acc[u_tok[u], :] += sum_{j in [u_off[u], u_off[u+1])} u_w[j] * Dm[u_rows[j], :], in that j order,

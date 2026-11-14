@@ -22,26 +22,8 @@ ExpertLayout g_layout;
 
 const ExpertLayout& expert_layout() { return g_layout; }
 
-int cpu_isa_cap() {
-    // STRATA_FORCE_ISA (tests, the experimental older-CPU builds): the engine's own dispatch acts as if this CPU
-    // stopped at that level.  ggml-cpu is not affected: it runs what the build compiled it for.
-    static const int cap = [] {
-        const char* f = std::getenv("STRATA_FORCE_ISA");
-        if (f == nullptr || f[0] == '\0') return 3;
-        const std::string v(f);
-        if (v == "avx2") return 2;
-        if (v == "avx") return 1;
-        if (v == "sse" || v == "sse4.2" || v == "none") return 0;
-        std::fprintf(stderr, "strata: STRATA_FORCE_ISA=%s is not avx2, avx or sse; ignored\n", f);
-        return 3;
-    }();
-    return cap;
-}
-
 bool cpu_avx512_ok() {
     static const bool ok = [] {
-        if (const char* f = std::getenv("STRATA_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
-        if (cpu_isa_cap() < 3) return false;
         unsigned r[4] = {0, 0, 0, 0};
         auto cpuid = [&](unsigned leaf, unsigned sub) {
 #if defined(_MSC_VER)
@@ -75,7 +57,6 @@ bool cpu_avx512_ok() {
 
 bool cpu_avx512bw_ok() {
     static const bool ok = [] {
-        if (const char* f = std::getenv("STRATA_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
         unsigned r[4] = {0, 0, 0, 0};
         auto cpuid = [&](unsigned leaf, unsigned sub) {
 #if defined(_MSC_VER)
@@ -109,7 +90,6 @@ bool cpu_avx512bw_ok() {
 
 bool cpu_avx2_ok() {
     static const bool ok = [] {
-        if (cpu_isa_cap() < 2) return false;
         unsigned r[4] = {0, 0, 0, 0};
         auto cpuid = [&](unsigned leaf, unsigned sub) {
 #if defined(_MSC_VER)
@@ -146,7 +126,6 @@ bool cpu_avx1_ok() {
     // AVX (Sandy Bridge, 2011): AVX + OSXSAVE with the OS saving the YMM state; FMA, F16C and AVX2 not needed.
     // From the Strata_Dirigo fork (rwkeyes).
     static const bool ok = [] {
-        if (cpu_isa_cap() < 1) return false;
         unsigned r[4] = {0, 0, 0, 0};
 #if defined(_MSC_VER)
         int x[4];
@@ -207,18 +186,8 @@ void cpuid_regs(unsigned leaf, unsigned sub, unsigned r[4]) {
 }
 }  // namespace
 
-int iq256_gather_setting() {
-    static const int s = [] {
-        const char* v = std::getenv("STRATA_IQ256_GATHER");
-        if (v == nullptr || v[0] == '\0') return -1;
-        return std::atoi(v) != 0 ? 1 : 0;
-    }();
-    return s;
-}
-
 bool cpu_gather_fast() {
     static const bool ok = [] {
-        if (cpu_isa_cap() < 3) return false;   // STRATA_FORCE_ISA: as on a CPU that stops at AVX2
         unsigned r[4];
         cpuid_regs(0, 0, r);
         const unsigned max_leaf = r[0];
@@ -259,8 +228,7 @@ bool cpu_gather_fast_here() {
 
 bool cpu_avxvnni_ok() {
     static const bool ok = [] {
-        if (const char* v = std::getenv("STRATA_NO_AVXVNNI"); v != nullptr && std::atoi(v) != 0) return false;
-        if (isa_floor_build()[0] != '\0' || cpu_isa_cap() < 3 || !cpu_avx2_ok()) return false;
+        if (isa_floor_build()[0] != '\0' || !cpu_avx2_ok()) return false;
         unsigned r[4];
         cpuid_regs(0, 0, r);
         if (r[0] < 7) return false;

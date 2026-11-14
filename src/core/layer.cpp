@@ -179,9 +179,8 @@ if (!w.wants_q8k()) {        s_gemv_q8_0_split(x80, p.codes, p.scales, p.offset,
 // namespace
 void layer_set_native_bf16(bool enabled) { native_bf16_projections = enabled; }
 void layer_set_native_flash_attn_short(bool enabled) { native_flash_attn_short = enabled; }
-namespace { bool g_kv_int8 = false, g_kv_q4 = false, g_kv_hybrid = false, g_kv_int8_rot = false; }
+namespace { bool g_kv_int8 = false, g_kv_q4 = false, g_kv_hybrid = false; }
 void qsa_set_kv_int8(bool enabled) { g_kv_int8 = enabled; }
-void qsa_set_kv_int8_rotate(bool enabled) { g_kv_int8_rot = enabled; }
 bool qsa_kv_int8() { return g_kv_int8; }
 void qsa_set_kv_q4(bool enabled) { g_kv_q4 = enabled; }
 bool qsa_kv_q4() { return g_kv_q4; }
@@ -405,8 +404,7 @@ strata::kernels::doorbell_ring(db->d_seq, stream);    }    return true;}
 bool moe_route_window(const WeightTable& tables, const ModelGeometry& g, int64_t layer, int64_t k, const MoEBuffers& b,
                       const float* x, float* logits, int32_t* ids, float* weights, int n, void* stream, std::string& err) {
     using namespace strata::kernels;
-    const bool batched = native_bf16_projections && !(native_router_enabled() && g.n_expert == 512 && k == 10) &&
-                         !std::getenv("STRATA_ROUTE_PER_TOKEN");
+    const bool batched = native_bf16_projections && !(native_router_enabled() && g.n_expert == 512 && k == 10);
     if (!batched || n == 1) {
         for (int t = 0; t < n; ++t) {
             MoEBuffers mb = b;
@@ -418,12 +416,7 @@ bool moe_route_window(const WeightTable& tables, const ModelGeometry& g, int64_t
     const LayerView v(tables, layer);
     const WeightRef* w_router = v.get("ffn_gate_inp.weight");
     if (w_router == nullptr) { err = v.name("ffn_gate_inp.weight") + " is missing"; return false; }
-    if (std::getenv("STRATA_ROUTE_PROJ_PER_TOKEN"))
-        for (int t = 0; t < n; ++t)
-            bf16_gemv_fp32_mmvf(x + t * g.n_embd, (const uint16_t*) w_router->data, logits + t * g.n_expert, g.n_embd,
-                                g.n_expert, stream);
-    else
-        bf16_gemv_fp32_mmvf_cols(x, (const uint16_t*) w_router->data, logits, g.n_embd, g.n_expert, n, stream);
+    bf16_gemv_fp32_mmvf_cols(x, (const uint16_t*) w_router->data, logits, g.n_embd, g.n_expert, n, stream);
     router_top10(logits, n, (int) g.n_expert, (int) k, ids, weights, stream);
     return true;
 }
@@ -537,8 +530,7 @@ uint64_t g_kv_host_bytes = 0;
 // under_wddm() does (/dev/dxg, the device its GPU goes through to the Windows driver), the copy is anonymous memory
 // registered Portable|Mapped before any page is touched, which also leaves WSL's small cudaHostAlloc budget to the
 // staging buffers. Elsewhere cudaHostAlloc stays first. Either way the other method is the fallback when the first
-// is refused. STRATA_KV_HOST_REGISTER=1/0 forces registering first or cudaHostAlloc first. Like the cudaHostAlloc
-// copy it lives as long as the process.
+// is refused. Like the cudaHostAlloc copy it lives as long as the process.
 uint8_t* kv_host_alloc(uint64_t bytes) {
     auto host_alloc = [](uint64_t n) -> uint8_t* {
         uint8_t* h = nullptr;
@@ -546,11 +538,8 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
         (void) cudaGetLastError();
         return nullptr;
     };
-    static const bool register_first = [] {
-        const char* e = std::getenv("STRATA_KV_HOST_REGISTER");
-        if (e != nullptr && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
-        return std::filesystem::exists("/dev/dxg");
-    }();
+    // /dev/dxg is the WSL/DirectX GPU device; there cudaHostRegister is the path that works, elsewhere it is not needed
+    static const bool register_first = std::filesystem::exists("/dev/dxg");
     auto register_anon = [](uint64_t n) -> uint8_t* {
         void* m = mmap(nullptr, (size_t) n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (m == MAP_FAILED) return nullptr;
@@ -694,10 +683,6 @@ KvPlan kv_plan(const QsaShapes& s, int64_t max_cells, int64_t ring_cells) {
     p.slots = p.pages;
     p.pooled_rows = max_cells / s.idx_block + 2;
     if (g_kv_resident <= 0 || ring_cells < 0) return p;   // ring_cells < 0: always fully resident
-    // A/B only: STRATA_KV_RING_OFF keeps the drafter fully resident, STRATA_KV_MAIN_OFF the main layers
-    static const bool ring_off = std::getenv("STRATA_KV_RING_OFF") != nullptr;
-    static const bool main_off = std::getenv("STRATA_KV_MAIN_OFF") != nullptr;
-    if (ring_cells > 0 ? ring_off : main_off) return p;
     if (ring_cells > 0) {
         const int64_t r = (ring_cells + s.page_size - 1) / s.page_size;
         if (r < p.pages) { p.mode = 2; p.slots = r; p.pooled_rows = 2; }   // the drafter has no indexer
@@ -772,7 +757,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         st.kv_int8 = false;
         st.kv_q4 = false;
     }
-    st.kv_rot = st.kv_q4 || (st.kv_int8 && g_kv_int8_rot);   // K8V4 rotates only V (below)
+    st.kv_rot = st.kv_q4;   // Q4_0 rotates K and V; K8V4 rotates only V (below)
     st.kv_mode = p.mode;
     st.n_slots = p.slots;
     const uint64_t rows = (uint64_t) p.slots * s.n_head_kv * s.page_size;   // VRAM rows: the slots
@@ -913,7 +898,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         cudaMemcpy(st.cos_tab, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice);
         cudaMemcpy(st.sin_tab, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice);
         st.owns_rope = true;
-        if (s.n_rot == 64)   // the native and prompt-path rope kernels read it (mrope.hpp, STRATA_ROPE_TABLE=1)
+        if (s.n_rot == 64)   // the native and prompt-path rope kernels read it (mrope.hpp)
             strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
     }
     // the page table starts as the IDENTITY, which is the simplest legal mapping and what a caller that does
@@ -1168,7 +1153,7 @@ if (st.kv_hybrid) {
     strata::kernels::kv_append_q4_step(st.v_q4, st.v_q4, st.page_table, st.step, b.vcur, b.vcur, s, stream,
                                        mirror ? &hv : nullptr);
 } else {
-if (st.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with STRATA_KV_ROT=1
+if (st.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0
     strata::kernels::fwht256_inplace_cuda(b.kcur, g.n_head_kv, stream);
     strata::kernels::fwht256_inplace_cuda(b.vcur, g.n_head_kv, stream);
 }

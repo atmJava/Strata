@@ -14,9 +14,9 @@
 // three implementations that pick the same token, bit for bit:
 //   - the SPLIT top_k (default): `sampler_split_part_kernel` cuts each row into 4,096-logit blocks over the whole
 //     GPU, each keeps its own top_k, and `sampler_split_merge_kernel` merges those lists and runs the tail;
-//   - `sampler_one_block_kernel` (`STRATA_SAMPLER_ONE_BLOCK=1`, and the fallback when the split cannot run): one
+//   - `sampler_one_block_kernel` (the fallback when the split cannot run): one
 //     block per token, `top_k` block-argmax rounds, each over the logits after the previous pick;
-//   - `sampler_kernel` (`STRATA_OLD_SAMPLER=1`), the kernel of engine 0.1.20, kept as the reference.
+//   - `sampler_kernel`, the kernel of engine 0.1.20, kept as the reference.
 // The two new ones share `sampled_tail_warp` (top_p / min_p / temperature / draw on one warp).
 #include "strata/kernels/sampler.hpp"
 #include "strata/core/coupled_draft.hpp"
@@ -63,7 +63,7 @@ __device__ __forceinline__ float philox_uniform(uint64_t seed, uint64_t counter)
     return (float) (c0 >> 8) * (1.0f / 16777216.0f);
 }
 
-// GUMBEL-MAX COUPLING (STRATA_SPEC_GUMBEL=1, ported from llama.cpp-lab's --spec-coupled, lab PRs #26/#30).  The pick
+// GUMBEL-MAX COUPLING (ported from llama.cpp-lab's --spec-coupled, lab PRs #26/#30).  The pick
 // is argmax_i p_i / E_i with E_i = -log(u_i) ~ Exp(1) and u_i a hash of (seed, counter, TOKEN ID) - exactly
 // equivalent to argmax(log p_i + Gumbel_i), so it is an exact sample of p.  Unlike the inverse-CDF pick over a
 // probability-sorted list, the noise a token gets does not depend on which other tokens survived the cut, so a
@@ -199,7 +199,7 @@ __global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vo
 /// order - is unchanged; `top_p`'s cut reads that order in double arithmetic as before; temperature and the
 /// Philox draw apply after the cut.  `sampler_parity` pins all of it against the host reference.
 ///
-/// **KEPT AS THE REFERENCE, BEHIND `STRATA_OLD_SAMPLER=1`.**  Two costs remain in it: the `taken`
+/// **KEPT AS THE REFERENCE.**  Two costs remain in it: the `taken`
 /// sweep is O(k) per logit per round, O(k^2 x n_vocab) per row (47 M shared-memory compares at k = 20, 500 M at
 /// 64), and the double-precision tail runs on all 1,024 threads where one warp suffices - GeForce issues FP64 at
 /// 1/64 of FP32.  The kernels after this one remove both and select the same list in the same order.
@@ -467,7 +467,7 @@ __device__ void sampled_tail_warp(const int* sel_ids, const float* sel_logit, in
 /// what has not been picked.  The round is then the same block argmax with the same tie rule, so the list is the
 /// same list in the same order.  An empty round leaves (-inf, id 0) as before, and every round after it is empty
 /// in both versions (nothing after -inf beats -inf).  O(k x n_vocab) per row instead of O(k^2 x n_vocab), then warp
-/// 0 runs the tail.  `STRATA_SAMPLER_ONE_BLOCK=1`, and the fallback when the split path cannot run.
+/// 0 runs the tail.  The fallback when the split path cannot run.
 __global__ void __launch_bounds__(1024)
 sampler_one_block_kernel(const float* __restrict__ logits, int n_vocab, const int* __restrict__ history,
                          int history_len, const SamplerParams p, int* __restrict__ out) {
@@ -790,7 +790,7 @@ coupled_merge_kernel(const int2* __restrict__ cand, int n_blocks, int nv, int kp
     }
 }
 
-// ---- PROBABILISTIC DRAFT ACCEPTANCE (include/strata/core/spec_prob.hpp, STRATA_SPEC_PROB=1) ----
+// ---- PROBABILISTIC DRAFT ACCEPTANCE (include/strata/core/spec_prob.hpp) ----
 //
 // `sampled_probs_warp` is `sampled_tail_warp`'s chain without the pick: the same arithmetic instruction for
 // instruction (top_p's cut in double over the top_k list, min_p's threshold in logit space, temperature, the two
@@ -856,7 +856,7 @@ spec_draft_merge_kernel(const int2* __restrict__ cand, int n_blocks, int nv, int
                         int* __restrict__ out_id, float* __restrict__ out_prob, int* __restrict__ qrow, int gate_pick, float tscale) {
     const int lane = (int) threadIdx.x;
     SamplerParams p = *dp;
-    p.temperature *= tscale;   // 1 unless STRATA_SPEC_PROB_DT: any q is valid, a sharper one may be kept more often
+    p.temperature *= tscale;   // 1 unless the draft temperature scaling applies: any q is valid, a sharper one may be kept more often
     const int k = sampled_k(p.top_k, nv);
     __shared__ int2 lists[kSplitMaxBlocks * kSelMax];
     __shared__ int sel_ids[kSelMax];
@@ -1029,26 +1029,12 @@ spec_verify_merge_kernel(const int2* __restrict__ cand, int n_blocks, int n_voca
     }
 }
 
-// Which sampled path runs, read once: `STRATA_OLD_SAMPLER=1` is `sampler_kernel` (engine 0.1.20),
-// `STRATA_SAMPLER_ONE_BLOCK=1` the one-block kernel; by default the split top_k wherever it applies.
-enum class SampledPath { Split, OneBlock, Old };
+// The split top_k runs wherever it applies; the one-block kernel is the captured-stream fallback.
+enum class SampledPath { Split, OneBlock };
 
-bool env_flag(const char* name) {
-    const char* e = std::getenv(name);
-    return e != nullptr && *e != '\0' && std::strcmp(e, "0") != 0;
-}
+bool gumbel_env() { return false; }
 
-bool gumbel_env() {
-    static const bool on = env_flag("STRATA_SPEC_GUMBEL");
-    return on;
-}
-
-SampledPath sampled_path() {
-    static const SampledPath path = env_flag("STRATA_OLD_SAMPLER")         ? SampledPath::Old
-                                    : env_flag("STRATA_SAMPLER_ONE_BLOCK") ? SampledPath::OneBlock
-                                                                           : SampledPath::Split;
-    return path;
-}
+SampledPath sampled_path() { return SampledPath::Split; }
 
 // A stream being captured into a graph must not reach `split_scratch` (cudaMalloc): it
 // gets the one-block kernel, which needs no memory of its own.  The legacy stream cannot be captured.
@@ -1135,11 +1121,6 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
         const int gthreads = 1024;
         sampler_greedy_kernel<<<(unsigned) n_tokens, gthreads, shmem, (cudaStream_t) stream>>>(
             logits, n_vocab, history, history_len, p, p.penalty_last_n, p.penalty_last_n, out);
-    } else if (sampled_path() == SampledPath::Old) {
-        // The same block-per-token shape: the selection's k argmax rounds reduce inside the block.  See
-        // `sampler_kernel`'s header for what the old one-thread-per-token launch cost.
-        sampler_kernel<<<(unsigned) n_tokens, 1024, shmem, (cudaStream_t) stream>>>(
-            logits, n_vocab, n_tokens, history, history_len, p, out);
     } else {
         // The split top_k by default: stage 1 over (61 blocks x rows) for 248,320 logits, stage 2 one warp per
         // row.  The one-block kernel when asked for, or when the split cannot run: a wider vocabulary than the merge

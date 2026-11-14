@@ -17,7 +17,6 @@ static int g_fail = 0;
 int main() {
     // the singleton reads its environment on first use: set everything first
     SETENV("STRATA_TEST_PIN_BUDGET_MIB", "100");
-    SETENV("STRATA_PIN_RESERVE_MIB", "32");   // soft 32 MiB, hard 64 MiB (a quarter of 32 is below the 64 MiB floor)
     using namespace strata::core;
     if (cudaFree(0) != cudaSuccess) {
         std::printf("pin_budget_test: SKIP (no GPU)\n");
@@ -43,20 +42,23 @@ int main() {
         CHECK(host_alloc_guarded(&p, 200u << 20, cudaHostAllocMapped) != cudaSuccess);
         (void) cudaGetLastError();
     }
-    // 3. the reserves are held, the arena (here: a registration) takes what is left, a required buffer is then
-    //    refused, the held headroom is handed back and the retry works
+    // 3. the reserves are held (shrunk to the ceiling), they fill it, the soft one is handed back so the arena (here:
+    //    a registration) fits, a required buffer is then refused, the held headroom is handed back and the retry works
     {
         pin_reserve_take();
-        CHECK(pin_detail::st().hard != nullptr && pin_detail::st().hard_bytes == (64u << 20));
-        CHECK(pin_detail::st().soft != nullptr && pin_detail::st().soft_bytes == (32u << 20));
-        CHECK(pin_detail::st().sim_used == (96u << 20));
+        // The default soft reserve is 640 MiB (the WDDM-shaped default this simulated ceiling stands in for); with a
+        // 100 MiB ceiling it shrinks by halves: hard 160 -> 80, soft 640 -> ... -> 20.  The two fill the ceiling.
+        CHECK(pin_detail::st().hard != nullptr && pin_detail::st().hard_bytes == (80u << 20));
+        CHECK(pin_detail::st().soft != nullptr && pin_detail::st().soft_bytes == (20u << 20));
+        CHECK(pin_detail::st().sim_used == (100u << 20));
         void* arena = std::malloc(4u << 20);
-        CHECK(pin_register(arena, 4u << 20, cudaHostRegisterPortable) == cudaSuccess);   // 100 MiB used: the ceiling
+        CHECK(pin_register(arena, 4u << 20, cudaHostRegisterPortable) == cudaErrorMemoryAllocation);  // full
         pin_reserve_release_soft();
         CHECK(pin_detail::st().soft == nullptr);
-        CHECK(pin_detail::st().sim_used == (68u << 20));
+        CHECK(pin_detail::st().sim_used == (80u << 20));
+        CHECK(pin_register(arena, 4u << 20, cudaHostRegisterPortable) == cudaSuccess);   // 84 MiB used
         void* a = nullptr;
-        CHECK(host_alloc_guarded(&a, 16u << 20, cudaHostAllocMapped) == cudaSuccess);   // fits beside the hard reserve
+        CHECK(host_alloc_guarded(&a, 16u << 20, cudaHostAllocMapped) == cudaSuccess);   // 100 MiB: fits beside the hard reserve
         void* b = nullptr;
         CHECK(host_alloc_guarded(&b, 40u << 20, cudaHostAllocMapped) == cudaSuccess);   // refused first, then the hard reserve goes
         CHECK(pin_detail::st().hard == nullptr);

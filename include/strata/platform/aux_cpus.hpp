@@ -6,7 +6,7 @@
 // workers' included.  Measured on a 16-worker box: while the adaptive tier was busy the host thread was preempted 5x
 // as often and the per-layer wait for the host's flag was 60-155 us instead of 8.
 //
-// `--aux-cpus LIST|auto|off` (STRATA_AUX_CPUS) puts every thread that is neither a pool worker nor the host thread on
+// `--aux-cpus LIST|auto|off` puts every thread that is neither a pool worker nor the host thread on
 // a small set of CPUs no worker uses:
 //   * threads the engine creates call `pin_current_thread()` first thing (a no-op while the feature is off);
 //   * threads somebody else created (the CUDA driver's) are caught by `sweep()` over /proc/self/task, run after the
@@ -127,7 +127,7 @@ inline std::vector<int> restrict_list(const std::vector<int>& list, const std::v
     return out;
 }
 
-/// What `--aux-cpus` / STRATA_AUX_CPUS said.  `on`: placed from the start-up; `use_list`: the list, not `auto`.
+/// What `--aux-cpus` said.  `on`: placed from the start-up; `use_list`: the list, not `auto`.
 struct Config {
     bool on = false;
     bool use_list = false;

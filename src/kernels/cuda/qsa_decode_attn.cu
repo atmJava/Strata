@@ -184,7 +184,7 @@ __device__ __forceinline__ void attn_chunk_body(const float* __restrict__ q, Qsa
     }
     __syncthreads();
     if constexpr (LANE_CELL) {
-        // S25 (STRATA_ATTN_LANECELL=1): thread t scores cell t % 64 for heads 3 (t / 64) .. +2 by itself - the same
+        // S25: thread t scores cell t % 64 for heads 3 (t / 64) .. +2 by itself - the same
         // 8-dimension partial per former lane (the identical expression), then the former warp_sum's butterfly as
         // lane 0 ran it (a[l] += a[l + o] for o = 16 .. 1), so every score is bit-identical without 12 shuffle
         // reductions per cell
@@ -350,8 +350,7 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_rows_kernel(const float* _
 //     12 warp_sums (60 shuffles);
 //   - the probabilities are stored cell-major, so the value loop reads a cell's 12 as three 16-byte broadcasts.
 // RTX 2080 Ti, 2051 selected cells: 1 / 2 / 3 / 4 queries 51.6 / 78.5 / 110 / 146 -> 34.5 / 41.0 / 73.0 / 84.9 us
-// (with the merge); 600 cells 45.9 / 74.6 / 105 / 137 -> 28.6 / 32.8 / 33.5 / 33.3 us.  STRATA_ATTN_V3=0 keeps the
-// default kernel; =1 takes this one on any CUDA card.
+// (with the merge); 600 cells 45.9 / 74.6 / 105 / 137 -> 28.6 / 32.8 / 33.5 / 33.3 us.  The default kernel is used.
 __global__ void __launch_bounds__(THREADS) attn_chunk_q8_v3_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                                    const int32_t* __restrict__ ids,
                                                                    const int32_t* __restrict__ step, int n_kv_heads,
@@ -450,8 +449,6 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_q8_v3_kernel(const float* 
 }
 bool attn_v3_on() {
     static int on[16] = {};   // by device ordinal: 0 unknown, 1 yes, -1 no
-    static const int env = [] { const char* v = std::getenv("STRATA_ATTN_V3"); return v ? (v[0] == '0' ? 0 : 1) : -1; }();
-    if (env >= 0) return env == 1;
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return false;
     if (on[dev] == 0) {
@@ -465,10 +462,9 @@ bool attn_v3_on() {
 }
 
 // PR #540 (sskver): the same attention with fewer shuffles and less shared-memory traffic, bit for bit the kernel
-// above (same operands, same order). It is retained for the sm_75 A/B run, STRATA_ATTN_DAILY=1.  With NC 2 and
-// no DPP it is the Daily's (be4cf1c) attn_chunk_kernel line for line - the same reduce12 scores, the same cell-major
-// probabilities and the same four-cell value fold - except that `spt` shares `sq`'s storage here (no arithmetic
-// change).  Without the variable nothing selects it on a card at or above sm_75.
+// above (same operands, same order).  With NC 2 and no DPP it is the Daily's (be4cf1c) attn_chunk_kernel line for
+// line - the same reduce12 scores, the same cell-major probabilities and the same four-cell value fold - except
+// that `spt` shares `sq`'s storage here (no arithmetic change).
 // A butterfly step's lane exchange, `M` = 1, 2, 4, 8 or 16.  DPP (HIP, wave32): in registers - DPP row_xmask within a
 // 16-lane row, v_permlanex16 across the two rows - instead of ds_bpermute; the same value moves, so every sum is
 // unchanged bit for bit.
@@ -795,44 +791,25 @@ __global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restri
     attn[(size_t) h * HD + d] = L > 0.0f ? acc / L : 0.0f;
 }
 
-// STRATA_ATTN_DAILY=1 opts into the Daily's decode-attention variant for an A/B run on sm_75.
-[[maybe_unused]] bool daily_attn() {
-    static const bool on = [] {
-        const char* v = std::getenv("STRATA_ATTN_DAILY");
-        return v != nullptr && v[0] == '1' && v[1] == '\0';
-    }();
-    return on;
-}
+// The Daily's decode-attention variant is not selected on this build.
+[[maybe_unused]] bool daily_attn() { return false; }
 
-// CUDA: the kernel below sm_75's line is selected only by STRATA_ATTN_DAILY=1 (the sm_75 A/B seam);
-// the pre-Turing gate that used to pick it never opens on this card.
-bool pre75_attn() {
-    return daily_attn();   // the ready-made engine: upstream's attn_chunk_kernel unless STRATA_ATTN_DAILY=1
-}
+// CUDA: the kernel below sm_75's line is the pre-Turing gate, which never opens on this card.
+bool pre75_attn() { return false; }
 // `PRE` picks PR #540's kernel.
 #define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M> : attn_chunk_kernel<M>)
 #define STRATA_ATTN_CHUNK(M) STRATA_ATTN_CHUNK_SEL(M, pre75_attn())
 
-// S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
-bool lane_cell_attn() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
-    return on;
-}
+// The score phase uses the shuffle reduction (no lane-cell variant).
+bool lane_cell_attn() { return false; }
 
 // 0 fp16, 1 int8, 2 q4_0, 3 int8 K with q4_0 V
 int attn_kv_mode(const QsaAttnPools& p) {
     return p.k_q4 != nullptr ? 2 : (p.k_q != nullptr && p.v_q4 != nullptr ? 3 : (p.k_q != nullptr ? 1 : 0));
 }
 
-// STRATA_ATTN_MERGE_V2: 1 merges with attn_merge_v2_kernel, 0 with attn_merge_kernel.  Unset it follows
-// STRATA_ATTN_DAILY (the Daily had it on by default on NVIDIA), so upstream's merger stays the default.
-int attn_merge_v2() {
-    static const int env = [] {
-        const char* v = std::getenv("STRATA_ATTN_MERGE_V2");
-        return v != nullptr && *v != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1;
-    }();
-    return env >= 0 ? env : (daily_attn() ? 1 : 0);
-}
+// 0 merges with attn_merge_kernel (the upstream merger).
+int attn_merge_v2() { return 0; }
 
 // the merge of `n_q` queries' partials: v2 = 0 attn_merge_kernel, 1 attn_merge_v2_kernel (bitwise the same output)
 void launch_merge(int v2, const float* part_acc, const float* part_m, const float* part_l, int n_chunks,
@@ -845,8 +822,7 @@ void launch_merge(int v2, const float* part_acc, const float* part_m, const floa
 }
 
 // qsa_decode_attn_batch's chunk pass: `n_q` queries' partials into `scratch` (one stride each).  `kernel` < 0 is the
-// environment's choice (lane cell, gfx906 swizzle, STRATA_ATTN_DAILY / PR #540); 0 is attn_chunk_kernel and 1 PR #540's
-// kernel where it is built (the parity harness: never the environment).
+// caller's choice; 0 is attn_chunk_kernel and 1 PR #540's kernel where it is built (the parity harness: never a knob).
 void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                          int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, cudaStream_t st, int kernel) {
     const int kv_mode = pools.k_q4 != nullptr ? 2 : (pools.k_q != nullptr && pools.v_q4 != nullptr ? 3
@@ -860,7 +836,7 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
     const float scale = 1.0f / sqrtf((float) HD);
     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
     const bool pre = kernel < 0 ? pre75_attn() : kernel == 1;
-    // S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
+    // S25: the score phase one cell per thread (bit-identical scores, no shuffle reductions)
     const bool lane_cell = kernel < 0 && lane_cell_attn();
 #define STRATA_ATTN_LC(M) attn_chunk_kernel<M, true><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
     if (lane_cell) {
@@ -992,11 +968,8 @@ void qsa_decode_attn_batch_rows(const float* q, const QsaAttnPoolsRows& rows, co
     const float scale = 1.0f / sqrtf((float) HD);
     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
     cudaStream_t st = (cudaStream_t) stream;
-    // The plain kernel is what qsa_decode_attn_batch runs unless one of its variants is on (lane-cell scoring, the
-    // pre-sm_75 / gfx103x kernel, the gfx906 swizzle): there each row goes through that call, one launch per row.
-    static const bool lane_cell_rows = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
-    bool per_row = lane_cell_rows;
-    per_row = per_row || pre75_attn();
+    // The plain kernel is what qsa_decode_attn_batch runs; the pre-sm_75 / gfx103x kernel would go one launch per row.
+    const bool per_row = pre75_attn();
     if (per_row) {
         for (int64_t r = 0; r < n_q; ++r)
             qsa_decode_attn_batch(q + (size_t) r * s.n_head * HD, rows.p[r], ids + (size_t) r * cap,

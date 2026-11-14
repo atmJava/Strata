@@ -215,27 +215,6 @@ int main() {
             std::printf("  case %3d  n_tok %d  margin %.2f  ranks [%d,%d]  ties %d  ids %s  weights %s (%d ulp)  stats %s\n",
                         c, n_tok, margin, lo, hi, (int) tie_heavy, ids_same ? "same" : "*** DIFFER ***",
                         w_same ? "same" : "*** DIFFER ***", w_ulp, st_same ? "same" : "*** DIFFER ***");
-            if (std::getenv("STRATA_PARITY_DUMP") && dumped < 2) {
-                ++dumped;
-                for (int t = 0; t < n_tok; ++t) {
-                    std::printf("    token %d  ids in ", t);
-                    for (int r = 0; r < kTop; ++r) std::printf(" %d", ids[(size_t) t * kTop + r]);
-                    std::printf("\n      ids ref ");
-                    for (int r = 0; r < kTop; ++r) std::printf(" %d", i_ref[(size_t) t * kTop + r]);
-                    std::printf("\n      ids par ");
-                    for (int r = 0; r < kTop; ++r) std::printf(" %d", i_par[(size_t) t * kTop + r]);
-                    std::printf("\n      logits  ");
-                    for (int r = 0; r < kTop; ++r)
-                        std::printf(" %.9g", logits[(size_t) t * kExperts + i_ref[(size_t) t * kTop + r]]);
-                    std::printf("\n      w ref   ");
-                    for (int r = 0; r < kTop; ++r)
-                        std::printf(" %08x", *(uint32_t*) &w_ref[(size_t) t * kTop + r]);
-                    std::printf("\n      w par   ");
-                    for (int r = 0; r < kTop; ++r)
-                        std::printf(" %08x", *(uint32_t*) &w_par[(size_t) t * kTop + r]);
-                    std::printf("\n");
-                }
-            }
         }
         if (st_par[1]) { ++swapped_cases; swaps_total += st_par[1]; }
     }

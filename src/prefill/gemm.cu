@@ -18,17 +18,6 @@
 
 namespace strata::prefill {
 namespace {
-}  // namespace
-
-void gemm_set_f16_range(bool on) {
-    (void) on;
-}
-bool gemm_f16_range_read(float max_abs[2], unsigned long long over[2], bool reset) {
-    (void) max_abs; (void) over; (void) reset;
-    return false;
-}
-
-namespace {
 
 void ck(cublasStatus_t s, const char* what) {
     if (s != CUBLAS_STATUS_SUCCESS) {
@@ -56,7 +45,7 @@ bool prompt_f16() {
 }
 
 // A padded X (ldx > K) no kernel took: its rows copied to a contiguous FP16 buffer of stride K.  Grown, never shrunk
-// (one buffer per Gemm; a padded X only arrives from STRATA_PF_PAD's producers).  One 2-D copy: the same values, and
+// (one buffer per Gemm; a padded X only arrives from the padded producers).  One 2-D copy: the same values, and
 // the ordinary paths below then read them exactly as if the producer had written them unpadded.
 const uint16_t* Gemm::unpad_x(const uint16_t* X, int64_t T, int64_t K, int64_t ldx) {
     if (X == nullptr || T <= 0 || K <= 0 || ldx <= K) return nullptr;
@@ -150,7 +139,7 @@ bool Gemm::init(void* stream, int64_t scratch_elems, std::string& err) {
 // activations sit there.  With the FP16 path, the weight is converted once per call and the activations in row
 // slices, into the instance's own buffers, and the product runs as the FP16 GEMM (fp32 accumulate) on the tensor
 // cores.  Finite values beyond FP16's range are clamped to +-65504 (#540) instead of becoming Inf.  A beta = 1
-// product (STRATA_PREFILL_BF16X2's remainder, ~2^-9 of the original, deep in FP16's subnormal band) keeps cuBLAS.
+// product (the BF16 remainder's, ~2^-9 of the original, deep in FP16's subnormal band) keeps cuBLAS.
 //   Default: off for sm_75 because its sums round differently.  STRATA_BF16_TC=1 enables it; =2 is a test mode.
 namespace {
 __global__ void bf16_to_f16_kernel(const uint16_t* __restrict__ in, __half* __restrict__ out, int64_t n) {
@@ -231,12 +220,6 @@ bool grow(uint16_t*& p, int64_t& have, int64_t want) {   // `have`, `want`: 2-by
 constexpr int64_t kXSliceElems = 16ll << 20;   // 32 MiB of FP16 activations per slice (64 MiB as fp32)
 
 }  // namespace
-void gemm_set_dense_f32(int) {}
-bool Gemm::bf16_hcd_exact(const uint16_t* X, int64_t ldx, const uint16_t* W, float* Y, int64_t T, int64_t N, int64_t K) {
-    (void) X; (void) ldx; (void) W; (void) Y; (void) T; (void) N; (void) K;
-    return false;
-}
-
 bool Gemm::bf16_converts_x() const {
     return bf16_path() == 1;
 }
@@ -350,10 +333,9 @@ void Gemm::f16_inplace(const uint16_t* X, const uint16_t* W, float* Y, int64_t T
 void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float* Y, int64_t T, int64_t N, int64_t K,
                   int64_t ldy, float beta, int64_t ldx) {
     if (ldx > 0 && ldx != K) {
-        // Nothing took a padded X: the padded product is the gfx11 matrix cores' (STRATA_PF_PAD asks
-        // strata_pf_padded_gemm_available() before padding now, so this is a stale producer or another card's
-        // activation).  Copy the rows unpadded and run the ordinary paths - the same products, the same bits - rather
-        // than ending the engine.
+        // Nothing took a padded X: the padded product is the gfx11 matrix cores', and no producer pads here, so this
+        // is another card's activation.  Copy the rows unpadded and run the ordinary paths - the same products, the
+        // same bits - rather than ending the engine.
         const uint16_t* Xu = unpad_x(X, T, K, ldx);
         if (Xu != nullptr) {
             native(Xu, ggml_type, W_blocks, Y, T, N, K, ldy, beta, 0);

@@ -66,8 +66,8 @@ uint64_t load64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v;
 
 // ---- file I/O in aligned 16 MiB blocks.  Linux: O_DIRECT when the filesystem takes it (no page cache, so a
 // 1.2 GB session neither evicts other files nor is charged to the engine's memory cgroup), buffered I/O otherwise
-// (tmpfs, a filesystem that refuses an aligned direct transfer, or STRATA_SESSION_BUFFERED=1).  Windows and other
-// systems: ordinary buffered I/O, same blocks.
+// (tmpfs, or a filesystem that refuses an aligned direct transfer).  Windows and other systems: ordinary buffered
+// I/O, same blocks.
 constexpr size_t kAlign = 4096, kBlock = 16u << 20;
 struct AlignedFree { void operator()(uint8_t* p) const { std::free(p); } };
 using Aligned = std::unique_ptr<uint8_t, AlignedFree>;
@@ -109,11 +109,6 @@ bool split_path(const std::string& path, std::string& dir, std::string& leaf, st
 #ifndef O_DIRECT
 #define O_DIRECT 0            // not offered by this system: buffered I/O
 #endif
-
-bool buffered_forced() {
-    const char* e = std::getenv("STRATA_SESSION_BUFFERED");
-    return e != nullptr && e[0] == '1';
-}
 
 static_assert(sizeof(off_t) >= 8, "session files need 64-bit file offsets (large-file support)");
 
@@ -217,7 +212,7 @@ private:
     // O_DIRECT is switched on the open descriptor: a filesystem that refuses it (EINVAL, e.g. tmpfs) keeps buffered
     // I/O, and the file is never opened twice
     void try_direct() {
-        if (O_DIRECT == 0 || buffered_forced()) return;
+        if (O_DIRECT == 0) return;
         const int fl = ::fcntl(fd_, F_GETFL);
         direct_ = fl >= 0 && ::fcntl(fd_, F_SETFL, fl | O_DIRECT) == 0;
     }
@@ -656,7 +651,7 @@ uint64_t session_config_fingerprint(const SessionConfig& c) {
     b.i64("max_context", c.max_context);
     b.i64("kv_resident", c.kv_resident);
     b.i64("mtp_window", c.mtp_window);
-    b.i64("kv_rot", c.kv_rot ? 1 : 0);
+    b.i64("kv_rot", 0);   // a removed setting: the constant keeps saved sessions' fingerprints valid
     b.i64("rope.type", c.rope.type);
     b.f64("rope.freq_base", c.rope.freq_base);
     b.f64("rope.factor", c.rope.factor);

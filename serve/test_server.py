@@ -5181,7 +5181,7 @@ class SilentEngine(unittest.TestCase):
         self.assertNotIn("STOP", engine.proc.stdin.getvalue())    # nothing is listening: no STOP, no drain
 
     def test_death_note_finds_the_watchdog_line_under_a_long_trace(self):
-        # #1705: STRATA_VERIFY_TRACE dumps (~30 KB) after the watchdog's line must not hide it
+        # #1705: a verify-trace dump (~30 KB) after the watchdog's line must not hide it
         import tempfile
         engine = self.bare(0.3)
         with tempfile.TemporaryDirectory() as d:

@@ -40,13 +40,13 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
 
 /// qsa_block_scores for `nq` queries of different slots, query i scoring its own slot's keys (pooled[i], dead[i]; host
 /// arrays of device pointers): one launch whose blocks each compute exactly what the single-query call computes.
-/// False (nothing launched) where that call would run another kernel (nq > 8, STRATA_SCORES_MULTI=0): loop instead.
+/// False (nothing launched) where that call would run another kernel (nq > 8): loop instead.
 bool qsa_block_scores_slots(const float* const* pooled, const float* const* dead, const float* q_idx,
                             const int32_t* steps, int64_t nq, int64_t max_blocks, const QsaShapes& s, float* scores,
                             void* stream);
 /// QSAROWS (docs/QSAROWS.md): block_scores_multi_kernel's scores for a call of up to 4 queries, bit for bit, with the
 /// queries in registers and the four heads reduce-scattered (six shuffles instead of twenty a block and query).
-/// qsa_block_scores takes it with STRATA_QSA_ROWS=1; false (nothing launched) above 4 queries or on another geometry.
+/// False (nothing launched) above 4 queries or on another geometry.
 /// For qsa_rows_bench's parity and timing it is callable on its own.
 bool qsa_block_scores_rows(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                            int64_t max_blocks, const QsaShapes& s, float* scores, void* stream);
@@ -72,7 +72,7 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
                                                    ///< The sm_75 server uses the bound to choose the register kernel.
                                                    ///< Omit it for captured graphs whose context can grow after capture.
 /// The original kernel (256 threads, one shared histogram, keys read from memory on every radix pass), for tests and
-/// STRATA_TOPK_OLD=1: the same ids.
+/// The same ids.
 void qsa_block_topk_ref(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                         const QsaShapes& s, int32_t* ids, void* stream);
 

@@ -53,7 +53,7 @@ void cvec_set_enabled(bool on);
 bool cvec_enabled();
 
 /// The CURRENT device's tables (dir n_layers x n_embd, s n_layers, the request flag), for a caller that applies the
-/// vector inside its own kernel (the prompt path's STRATA_CVEC_FUSE).  False without a vector on this device.
+/// vector inside its own kernel (the prompt path's fused read).  False without a vector on this device.
 bool cvec_tables(const float** dir, const float** s, const int** on);
 
 /// Layer `layer`'s vector on T tokens' residual stacks (`R + t * r_ld`, hc streams of n_embd).  With `write`, the

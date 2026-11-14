@@ -31,12 +31,6 @@ std::size_t native_q8_1_bytes(int n_in, int ncols = 1);
 // graph capture; captured graphs keep the kernels they captured.
 void native_mmvq_set_multi_exact(bool exact);
 bool native_mmvq_multi_exact();
-// B6 (lab, opt-in STRATA_B6_MMVQ_ROWS=1): the exact multi-column layout with the activation blocks of every column
-// loaded once per weight block and reused across the block's rows (bitwise the same sums as the default exact
-// layout). 0 = off (default), 1 = 2 rows per block, 2 / 4 / 8 = that many rows. Q4_K, Q5_K, Q6_K and IQ4_XS only.
-// Set before graph capture.
-void native_mmvq_set_b6_rows(int mode);
-int native_mmvq_b6_rows();
 
 // One quantization may serve multiple weight matrices sharing the same input.
 // Q8_1 stores FP16 scale and FP16 warp sum of the ORIGINAL float inputs; it does
@@ -99,7 +93,7 @@ void native_q5_0_f32(const void* weights, const float* x, void* scratch_q8_1,
 void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream);
 
-/// STRATA_Q8_PACKED=1 (opt-in): a lossless load-time repack of a Q8_0 matrix into a qs plane (n_out x n_in int8)
+/// A lossless load-time repack of a Q8_0 matrix into a qs plane (n_out x n_in int8)
 /// followed by a d plane (n_out x n_in / 32 fp16), the same bytes (34 per 32 values). A registered matrix's
 /// native_q8_0_mmvq calls (keyed by its GGUF-layout device pointer, which stays valid for the prompt path) read the
 /// packed copy instead; every output is bitwise equal to the GGUF-layout kernels.
@@ -109,10 +103,10 @@ void native_q8_0_pack_host(const void* gguf_blocks, void* out, int n_in, int n_o
 void native_q8_0_packed_register(const void* gguf_weights, const void* packed, int n_in, int n_out);
 void native_q8_0_packed_unregister(const void* gguf_weights);
 
-/// STRATA_Q6_PACKED=1 (opt-in): a packed copy of a Q6_K matrix (the output heads) - the same bytes as ql / qh /
+/// A packed copy of a Q6_K matrix (the output heads) - the same bytes as ql / qh /
 /// scales / d planes - that native_q6_k_mmvq calls on `weights` read instead (bitwise equal outputs). The copy is
 /// owned here: native_q6_k_pack builds it from the device matrix (false: not eligible or failed; nothing changes),
-/// native_q6_k_unpack frees it. STRATA_Q6P_SELFTEST=1 checks it bitwise and times it at load.
+/// native_q6_k_unpack frees it.
 bool native_q6_k_packed_enabled();
 bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what);
 void native_q6_k_unpack(const void* weights);
@@ -157,7 +151,7 @@ bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out);
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,
                     int n_out, int ncols, void* stream);
 // The table's rows a warp (0, 1, 2, 4; 0 = native_mmvq's kernels) for a card of compute capability `cc` (major * 10 + minor).
-// Per-architecture tables plus STRATA_MMVQ_IL_ROWS; see native_mmvq.cu and docs/MMVQ_IL_TABLE.md.
+// Per-architecture tables; see native_mmvq.cu and docs/MMVQ_IL_TABLE.md.
 int native_mmvq_il_rows_for(int cc, int ggml_type, int ncols, int n_out);
 // Tests and benchmarks: every native_mmvq_il call takes `rows` a warp (0: the table).
 void native_mmvq_il_tune(int rows);

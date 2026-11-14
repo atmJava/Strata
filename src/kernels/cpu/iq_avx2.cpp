@@ -11,7 +11,7 @@
 //
 // The server's gate/up format is IQ3_XXS (18). It has a gathered decode (Fmt32<118>): the grid indices are built in
 // one register and read with one vpgather, the same words into the same lanes, so the same bits. Where it is faster
-// depends on the core, so STRATA_IQ256_GATHER picks it per thread (expert_layout.hpp, cpu_gather_fast_here).
+// depends on the core, so it is picked per thread (expert_layout.hpp, cpu_gather_fast_here).
 //
 // Where the CPU has AVX-VNNI (cpu_avxvnni_ok: Alder Lake, Sapphire Rapids and later) the row kernels take a second
 // copy with vpdpwssd / vpdpbusd (iq_avx2_rows.inl), the same integer sums.
@@ -89,17 +89,10 @@ inline float hsum8(__m256 v) {
 
 // E-2 (iq_avx512.cpp) on the AVX-2 path: the pool streams the expert rows from DRAM at ~25 GB/s (4 KB pages
 // when large pages are refused), so ask for the bytes a few blocks before the decode needs them - 2048 B is
-// two gate/up rows ahead, a row is ~1 KB.  Same switch as the AVX-512 kernels: STRATA_IQ_PREFETCH is the
-// distance in bytes, 0 = off, default 2048.  Measured on a Zen 3 5700X3D (no AVX-512) on IQ3_XXS decode: -4% on
+// two gate/up rows ahead, a row is ~1 KB.  Measured on a Zen 3 5700X3D (no AVX-512) on IQ3_XXS decode: -4% on
 // the gate/up phase, +1.0 GB/s over the rows, -1.3% ms/round end to end.  The non-temporal hint measured
 // worse than T0 at the same distance, so this keeps T0.
-int prefetch_distance() {
-    static const int d = [] {
-        const char* v = std::getenv("STRATA_IQ_PREFETCH");
-        return v ? std::atoi(v) : 2048;
-    }();
-    return d;
-}
+constexpr int prefetch_distance() { return 2048; }
 
 inline void rows_ahead(const uint8_t* blk, int pf) {
     if (pf <= 0) return;
@@ -124,7 +117,7 @@ template <> struct Fmt32<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x 
     }
 };
 
-// ---- the gathered IQ3_XXS decode (STRATA_IQ256_GATHER, see the top of the file)
+// ---- the gathered IQ3_XXS decode (see the top of the file)
 // The four 7-bit even-sign indices of a u32 (bits 0-6, 7-13, 14-20, 21-27) -> their four masks, one gather.
 inline __m256i even_signs4(uint32_t w) {
     const __m128i idx = _mm_and_si128(_mm_srlv_epi32(_mm_set1_epi32((int) w), _mm_setr_epi32(0, 7, 14, 21)),
@@ -252,10 +245,9 @@ void iq256_gu_rows_exact_one(int type, const uint8_t* blob, size_t gu_row, size_
 }
 
 int iq256_variant() noexcept {
-    // STRATA_IQ256_GATHER=0/1 for every core; unset, where the calling thread's core gathers faster (per thread: a
-    // hybrid CPU's pool runs on P- and E-cores).  AVX-VNNI where cpu_avxvnni_ok().  The same bits either way.
-    const int s = iq256_gather_setting();
-    return ((s >= 0 ? s == 1 : cpu_gather_fast_here()) ? kIq256Gather : 0) | (vnni_on() ? kIq256Vnni : 0);
+    // Where the calling thread's core gathers faster (per thread: a hybrid CPU's pool runs on P- and E-cores).
+    // AVX-VNNI where cpu_avxvnni_ok().  The same bits either way.
+    return (cpu_gather_fast_here() ? kIq256Gather : 0) | (vnni_on() ? kIq256Vnni : 0);
 }
 
 int iq256_variants() noexcept { return kIq256Gather | (vnni_on() ? kIq256Vnni : 0); }

@@ -91,7 +91,7 @@ public:
     int n_embd() const { return N_; }
     const std::vector<int>& tap_layers() const { return taps_; }
     cudaStream_t stream() const { return cs_; }
-    /// Diagnostics (STRATA_DF2_DUMP): the final normalized block rows of the last draft(), host copy.
+    /// Diagnostics: the final normalized block rows of the last draft(), host copy.
     bool debug_rows(std::vector<float>& rows, std::string& err);
 
     double ms_draft = 0, ms_gpu = 0, ms_ctx = 0, ms_capture = 0;
@@ -109,12 +109,6 @@ private:
     bool record_block(cudaStream_t cs, std::string& err);
     bool capture(int n, const float* taps, std::string& err);
     bool alloc(std::string& err);
-    struct Prof;
-    Prof* prof_ = nullptr;
-    void stamp(const char* name);
-    void prof_collect();
-    void prof_report() const;
-    void prof_free();
 
     int device_ = -1;
     cudaStream_t cs_ = nullptr;
@@ -171,11 +165,8 @@ private:
     bool lazy_capture_ = true;               ///< capture a missing graph inside the round (true) or only in prepare() (false)
     bool pending_ = false;                   ///< a draft_launch() this instance has not waited for yet
     int64_t pending_pos1_ = 0;               ///< pos0 + n_new of that round, for have_ctx_
-    bool pending_timing_ = false;
     std::chrono::steady_clock::time_point pending_t0_;
     int64_t have_ctx_ = 0;
-    cudaEvent_t ev_a_ = nullptr, ev_b_ = nullptr;
-    bool timing_ = false;
 };
 
 }  // namespace strata::core

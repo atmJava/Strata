@@ -1,6 +1,6 @@
 // iq512_gather_parity: the 512-bit i-quant rows (iq_avx512.cpp) against ggml-cpu's own dot.
 //  (a) iq512x_rows, for 1..4 tokens, is ggml-cpu's single-token IQ3_XXS vec_dot bit for bit, whatever the
-//      grid lookup is (scalar loads or gathers: STRATA_IQ_GATHER=0 / 1, ctest runs both);
+//      grid lookup is (scalar loads or gathers);
 //  (b) iq512_rows (the engine's multi-token rows) agrees with it to float rounding (another summation order).
 // Synthetic blocks (random bytes, a fixed f16 scale), so no quantizer and no imatrix are needed.  SKIP without AVX-512.
 #include "strata/kernels/cpu/expert_layout.hpp"

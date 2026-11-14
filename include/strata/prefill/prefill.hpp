@@ -49,7 +49,7 @@ public:
     /// E-9: the draft layer's K/V for prompt cells [cell0, cell0 + n) from their final residual rows `R_rows`
     /// (device) and `next_tokens` (host: the token at cell+1), in batches through this path's GEMMs and its idle
     /// scratch - call it from on_chunk.  false with `err` empty: not applicable here (a ring or hybrid K/V, another
-    /// device, too little scratch; STRATA_MTP_BATCH=0), the caller runs the drafter's own pass.  Not bit-identical to
+    /// device, too little scratch), the caller runs the drafter's own pass.  Not bit-identical to
     /// that pass (FP16 GEMMs instead of Q8_1 activations): the drafts may differ, never the target's tokens' logits.
     /// `why` (optional): on a decline (false, `err` empty) the reason, a static string.
     bool draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0,
@@ -82,17 +82,17 @@ public:
     static void set_pinned_share(double share);
     static double pinned_share();
     /// The chunk size from which a chunk streams every expert the GPU does not hold, routed or not; a smaller one
-    /// stages only the experts it routes to.  1024, or STRATA_PREFILL_STREAM_MIN, or the CPU share's limit once that
-    /// is armed (3072 when STRATA_PREFILL_CPU_SHARE is set).
+    /// stages only the experts it routes to.  1024, or the CPU share's limit once that is armed (3072 when the
+    /// CPU share is on).
     static int64_t stream_all_min_tokens();
     /// --prefill-pipe (opt-in): the chunk a layer split's first stage reads an `n`-token prompt in, for `stages`
     /// stages, chunks of at most `cap` (the buffers' size) and a stage-chunk cost of b + a C with b/a = `ratio` tokens
-    /// (0: unknown - STRATA_PREFILL_EQUAL's rule: the same chunk count as `cap` gives, evened out when its last chunk
+    /// (0: unknown - the equal-chunk rule: the same chunk count as `cap` gives, evened out when its last chunk
     /// has stream_all_min tokens or more): the chunk count with the pipeline's least time, see the definition. `cap`
     /// when that is today's split or not 3% better than it. A function of its arguments only.
     static int64_t pipeline_chunk(int64_t n, int64_t cap, int stages, double ratio);
-    /// --prefill-pipe for this run: 0 off (the buffers' chunks), 1 today's chunk count evened out (STRATA_PREFILL_EQUAL's
-    /// rule), a number > 1 the rig's b/a in tokens (setup's --calibrate measures it). Default: STRATA_PREFILL_PIPE, else 0.
+    /// --prefill-pipe for this run: 0 off (the buffers' chunks), 1 today's chunk count evened out (the equal-chunk
+    /// rule), a number > 1 the rig's b/a in tokens (setup's --calibrate measures it). Default: 0.
     static void set_pipe(double value);
     /// The same for the next prompts only (the `pipe=` request key, setup's calibration); < 0 = the run's own value.
     static void set_pipe_request(double value);
@@ -117,10 +117,10 @@ public:
     /// The expert blobs this stage and the later ones copied host -> device so far (PrefillStats::experts_streamed).
     int64_t chain_experts_streamed() const;
     /// #340: the streamed ring's slot count for chunks that stream every expert, instead of the pinned-share rule
-    /// (0 = that rule). Set before any `bytes_needed`/`init` (both count the ring); STRATA_PREFILL_RING still wins.
+    /// (0 = that rule). Set before any `bytes_needed`/`init` (both count the ring).
     static void set_ring_override(int slots);
     /// #583: the auto chunk scan's byte-budget ring, for chunks above `small_max` (0.1.39's auto chunk: a prompt that
-    /// fits it keeps 0.1.39's ring).  0 slots = none.  A layer split's set_ring_override and STRATA_PREFILL_RING win.
+    /// fits it keeps 0.1.39's ring).  0 slots = none.  A layer split's set_ring_override wins.
     static void set_ring_budget(int slots, int64_t small_max);
 
     /// Device bytes `init` needs for a chunk of `chunk` tokens (what a borrowed region must hold).  `src`: init gets an
@@ -148,14 +148,10 @@ public:
     /// chunk was small (< 6144), else 0.1.39's ring (measured: shrinking it for a bigger chunk lost there).
     static int64_t ring_cap_for(int64_t old_chunk);
 
-    /// What the ring actually resolves to for a chunk of `chunk` tokens, after the override, STRATA_PREFILL_RING
-    /// and the pinned-share rule - the slot count `init` lays out.  The engine reports it on its INFO line so the
+    /// What the ring actually resolves to for a chunk of `chunk` tokens, after the override and the pinned-share
+    /// rule - the slot count `init` lays out.  The engine reports it on its INFO line so the
     /// Monitor tab shows the pair the run really got, not what it asked for.
     static int64_t ring_slots_for(int64_t chunk);
-
-    /// 0.1.39b (#583, the default): the ring as a byte budget, the loan's corrected count and the auto chunk scan that
-    /// keeps the ring full.  STRATA_RING_BYTES=0: 0.1.39's ring, loan and chunk list.
-    static bool ring_bytes_enabled();
 
     /// Positions [pos0, pos0 + n) holding `tokens`; `ss.ple_prev` must be the two tokens before pos0 (oldest
     /// first, -1 for none) and is advanced to the last two of these.
@@ -213,13 +209,7 @@ public:
         stage_lb_ = layer_begin; stage_le_ = layer_end; next_ = next;
     }
 
-    /// LAYER SPLIT: `helper` is another stage's prompt path (another GPU).  A prompt of one chunk runs the stages one
-    /// after the other, so while this stage reads it the helper's GPU idles: it then streams a share of this stage's
-    /// non-resident experts over its own PCIe link into its own (lent) prompt buffers, computes their rows, and sends
-    /// them back - the --peer-device peer's streaming, without P2P (activations and rows through mapped host memory,
-    /// read by copy kernels).  Only on the MMQ prompt path, only for chunks of stream_all_min() tokens and more, up to
-    /// the size where the measured share stops paying.  Opt-in: STRATA_PREFILL_HELP=1 (not bit-identical to the default).  Both stages must have
-    /// run `init`.
+    /// LAYER SPLIT: kept for the caller's API, a no-op - a stage's prompt experts run on its own GPU.
     bool set_stage_helper(Prefill* helper, std::string& err);
 
     /// The CPU expert pool (decode's, idle while a prompt is read). With STRATA_PREFILL_CPU_SHARE set, a chunk below
@@ -238,7 +228,7 @@ public:
     /// the share is on for chunks below 1024 tokens (STRATA_PREFILL_CPU_SHARE=0 turns it off).
     static void arm_cpu_share(bool applies, bool by_default = false);
 
-    /// Layer-major prefill (STRATA_PREFILL_LAYER_MAJOR=1): true while `on_chunk` reports a sub-chunk before the end of
+    /// Layer-major prefill (a layer split): true while `on_chunk` reports a sub-chunk before the end of
     /// its super-chunk.  The session state is already at the super-chunk's end then, so no checkpoint may be taken.
     /// On a layer split it is the last stage's (the one that reports the rows), asked through the first.
     bool layer_major_mid() const {
@@ -260,7 +250,6 @@ private:
     bool run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err);
     void lm_release();
     bool lm_mid_ = false;
-    bool lm_by_default_ = false;   ///< the walk is on because nothing was set (a wider VRAM margin, the measured super-chunk size)
     // Stage-1 pipeline: intermediate stages return after handing their chunk to
     // the direct successor. The public run() drains the chain once at prompt end.
     bool run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err);
@@ -271,21 +260,12 @@ private:
     int64_t tap_first_ = 0, tap_cap_ = 0;
     float* tap_dev_ = nullptr;
     Prefill* next_ = nullptr;
-    Prefill* helper_ = nullptr;         ///< set_stage_helper
     bool single_chunk_ = false;         ///< a later stage: the prompt is one chunk (set by the stage before)
     int64_t stopped_at_ = -1;           ///< stop_at_chunk ended the last run after this many tokens (-1: it read all)
     bool pipe_chunked_ = false;         ///< a later stage: the chunks came from a --prefill-pipe plan (set likewise)
     int64_t force_chunk_ = 0;           ///< force_chunk, for the next run (0: none)
     bool force_single_ = false, force_planned_ = false;
-    bool bind_stage_helper(int64_t T);  // binds the helper's buffers for a one-chunk prompt of T tokens
-    const float* hand_in_ = nullptr;    ///< previous stage's rows (host pinned; this stage's R marker for P2P)
-    /// STRATA_HANDOFF_PIPE: the previous stage's per-piece "landed in hand_in_" events (cudaEvent_t[hand_pieces_],
-    /// on its device) when it copies the chunk in pieces without a host wait; null with the one-copy hand-off
-    const void* hand_ev_ = nullptr;
-    /// STRATA_HANDOFF_P2P: the previous stage copied directly into this stage's R.  hand_in_ is a non-null marker
-    /// and hand_ev_ is the source-stream event that makes those rows visible.  Set by the stage before.
-    bool hand_p2p_ = false;
-    int hand_pieces_ = 0;
+    const float* hand_in_ = nullptr;    ///< previous stage's rows (host pinned)
 
     std::string next_err_;
     std::future<bool> next_run_;

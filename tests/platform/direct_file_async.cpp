@@ -24,7 +24,6 @@ int main() {
         { std::ofstream f(name, std::ios::binary); std::string bytes(4096 * 16 + 17, 'x'); f.write(bytes.data(), bytes.size()); }
         DirectFile f;
         std::string error;
-        setenv("STRATA_IO_THREADS", "4", 1);   // the pool's size (out-of-range values are clamped to 1..64)
         check(!f.is_open(), "new handle reports open");
         check(!f.submit(0, memory, 4096, 0, error) && error.find("not open") != std::string::npos,
               "closed handle accepted a request");
